@@ -15,7 +15,6 @@ defmodule Durable.MixProject do
       aliases: aliases(),
       deps: deps(),
       name: "Durable",
-      organization: "WaveZync",
       homepage_url: @homepage_url,
       description: "A durable, resumable workflow engine for Elixir",
       source_url: @source_url,
@@ -74,6 +73,7 @@ defmodule Durable.MixProject do
     [
       licenses: ["MIT"],
       links: %{"GitHub" => @source_url},
+      organization: "WaveZync",
       files: ~w(lib .formatter.exs mix.exs README.md LICENSE)
     ]
   end
