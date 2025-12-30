@@ -59,7 +59,10 @@ defmodule Durable.Executor do
         error = if reason, do: %{type: "cancelled", message: reason}, else: %{type: "cancelled"}
 
         execution
-        |> WorkflowExecution.status_changeset(:cancelled, %{error: error, completed_at: DateTime.utc_now()})
+        |> WorkflowExecution.status_changeset(:cancelled, %{
+          error: error,
+          completed_at: DateTime.utc_now()
+        })
         |> Repo.update()
 
         :ok

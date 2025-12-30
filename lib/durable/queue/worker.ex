@@ -81,9 +81,7 @@ defmodule Durable.Queue.Worker do
         :ok
 
       {:error, reason} ->
-        Logger.warning(
-          "Heartbeat failed for job #{state.job.id}: #{inspect(reason)}"
-        )
+        Logger.warning("Heartbeat failed for job #{state.job.id}: #{inspect(reason)}")
     end
 
     # Emit telemetry

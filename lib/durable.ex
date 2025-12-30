@@ -125,14 +125,16 @@ defmodule Durable do
       @doc """
       Returns the workflow definition for the given workflow name.
       """
-      @spec __workflow_definition__(String.t()) :: {:ok, Durable.Definition.Workflow.t()} | {:error, :not_found}
+      @spec __workflow_definition__(String.t()) ::
+              {:ok, Durable.Definition.Workflow.t()} | {:error, :not_found}
       unquote_splicing(workflow_clauses)
       unquote(fallback_clause)
 
       @doc """
       Returns the default workflow definition (first defined workflow).
       """
-      @spec __default_workflow__() :: {:ok, Durable.Definition.Workflow.t()} | {:error, :no_workflows}
+      @spec __default_workflow__() ::
+              {:ok, Durable.Definition.Workflow.t()} | {:error, :no_workflows}
       unquote(default_workflow)
     end
   end

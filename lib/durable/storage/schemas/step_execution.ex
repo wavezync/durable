@@ -32,19 +32,24 @@ defmodule Durable.Storage.Schemas.StepExecution do
   @primary_key {:id, :binary_id, autogenerate: true}
   @foreign_key_type :binary_id
   schema "step_executions" do
-    field :step_name, :string
-    field :step_type, :string, default: "step"
-    field :attempt, :integer, default: 1
-    field :status, Ecto.Enum, values: [:pending, :running, :completed, :failed, :waiting], default: :pending
-    field :input, :map
-    field :output, :map
-    field :error, :map
-    field :logs, {:array, :map}, default: []
-    field :started_at, :utc_datetime_usec
-    field :completed_at, :utc_datetime_usec
-    field :duration_ms, :integer
+    field(:step_name, :string)
+    field(:step_type, :string, default: "step")
+    field(:attempt, :integer, default: 1)
 
-    belongs_to :workflow, Durable.Storage.Schemas.WorkflowExecution, foreign_key: :workflow_id
+    field(:status, Ecto.Enum,
+      values: [:pending, :running, :completed, :failed, :waiting],
+      default: :pending
+    )
+
+    field(:input, :map)
+    field(:output, :map)
+    field(:error, :map)
+    field(:logs, {:array, :map}, default: [])
+    field(:started_at, :utc_datetime_usec)
+    field(:completed_at, :utc_datetime_usec)
+    field(:duration_ms, :integer)
+
+    belongs_to(:workflow, Durable.Storage.Schemas.WorkflowExecution, foreign_key: :workflow_id)
 
     timestamps(type: :utc_datetime_usec)
   end
@@ -86,13 +91,16 @@ defmodule Durable.Storage.Schemas.StepExecution do
   """
   def complete_changeset(step_execution, output, logs, duration_ms) do
     step_execution
-    |> cast(%{
-      status: :completed,
-      output: output,
-      logs: logs,
-      completed_at: DateTime.utc_now(),
-      duration_ms: duration_ms
-    }, [:status, :output, :logs, :completed_at, :duration_ms])
+    |> cast(
+      %{
+        status: :completed,
+        output: output,
+        logs: logs,
+        completed_at: DateTime.utc_now(),
+        duration_ms: duration_ms
+      },
+      [:status, :output, :logs, :completed_at, :duration_ms]
+    )
   end
 
   @doc """
@@ -100,13 +108,16 @@ defmodule Durable.Storage.Schemas.StepExecution do
   """
   def fail_changeset(step_execution, error, logs, duration_ms) do
     step_execution
-    |> cast(%{
-      status: :failed,
-      error: error,
-      logs: logs,
-      completed_at: DateTime.utc_now(),
-      duration_ms: duration_ms
-    }, [:status, :error, :logs, :completed_at, :duration_ms])
+    |> cast(
+      %{
+        status: :failed,
+        error: error,
+        logs: logs,
+        completed_at: DateTime.utc_now(),
+        duration_ms: duration_ms
+      },
+      [:status, :error, :logs, :completed_at, :duration_ms]
+    )
   end
 
   @doc """
@@ -114,6 +125,7 @@ defmodule Durable.Storage.Schemas.StepExecution do
   """
   def append_logs_changeset(step_execution, new_logs) do
     current_logs = step_execution.logs || []
+
     step_execution
     |> cast(%{logs: current_logs ++ new_logs}, [:logs])
   end

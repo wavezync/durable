@@ -33,20 +33,28 @@ defmodule Durable.Storage.Schemas.PendingInput do
   @primary_key {:id, :binary_id, autogenerate: true}
   @foreign_key_type :binary_id
   schema "pending_inputs" do
-    field :input_name, :string
-    field :step_name, :string
-    field :input_type, Ecto.Enum,
+    field(:input_name, :string)
+    field(:step_name, :string)
+
+    field(:input_type, Ecto.Enum,
       values: [:form, :single_choice, :multi_choice, :free_text, :approval],
       default: :free_text
-    field :prompt, :string
-    field :schema, :map
-    field :fields, {:array, :map}
-    field :status, Ecto.Enum, values: [:pending, :completed, :timeout, :cancelled], default: :pending
-    field :response, :map
-    field :timeout_at, :utc_datetime_usec
-    field :completed_at, :utc_datetime_usec
+    )
 
-    belongs_to :workflow, Durable.Storage.Schemas.WorkflowExecution, foreign_key: :workflow_id
+    field(:prompt, :string)
+    field(:schema, :map)
+    field(:fields, {:array, :map})
+
+    field(:status, Ecto.Enum,
+      values: [:pending, :completed, :timeout, :cancelled],
+      default: :pending
+    )
+
+    field(:response, :map)
+    field(:timeout_at, :utc_datetime_usec)
+    field(:completed_at, :utc_datetime_usec)
+
+    belongs_to(:workflow, Durable.Storage.Schemas.WorkflowExecution, foreign_key: :workflow_id)
 
     timestamps(type: :utc_datetime_usec)
   end
@@ -78,11 +86,14 @@ defmodule Durable.Storage.Schemas.PendingInput do
   """
   def complete_changeset(pending_input, response) do
     pending_input
-    |> cast(%{
-      status: :completed,
-      response: response,
-      completed_at: DateTime.utc_now()
-    }, [:status, :response, :completed_at])
+    |> cast(
+      %{
+        status: :completed,
+        response: response,
+        completed_at: DateTime.utc_now()
+      },
+      [:status, :response, :completed_at]
+    )
   end
 
   @doc """

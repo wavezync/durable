@@ -148,7 +148,12 @@ defmodule Durable.Queue.Poller do
       {:reply, :ok, state}
     else
       # Wait for jobs to complete
-      Process.send_after(self(), {:drain_check, from, timeout, System.monotonic_time(:millisecond)}, 100)
+      Process.send_after(
+        self(),
+        {:drain_check, from, timeout, System.monotonic_time(:millisecond)},
+        100
+      )
+
       {:noreply, state}
     end
   end
@@ -186,7 +191,9 @@ defmodule Durable.Queue.Poller do
 
   @impl true
   def handle_info({:job_complete, job_id, result, duration_ms}, state) do
-    Logger.debug("Job #{job_id} completed with result=#{inspect(result)} duration=#{duration_ms}ms")
+    Logger.debug(
+      "Job #{job_id} completed with result=#{inspect(result)} duration=#{duration_ms}ms"
+    )
 
     state = handle_job_completion(state, job_id, result)
     {:noreply, state}
@@ -201,10 +208,12 @@ defmodule Durable.Queue.Poller do
       job_id ->
         Logger.warning("Worker for job #{job_id} crashed: #{inspect(reason)}")
         # Job remains locked in DB, will be recovered by stale lock recovery
-        state = %{state |
-          active_jobs: MapSet.delete(state.active_jobs, job_id),
-          worker_refs: Map.delete(state.worker_refs, ref)
+        state = %{
+          state
+          | active_jobs: MapSet.delete(state.active_jobs, job_id),
+            worker_refs: Map.delete(state.worker_refs, ref)
         }
+
         {:noreply, state}
     end
   end
@@ -255,9 +264,10 @@ defmodule Durable.Queue.Poller do
 
         emit_job_claimed_telemetry(job, state.node_id)
 
-        %{state |
-          active_jobs: MapSet.put(state.active_jobs, job.id),
-          worker_refs: Map.put(state.worker_refs, ref, job.id)
+        %{
+          state
+          | active_jobs: MapSet.put(state.active_jobs, job.id),
+            worker_refs: Map.put(state.worker_refs, ref, job.id)
         }
 
       {:error, reason} ->
@@ -294,10 +304,7 @@ defmodule Durable.Queue.Poller do
 
     if ref, do: Process.demonitor(ref, [:flush])
 
-    %{state |
-      active_jobs: MapSet.delete(state.active_jobs, job_id),
-      worker_refs: worker_refs
-    }
+    %{state | active_jobs: MapSet.delete(state.active_jobs, job_id), worker_refs: worker_refs}
   end
 
   defp schedule_poll(state, delay) do

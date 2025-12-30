@@ -35,24 +35,29 @@ defmodule Durable.Storage.Schemas.WorkflowExecution do
   @primary_key {:id, :binary_id, autogenerate: true}
   @foreign_key_type :binary_id
   schema "workflow_executions" do
-    field :workflow_module, :string
-    field :workflow_name, :string
-    field :status, Ecto.Enum, values: [:pending, :running, :completed, :failed, :waiting, :cancelled], default: :pending
-    field :queue, :string, default: "default"
-    field :priority, :integer, default: 0
-    field :input, :map, default: %{}
-    field :context, :map, default: %{}
-    field :current_step, :string
-    field :error, :map
-    field :parent_workflow_id, :binary_id
-    field :scheduled_at, :utc_datetime_usec
-    field :started_at, :utc_datetime_usec
-    field :completed_at, :utc_datetime_usec
-    field :locked_by, :string
-    field :locked_at, :utc_datetime_usec
+    field(:workflow_module, :string)
+    field(:workflow_name, :string)
 
-    has_many :step_executions, Durable.Storage.Schemas.StepExecution, foreign_key: :workflow_id
-    has_many :pending_inputs, Durable.Storage.Schemas.PendingInput, foreign_key: :workflow_id
+    field(:status, Ecto.Enum,
+      values: [:pending, :running, :completed, :failed, :waiting, :cancelled],
+      default: :pending
+    )
+
+    field(:queue, :string, default: "default")
+    field(:priority, :integer, default: 0)
+    field(:input, :map, default: %{})
+    field(:context, :map, default: %{})
+    field(:current_step, :string)
+    field(:error, :map)
+    field(:parent_workflow_id, :binary_id)
+    field(:scheduled_at, :utc_datetime_usec)
+    field(:started_at, :utc_datetime_usec)
+    field(:completed_at, :utc_datetime_usec)
+    field(:locked_by, :string)
+    field(:locked_at, :utc_datetime_usec)
+
+    has_many(:step_executions, Durable.Storage.Schemas.StepExecution, foreign_key: :workflow_id)
+    has_many(:pending_inputs, Durable.Storage.Schemas.PendingInput, foreign_key: :workflow_id)
 
     timestamps(type: :utc_datetime_usec)
   end
@@ -88,7 +93,14 @@ defmodule Durable.Storage.Schemas.WorkflowExecution do
   """
   def status_changeset(execution, status, attrs \\ %{}) do
     execution
-    |> cast(Map.put(attrs, :status, status), [:status, :current_step, :error, :started_at, :completed_at, :context])
+    |> cast(Map.put(attrs, :status, status), [
+      :status,
+      :current_step,
+      :error,
+      :started_at,
+      :completed_at,
+      :context
+    ])
   end
 
   @doc """

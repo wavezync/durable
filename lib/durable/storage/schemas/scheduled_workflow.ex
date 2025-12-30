@@ -29,16 +29,16 @@ defmodule Durable.Storage.Schemas.ScheduledWorkflow do
   @primary_key {:id, :binary_id, autogenerate: true}
   @foreign_key_type :binary_id
   schema "scheduled_workflows" do
-    field :name, :string
-    field :workflow_module, :string
-    field :workflow_name, :string
-    field :cron_expression, :string
-    field :timezone, :string, default: "UTC"
-    field :input, :map, default: %{}
-    field :queue, :string, default: "default"
-    field :enabled, :boolean, default: true
-    field :last_run_at, :utc_datetime_usec
-    field :next_run_at, :utc_datetime_usec
+    field(:name, :string)
+    field(:workflow_module, :string)
+    field(:workflow_name, :string)
+    field(:cron_expression, :string)
+    field(:timezone, :string, default: "UTC")
+    field(:input, :map, default: %{})
+    field(:queue, :string, default: "default")
+    field(:enabled, :boolean, default: true)
+    field(:last_run_at, :utc_datetime_usec)
+    field(:next_run_at, :utc_datetime_usec)
 
     timestamps(type: :utc_datetime_usec)
   end
