@@ -35,7 +35,9 @@ defmodule Durable.Storage.Schemas.PendingInput do
   schema "pending_inputs" do
     field :input_name, :string
     field :step_name, :string
-    field :input_type, Ecto.Enum, values: [:form, :single_choice, :multi_choice, :free_text, :approval], default: :free_text
+    field :input_type, Ecto.Enum,
+      values: [:form, :single_choice, :multi_choice, :free_text, :approval],
+      default: :free_text
     field :prompt, :string
     field :schema, :map
     field :fields, {:array, :map}

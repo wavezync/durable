@@ -24,6 +24,7 @@ defmodule Durable.Queue.Manager do
 
   require Logger
 
+  alias Durable.Queue.Adapter
   alias Durable.Queue.Poller
   alias Durable.Queue.StaleJobRecovery
 
@@ -86,7 +87,7 @@ defmodule Durable.Queue.Manager do
   def stats(queue_name) do
     queue_name
     |> normalize_queue_name()
-    |> Durable.Queue.Adapter.adapter().get_stats()
+    |> Adapter.adapter().get_stats()
   end
 
   @doc """
@@ -173,8 +174,7 @@ defmodule Durable.Queue.Manager do
   defp camelize(string) do
     string
     |> String.split("_")
-    |> Enum.map(&String.capitalize/1)
-    |> Enum.join()
+    |> Enum.map_join(&String.capitalize/1)
     |> String.to_atom()
   end
 end

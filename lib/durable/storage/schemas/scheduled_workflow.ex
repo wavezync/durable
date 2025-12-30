@@ -8,6 +8,8 @@ defmodule Durable.Storage.Schemas.ScheduledWorkflow do
   use Ecto.Schema
   import Ecto.Changeset
 
+  alias Crontab.CronExpression.Parser, as: CronParser
+
   @type t :: %__MODULE__{
           id: Ecto.UUID.t(),
           name: String.t(),
@@ -84,7 +86,7 @@ defmodule Durable.Storage.Schemas.ScheduledWorkflow do
         changeset
 
       cron ->
-        case Crontab.CronExpression.Parser.parse(cron) do
+        case CronParser.parse(cron) do
           {:ok, _} -> changeset
           {:error, _} -> add_error(changeset, :cron_expression, "is not a valid cron expression")
         end

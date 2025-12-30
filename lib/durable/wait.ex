@@ -28,7 +28,7 @@ defmodule Durable.Wait do
   """
 
   alias Durable.Repo
-  alias Durable.Storage.Schemas.{WorkflowExecution, PendingInput}
+  alias Durable.Storage.Schemas.{PendingInput, WorkflowExecution}
 
   import Ecto.Query
 

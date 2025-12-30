@@ -11,6 +11,7 @@ defmodule Durable.Queue.Adapters.Postgres do
 
   alias Durable.Repo
   alias Durable.Storage.Schemas.WorkflowExecution
+  alias Ecto.Adapters.SQL
 
   import Ecto.Query
 
@@ -36,15 +37,10 @@ defmodule Durable.Queue.Adapters.Postgres do
     RETURNING id, workflow_module, workflow_name, queue, priority, input, context, scheduled_at, current_step;
     """
 
-    case Ecto.Adapters.SQL.query(Repo, sql, [queue, limit, node_id]) do
+    case SQL.query(Repo, sql, [queue, limit, node_id]) do
       {:ok, %{rows: rows, columns: columns}} ->
         rows
-        |> Enum.map(fn row ->
-          columns
-          |> Enum.zip(row)
-          |> Map.new(fn {col, val} -> {String.to_atom(col), val} end)
-          |> decode_job()
-        end)
+        |> Enum.map(&parse_row(&1, columns))
         # Re-sort in Elixir since UPDATE doesn't preserve order
         |> Enum.sort_by(fn job -> {-job.priority, job.scheduled_at} end)
 
@@ -198,6 +194,13 @@ defmodule Durable.Queue.Adapters.Postgres do
 
   defp lock_timeout_seconds do
     Application.get_env(:durable, :stale_lock_timeout, @default_lock_timeout)
+  end
+
+  defp parse_row(row, columns) do
+    columns
+    |> Enum.zip(row)
+    |> Map.new(fn {col, val} -> {String.to_atom(col), val} end)
+    |> decode_job()
   end
 
   defp decode_job(job) do

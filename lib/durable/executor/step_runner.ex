@@ -43,7 +43,12 @@ defmodule Durable.Executor.StepRunner do
         {:ok, output}
       rescue
         e ->
-          {:error, %{type: inspect(e.__struct__), message: Exception.message(e), stacktrace: Exception.format_stacktrace(__STACKTRACE__)}}
+          {:error,
+           %{
+             type: inspect(e.__struct__),
+             message: Exception.message(e),
+             stacktrace: Exception.format_stacktrace(__STACKTRACE__)
+           }}
       catch
         :throw, value ->
           {:throw, value}

@@ -133,40 +133,38 @@ defmodule Durable.Queue.Worker do
   # Private functions
 
   defp execute_job(job) do
-    try do
-      case Durable.Executor.execute_workflow(job.id) do
-        {:ok, _execution} ->
-          :ok
+    case Durable.Executor.execute_workflow(job.id) do
+      {:ok, _execution} ->
+        :ok
 
-        {:waiting, _execution} ->
-          # Workflow is waiting for sleep/event/input - not an error
-          :waiting
+      {:waiting, _execution} ->
+        # Workflow is waiting for sleep/event/input - not an error
+        :waiting
 
-        {:error, error} ->
-          {:error, error}
-      end
-    rescue
-      error ->
-        Logger.error(
-          "Worker crashed executing job #{job.id}: #{Exception.message(error)}\n#{Exception.format_stacktrace(__STACKTRACE__)}"
-        )
-
-        {:error,
-         %{
-           type: inspect(error.__struct__),
-           message: Exception.message(error),
-           stacktrace: Exception.format_stacktrace(__STACKTRACE__)
-         }}
-    catch
-      kind, reason ->
-        Logger.error("Worker caught #{kind} executing job #{job.id}: #{inspect(reason)}")
-
-        {:error,
-         %{
-           type: "#{kind}",
-           message: inspect(reason)
-         }}
+      {:error, error} ->
+        {:error, error}
     end
+  rescue
+    error ->
+      Logger.error(
+        "Worker crashed executing job #{job.id}: #{Exception.message(error)}\n#{Exception.format_stacktrace(__STACKTRACE__)}"
+      )
+
+      {:error,
+       %{
+         type: inspect(error.__struct__),
+         message: Exception.message(error),
+         stacktrace: Exception.format_stacktrace(__STACKTRACE__)
+       }}
+  catch
+    kind, reason ->
+      Logger.error("Worker caught #{kind} executing job #{job.id}: #{inspect(reason)}")
+
+      {:error,
+       %{
+         type: "#{kind}",
+         message: inspect(reason)
+       }}
   end
 
   defp schedule_heartbeat do

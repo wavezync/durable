@@ -321,7 +321,7 @@ defmodule Durable.Executor do
         DateTime.add(DateTime.utc_now(), opts[:hours] * 3600, :second)
 
       Keyword.has_key?(opts, :days) ->
-        DateTime.add(DateTime.utc_now(), opts[:days] * 86400, :second)
+        DateTime.add(DateTime.utc_now(), opts[:days] * 86_400, :second)
 
       true ->
         DateTime.add(DateTime.utc_now(), 60, :second)

@@ -6,7 +6,7 @@ defmodule Durable.Query do
   import Ecto.Query
 
   alias Durable.Repo
-  alias Durable.Storage.Schemas.{WorkflowExecution, StepExecution}
+  alias Durable.Storage.Schemas.{StepExecution, WorkflowExecution}
 
   @doc """
   Gets a workflow execution by ID.

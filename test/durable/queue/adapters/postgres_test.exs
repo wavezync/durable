@@ -2,8 +2,8 @@ defmodule Durable.Queue.Adapters.PostgresTest do
   use Durable.DataCase, async: false
 
   alias Durable.Queue.Adapters.Postgres
-  alias Durable.Storage.Schemas.WorkflowExecution
   alias Durable.Repo
+  alias Durable.Storage.Schemas.WorkflowExecution
 
   describe "fetch_jobs/3" do
     test "claims pending jobs atomically" do
