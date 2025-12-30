@@ -3,6 +3,7 @@ defmodule Durable.MixProject do
 
   @version "0.0.0-alpha"
   @source_url "https://github.com/wavezync/durable"
+  @homepage_url "https://durable.wavezync.com"
 
   def project do
     [
@@ -14,6 +15,8 @@ defmodule Durable.MixProject do
       aliases: aliases(),
       deps: deps(),
       name: "Durable",
+      organization: "WaveZync",
+      homepage_url: @homepage_url,
       description: "A durable, resumable workflow engine for Elixir",
       source_url: @source_url,
       docs: docs(),
