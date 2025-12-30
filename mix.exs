@@ -73,7 +73,6 @@ defmodule Durable.MixProject do
     [
       licenses: ["MIT"],
       links: %{"GitHub" => @source_url},
-      organization: "WaveZync",
       files: ~w(lib .formatter.exs mix.exs README.md LICENSE)
     ]
   end
