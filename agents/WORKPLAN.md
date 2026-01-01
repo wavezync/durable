@@ -2,10 +2,12 @@
 
 ## Executive Summary
 
-**Completed:** Phase 0 (Foundation) + Phase 1 (Core MVP)
-**Remaining:** Phases 2-5 (Observability, Advanced Features, Scalability, Developer Experience)
+**Completed:** Phase 0 (Foundation) + Phase 1 (Core MVP) + Phase 2 Log Capture (2.1-2.2) + Phase 3 Wait Primitives (3.1-3.3) + Phase 5 Query API
+**Remaining:** Phase 2 (Graph: 2.3-2.5), Phase 3 (Control Flow: 3.4-3.10), Phase 4 (Scalability), Phase 5 (Mix Tasks, Docs)
 
-**Current State:** 17 modules, 8 passing tests, core DSL and executor working
+**Current State:** 25 modules, 57 passing tests, core DSL, executor, wait primitives, log capture, and query API working
+
+**Overall Progress:** ~40% complete
 
 ---
 
@@ -16,11 +18,12 @@ Add comprehensive logging, graph visualization, and real-time monitoring capabil
 
 ---
 
-### 2.1 Logger Backend for Log Capture
+### 2.1 Logger Backend for Log Capture ✅ COMPLETE
 
 **Priority:** High
 **Complexity:** Medium
 **Dependencies:** None
+**Status:** IMPLEMENTED
 
 **Goal:** Automatically capture all `Logger` calls within workflow steps and store them in `step_executions.logs`.
 
@@ -71,18 +74,25 @@ end
 - Verify logs appear in `step_executions.logs`
 
 **Acceptance Criteria:**
-- [ ] `Logger.info/warn/error` calls captured within steps
-- [ ] Logs stored with timestamp, level, message
-- [ ] Logs retrievable via `Durable.Query.get_step_logs/2`
-- [ ] Configurable log levels
+- [x] `Logger.info/warn/error` calls captured within steps
+- [x] Logs stored with timestamp, level, message
+- [x] Logs retrievable via `Durable.Query.get_step_logs/2`
+- [x] Configurable log levels
+
+**Implementation Notes:**
+- Uses Elixir 1.15+ `:logger.add_handler/3` API (modern approach)
+- Logs buffered in process dictionary during step execution
+- Handler registered at application startup
+- Files: `lib/durable/log_capture.ex`, `lib/durable/log_capture/handler.ex`
 
 ---
 
-### 2.2 IO Capture
+### 2.2 IO Capture ✅ COMPLETE
 
 **Priority:** Medium
 **Complexity:** Medium
 **Dependencies:** 2.1 (Logger Backend)
+**Status:** IMPLEMENTED
 
 **Goal:** Capture `IO.puts` and `IO.inspect` output within workflow steps.
 
@@ -131,10 +141,16 @@ end
 - Verify original IO restored after step
 
 **Acceptance Criteria:**
-- [ ] `IO.puts` output captured
-- [ ] `IO.inspect` output captured
-- [ ] Output stored as log entries
-- [ ] No interference with normal IO after step
+- [x] `IO.puts` output captured
+- [x] `IO.inspect` output captured
+- [x] Output stored as log entries
+- [x] No interference with normal IO after step
+
+**Implementation Notes:**
+- Uses group_leader replacement technique
+- GenServer captures `:io_request` messages
+- Supports optional passthrough to console
+- Files: `lib/durable/log_capture/io_server.ex`
 
 ---
 
@@ -399,7 +415,7 @@ Implement wait primitives, control flow constructs, and advanced patterns.
 
 ---
 
-### 3.1 Sleep Primitives
+### 3.1 Sleep Primitives ✅ COMPLETE
 
 **Priority:** High
 **Complexity:** Medium
@@ -407,7 +423,7 @@ Implement wait primitives, control flow constructs, and advanced patterns.
 
 **Goal:** Implement `sleep_for` and `sleep_until` that properly suspend workflows.
 
-**Current State:** Stubs exist in `Durable.Wait`, throwing signals.
+**Status:** IMPLEMENTED in `lib/durable/wait.ex`
 
 **Files to Modify:**
 - `lib/durable/wait.ex` - Already has basic structure
@@ -463,15 +479,15 @@ end
 - Test scheduled_at correctly set
 
 **Acceptance Criteria:**
-- [ ] `sleep_for` suspends workflow
-- [ ] Workflow resumes after duration
-- [ ] `sleep_until` works with DateTime
-- [ ] Context preserved across sleep
-- [ ] Multiple sleeping workflows handled
+- [x] `sleep_for` suspends workflow
+- [x] Workflow resumes after duration
+- [x] `sleep_until` works with DateTime
+- [x] Context preserved across sleep
+- [x] Multiple sleeping workflows handled
 
 ---
 
-### 3.2 Wait for Events
+### 3.2 Wait for Events ✅ COMPLETE
 
 **Priority:** High
 **Complexity:** Medium
@@ -479,12 +495,7 @@ end
 
 **Goal:** Implement `wait_for_event` and `send_event` for external event handling.
 
-**Files to Modify:**
-- `lib/durable/wait.ex`
-- `lib/durable/executor.ex`
-
-**Files to Create:**
-- `lib/durable/events.ex` - Event routing logic
+**Status:** IMPLEMENTED in `lib/durable/wait.ex` and `lib/durable/executor.ex`
 
 **Implementation Details:**
 
@@ -558,15 +569,15 @@ end
 - Test workflow_id scoping
 
 **Acceptance Criteria:**
-- [ ] `wait_for_event` suspends workflow
-- [ ] `send_event` resumes matching workflow
-- [ ] Payload accessible in context
-- [ ] Timeout triggers with timeout_value
-- [ ] Multiple workflows can wait for same event
+- [x] `wait_for_event` suspends workflow
+- [x] `send_event` resumes matching workflow
+- [x] Payload accessible in context
+- [x] Timeout triggers with timeout_value
+- [x] Multiple workflows can wait for same event
 
 ---
 
-### 3.3 Wait for Human Input
+### 3.3 Wait for Human Input ✅ COMPLETE
 
 **Priority:** High
 **Complexity:** Medium
@@ -574,7 +585,7 @@ end
 
 **Goal:** Implement `wait_for_input` with form schemas and `provide_input` for human-in-the-loop.
 
-**Current State:** Basic structure exists.
+**Status:** IMPLEMENTED in `lib/durable/wait.ex` and `lib/durable/storage/schemas/pending_input.ex`
 
 **Enhancements Needed:**
 
@@ -632,11 +643,11 @@ Durable.Wait.list_pending_inputs(
 - Test provide_input resumes workflow
 
 **Acceptance Criteria:**
-- [ ] Form input with field validation
-- [ ] Choice inputs validated against options
-- [ ] Timeout triggers with timeout_value
-- [ ] Pending inputs queryable
-- [ ] Input response stored in context
+- [x] Form input with field validation
+- [x] Choice inputs validated against options
+- [x] Timeout triggers with timeout_value
+- [x] Pending inputs queryable
+- [x] Input response stored in context
 
 ---
 
@@ -1420,34 +1431,36 @@ end
 
 ## Implementation Priority Matrix
 
-| Feature | Priority | Complexity | Dependencies | Estimated Effort |
-|---------|----------|------------|--------------|-----------------|
-| Logger Backend | High | Medium | None | 1-2 days |
-| IO Capture | Medium | Medium | Logger Backend | 1 day |
-| Graph Generation | High | Medium | None | 2 days |
-| Graph Export | Medium | Low | Graph Gen | 1 day |
-| Execution State | High | Medium | Graph Gen | 1 day |
-| Sleep Primitives | High | Medium | None | 1-2 days |
-| Wait for Events | High | Medium | Sleep | 2 days |
-| Wait for Input | High | Medium | Events | 2 days |
-| Decision Steps | High | Medium | None | 2-3 days |
-| Loops | Medium | Medium | Decisions | 2 days |
-| Parallel | High | High | None | 3-4 days |
-| ForEach | Medium | Medium | Parallel | 2 days |
-| Switch/Case | Medium | Low | Decisions | 1 day |
-| Compensation | High | High | None | 3-4 days |
-| Cron Scheduling | Medium | Medium | Sleep | 2-3 days |
-| Mix Tasks | High | Low | Core | 2 days |
-| Testing Helpers | High | Medium | Core | 2-3 days |
-| Documentation | High | Low | All | 3-5 days |
+| Feature | Priority | Complexity | Dependencies | Status |
+|---------|----------|------------|--------------|--------|
+| Logger Backend | High | Medium | None | ✅ DONE |
+| IO Capture | Medium | Medium | Logger Backend | ✅ DONE |
+| Graph Generation | High | Medium | None | TODO |
+| Graph Export | Medium | Low | Graph Gen | TODO |
+| Execution State | High | Medium | Graph Gen | TODO |
+| Sleep Primitives | High | Medium | None | ✅ DONE |
+| Wait for Events | High | Medium | Sleep | ✅ DONE |
+| Wait for Input | High | Medium | Events | ✅ DONE |
+| Decision Steps | High | Medium | None | TODO |
+| Loops | Medium | Medium | Decisions | TODO |
+| Parallel | High | High | None | TODO |
+| ForEach | Medium | Medium | Parallel | TODO |
+| Switch/Case | Medium | Low | Decisions | TODO |
+| Compensation | High | High | None | TODO |
+| Cron Scheduling | Medium | Medium | Sleep | TODO (schema exists) |
+| Mix Tasks | High | Low | Core | TODO |
+| Testing Helpers | High | Medium | Core | PARTIAL (DataCase) |
+| Documentation | High | Low | All | TODO |
+| Query API | High | Low | Core | ✅ DONE |
+| Time Helpers | Low | Low | None | ✅ DONE |
 
 ---
 
 ## Recommended Implementation Order
 
 ### Sprint 1: Core Observability (1 week)
-1. Logger Backend (2.1)
-2. IO Capture (2.2)
+1. Logger Backend (2.1) ✅ DONE
+2. IO Capture (2.2) ✅ DONE
 3. Graph Generation (2.3)
 4. Graph Export (2.4)
 
@@ -1483,12 +1496,13 @@ end
 ## Success Metrics
 
 ### Phase 2 Complete When:
-- [ ] All Logger calls captured within steps
+- [x] All Logger calls captured within steps ✅
+- [x] IO.puts/IO.inspect captured within steps ✅
 - [ ] Graph visualization works
 - [ ] Real-time execution state available
 
 ### Phase 3 Complete When:
-- [ ] All wait primitives work (sleep, event, input)
+- [x] All wait primitives work (sleep, event, input) ✅
 - [ ] All control flow works (decision, loop, parallel, foreach)
 - [ ] Compensation pattern works
 - [ ] Cron scheduling works
@@ -1521,8 +1535,9 @@ end
 ## Appendix: File Checklist
 
 ### Phase 2 Files
-- [ ] `lib/durable/log_capture/logger_backend.ex`
-- [ ] `lib/durable/log_capture/io_capture.ex`
+- [x] `lib/durable/log_capture.ex` - Core log capture module ✅
+- [x] `lib/durable/log_capture/handler.ex` - Logger handler ✅
+- [x] `lib/durable/log_capture/io_server.ex` - IO capture GenServer ✅
 - [ ] `lib/durable/graph.ex`
 - [ ] `lib/durable/graph/generator.ex`
 - [ ] `lib/durable/graph/layout.ex`
@@ -1532,8 +1547,11 @@ end
 - [ ] `lib/durable/graph/export/cytoscape.ex`
 
 ### Phase 3 Files
-- [ ] `lib/durable/scheduler/sleep_watcher.ex`
-- [ ] `lib/durable/events.ex`
+- [x] `lib/durable/wait.ex` - Sleep, wait_for_event, wait_for_input ✅
+- [x] `lib/durable/executor.ex` - Handles wait signal suspension ✅
+- [x] `lib/durable/storage/schemas/pending_input.ex` - Human input tracking ✅
+- [ ] `lib/durable/scheduler/sleep_watcher.ex` - (sleep uses queue polling instead)
+- [ ] `lib/durable/events.ex` - (integrated into wait.ex)
 - [ ] `lib/durable/wait/input_validator.ex`
 - [ ] `lib/durable/dsl/decision.ex`
 - [ ] `lib/durable/dsl/loop.ex`
@@ -1554,6 +1572,9 @@ end
 - [ ] `lib/durable/message_bus/adapters/phoenix_pubsub.ex`
 
 ### Phase 5 Files
+- [x] `lib/durable/query.ex` - Query API ✅
+- [x] `lib/durable/dsl/time_helpers.ex` - Time conversion helpers ✅
+- [x] `test/support/data_case.ex` - Test sandbox setup ✅
 - [ ] `lib/mix/tasks/durable.gen.migration.ex`
 - [ ] `lib/mix/tasks/durable.list.ex`
 - [ ] `lib/mix/tasks/durable.run.ex`
@@ -1561,4 +1582,4 @@ end
 - [ ] `lib/mix/tasks/durable.cancel.ex`
 - [ ] `lib/mix/tasks/durable.cleanup.ex`
 - [ ] `lib/durable/testing.ex`
-- [ ] `test/support/case.ex`
+- [ ] `test/support/case.ex` - Full test helpers

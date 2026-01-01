@@ -5,6 +5,9 @@ defmodule Durable.Application do
 
   @impl true
   def start(_type, _args) do
+    # Register log capture handler for workflow step logging
+    :ok = Durable.LogCapture.Handler.attach()
+
     children = [
       Durable.Repo,
       Durable.Queue.Manager

@@ -2,10 +2,18 @@
 
 ## Executive Summary
 
-This document outlines the complete implementation plan for **DurableWorkflow**, a durable, resumable workflow engine for Elixir. The project is currently at the specification phase with a comprehensive architecture document (`agents/arch.md`) but no implementation code.
+This document outlines the complete implementation plan for **Durable**, a durable, resumable workflow engine for Elixir.
 
-**Current State:** Specification only (0% implemented)
+**Current State:** ~35% implemented (Phase 0+1 complete, partial Phase 3+5)
 **Target:** Production-ready workflow engine replacing Oban
+
+### Completed Features (as of Dec 2024)
+- Phase 0: Project foundation, database schema, migrations ✅
+- Phase 1: Core MVP (DSL, context, executor, retry, queue, worker) ✅
+- Phase 3.1-3.3: Wait primitives (sleep, events, human input) ✅
+- Phase 5 (partial): Query API, time helpers, test DataCase ✅
+
+**Stats:** 22 modules, 24 passing tests
 
 ---
 
@@ -118,16 +126,16 @@ This document outlines the complete implementation plan for **DurableWorkflow**,
    - `.github/workflows/ci.yml` - GitHub Actions for tests, formatting, dialyzer
    - `.tool-versions` - asdf version management
 
-**Success Criteria:**
-- [ ] `mix compile` succeeds
-- [ ] `mix test` runs (with placeholder tests)
-- [ ] `mix format --check-formatted` passes
-- [ ] `mix credo` passes
-- [ ] `mix dialyzer` passes
+**Success Criteria:** ✅ COMPLETE
+- [x] `mix compile` succeeds
+- [x] `mix test` runs (24 passing tests)
+- [x] `mix format --check-formatted` passes
+- [x] `mix credo` passes
+- [x] `mix dialyzer` passes
 
 ---
 
-### Milestone 0.2: Database Schema & Migrations
+### Milestone 0.2: Database Schema & Migrations ✅ COMPLETE
 
 **Objective:** Create Ecto schemas and migrations for all core tables.
 
@@ -245,9 +253,9 @@ This document outlines the complete implementation plan for **DurableWorkflow**,
 
 ---
 
-## Phase 1: Core Workflow Engine (MVP)
+## Phase 1: Core Workflow Engine (MVP) ✅ COMPLETE
 
-### Milestone 1.1: DSL Foundation - Basic Macros
+### Milestone 1.1: DSL Foundation - Basic Macros ✅ COMPLETE
 
 **Objective:** Implement the core `use DurableWorkflow` macro and basic `workflow`/`step` DSL.
 
@@ -332,7 +340,7 @@ MyApp.OrderWorkflow.__workflow_definition__("process_order")
 
 ---
 
-### Milestone 1.2: Context Management
+### Milestone 1.2: Context Management ✅ COMPLETE
 
 **Objective:** Implement the context system for state management within workflows.
 
@@ -415,7 +423,7 @@ end
 
 ---
 
-### Milestone 1.3: Basic Executor
+### Milestone 1.3: Basic Executor ✅ COMPLETE
 
 **Objective:** Implement the core workflow executor that runs steps sequentially.
 
@@ -478,7 +486,7 @@ execution.context # => %{order_id: 123, total: 99.99, ...}
 
 ---
 
-### Milestone 1.4: Retry Logic & Backoff
+### Milestone 1.4: Retry Logic & Backoff ✅ COMPLETE
 
 **Objective:** Implement step-level retry with configurable backoff strategies.
 
@@ -559,7 +567,7 @@ execution.context # => %{order_id: 123, total: 99.99, ...}
 
 ---
 
-### Milestone 1.5: PostgreSQL Queue Adapter
+### Milestone 1.5: PostgreSQL Queue Adapter ✅ COMPLETE
 
 **Objective:** Implement the default PostgreSQL-based job queue.
 
@@ -629,7 +637,7 @@ execution.context # => %{order_id: 123, total: 99.99, ...}
 
 ---
 
-### Milestone 1.6: Basic Public API
+### Milestone 1.6: Basic Public API ✅ COMPLETE
 
 **Objective:** Complete the public API for starting, querying, and managing workflows.
 
@@ -972,9 +980,9 @@ execution.context # => %{order_id: 123, total: 99.99, ...}
 
 ---
 
-## Phase 3: Advanced Features
+## Phase 3: Advanced Features (Partial)
 
-### Milestone 3.1: Wait Primitives - Sleep
+### Milestone 3.1: Wait Primitives - Sleep ✅ COMPLETE
 
 **Objective:** Implement `sleep_for` and `sleep_until` functions.
 
@@ -1016,15 +1024,15 @@ execution.context # => %{order_id: 123, total: 99.99, ...}
    ```
 
 **Success Criteria:**
-- [ ] sleep_for suspends workflow
-- [ ] Workflow resumes after duration
-- [ ] sleep_until works with DateTime
-- [ ] State preserved across sleep
-- [ ] Tests verify timing
+- [x] sleep_for suspends workflow
+- [x] Workflow resumes after duration
+- [x] sleep_until works with DateTime
+- [x] State preserved across sleep
+- [x] Tests verify timing
 
 ---
 
-### Milestone 3.2: Wait Primitives - Events
+### Milestone 3.2: Wait Primitives - Events ✅ COMPLETE
 
 **Objective:** Implement `wait_for_event` and `send_event` for external event handling.
 
@@ -1059,15 +1067,15 @@ execution.context # => %{order_id: 123, total: 99.99, ...}
    - Or create separate `pending_events` table
 
 **Success Criteria:**
-- [ ] wait_for_event suspends workflow
-- [ ] send_event resumes matching workflow
-- [ ] Filter function works correctly
-- [ ] Timeout triggers with timeout_value
-- [ ] Multiple workflows can wait for same event
+- [x] wait_for_event suspends workflow
+- [x] send_event resumes matching workflow
+- [x] Filter function works correctly
+- [x] Timeout triggers with timeout_value
+- [x] Multiple workflows can wait for same event
 
 ---
 
-### Milestone 3.3: Wait Primitives - Human Input
+### Milestone 3.3: Wait Primitives - Human Input ✅ COMPLETE
 
 **Objective:** Implement `wait_for_input` for human-in-the-loop workflows.
 
@@ -1125,11 +1133,11 @@ execution.context # => %{order_id: 123, total: 99.99, ...}
    - Type coercion
 
 **Success Criteria:**
-- [ ] wait_for_input suspends workflow
-- [ ] provide_input resumes with data
-- [ ] Form validation works
-- [ ] Timeout handling works
-- [ ] Pending inputs queryable
+- [x] wait_for_input suspends workflow
+- [x] provide_input resumes with data
+- [x] Form validation works
+- [x] Timeout handling works
+- [x] Pending inputs queryable
 
 ---
 

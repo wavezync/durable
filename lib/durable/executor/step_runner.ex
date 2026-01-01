@@ -34,6 +34,9 @@ defmodule Durable.Executor.StepRunner do
     # Mark as running
     {:ok, step_exec} = update_step_execution(step_exec, :running)
 
+    # Start log capture for this step
+    Durable.LogCapture.start_capture()
+
     # Execute the step body
     start_time = System.monotonic_time(:millisecond)
 
@@ -60,8 +63,8 @@ defmodule Durable.Executor.StepRunner do
     end_time = System.monotonic_time(:millisecond)
     duration_ms = end_time - start_time
 
-    # Get captured logs (to be implemented with log capture backend)
-    logs = []
+    # Stop log capture and get captured logs
+    logs = Durable.LogCapture.stop_capture()
 
     case result do
       {:ok, output} ->

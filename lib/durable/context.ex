@@ -314,6 +314,10 @@ defmodule Durable.Context do
     Process.delete(@input_key)
     Process.delete(@workflow_id_key)
     Process.delete(@step_key)
+    # Log capture keys (cleanup in case of crashes)
+    Process.delete(:durable_logs)
+    Process.delete(:durable_original_group_leader)
+    Process.delete(:durable_io_capture_pid)
     :ok
   end
 

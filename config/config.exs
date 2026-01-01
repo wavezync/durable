@@ -17,7 +17,19 @@ config :durable,
   # Heartbeat interval (milliseconds)
   # Workers send heartbeats to update locked_at and prevent stale lock recovery
   # Should be less than stale_lock_timeout / 2
-  heartbeat_interval: 30_000
+  heartbeat_interval: 30_000,
+
+  # Log capture configuration
+  # Captures Logger and IO output during workflow step execution
+  log_capture: [
+    enabled: true,
+    levels: [:debug, :info, :warning, :error],
+    io_capture: true,
+    io_passthrough: false,
+    max_log_entries: 1000,
+    max_message_length: 10_000,
+    metadata_filter: [:request_id, :user_id, :module, :function, :line]
+  ]
 
 config :durable, Durable.Repo,
   migration_primary_key: [type: :binary_id],

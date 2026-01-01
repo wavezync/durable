@@ -13,4 +13,5 @@ config :durable, Durable.Repo,
 config :durable,
   queue_enabled: false
 
-config :logger, level: :warning
+# Log level for tests - keep higher to reduce noise, but allow info for log capture tests
+config :logger, level: :info
