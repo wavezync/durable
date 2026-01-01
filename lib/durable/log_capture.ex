@@ -33,6 +33,8 @@ defmodule Durable.LogCapture do
         ]
   """
 
+  alias Durable.LogCapture.IOServer
+
   @logs_key :durable_logs
   @original_gl_key :durable_original_group_leader
   @io_server_key :durable_io_capture_pid
@@ -174,7 +176,7 @@ defmodule Durable.LogCapture do
     passthrough = Keyword.get(config, :io_passthrough, false)
 
     {:ok, io_server} =
-      Durable.LogCapture.IOServer.start_link(
+      IOServer.start_link(
         original_leader: original_leader,
         passthrough: passthrough,
         parent_pid: self()
@@ -203,7 +205,7 @@ defmodule Durable.LogCapture do
         :ok
 
       io_server ->
-        Durable.LogCapture.IOServer.stop(io_server)
+        IOServer.stop(io_server)
         Process.delete(@io_server_key)
     end
 

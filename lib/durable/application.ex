@@ -3,10 +3,12 @@ defmodule Durable.Application do
 
   use Application
 
+  alias Durable.LogCapture.Handler
+
   @impl true
   def start(_type, _args) do
     # Register log capture handler for workflow step logging
-    :ok = Durable.LogCapture.Handler.attach()
+    :ok = Handler.attach()
 
     children = [
       Durable.Repo,

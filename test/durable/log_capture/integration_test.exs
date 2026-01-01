@@ -3,7 +3,7 @@ defmodule Durable.LogCapture.IntegrationTest do
 
   alias Durable.Executor
   alias Durable.Repo
-  alias Durable.Storage.Schemas.{WorkflowExecution, StepExecution}
+  alias Durable.Storage.Schemas.{StepExecution, WorkflowExecution}
 
   import Ecto.Query
 

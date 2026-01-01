@@ -87,12 +87,10 @@ defmodule Durable.LogCapture.IOServer do
 
   defp handle_io_request({:put_chars, encoding, module, fun, args}, state) do
     # Format function call result
-    try do
-      chars = apply(module, fun, args)
-      handle_put_chars(chars, encoding, state)
-    rescue
-      _ -> {:error, :format_error}
-    end
+    chars = apply(module, fun, args)
+    handle_put_chars(chars, encoding, state)
+  rescue
+    _ -> {:error, :format_error}
   end
 
   defp handle_io_request({:put_chars, chars}, state) do
