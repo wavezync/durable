@@ -11,7 +11,7 @@ defmodule Durable.Executor.StepRunner do
 
   require Logger
 
-  @type result :: {:ok, any()} | {:error, any()}
+  @type result :: {:ok, any()} | {:error, any()} | {:decision, atom()}
 
   @doc """
   Executes a step with retry logic.
@@ -68,9 +68,8 @@ defmodule Durable.Executor.StepRunner do
 
     case result do
       {:ok, output} ->
-        # Success - complete the step
-        {:ok, _} = complete_step_execution(step_exec, output, logs, duration_ms)
-        {:ok, output}
+        # Handle decision steps with routing
+        handle_step_result(step, step_exec, output, logs, duration_ms)
 
       {:throw, {:sleep, opts}} ->
         # Sleep signal - workflow should suspend
@@ -172,4 +171,39 @@ defmodule Durable.Executor.StepRunner do
   defp serialize_output(output) when is_tuple(output), do: %{value: Tuple.to_list(output)}
   defp serialize_output(nil), do: nil
   defp serialize_output(output), do: %{value: inspect(output)}
+
+  # Handle decision step results with routing
+  defp handle_step_result(%Step{type: :decision}, step_exec, {:goto, target}, logs, duration_ms)
+       when is_atom(target) do
+    decision_output = %{
+      decision_type: "goto",
+      target_step: Atom.to_string(target)
+    }
+
+    {:ok, _} = complete_step_execution(step_exec, decision_output, logs, duration_ms)
+    {:decision, target}
+  end
+
+  defp handle_step_result(%Step{type: :decision}, step_exec, {:continue}, logs, duration_ms) do
+    decision_output = %{decision_type: "continue"}
+    {:ok, _} = complete_step_execution(step_exec, decision_output, logs, duration_ms)
+    {:ok, {:continue}}
+  end
+
+  defp handle_step_result(%Step{type: :decision}, step_exec, other_output, logs, duration_ms) do
+    # Decision returned a plain value - treat as continue
+    decision_output = %{
+      decision_type: "continue",
+      value: serialize_output(other_output)
+    }
+
+    {:ok, _} = complete_step_execution(step_exec, decision_output, logs, duration_ms)
+    {:ok, other_output}
+  end
+
+  # Regular step - standard handling
+  defp handle_step_result(_step, step_exec, output, logs, duration_ms) do
+    {:ok, _} = complete_step_execution(step_exec, output, logs, duration_ms)
+    {:ok, output}
+  end
 end

@@ -72,4 +72,67 @@ defmodule Durable.DSL.Step do
   end
 
   defp normalize_retry_opts(opts), do: opts
+
+  @doc """
+  Defines a decision step for conditional branching within a workflow.
+
+  Decision steps evaluate conditions and determine which step to execute next.
+  They can return:
+  - `{:goto, :step_name}` - Jump forward to the named step, skipping intermediate steps
+  - `{:continue}` - Continue to the next sequential step
+  - Any other value - Treated as `{:continue}` with the value stored as output
+
+  ## Examples
+
+      workflow "order_processing" do
+        step :validate do
+          put_context(:amount, input().amount)
+        end
+
+        decision :check_amount do
+          if get_context(:amount) > 1000 do
+            {:goto, :manager_approval}
+          else
+            {:goto, :auto_approve}
+          end
+        end
+
+        step :auto_approve do
+          put_context(:approved_by, "system")
+        end
+
+        step :manager_approval do
+          put_context(:approved_by, "manager")
+        end
+      end
+
+  ## Options
+
+  Decision steps support the same options as regular steps:
+  - `:retry` - Retry configuration for the decision logic
+  - `:timeout` - Decision timeout in milliseconds
+
+  ## Constraints
+
+  - Target steps must exist in the workflow
+  - Jumps must be forward-only (cannot jump to earlier steps)
+  - Jumping to self is not allowed
+  """
+  defmacro decision(name, opts \\ [], do: body) do
+    normalized_opts = normalize_step_opts(opts)
+
+    quote do
+      @doc false
+      def unquote(:"__step_body__#{name}")(_ctx) do
+        unquote(body)
+      end
+
+      @durable_current_steps %Durable.Definition.Step{
+        name: unquote(name),
+        type: :decision,
+        module: __MODULE__,
+        opts: unquote(Macro.escape(normalized_opts))
+      }
+    end
+  end
 end

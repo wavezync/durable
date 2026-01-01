@@ -23,6 +23,12 @@ defmodule Durable.MixProject do
     ]
   end
 
+  def cli do
+    [
+      preferred_envs: [precommit: :test]
+    ]
+  end
+
   def application do
     [
       extra_applications: [:logger],

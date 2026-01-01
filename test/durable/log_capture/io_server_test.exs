@@ -25,7 +25,7 @@ defmodule Durable.LogCapture.IOServerTest do
       Process.put(:durable_workflow_id, "test")
       LogCapture.start_capture()
 
-      IO.inspect(%{key: "value"}, label: "Debug")
+      IO.puts("Debug: " <> inspect(%{key: "value"}))
 
       Process.sleep(10)
 

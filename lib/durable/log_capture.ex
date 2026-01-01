@@ -247,7 +247,8 @@ defmodule Durable.LogCapture do
   end
 
   defp filter_metadata(metadata, config) do
-    allowed_keys = Keyword.get(config, :metadata_filter, [:request_id, :user_id, :module, :function, :line])
+    allowed_keys =
+      Keyword.get(config, :metadata_filter, [:request_id, :user_id, :module, :function, :line])
 
     # Remove internal keys that shouldn't be stored
     internal_keys = [:source, :gl, :pid, :time, :mfa, :file, :domain, :erl_level]

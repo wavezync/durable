@@ -178,7 +178,10 @@ defmodule Durable.LogCapture.IOServer do
 
     # Optionally passthrough to original leader
     if state.passthrough do
-      send(state.original_leader, {:io_request, self(), make_ref(), {:put_chars, :unicode, chars}})
+      send(
+        state.original_leader,
+        {:io_request, self(), make_ref(), {:put_chars, :unicode, chars}}
+      )
     end
 
     {:ok, state}

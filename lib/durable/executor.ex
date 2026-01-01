@@ -192,47 +192,117 @@ defmodule Durable.Executor do
         {steps, []}
       end
 
-    # Execute steps sequentially
-    result =
-      Enum.reduce_while(steps_to_run, {:ok, execution}, fn step, {:ok, exec} ->
-        # Update current step
-        {:ok, exec} = update_current_step(exec, step.name)
+    # Build step index for validation
+    step_index = build_step_index(steps)
 
-        case StepRunner.execute(step, exec.id) do
-          {:ok, _output} ->
-            # Save context after each step
-            {:ok, exec} = save_context(exec)
-            {:cont, {:ok, exec}}
+    # Execute steps with decision support
+    case execute_steps_recursive(steps_to_run, execution, step_index) do
+      {:ok, exec} ->
+        mark_completed(exec)
 
-          {:sleep, opts} ->
-            # Workflow needs to sleep
-            {:halt, handle_sleep(exec, opts)}
-
-          {:wait_for_event, opts} ->
-            # Workflow waiting for event
-            {:halt, handle_wait_for_event(exec, opts)}
-
-          {:wait_for_input, opts} ->
-            # Workflow waiting for input
-            {:halt, handle_wait_for_input(exec, opts)}
-
-          {:error, error} ->
-            # Step failed after all retries
-            {:halt, mark_failed(exec, error)}
-        end
-      end)
-
-    case result do
-      {:ok, execution} ->
-        # All steps completed successfully
-        mark_completed(execution)
-
-      {:waiting, execution} ->
-        {:ok, execution}
+      {:waiting, exec} ->
+        {:ok, exec}
 
       {:error, _} = error ->
         error
     end
+  end
+
+  defp build_step_index(steps) do
+    steps
+    |> Enum.with_index()
+    |> Enum.map(fn {step, idx} -> {step.name, idx} end)
+    |> Map.new()
+  end
+
+  defp execute_steps_recursive([], execution, _step_index) do
+    {:ok, execution}
+  end
+
+  defp execute_steps_recursive([step | remaining_steps], execution, step_index) do
+    # Update current step
+    {:ok, exec} = update_current_step(execution, step.name)
+
+    case StepRunner.execute(step, exec.id) do
+      {:ok, _output} ->
+        # Save context and continue to next step
+        {:ok, exec} = save_context(exec)
+        execute_steps_recursive(remaining_steps, exec, step_index)
+
+      {:decision, target_step} ->
+        # Decision step wants to jump - find target in remaining steps
+        {:ok, exec} = save_context(exec)
+
+        case find_jump_target(target_step, remaining_steps, step.name, step_index) do
+          {:ok, target_steps} ->
+            execute_steps_recursive(target_steps, exec, step_index)
+
+          {:error, reason} ->
+            mark_failed(exec, decision_error(step.name, target_step, reason))
+        end
+
+      {:sleep, opts} ->
+        {:waiting, handle_sleep(exec, opts) |> elem(1)}
+
+      {:wait_for_event, opts} ->
+        {:waiting, handle_wait_for_event(exec, opts) |> elem(1)}
+
+      {:wait_for_input, opts} ->
+        {:waiting, handle_wait_for_input(exec, opts) |> elem(1)}
+
+      {:error, error} ->
+        mark_failed(exec, error)
+    end
+  end
+
+  defp find_jump_target(target_step, remaining_steps, current_step, step_index) do
+    with :ok <- validate_target_exists(target_step, step_index),
+         :ok <- validate_not_self(target_step, current_step),
+         :ok <- validate_forward_jump(target_step, current_step, step_index) do
+      find_target_in_remaining(target_step, remaining_steps)
+    end
+  end
+
+  defp validate_target_exists(target_step, step_index) do
+    if Map.has_key?(step_index, target_step) do
+      :ok
+    else
+      {:error, "Target step :#{target_step} does not exist in workflow"}
+    end
+  end
+
+  defp validate_not_self(target_step, current_step) do
+    if target_step == current_step do
+      {:error, "Cannot jump to self (:#{current_step})"}
+    else
+      :ok
+    end
+  end
+
+  defp validate_forward_jump(target_step, current_step, step_index) do
+    if Map.get(step_index, target_step) <= Map.get(step_index, current_step) do
+      {:error,
+       "Cannot jump backwards from :#{current_step} to :#{target_step}. " <>
+         "Decision steps can only jump forward."}
+    else
+      :ok
+    end
+  end
+
+  defp find_target_in_remaining(target_step, remaining_steps) do
+    case Enum.drop_while(remaining_steps, fn s -> s.name != target_step end) do
+      [] -> {:error, "Target step :#{target_step} not found in remaining steps"}
+      target_steps -> {:ok, target_steps}
+    end
+  end
+
+  defp decision_error(from_step, target_step, reason) do
+    %{
+      type: "decision_error",
+      message: reason,
+      from_step: Atom.to_string(from_step),
+      target_step: Atom.to_string(target_step)
+    }
   end
 
   defp update_current_step(execution, step_name) do
