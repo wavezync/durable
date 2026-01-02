@@ -1528,7 +1528,51 @@ execution.context # => %{order_id: 123, total: 99.99, ...}
 
 ---
 
-### Milestone 3.11: Cron Scheduling
+### Milestone 3.11: Pipe-Based API
+
+**Objective:** Provide a functional, pipe-based alternative to the macro DSL.
+
+**Deliverables:**
+
+1. **API:**
+   ```elixir
+   # Pipe-based workflow composition
+   workflow =
+     Durable.Workflow.new("process_order")
+     |> Durable.Workflow.step(:validate, &validate_order/1)
+     |> Durable.Workflow.step(:charge, &charge_payment/1, retry: [max_attempts: 3])
+     |> Durable.Workflow.branch(:doc_type, %{
+       invoice: [&extract_invoice/1, &validate_invoice/1],
+       contract: [&extract_contract/1],
+       _default: [&flag_review/1]
+     })
+     |> Durable.Workflow.parallel([&send_email/1, &notify_slack/1])
+     |> Durable.Workflow.step(:finalize, &complete_order/1)
+
+   # Register and use
+   Durable.register(workflow)
+   Durable.start(workflow, %{order_id: 123})
+   ```
+
+2. **Benefits:**
+   - Composable/reusable steps as plain functions
+   - Dynamic workflow construction at runtime
+   - Easier testing of individual steps
+   - Familiar functional style
+
+3. **Conversion:**
+   - Convert between macro DSL and pipe-based definitions
+   - Same underlying execution engine
+
+**Success Criteria:**
+- [ ] `Durable.Workflow.new/1` creates workflow builder
+- [ ] All constructs (step, branch, parallel) supported
+- [ ] Workflows can be registered and executed
+- [ ] Interoperable with macro DSL
+
+---
+
+### Milestone 3.12: Cron Scheduling
 
 **Objective:** Implement decorator-based cron scheduling.
 

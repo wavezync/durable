@@ -1213,6 +1213,7 @@ Benefits:
 - [ ] Loops and iterations
 - [ ] Parallel execution
 - [ ] Workflow orchestration (call child workflows)
+- [ ] Pipe-based API (functional workflow composition)
 - [ ] Compensation/saga
 - [ ] Cron scheduling
 

@@ -1476,6 +1476,7 @@ end
 | ForEach | Medium | Medium | Parallel | TODO |
 | Switch/Case | Medium | Low | Decisions | TODO |
 | Workflow Orchestration | High | Medium | Core | TODO |
+| Pipe-based API | Medium | Medium | Core | TODO |
 | Compensation | High | High | None | TODO |
 | Cron Scheduling | Medium | Medium | Sleep | TODO (schema exists) |
 | Mix Tasks | High | Low | Core | TODO |
