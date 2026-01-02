@@ -1,30 +1,33 @@
 # Durable
 
+[![Build Status](https://github.com/wavezync/durable/actions/workflows/ci.yml/badge.svg)](https://github.com/wavezync/durable/actions/workflows/ci.yml)
+[![Hex.pm](https://img.shields.io/hexpm/v/durable.svg)](https://hex.pm/packages/durable)
+
 A durable, resumable workflow engine for Elixir, similar to Temporal/Inngest.
 
-## Features
+## ✨ Features
 
-- **Declarative DSL** - Clean macro-based workflow definitions
-- **Resumability** - Sleep, wait for events, wait for human input
-- **Conditional Branching** - Intuitive `branch` construct for flow control
-- **Parallel Execution** - Run steps concurrently with `parallel`
-- **Reliability** - Automatic retries with configurable backoff strategies
-- **Observability** - Built-in log capture per step
-- **Persistence** - PostgreSQL-backed execution state
+- 📝 **Declarative DSL** - Clean macro-based workflow definitions
+- ⏸️ **Resumability** - Sleep, wait for events, wait for human input
+- 🔀 **Conditional Branching** - Intuitive `branch` construct for flow control
+- ⚡ **Parallel Execution** - Run steps concurrently with `parallel`
+- 🔄 **Reliability** - Automatic retries with configurable backoff strategies
+- 🔍 **Observability** - Built-in log capture per step
+- 💾 **Persistence** - PostgreSQL-backed execution state
 
-## Installation
+## 📦 Installation
 
 Add `durable` to your list of dependencies in `mix.exs`:
 
 ```elixir
 def deps do
   [
-    {:durable, "~> 0.1.0"}
+    {:durable, "~> 0.0.0-alpha"}
   ]
 end
 ```
 
-## Quick Start
+## 🚀 Quick Start
 
 ### 1. Configure the Repo
 
@@ -94,7 +97,7 @@ execution.status  # => :completed
 execution.context # => %{order_id: 123, total: 99.99, charge_id: "ch_xxx"}
 ```
 
-## Document Processing Example
+## 📄 Document Processing Example
 
 Durable shines for multi-step pipelines that need reliability and clear flow control:
 
@@ -147,14 +150,14 @@ defmodule MyApp.DocumentProcessor do
 end
 ```
 
-Key benefits:
+**Key benefits:**
 
-- **Automatic Retries** - Failed steps retry with configurable backoff
-- **State Persistence** - Workflow resumes from the last step after crashes
-- **Clear Flow Control** - The `branch` construct makes conditional logic readable
-- **Observability** - Each step's logs are captured for debugging
+- 🔄 **Automatic Retries** - Failed steps retry with configurable backoff
+- 💾 **State Persistence** - Workflow resumes from the last step after crashes
+- 🔀 **Clear Flow Control** - The `branch` construct makes conditional logic readable
+- 🔍 **Observability** - Each step's logs are captured for debugging
 
-## DSL Reference
+## 📖 DSL Reference
 
 ### Workflow Definition
 
@@ -180,7 +183,7 @@ step :name, timeout: minutes(5) do
 end
 ```
 
-### Branch (Conditional Flow)
+### 🔀 Branch (Conditional Flow)
 
 The `branch` macro provides intuitive conditional execution. Only ONE branch executes based on the condition, then execution continues after the branch block.
 
@@ -209,7 +212,7 @@ Features:
 - Multiple steps per branch
 - Execution continues after the branch block
 
-### Parallel Execution
+### ⚡ Parallel Execution
 
 Run multiple steps concurrently and wait for all to complete:
 
@@ -238,7 +241,65 @@ step :build_dashboard do
 end
 ```
 
-### Context Management
+#### 🚀 Advanced: Parallel Workflows
+
+Nest `parallel` inside `branch` to run different concurrent tasks based on conditions. This example processes documents differently by type - contracts run 3 extractions in parallel, while invoices use a single step:
+
+```elixir
+workflow "process_document" do
+  step :fetch do
+    doc = DocumentStore.get(input()["doc_id"])
+    put_context(:doc, doc)
+  end
+
+  step :classify, retry: [max_attempts: 3] do
+    result = AI.classify(get_context(:doc).content)
+    put_context(:doc_type, result.type)
+  end
+
+  branch on: get_context(:doc_type) do
+    :contract ->
+      # Run multiple AI extractions in parallel
+      parallel do
+        step :extract_parties do
+          put_context(:parties, AI.extract_parties(get_context(:doc)))
+        end
+
+        step :extract_terms do
+          put_context(:terms, AI.extract_terms(get_context(:doc)))
+        end
+
+        step :check_signatures do
+          put_context(:signatures, AI.detect_signatures(get_context(:doc)))
+        end
+      end
+
+      step :merge_results do
+        put_context(:extracted, %{
+          parties: get_context(:parties),
+          terms: get_context(:terms),
+          signatures: get_context(:signatures)
+        })
+      end
+
+    :invoice ->
+      step :extract_invoice do
+        put_context(:extracted, AI.extract_invoice(get_context(:doc)))
+      end
+
+    _ ->
+      step :flag_review do
+        put_context(:needs_review, true)
+      end
+  end
+
+  step :store do
+    DocumentStore.save(get_context(:doc).id, get_context(:extracted, %{}))
+  end
+end
+```
+
+### 📦 Context Management
 
 ```elixir
 use Durable.Context
@@ -261,7 +322,7 @@ append_context(:list, value)
 increment_context(:counter, 1)
 ```
 
-### Time Helpers
+### ⏰ Time Helpers
 
 ```elixir
 seconds(30)   # 30,000 ms
@@ -270,7 +331,7 @@ hours(2)      # 7,200,000 ms
 days(7)       # 604,800,000 ms
 ```
 
-### Wait Primitives
+### ⏸️ Wait Primitives
 
 ```elixir
 use Durable.Wait
@@ -290,7 +351,7 @@ wait_for_event("payment_confirmed", timeout: minutes(5))
 wait_for_input("manager_decision", timeout: days(3))
 ```
 
-### Retry Strategies
+### 🔄 Retry Strategies
 
 - `:exponential` - Delay = base^attempt * 1000ms (default)
 - `:linear` - Delay = attempt * base * 1000ms
@@ -307,7 +368,7 @@ step :api_call, retry: [
 end
 ```
 
-## API Reference
+## 🔌 API Reference
 
 ### Starting Workflows
 
@@ -351,14 +412,14 @@ Durable.provide_input(workflow_id, "manager_decision", %{approved: true})
 Durable.send_event(workflow_id, "payment_confirmed", %{payment_id: "pay_123"})
 ```
 
-## Coming Soon
+## 🔮 Coming Soon
 
-- Collection iteration (`each items, as: :item do ... end`)
-- Compensation/Saga patterns
-- Cron scheduling
-- Graph visualization
-- Phoenix LiveView dashboard
+- 🔁 Collection iteration (`each items, as: :item do ... end`)
+- ↩️ Compensation/Saga patterns
+- 📅 Cron scheduling
+- 📊 Graph visualization
+- 🖥️ Phoenix LiveView dashboard
 
-## License
+## 📄 License
 
 MIT
