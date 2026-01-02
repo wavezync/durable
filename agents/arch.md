@@ -89,39 +89,99 @@ defmodule OrderWorkflow do
 end
 ```
 
-### Decision Steps
+### Branch (Conditional Flow)
+
+The `branch` macro provides intuitive conditional execution that reads top-to-bottom. Only ONE branch executes based on the condition, then execution continues after the branch block.
+
+```elixir
+workflow "process_order" do
+  step :validate do
+    order = input().order
+    put_context(:total, order.total)
+  end
+
+  # Conditional branching - one path runs based on condition
+  branch on: get_context(:total) > 1000 do
+    true ->
+      step :require_approval do
+        wait_for_input("manager_approval", timeout: days(2))
+      end
+
+      step :process_approval do
+        if get_context(:manager_approval).approved do
+          put_context(:approved_by, "manager")
+        else
+          raise "Order rejected by manager"
+        end
+      end
+
+    false ->
+      step :auto_approve do
+        put_context(:approved_by, "system")
+      end
+  end
+
+  # This runs after ANY branch completes
+  step :charge_payment do
+    PaymentService.charge(get_context(:total))
+  end
+end
+```
+
+Pattern matching with atoms, strings, and default clauses:
+
+```elixir
+branch on: get_context(:doc_type) do
+  :invoice ->
+    step :extract_invoice do
+      AI.extract(get_context(:content), schema: :invoice)
+    end
+
+    step :validate_invoice do
+      validate_totals(get_context(:extracted))
+    end
+
+  :contract ->
+    step :extract_contract do
+      AI.extract(get_context(:content), schema: :contract)
+    end
+
+  _ ->
+    step :manual_review do
+      wait_for_input("classification", timeout: hours(24))
+    end
+end
+```
+
+### Decision Steps (Legacy)
+
+For simple conditional jumps without multi-step branches, you can use the `decision` macro:
 
 ```elixir
 decision :check_order_value do
   order = context().order
-  
+
   cond do
-    order.total > 10_000 -> :high_value
-    order.total > 1_000 -> :medium_value
-    true -> :standard
+    order.total > 10_000 -> {:goto, :high_value_review}
+    order.total > 1_000 -> {:goto, :medium_value_check}
+    true -> {:goto, :standard_process}
   end
 end
 
-on_decision :check_order_value do
-  when_result :high_value do
-    step :require_manual_review do
-      wait_for_input("review_completed", timeout: days(2))
-    end
-  end
-  
-  when_result :medium_value do
-    step :charge_with_verification do
-      PaymentService.charge_with_3ds(context().order)
-    end
-  end
-  
-  when_result :standard do
-    step :charge_standard do
-      PaymentService.charge(context().order)
-    end
-  end
+step :high_value_review do
+  wait_for_input("review_completed", timeout: days(2))
+end
+
+step :medium_value_check do
+  PaymentService.charge_with_3ds(context().order)
+end
+
+step :standard_process do
+  PaymentService.charge(context().order)
 end
 ```
+
+Note: The `branch` macro is preferred for new workflows as it's more readable and allows multiple steps per branch.
 
 ### Loops
 
@@ -878,130 +938,216 @@ Durable.send_event(workflow_id, "payment_confirmed", %{
 
 ---
 
-## Example: Document Ingestion Pipeline
+## Example: AI Document Processing Pipeline
 
-Complete real-world example showing all features:
+Complete real-world example showing AI workflows with [ReqLLM](https://hex.pm/packages/req_llm) for LLM calls:
 
 ```elixir
 defmodule DocumentIngestionWorkflow do
   use Durable
   use Durable.Context
   use Durable.Wait
-  use Durable.Cron
-  
-  # Discovery runs every minute
-  @cron "* * * * *"
-  @cron_queue :discovery
-  workflow "discover_financial_news" do
-    step :fetch_from_sources do
-      # Fetch from multiple sources
-      articles = fetch_articles_from_all_sources()
-      put_context(:discovered_articles, articles)
+
+  @anthropic_url "https://api.anthropic.com/v1/messages"
+
+  # Process individual document with AI extraction
+  workflow "process_document", timeout: minutes(30) do
+    step :fetch_document do
+      doc = DocumentStore.get(input()["doc_id"])
+      put_context(:document, doc)
+      put_context(:content, doc.content)
     end
-    
-    step :deduplicate do
-      articles = get_context(:discovered_articles)
-      new_articles = filter_new_articles(articles)
-      put_context(:new_articles, new_articles)
-    end
-    
-    step :enqueue_processing do
-      articles = get_context(:new_articles)
-      
-      Enum.each(articles, fn article ->
-        Durable.start(__MODULE__, %{article: article},
-          workflow: "process_article",
-          queue: :article_processing
-        )
-      end)
-    end
-  end
-  
-  # Process individual article
-  workflow "process_article", timeout: minutes(30) do
-    step :validate_article do
-      put_context(:article, input().article)
-    end
-    
-    # Scrape if needed
-    decision :needs_scraping do
-      if String.length(context().article.content) < 500 do
-        :needs_scraping
-      else
-        :has_content
-      end
-    end
-    
-    on_decision :needs_scraping do
-      when_result :needs_scraping do
-        step :scrape_content, retry: [max_attempts: 3] do
-          {:ok, content} = ScraperAPI.scrape(context().article.url)
-          update_context(:article, &Map.put(&1, :content, content))
-        end
-      end
-    end
-    
-    step :convert_to_markdown do
-      markdown = HTMLToMarkdown.convert(context().article.content)
-      put_context(:markdown, markdown)
-    end
-    
-    step :insert_article, compensate: :delete_article do
-      article = Repo.insert!(%Article{
-        url: context().article.url,
-        content: context().markdown,
-        status: :raw
-      })
-      put_context(:article_id, article.id)
-    end
-    
-    # Clean with LLM
-    step :clean_with_llm, retry: [max_attempts: 3] do
-      {:ok, cleaned} = LLMService.clean_content(context().markdown)
-      put_context(:cleaned_content, cleaned)
-    end
-    
-    # Parallel: Generate embeddings + analyze
-    parallel do
-      step :generate_embeddings, queue: :embeddings do
-        {:ok, embeddings} = EmbeddingService.generate(context().cleaned_content)
-        ArticleEmbedding.insert!(article_id: context().article_id, vector: embeddings)
-      end
-      
-      step :analyze_article, queue: :analysis do
-        {:ok, analysis} = LLMService.analyze(context().cleaned_content)
-        put_context(:analysis, analysis)
-      end
-    end
-    
-    step :generate_analysis_embeddings, queue: :embeddings do
-      {:ok, embeddings} = EmbeddingService.generate(context().analysis)
-      ArticleEmbedding.insert!(article_id: context().article_id, 
-        type: :analysis, vector: embeddings)
-    end
-    
-    step :create_timeline_entry do
-      TimelineEntry.create_from_analysis(
-        context().article_id,
-        context().analysis
+
+    # Classify document type using Claude
+    step :classify, retry: [max_attempts: 3, backoff: :exponential] do
+      content = get_context(:content)
+
+      {:ok, response} = Req.post(@anthropic_url,
+        auth: {:bearer, System.get_env("ANTHROPIC_API_KEY")},
+        json: %{
+          model: "claude-sonnet-4-20250514",
+          max_tokens: 50,
+          messages: [%{
+            role: "user",
+            content: """
+            Classify this document into exactly one category:
+            - invoice
+            - contract
+            - receipt
+            - other
+
+            Reply with only the category name, nothing else.
+
+            Document:
+            #{String.slice(content, 0, 2000)}
+            """
+          }]
+        }
       )
+
+      doc_type = response.body["content"]
+        |> hd()
+        |> Map.get("text")
+        |> String.trim()
+        |> String.downcase()
+        |> String.to_atom()
+
+      put_context(:doc_type, doc_type)
     end
-    
-    step :mark_complete do
-      Repo.update!(Article, context().article_id, status: :completed)
+
+    # Branch based on document type - only ONE path executes
+    branch on: get_context(:doc_type) do
+      :invoice ->
+        step :extract_invoice, retry: [max_attempts: 3] do
+          content = get_context(:content)
+
+          {:ok, response} = Req.post(@anthropic_url,
+            auth: {:bearer, System.get_env("ANTHROPIC_API_KEY")},
+            json: %{
+              model: "claude-sonnet-4-20250514",
+              max_tokens: 1000,
+              messages: [%{
+                role: "user",
+                content: """
+                Extract invoice data as JSON with these fields:
+                {
+                  "invoice_number": "string",
+                  "date": "YYYY-MM-DD",
+                  "vendor": "string",
+                  "total": number,
+                  "line_items": [{"description": "string", "amount": number}]
+                }
+
+                Document:
+                #{content}
+                """
+              }]
+            }
+          )
+
+          json_text = response.body["content"] |> hd() |> Map.get("text")
+          extracted = Jason.decode!(json_text)
+          put_context(:extracted, extracted)
+        end
+
+        step :validate_invoice do
+          extracted = get_context(:extracted)
+          line_total = Enum.sum(Enum.map(extracted["line_items"], & &1["amount"]))
+          put_context(:valid, abs(line_total - extracted["total"]) < 0.01)
+        end
+
+      :contract ->
+        step :extract_contract, retry: [max_attempts: 3] do
+          content = get_context(:content)
+
+          {:ok, response} = Req.post(@anthropic_url,
+            auth: {:bearer, System.get_env("ANTHROPIC_API_KEY")},
+            json: %{
+              model: "claude-sonnet-4-20250514",
+              max_tokens: 2000,
+              messages: [%{
+                role: "user",
+                content: """
+                Extract contract data as JSON:
+                {
+                  "parties": ["party1", "party2"],
+                  "effective_date": "YYYY-MM-DD",
+                  "term_months": number,
+                  "key_terms": ["term1", "term2"],
+                  "total_value": number or null
+                }
+
+                Document:
+                #{content}
+                """
+              }]
+            }
+          )
+
+          json_text = response.body["content"] |> hd() |> Map.get("text")
+          extracted = Jason.decode!(json_text)
+          put_context(:extracted, extracted)
+        end
+
+      :receipt ->
+        step :extract_receipt, retry: [max_attempts: 3] do
+          content = get_context(:content)
+
+          {:ok, response} = Req.post(@anthropic_url,
+            auth: {:bearer, System.get_env("ANTHROPIC_API_KEY")},
+            json: %{
+              model: "claude-sonnet-4-20250514",
+              max_tokens: 500,
+              messages: [%{
+                role: "user",
+                content: """
+                Extract receipt data as JSON:
+                {
+                  "merchant": "string",
+                  "date": "YYYY-MM-DD",
+                  "total": number,
+                  "payment_method": "string"
+                }
+
+                Document:
+                #{content}
+                """
+              }]
+            }
+          )
+
+          json_text = response.body["content"] |> hd() |> Map.get("text")
+          extracted = Jason.decode!(json_text)
+          put_context(:extracted, extracted)
+        end
+
+      _ ->
+        step :flag_for_review do
+          put_context(:needs_review, true)
+          put_context(:review_reason, "Unknown document type: #{get_context(:doc_type)}")
+        end
+    end
+
+    # This runs after ANY branch completes
+    step :store_result do
+      doc = get_context(:document)
+      extracted = get_context(:extracted, %{})
+
+      DocumentStore.update(doc.id, %{
+        status: :processed,
+        doc_type: get_context(:doc_type),
+        extracted_data: extracted,
+        valid: get_context(:valid, true),
+        needs_review: get_context(:needs_review, false),
+        review_reason: get_context(:review_reason)
+      })
+    end
+
+    step :notify do
+      doc = get_context(:document)
+      Webhook.send(input()["callback_url"], %{
+        doc_id: doc.id,
+        status: :completed,
+        doc_type: get_context(:doc_type)
+      })
     end
   end
 end
+
+# Start the workflow
+{:ok, workflow_id} = Durable.start(DocumentIngestionWorkflow, %{
+  "doc_id" => "doc_123",
+  "callback_url" => "https://api.example.com/webhooks/doc-processed"
+})
 ```
 
 Benefits:
-- ✅ Single source of truth
-- ✅ Full observability with graph
-- ✅ See exactly where each article is
-- ✅ Automatic retries per step
-- ✅ Real-time monitoring
-- ✅ Easy debugging with logs
-- ✅ No scattered Oban jobs!
+- ✅ **Reliable AI calls** - Automatic retries with exponential backoff for flaky APIs
+- ✅ **Clear flow control** - `branch` makes conditional logic readable
+- ✅ **State persistence** - Workflow resumes from last step if process crashes
+- ✅ **Full observability** - Each step's logs captured for debugging
+- ✅ **Type-specific processing** - Different extraction logic per document type
+- ✅ **Single source of truth** - No scattered background jobs
 
 ---
 
@@ -1016,15 +1162,16 @@ Benefits:
 - [x] Database schema
 
 ### Phase 2: Observability
-- [ ] Logger backend for log capture
-- [ ] IO capture via group leader
+- [x] Logger backend for log capture
+- [x] IO capture via group leader
 - [ ] Graph generation
 - [ ] Real-time graph updates
 - [ ] Phoenix LiveView dashboard
 
 ### Phase 3: Advanced Features
-- [ ] Wait primitives (sleep, wait_for_event, wait_for_input)
-- [ ] Decision steps
+- [x] Wait primitives (sleep, wait_for_event, wait_for_input)
+- [x] Decision steps (legacy `decision` + `{:goto}`)
+- [x] Branch macro (new intuitive conditional flow)
 - [ ] Loops and iterations
 - [ ] Parallel execution
 - [ ] Compensation/saga

@@ -220,6 +220,15 @@ defmodule Durable.Executor do
   end
 
   defp execute_steps_recursive([step | remaining_steps], execution, step_index) do
+    # Handle branch step type specially
+    if step.type == :branch do
+      execute_branch(step, remaining_steps, execution, step_index)
+    else
+      execute_regular_step(step, remaining_steps, execution, step_index)
+    end
+  end
+
+  defp execute_regular_step(step, remaining_steps, execution, step_index) do
     # Update current step
     {:ok, exec} = update_current_step(execution, step.name)
 
@@ -253,6 +262,116 @@ defmodule Durable.Executor do
       {:error, error} ->
         mark_failed(exec, error)
     end
+  end
+
+  defp execute_branch(branch_step, remaining_steps, execution, step_index) do
+    {:ok, exec} = update_current_step(execution, branch_step.name)
+
+    # Get branch configuration
+    opts = branch_step.opts
+    condition_fn = opts[:condition_fn]
+    clauses = opts[:clauses]
+    all_branch_steps = opts[:all_steps] || []
+
+    # Evaluate the condition by calling the module function
+    condition_value =
+      try do
+        apply(branch_step.module, condition_fn, [])
+      rescue
+        e ->
+          {:error, Exception.message(e)}
+      end
+
+    case condition_value do
+      {:error, error} ->
+        mark_failed(exec, %{type: "branch_error", message: error})
+
+      value ->
+        # Find matching clause steps
+        matching_steps = find_matching_clause_steps(value, clauses)
+
+        # Save context before executing branch steps
+        {:ok, exec} = save_context(exec)
+
+        # Execute only the matching branch's steps
+        case execute_branch_steps(matching_steps, remaining_steps, exec, step_index) do
+          {:ok, exec} ->
+            # Skip past all branch steps in remaining and continue
+            after_branch = skip_branch_steps(remaining_steps, all_branch_steps)
+            execute_steps_recursive(after_branch, exec, step_index)
+
+          {:waiting, exec} ->
+            {:waiting, exec}
+
+          {:error, _} = error ->
+            error
+        end
+    end
+  end
+
+  defp find_matching_clause_steps(value, clauses) do
+    find_exact_match(value, clauses) || find_default_clause(clauses)
+  end
+
+  defp find_exact_match(value, clauses) do
+    Enum.find_value(clauses, fn {{pattern, _idx}, steps} ->
+      if pattern == value, do: steps
+    end)
+  end
+
+  defp find_default_clause(clauses) do
+    Enum.find_value(clauses, [], fn {{pattern, _idx}, steps} ->
+      if pattern == :default, do: steps
+    end)
+  end
+
+  defp execute_branch_steps(step_names, remaining_steps, execution, step_index) do
+    # Find the actual step definitions from remaining_steps
+    steps_to_execute =
+      Enum.filter(remaining_steps, fn step ->
+        step.name in step_names
+      end)
+
+    # Execute them in the order they appear in step_names
+    ordered_steps =
+      Enum.map(step_names, fn name ->
+        Enum.find(steps_to_execute, fn s -> s.name == name end)
+      end)
+      |> Enum.reject(&is_nil/1)
+
+    execute_branch_steps_sequential(ordered_steps, execution, step_index)
+  end
+
+  defp execute_branch_steps_sequential([], execution, _step_index) do
+    {:ok, execution}
+  end
+
+  defp execute_branch_steps_sequential([step | rest], execution, step_index) do
+    {:ok, exec} = update_current_step(execution, step.name)
+
+    case StepRunner.execute(step, exec.id) do
+      {:ok, _output} ->
+        {:ok, exec} = save_context(exec)
+        execute_branch_steps_sequential(rest, exec, step_index)
+
+      {:sleep, opts} ->
+        {:waiting, handle_sleep(exec, opts) |> elem(1)}
+
+      {:wait_for_event, opts} ->
+        {:waiting, handle_wait_for_event(exec, opts) |> elem(1)}
+
+      {:wait_for_input, opts} ->
+        {:waiting, handle_wait_for_input(exec, opts) |> elem(1)}
+
+      {:error, error} ->
+        mark_failed(exec, error)
+    end
+  end
+
+  defp skip_branch_steps(remaining_steps, all_branch_step_names) do
+    Enum.reject(remaining_steps, fn step ->
+      step.name in all_branch_step_names
+    end)
   end
 
   defp find_jump_target(target_step, remaining_steps, current_step, step_index) do

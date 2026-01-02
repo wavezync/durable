@@ -4,16 +4,18 @@
 
 This document outlines the complete implementation plan for **Durable**, a durable, resumable workflow engine for Elixir.
 
-**Current State:** ~35% implemented (Phase 0+1 complete, partial Phase 3+5)
+**Current State:** ~45% implemented (Phase 0+1 complete, partial Phase 2+3+5)
 **Target:** Production-ready workflow engine replacing Oban
 
-### Completed Features (as of Dec 2024)
+### Completed Features (as of Jan 2025)
 - Phase 0: Project foundation, database schema, migrations ✅
 - Phase 1: Core MVP (DSL, context, executor, retry, queue, worker) ✅
+- Phase 2.1-2.2: Log capture (Logger backend, IO capture) ✅
 - Phase 3.1-3.3: Wait primitives (sleep, events, human input) ✅
+- Phase 3.4: Conditional branching (`branch` macro, `decision` legacy) ✅
 - Phase 5 (partial): Query API, time helpers, test DataCase ✅
 
-**Stats:** 22 modules, 24 passing tests
+**Stats:** 25+ modules, 80 passing tests
 
 ---
 
@@ -1141,61 +1143,72 @@ execution.context # => %{order_id: 123, total: 99.99, ...}
 
 ---
 
-### Milestone 3.4: Decision Steps
+### Milestone 3.4: Conditional Branching ✅ COMPLETE
 
-**Objective:** Implement decision steps for conditional branching.
+**Objective:** Implement conditional branching for workflow flow control.
 
-**Deliverables:**
+**Implemented Features:**
 
-1. **DSL:**
+1. **Branch Macro (Primary - New DSL):**
    ```elixir
-   decision :check_order_value do
-     order = get_context(:order)
-     cond do
-       order.total > 10_000 -> :high_value
-       order.total > 1_000 -> :medium_value
-       true -> :standard
-     end
-   end
+   branch on: get_context(:doc_type) do
+     :invoice ->
+       step :extract_invoice do
+         AI.extract(get_context(:content), schema: :invoice)
+       end
 
-   on_decision :check_order_value do
-     when_result :high_value do
+       step :validate_invoice do
+         validate_totals(get_context(:extracted))
+       end
+
+     :contract ->
+       step :extract_contract do
+         AI.extract(get_context(:content), schema: :contract)
+       end
+
+     _ ->
        step :manual_review do
-         # ...
+         wait_for_input("classification", timeout: hours(24))
        end
-     end
-
-     when_result :medium_value do
-       step :verify_payment do
-         # ...
-       end
-     end
-
-     when_result :standard do
-       step :auto_approve do
-         # ...
-       end
-     end
    end
    ```
 
-2. **Implementation:**
-   - Decision step evaluates to an atom/value
-   - Result stored in context
-   - on_decision macro defines branch handlers
-   - Executor selects matching branch
+2. **Decision Macro (Legacy):**
+   ```elixir
+   decision :check_amount do
+     if get_context(:amount) > 1000 do
+       {:goto, :manager_approval}
+     else
+       {:goto, :auto_approve}
+     end
+   end
 
-3. **Graph Representation:**
-   - Decision node as diamond shape
-   - Edges labeled with result values
-   - Each branch as subgraph
+   step :auto_approve do ... end
+   step :manager_approval do ... end
+   ```
+
+3. **Implementation Details:**
+   - `branch` macro parses case-like clause syntax at macro expansion time
+   - Steps inside branches get qualified names: `:branch_<id>__<clause>__<step_name>`
+   - Executor evaluates condition and executes only matching clause's steps
+   - Supports pattern matching on atoms, strings, integers, booleans
+   - Default clause with `_` wildcard
+   - Multiple steps per branch
+   - Execution continues after branch block
+
+4. **Files Modified:**
+   - `lib/durable/dsl/step.ex` - Added `branch` macro with AST parsing
+   - `lib/durable/definition.ex` - Added `:branch` step type
+   - `lib/durable/executor.ex` - Added branch execution logic
 
 **Success Criteria:**
-- [ ] decision macro works
-- [ ] on_decision routes correctly
-- [ ] when_result matches values
-- [ ] Graph shows decision branches
-- [ ] Tests cover all branches
+- [x] `branch` macro compiles correctly
+- [x] Only matching clause steps execute
+- [x] Default clause (`_`) works as fallback
+- [x] Multiple steps per clause work
+- [x] Execution continues after branch block
+- [x] `decision` macro still works (legacy support)
+- [x] Tests cover all branch scenarios (10 tests)
 
 ---
 

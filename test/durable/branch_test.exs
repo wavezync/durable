@@ -1,0 +1,312 @@
+defmodule Durable.BranchTest do
+  use Durable.DataCase, async: false
+
+  alias Durable.Executor
+  alias Durable.Repo
+  alias Durable.Storage.Schemas.{StepExecution, WorkflowExecution}
+
+  import Ecto.Query
+
+  describe "branch macro DSL compilation" do
+    test "branch macro creates step with type :branch" do
+      {:ok, definition} =
+        SimpleBranchTestWorkflow.__workflow_definition__("simple_branch")
+
+      branch_step = Enum.find(definition.steps, &(&1.type == :branch))
+
+      assert branch_step != nil
+      assert branch_step.type == :branch
+      assert branch_step.opts[:clauses] != nil
+      assert branch_step.opts[:condition_fn] != nil
+    end
+
+    test "branch creates qualified step names for nested steps" do
+      {:ok, definition} =
+        SimpleBranchTestWorkflow.__workflow_definition__("simple_branch")
+
+      step_names = Enum.map(definition.steps, & &1.name) |> Enum.map(&Atom.to_string/1)
+
+      # Should have qualified names like branch_<id>__<clause>__<step>
+      assert Enum.any?(step_names, &String.contains?(&1, "branch_"))
+      assert Enum.any?(step_names, &String.contains?(&1, "__invoice__"))
+      assert Enum.any?(step_names, &String.contains?(&1, "__contract__"))
+    end
+
+    test "branch includes all nested step definitions in workflow" do
+      {:ok, definition} =
+        SimpleBranchTestWorkflow.__workflow_definition__("simple_branch")
+
+      # Should have: setup, branch_X, branch steps for invoice and contract, final
+      assert length(definition.steps) >= 4
+    end
+  end
+
+  describe "branch execution - exact match" do
+    test "executes only invoice branch when doc_type is :invoice" do
+      {:ok, execution} =
+        create_and_execute_workflow(SimpleBranchTestWorkflow, %{"doc_type" => "invoice"})
+
+      assert execution.status == :completed
+
+      step_execs = get_step_executions(execution.id)
+      executed_steps = Enum.map(step_execs, & &1.step_name)
+
+      # Should execute setup step
+      assert "setup" in executed_steps
+
+      # Should execute invoice branch step(s)
+      assert Enum.any?(executed_steps, &String.contains?(&1, "invoice"))
+
+      # Should NOT execute contract branch step(s)
+      refute Enum.any?(executed_steps, &String.contains?(&1, "contract"))
+
+      # Should execute final step
+      assert "final" in executed_steps
+
+      # Context should reflect invoice processing
+      assert execution.context["processed_as"] == "invoice"
+    end
+
+    test "executes only contract branch when doc_type is :contract" do
+      {:ok, execution} =
+        create_and_execute_workflow(SimpleBranchTestWorkflow, %{"doc_type" => "contract"})
+
+      assert execution.status == :completed
+
+      step_execs = get_step_executions(execution.id)
+      executed_steps = Enum.map(step_execs, & &1.step_name)
+
+      # Should execute contract branch step(s)
+      assert Enum.any?(executed_steps, &String.contains?(&1, "contract"))
+
+      # Should NOT execute invoice branch step(s)
+      refute Enum.any?(executed_steps, &String.contains?(&1, "invoice"))
+
+      # Context should reflect contract processing
+      assert execution.context["processed_as"] == "contract"
+    end
+  end
+
+  describe "branch execution - default clause" do
+    test "executes default branch when no exact match" do
+      {:ok, execution} =
+        create_and_execute_workflow(BranchWithDefaultWorkflow, %{"doc_type" => "unknown"})
+
+      assert execution.status == :completed
+
+      step_execs = get_step_executions(execution.id)
+      executed_steps = Enum.map(step_execs, & &1.step_name)
+
+      # Should execute default branch
+      assert Enum.any?(executed_steps, &String.contains?(&1, "default"))
+
+      # Should NOT execute other branches
+      refute Enum.any?(executed_steps, &String.contains?(&1, "__invoice__"))
+
+      assert execution.context["processed_as"] == "manual_review"
+    end
+  end
+
+  describe "branch with multiple steps per clause" do
+    test "executes all steps in matching branch in order" do
+      {:ok, execution} =
+        create_and_execute_workflow(MultiStepBranchWorkflow, %{"doc_type" => "invoice"})
+
+      assert execution.status == :completed
+
+      step_execs = get_step_executions(execution.id)
+      executed_steps = Enum.map(step_execs, & &1.step_name)
+
+      # Should execute both invoice steps in order
+      invoice_steps =
+        Enum.filter(executed_steps, &String.contains?(&1, "invoice"))
+
+      # Should have 2 invoice steps
+      assert length(invoice_steps) == 2
+
+      # Context should have both step results
+      assert execution.context["step_1"] == "extracted"
+      assert execution.context["step_2"] == "validated"
+    end
+  end
+
+  describe "branch continues after block" do
+    test "execution continues to steps after branch block" do
+      {:ok, execution} =
+        create_and_execute_workflow(SimpleBranchTestWorkflow, %{"doc_type" => "invoice"})
+
+      assert execution.status == :completed
+
+      step_execs = get_step_executions(execution.id)
+      executed_steps = Enum.map(step_execs, & &1.step_name)
+
+      # Final step should execute after branch
+      assert "final" in executed_steps
+      assert execution.context["completed"] == true
+    end
+  end
+
+  describe "branch with context access" do
+    test "branch condition can access context" do
+      {:ok, execution} =
+        create_and_execute_workflow(ContextBranchWorkflow, %{"amount" => 1500})
+
+      assert execution.status == :completed
+      assert execution.context["approval_type"] == "manager"
+    end
+
+    test "branch steps can read and write context" do
+      {:ok, execution} =
+        create_and_execute_workflow(ContextBranchWorkflow, %{"amount" => 500})
+
+      assert execution.status == :completed
+      assert execution.context["approval_type"] == "auto"
+    end
+  end
+
+  # Helper functions
+  defp create_and_execute_workflow(module, input) do
+    {:ok, workflow_def} = module.__default_workflow__()
+
+    attrs = %{
+      workflow_module: Atom.to_string(module),
+      workflow_name: workflow_def.name,
+      status: :pending,
+      queue: "default",
+      priority: 0,
+      input: input,
+      context: %{}
+    }
+
+    {:ok, execution} =
+      %WorkflowExecution{}
+      |> WorkflowExecution.changeset(attrs)
+      |> Repo.insert()
+
+    Executor.execute_workflow(execution.id)
+    {:ok, Repo.get!(WorkflowExecution, execution.id)}
+  end
+
+  defp get_step_executions(workflow_id) do
+    Repo.all(
+      from(s in StepExecution,
+        where: s.workflow_id == ^workflow_id,
+        order_by: [asc: s.inserted_at]
+      )
+    )
+  end
+end
+
+# Test workflow modules
+
+defmodule SimpleBranchTestWorkflow do
+  use Durable
+  use Durable.Context
+
+  workflow "simple_branch" do
+    step :setup do
+      put_context(:doc_type, String.to_atom(input()["doc_type"]))
+    end
+
+    branch on: get_context(:doc_type) do
+      :invoice ->
+        step :process_invoice do
+          put_context(:processed_as, "invoice")
+        end
+
+      :contract ->
+        step :process_contract do
+          put_context(:processed_as, "contract")
+        end
+    end
+
+    step :final do
+      put_context(:completed, true)
+    end
+  end
+end
+
+defmodule BranchWithDefaultWorkflow do
+  use Durable
+  use Durable.Context
+
+  workflow "branch_with_default" do
+    step :setup do
+      put_context(:doc_type, String.to_atom(input()["doc_type"]))
+    end
+
+    branch on: get_context(:doc_type) do
+      :invoice ->
+        step :process_invoice do
+          put_context(:processed_as, "invoice")
+        end
+
+      _ ->
+        step :manual_review do
+          put_context(:processed_as, "manual_review")
+        end
+    end
+
+    step :done do
+      :ok
+    end
+  end
+end
+
+defmodule MultiStepBranchWorkflow do
+  use Durable
+  use Durable.Context
+
+  workflow "multi_step_branch" do
+    step :setup do
+      put_context(:doc_type, String.to_atom(input()["doc_type"]))
+    end
+
+    branch on: get_context(:doc_type) do
+      :invoice ->
+        step :extract_invoice do
+          put_context(:step_1, "extracted")
+        end
+
+        step :validate_invoice do
+          put_context(:step_2, "validated")
+        end
+
+      :contract ->
+        step :extract_contract do
+          put_context(:step_1, "extracted")
+        end
+    end
+
+    step :store do
+      :ok
+    end
+  end
+end
+
+defmodule ContextBranchWorkflow do
+  use Durable
+  use Durable.Context
+
+  workflow "context_branch" do
+    step :setup do
+      put_context(:amount, input()["amount"])
+    end
+
+    branch on: get_context(:amount) > 1000 do
+      true ->
+        step :manager_approval do
+          put_context(:approval_type, "manager")
+        end
+
+      false ->
+        step :auto_approval do
+          put_context(:approval_type, "auto")
+        end
+    end
+
+    step :complete do
+      :ok
+    end
+  end
+end

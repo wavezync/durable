@@ -15,7 +15,7 @@ defmodule Durable.Definition do
     the actual step logic is compiled into the module.
     """
 
-    @type step_type :: :step | :decision | :parallel | :loop | :foreach | :switch
+    @type step_type :: :step | :decision | :branch | :parallel | :loop | :foreach | :switch
 
     @type retry_opts :: %{
             optional(:max_attempts) => pos_integer(),

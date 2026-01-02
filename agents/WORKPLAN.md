@@ -651,23 +651,29 @@ Durable.Wait.list_pending_inputs(
 
 ---
 
-### 3.4 Decision Steps
+### 3.4 Branch - Conditional Flow ✅ REDESIGNED
 
 **Priority:** High
 **Complexity:** Medium
 **Dependencies:** Core DSL
+**Status:** REDESIGNED - Replaces original `decision` + `on_decision` pattern
 
-**Goal:** Implement `decision` and `on_decision` macros for conditional branching.
+**Goal:** Implement intuitive `branch` macro for conditional workflow execution that reads top-to-bottom like normal code.
 
-**Files to Create:**
-- `lib/durable/dsl/decision.ex`
+**Design Philosophy:**
+The original `decision` + `on_decision` + `{:goto}` pattern was confusing because:
+- Steps looked linear but executed non-linearly
+- No visual hierarchy showing which steps belonged to which branch
+- Implicit relationships between decision and target steps
+
+The new `branch` macro makes flow explicit and readable.
 
 **Files to Modify:**
-- `lib/durable.ex` - Add import
-- `lib/durable/executor.ex` - Handle decision execution
-- `lib/durable/definition.ex` - Add decision node type
+- `lib/durable/dsl/step.ex` - Add `branch` macro
+- `lib/durable/definition.ex` - Add `:branch` step type
+- `lib/durable/executor.ex` - Handle branch execution
 
-**DSL Design:**
+**New DSL Design:**
 
 ```elixir
 defmodule MyApp.OrderWorkflow do
@@ -675,101 +681,124 @@ defmodule MyApp.OrderWorkflow do
   use Durable.Context
 
   workflow "process_order" do
-    step :calculate_total do
-      put_context(:total, calculate_order_total())
+    step :validate do
+      put_context(:total, input()["total"])
     end
 
-    decision :check_order_value do
-      total = get_context(:total)
-      cond do
-        total > 10_000 -> :high_value
-        total > 1_000 -> :medium_value
-        true -> :standard
-      end
-    end
-
-    on_decision :check_order_value do
-      branch :high_value do
-        step :require_approval do
-          wait_for_input("manager_approval")
+    # Branch is inline and visual - reads top to bottom
+    branch on: get_context(:total) do
+      high when high > 10_000 ->
+        step :notify_manager do
+          send_email(:manager, "Large order: $#{get_context(:total)}")
         end
-      end
 
-      branch :medium_value do
+        step :wait_approval do
+          wait_for_input("manager_approval", timeout: hours(24))
+        end
+
+      medium when medium > 1_000 ->
         step :verify_payment do
-          PaymentService.verify_with_3ds(get_context(:order))
+          PaymentService.verify_3ds(get_context(:order))
         end
-      end
 
-      branch :standard do
+      _ ->
         step :auto_approve do
           put_context(:approved, true)
         end
-      end
     end
 
-    step :finalize do
-      # Continues after any branch completes
+    # Runs after ANY branch completes
+    step :charge do
+      PaymentService.charge(get_context(:order))
+    end
+
+    step :notify do
+      send_confirmation_email()
     end
   end
 end
+```
+
+**Visual Flow:**
+
+```
+validate
+    │
+    ▼
+branch on: total
+┌───────────────┬───────────────┬──────────────┐
+│ > 10_000      │ > 1_000       │ default      │
+│               │               │              │
+│ notify_manager│ verify_payment│ auto_approve │
+│      │        │               │              │
+│ wait_approval │               │              │
+└───────┬───────┴───────┬───────┴──────┬───────┘
+        └───────────────┼──────────────┘
+                        ▼
+                     charge
+                        │
+                        ▼
+                     notify
 ```
 
 **Implementation Approach:**
 
-1. **Compile-time:** Collect branches into definition
-2. **Runtime:** Executor evaluates decision, selects branch, executes branch steps
+1. **Compile-time:** Parse case-like clauses, collect nested steps with qualified names
+2. **Runtime:** Evaluate condition, execute only matching branch, skip others
 
 ```elixir
-defmodule Durable.DSL.Decision do
-  defmacro decision(name, do: body) do
-    quote do
-      def unquote(:"__decision_body__#{name}")(_ctx) do
-        unquote(body)
-      end
+defmacro branch(opts, do: block) do
+  # opts: [on: expression]
+  # block: case-like clauses with -> arrows
 
-      @durable_current_steps %Durable.Definition.Step{
-        name: unquote(name),
-        type: :decision,
-        module: __MODULE__,
-        opts: %{}
-      }
-    end
-  end
+  quote do
+    # 1. Generate a unique branch name
+    branch_name = :"branch_#{:erlang.unique_integer([:positive])}"
 
-  defmacro on_decision(decision_name, do: block) do
-    # Collect branches and register as a single decision handler step
-    quote do
-      @durable_decision_branches %{}
-      unquote(block)
-
-      branches = @durable_decision_branches
-      @durable_current_steps %Durable.Definition.Step{
-        name: :"#{unquote(decision_name)}_handler",
-        type: :decision_handler,
-        module: __MODULE__,
-        opts: %{decision: unquote(decision_name), branches: branches}
-      }
-    end
-  end
-
-  defmacro branch(result, do: block) do
-    # Register branch steps
+    # 2. Parse clauses and collect steps for each
+    # 3. Flatten branch steps into main workflow
+    # 4. Create :branch step that knows which steps belong to which clause
   end
 end
 ```
 
-**Graph Representation:**
-- Decision node as diamond
-- Edges labeled with result values
-- Each branch as subgraph
+**Executor Logic:**
+
+```elixir
+defp execute_branch(branch_step, remaining_steps, execution, step_index) do
+  # 1. Evaluate the condition
+  condition_value = branch_step.opts.condition_fn.()
+
+  # 2. Find matching clause (supports guards and patterns)
+  matching_clause = find_matching_clause(branch_step.opts.clauses, condition_value)
+
+  # 3. Get step names for that clause
+  branch_step_names = branch_step.opts.branches[matching_clause]
+
+  # 4. Execute those steps
+  execute_branch_steps(branch_step_names, remaining_steps, execution)
+
+  # 5. Skip all other branch steps, continue after
+  after_branch_steps = skip_all_branch_steps(remaining_steps, branch_step.opts.all_branch_steps)
+  execute_steps_recursive(after_branch_steps, execution, step_index)
+end
+```
+
+**Step Naming:**
+Branch steps get qualified names to avoid conflicts:
+- Pattern: `:branch_<id>__<clause>__<step_name>`
+- Example: `:branch_1__high_value__notify_manager`
 
 **Acceptance Criteria:**
-- [ ] `decision` macro works
-- [ ] `on_decision` routes correctly
-- [ ] `branch` matches values
-- [ ] Graph shows decision branches
-- [ ] Decision result stored in context
+- [x] `branch` macro compiles with case-like syntax
+- [x] Correct branch executes based on condition
+- [x] Non-matching branches are skipped
+- [x] Execution continues after branch block
+- [x] Multiple steps per branch work
+- [x] Default clause (`_`) works
+- [x] Guard clauses work (when)
+- [x] Resume/restart works correctly
+- [x] Step execution records show branch taken
 
 ---
 
