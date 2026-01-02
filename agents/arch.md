@@ -234,6 +234,44 @@ foreach :process_items, items: fn -> context().items end do |item|
 end
 ```
 
+### Workflow Orchestration
+
+Call child workflows from parent steps to compose larger workflows:
+
+```elixir
+workflow "order_pipeline" do
+  step :validate do
+    put_context(:order, input()["order"])
+  end
+
+  # Call child workflow and wait for result
+  step :process_payment do
+    {:ok, result} = call_workflow(MyApp.PaymentWorkflow, %{
+      order_id: get_context(:order).id,
+      amount: get_context(:order).total
+    })
+    put_context(:payment, result)
+  end
+
+  # Fire-and-forget (don't wait for completion)
+  step :send_notifications do
+    start_workflow(MyApp.NotificationWorkflow, %{
+      user_id: get_context(:order).user_id,
+      event: :order_completed
+    })
+  end
+
+  step :finalize do
+    OrderService.complete(get_context(:order).id)
+  end
+end
+```
+
+**Options:**
+- `call_workflow/3` - Start child and wait for result
+- `start_workflow/3` - Fire-and-forget
+- Parent-child relationships tracked via `parent_workflow_id`
+
 ### Switch/Case
 
 ```elixir
@@ -1174,6 +1212,7 @@ Benefits:
 - [x] Branch macro (new intuitive conditional flow)
 - [ ] Loops and iterations
 - [ ] Parallel execution
+- [ ] Workflow orchestration (call child workflows)
 - [ ] Compensation/saga
 - [ ] Cron scheduling
 

@@ -415,6 +415,7 @@ Durable.send_event(workflow_id, "payment_confirmed", %{payment_id: "pay_123"})
 ## 🔮 Coming Soon
 
 - 🔁 Collection iteration (`each items, as: :item do ... end`)
+- 🔗 Workflow orchestration - Call child workflows from steps
 - ↩️ Compensation/Saga patterns
 - 📅 Cron scheduling
 - 📊 Graph visualization

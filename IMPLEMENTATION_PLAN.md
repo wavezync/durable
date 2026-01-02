@@ -1466,7 +1466,69 @@ execution.context # => %{order_id: 123, total: 99.99, ...}
 
 ---
 
-### Milestone 3.10: Cron Scheduling
+### Milestone 3.10: Workflow Orchestration
+
+**Objective:** Enable calling child workflows from parent workflow steps.
+
+**Deliverables:**
+
+1. **DSL:**
+   ```elixir
+   # Call child workflow and wait for result
+   step :process_payment do
+     {:ok, result} = call_workflow(MyApp.PaymentWorkflow, %{
+       order_id: get_context(:order_id),
+       amount: get_context(:total)
+     })
+     put_context(:payment_result, result)
+   end
+
+   # Fire-and-forget (don't wait)
+   step :send_notifications do
+     start_workflow(MyApp.NotificationWorkflow, %{
+       user_id: get_context(:user_id),
+       event: :order_completed
+     })
+   end
+   ```
+
+2. **Implementation:**
+   - `call_workflow/2,3` - Start child workflow, wait for completion, return result
+   - `start_workflow/2,3` - Start child workflow, return immediately (fire-and-forget)
+   - Parent-child relationship tracked via `parent_workflow_id` column
+   - Child context isolated from parent
+   - Child failure can propagate to parent (configurable)
+
+3. **Options:**
+   ```elixir
+   call_workflow(Module, input,
+     timeout: hours(1),          # Max wait time
+     on_failure: :propagate,     # :propagate | :ignore | :compensate
+     queue: :high_priority       # Override child's default queue
+   )
+   ```
+
+4. **Querying:**
+   ```elixir
+   # Get child workflows
+   Durable.list_executions(parent_id: workflow_id)
+
+   # Get parent
+   {:ok, execution} = Durable.get_execution(child_id)
+   execution.parent_workflow_id
+   ```
+
+**Success Criteria:**
+- [ ] `call_workflow` starts and waits for child
+- [ ] `start_workflow` starts child without waiting
+- [ ] Parent-child relationship tracked
+- [ ] Child result returned to parent
+- [ ] Timeout handling works
+- [ ] Failure propagation configurable
+
+---
+
+### Milestone 3.11: Cron Scheduling
 
 **Objective:** Implement decorator-based cron scheduling.
 
