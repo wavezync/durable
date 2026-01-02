@@ -7,6 +7,7 @@ A durable, resumable workflow engine for Elixir, similar to Temporal/Inngest.
 - **Declarative DSL** - Clean macro-based workflow definitions
 - **Resumability** - Sleep, wait for events, wait for human input
 - **Conditional Branching** - Intuitive `branch` construct for flow control
+- **Parallel Execution** - Run steps concurrently with `parallel`
 - **Reliability** - Automatic retries with configurable backoff strategies
 - **Observability** - Built-in log capture per step
 - **Persistence** - PostgreSQL-backed execution state
@@ -208,25 +209,32 @@ Features:
 - Multiple steps per branch
 - Execution continues after the branch block
 
-### Decision Steps (Legacy)
+### Parallel Execution
 
-For simple conditional jumps, you can also use `decision` steps:
+Run multiple steps concurrently and wait for all to complete:
 
 ```elixir
-decision :check_amount do
-  if get_context(:amount) > 1000 do
-    {:goto, :manager_approval}
-  else
-    {:goto, :auto_approve}
+parallel do
+  step :fetch_user do
+    put_context(:user, UserService.get(input().user_id))
+  end
+
+  step :fetch_orders do
+    put_context(:orders, OrderService.list(input().user_id))
+  end
+
+  step :fetch_preferences do
+    put_context(:prefs, PreferenceService.get(input().user_id))
   end
 end
 
-step :auto_approve do
-  # ...
-end
-
-step :manager_approval do
-  # ...
+# Continues after all parallel steps complete
+step :build_dashboard do
+  Dashboard.build(
+    get_context(:user),
+    get_context(:orders),
+    get_context(:prefs)
+  )
 end
 ```
 
@@ -345,7 +353,6 @@ Durable.send_event(workflow_id, "payment_confirmed", %{payment_id: "pay_123"})
 
 ## Coming Soon
 
-- Parallel execution (`parallel do ... end`)
 - Collection iteration (`each items, as: :item do ... end`)
 - Compensation/Saga patterns
 - Cron scheduling

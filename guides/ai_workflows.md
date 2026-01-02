@@ -9,7 +9,7 @@ Build reliable AI agent workflows with automatic retries, state persistence, and
 defp deps do
   [
     {:durable, "~> 0.1.0"},
-    {:req_llm, "~> 0.3"}
+    {:req_llm, "~> 1.1"}
   ]
 end
 ```
