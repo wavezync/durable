@@ -135,6 +135,8 @@ defmodule Durable.Queue.Adapters.Postgres do
       )
 
     {:ok, count}
+  rescue
+    e -> {:error, Exception.message(e)}
   end
 
   @impl true

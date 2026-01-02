@@ -137,12 +137,15 @@ defmodule Durable.Config do
   """
   @spec get(atom()) :: t()
   def get(name \\ Durable) do
-    :persistent_term.get({__MODULE__, name})
-  rescue
-    ArgumentError ->
-      raise ArgumentError,
-            "Durable instance #{inspect(name)} not found. " <>
-              "Make sure Durable is started with {Durable, repo: YourApp.Repo, name: #{inspect(name)}}"
+    case :persistent_term.get({__MODULE__, name}, :not_found) do
+      :not_found ->
+        raise ArgumentError,
+              "Durable instance #{inspect(name)} not found. " <>
+                "Make sure Durable is started with {Durable, repo: YourApp.Repo, name: #{inspect(name)}}"
+
+      config ->
+        config
+    end
   end
 
   @doc """

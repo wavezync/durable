@@ -50,6 +50,7 @@ defmodule Durable.Supervisor do
   require Logger
 
   alias Durable.Config
+  alias Durable.LogCapture.Handler
 
   @doc """
   Starts the Durable supervisor.
@@ -89,7 +90,7 @@ defmodule Durable.Supervisor do
   @impl true
   def init(%Config{} = config) do
     # Attach log capture handler (idempotent)
-    :ok = Durable.LogCapture.Handler.attach()
+    :ok = Handler.attach()
 
     children =
       if config.queue_enabled do
