@@ -218,8 +218,20 @@ defmodule Durable.Executor.StepRunner do
   end
 
   # Regular step - standard handling
-  defp handle_step_result(repo, _step, step_exec, output, logs, duration_ms) do
-    {:ok, _} = complete_step_execution(repo, step_exec, output, logs, duration_ms)
+  # For parallel steps, store context snapshot for durability on resume
+  defp handle_step_result(repo, step, step_exec, output, logs, duration_ms) do
+    stored_output =
+      if step.opts[:parallel_id] do
+        # Include context snapshot so we can restore it on resume
+        %{
+          "__output__" => serialize_output(output),
+          "__context__" => Context.get_current_context()
+        }
+      else
+        output
+      end
+
+    {:ok, _} = complete_step_execution(repo, step_exec, stored_output, logs, duration_ms)
     {:ok, output}
   end
 end

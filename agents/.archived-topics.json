@@ -1,0 +1,69 @@
+{
+  "version": "1.0",
+  "lastUpdated": "2026-01-03",
+  "topics": [
+    {
+      "slug": "embeddable-library-transformation",
+      "title": "Embeddable Library Transformation",
+      "description": "Transform Durable from standalone application to Oban-style embeddable library",
+      "created": "2026-01-02",
+      "lastUpdated": "2026-01-02",
+      "sessionCount": 1,
+      "status": "completed",
+      "tags": [
+        "embedding",
+        "oban-pattern",
+        "configuration",
+        "supervision-tree",
+        "ecto",
+        "migrations"
+      ],
+      "keyFiles": [
+        "lib/durable/config.ex",
+        "lib/durable/migration.ex",
+        "lib/durable/supervisor.ex"
+      ],
+      "sessions": [
+        {
+          "number": 1,
+          "date": "2026-01-02",
+          "file": "sessions/2026-01-02-session-01.md",
+          "focus": "Full implementation of embeddable pattern",
+          "status": "completed"
+        }
+      ]
+    },
+    {
+      "slug": "parallel-durability-implementation",
+      "title": "Parallel Durability Implementation",
+      "description": "Make parallel execution truly durable and resumable in Durable workflow engine",
+      "created": "2026-01-03",
+      "lastUpdated": "2026-01-03",
+      "sessionCount": 1,
+      "status": "completed",
+      "tags": [
+        "parallel",
+        "durability",
+        "resume",
+        "context",
+        "executor",
+        "integration-tests"
+      ],
+      "keyFiles": [
+        "lib/durable/executor.ex",
+        "lib/durable/executor/step_runner.ex",
+        "test/durable/integration_test.exs",
+        "test/durable/parallel_test.exs"
+      ],
+      "sessions": [
+        {
+          "number": 1,
+          "date": "2026-01-03",
+          "file": "sessions/2026-01-03-session-01.md",
+          "focus": "Full parallel durability implementation",
+          "status": "completed"
+        }
+      ]
+    }
+  ]
+}

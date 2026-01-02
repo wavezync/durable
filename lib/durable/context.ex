@@ -47,6 +47,8 @@ defmodule Durable.Context do
   @input_key :durable_input
   @workflow_id_key :durable_workflow_id
   @step_key :durable_current_step
+  @foreach_item_key :durable_foreach_item
+  @foreach_index_key :durable_foreach_index
 
   @doc """
   Injects context management functions into the calling module.
@@ -68,7 +70,9 @@ defmodule Durable.Context do
           workflow_id: 0,
           current_step: 0,
           append_context: 2,
-          increment_context: 2
+          increment_context: 2,
+          current_item: 0,
+          current_index: 0
         ]
     end
   end
@@ -279,6 +283,42 @@ defmodule Durable.Context do
     put_context(key, current + amount)
   end
 
+  @doc """
+  Returns the current item being processed in a foreach block.
+
+  ## Examples
+
+      foreach :items, items: :items do
+        step :process do
+          item = current_item()
+          # process the item
+        end
+      end
+
+  """
+  @spec current_item() :: any()
+  def current_item do
+    Process.get(@foreach_item_key)
+  end
+
+  @doc """
+  Returns the current index in a foreach block.
+
+  ## Examples
+
+      foreach :items, items: :items do
+        step :process do
+          idx = current_index()
+          # use the index
+        end
+      end
+
+  """
+  @spec current_index() :: non_neg_integer() | nil
+  def current_index do
+    Process.get(@foreach_index_key)
+  end
+
   # Internal functions for executor use
 
   @doc false
@@ -309,11 +349,27 @@ defmodule Durable.Context do
   end
 
   @doc false
+  def set_foreach_item(item, index) do
+    Process.put(@foreach_item_key, item)
+    Process.put(@foreach_index_key, index)
+    :ok
+  end
+
+  @doc false
+  def clear_foreach_item do
+    Process.delete(@foreach_item_key)
+    Process.delete(@foreach_index_key)
+    :ok
+  end
+
+  @doc false
   def cleanup do
     Process.delete(@context_key)
     Process.delete(@input_key)
     Process.delete(@workflow_id_key)
     Process.delete(@step_key)
+    Process.delete(@foreach_item_key)
+    Process.delete(@foreach_index_key)
     # Log capture keys (cleanup in case of crashes)
     Process.delete(:durable_logs)
     Process.delete(:durable_original_group_leader)

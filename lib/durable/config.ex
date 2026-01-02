@@ -216,6 +216,16 @@ defmodule Durable.Config do
   end
 
   @doc """
+  Returns the Task.Supervisor name for a Durable instance.
+
+  This supervisor is used for parallel step execution.
+  """
+  @spec task_supervisor(atom()) :: atom()
+  def task_supervisor(name \\ Durable) do
+    Durable.Supervisor.task_supervisor_name(name)
+  end
+
+  @doc """
   Returns the NimbleOptions schema for documentation.
   """
   @spec schema() :: keyword()

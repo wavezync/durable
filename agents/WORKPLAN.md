@@ -2,12 +2,12 @@
 
 ## Executive Summary
 
-**Completed:** Phase 0 (Foundation) + Phase 1 (Core MVP) + Phase 2 Log Capture (2.1-2.2) + Phase 3 Wait Primitives (3.1-3.3) + Phase 5 Query API
-**Remaining:** Phase 2 (Graph: 2.3-2.5), Phase 3 (Control Flow: 3.4-3.10), Phase 4 (Scalability), Phase 5 (Mix Tasks, Docs)
+**Completed:** Phase 0 (Foundation) + Phase 1 (Core MVP) + Phase 2 Log Capture (2.1-2.2) + Phase 3 Wait Primitives (3.1-3.3) + Phase 3 Control Flow (3.4, 3.6, 3.7) + Phase 5 Query API
+**Remaining:** Phase 2 (Graph: 2.3-2.5), Phase 3 (Control Flow: 3.5, 3.8-3.10), Phase 4 (Scalability), Phase 5 (Mix Tasks, Docs)
 
-**Current State:** 25 modules, 57 passing tests, core DSL, executor, wait primitives, log capture, and query API working
+**Current State:** 28 modules, 104 passing tests, core DSL, executor, wait primitives, log capture, query API, branch, parallel, and foreach working
 
-**Overall Progress:** ~40% complete
+**Overall Progress:** ~55% complete
 
 ---
 
@@ -651,12 +651,12 @@ Durable.Wait.list_pending_inputs(
 
 ---
 
-### 3.4 Branch - Conditional Flow ✅ REDESIGNED
+### 3.4 Branch - Conditional Flow ✅ COMPLETE
 
 **Priority:** High
 **Complexity:** Medium
 **Dependencies:** Core DSL
-**Status:** REDESIGNED - Replaces original `decision` + `on_decision` pattern
+**Status:** IMPLEMENTED - Replaces original `decision` + `on_decision` pattern
 
 **Goal:** Implement intuitive `branch` macro for conditional workflow execution that reads top-to-bottom like normal code.
 
@@ -847,11 +847,12 @@ end
 
 ---
 
-### 3.6 Parallel Execution
+### 3.6 Parallel Execution ✅ COMPLETE
 
 **Priority:** High
 **Complexity:** High
 **Dependencies:** Core executor
+**Status:** IMPLEMENTED
 
 **Goal:** Implement `parallel` block for concurrent step execution.
 
@@ -924,47 +925,71 @@ end
 | `:complete_all` | Wait for all, collect errors |
 
 **Acceptance Criteria:**
-- [ ] `parallel` macro works
-- [ ] Steps execute concurrently
-- [ ] All steps complete before continuing
-- [ ] Context merging works
-- [ ] Error handling configurable
-- [ ] Graph shows parallel branches
+- [x] `parallel` macro works
+- [x] Steps execute concurrently (verified with timing test)
+- [x] All steps complete before continuing
+- [x] Context merging works (deep_merge, last_wins, collect strategies)
+- [x] Error handling configurable (fail_fast, complete_all)
+- [ ] Graph shows parallel branches (needs graph implementation)
+
+**Implementation Notes:**
+- Uses `Task.Supervisor.async/3` for proper supervision
+- Task.Supervisor added to `Durable.Supervisor` children
+- Step naming: `parallel_<id>__<step_name>`
+- Files: `lib/durable/dsl/step.ex`, `lib/durable/executor.ex`
+- Tests: `test/durable/parallel_test.exs` (11 tests)
 
 ---
 
-### 3.7 ForEach
+### 3.7 ForEach ✅ COMPLETE
 
 **Priority:** Medium
 **Complexity:** Medium
 **Dependencies:** 3.6 (Parallel)
+**Status:** IMPLEMENTED
 
 **Goal:** Implement `foreach` for processing collections.
 
 **DSL:**
 
 ```elixir
-foreach :process_items,
-  items: fn -> get_context(:items) end,
-  concurrency: 5 do |item|
-
+# Using context key for items
+foreach :process_items, items: :items do
   step :process_item do
+    item = current_item()
+    index = current_index()
     result = ItemProcessor.process(item)
     append_context(:results, result)
+  end
+end
+
+# Concurrent with collect_as
+foreach :process_items, items: :items, concurrency: 5, collect_as: :results do
+  step :process_item do
+    put_context(:result, process(current_item()))
   end
 end
 ```
 
 **Implementation:**
-- Sequential: Process items one at a time
-- Concurrent: Process up to N items in parallel
+- Sequential: Process items one at a time (default)
+- Concurrent: Process up to N items in parallel using Task.Supervisor
+- `current_item()` and `current_index()` available in Context
+- `collect_as` option for gathering results in concurrent mode
+- Error strategies: `:fail_fast` (default) and `:continue`
 
 **Acceptance Criteria:**
-- [ ] `foreach` iterates over collection
-- [ ] Item available in step context
-- [ ] Sequential mode works
-- [ ] Concurrent mode with limit works
-- [ ] Results collected correctly
+- [x] `foreach` iterates over collection
+- [x] Item available via `current_item()`, index via `current_index()`
+- [x] Sequential mode works
+- [x] Concurrent mode with limit works
+- [x] Results collected correctly via `collect_as`
+
+**Implementation Notes:**
+- Macro: `lib/durable/dsl/step.ex` lines 476-607
+- Executor: `lib/durable/executor.ex` lines 603-894
+- Context: Added `current_item/0`, `current_index/0`, `set_foreach_item/2`, `clear_foreach_item/0`
+- Tests: `test/durable/foreach_test.exs` (13 tests)
 
 ---
 
@@ -1470,11 +1495,11 @@ end
 | Sleep Primitives | High | Medium | None | ✅ DONE |
 | Wait for Events | High | Medium | Sleep | ✅ DONE |
 | Wait for Input | High | Medium | Events | ✅ DONE |
-| Decision Steps | High | Medium | None | TODO |
-| Loops | Medium | Medium | Decisions | TODO |
-| Parallel | High | High | None | TODO |
-| ForEach | Medium | Medium | Parallel | TODO |
-| Switch/Case | Medium | Low | Decisions | TODO |
+| Branch (3.4) | High | Medium | None | ✅ DONE |
+| Loops | Medium | Medium | Branch | SKIPPED (use retries/each) |
+| Parallel (3.6) | High | High | None | ✅ DONE |
+| ForEach (3.7) | Medium | Medium | Parallel | ✅ DONE |
+| Switch/Case | Medium | Low | Branch | TODO |
 | Workflow Orchestration | High | Medium | Core | TODO |
 | Pipe-based API | Medium | Medium | Core | TODO |
 | Compensation | High | High | None | TODO |
@@ -1502,13 +1527,13 @@ end
 4. Execution State (2.5)
 
 ### Sprint 3: Control Flow (1.5 weeks)
-1. Decision Steps (3.4)
-2. Switch/Case (3.8)
-3. Loops (3.5)
-4. Parallel Execution (3.6)
+1. Branch (3.4) ✅ DONE
+2. Parallel Execution (3.6) ✅ DONE
+3. Loops (3.5) - SKIPPED (use step retries or ForEach instead)
+4. Switch/Case (3.8) - Can use branch instead
 
 ### Sprint 4: Advanced Patterns (1 week)
-1. ForEach (3.7)
+1. ForEach (3.7) ✅ DONE
 2. Compensation/Saga (3.9)
 3. Cron Scheduling (3.10)
 
@@ -1534,7 +1559,9 @@ end
 
 ### Phase 3 Complete When:
 - [x] All wait primitives work (sleep, event, input) ✅
-- [ ] All control flow works (decision, loop, parallel, foreach)
+- [x] Branch/conditional flow works ✅
+- [x] Parallel execution works ✅
+- [x] ForEach works ✅
 - [ ] Compensation pattern works
 - [ ] Cron scheduling works
 
@@ -1556,7 +1583,7 @@ end
 | Risk | Mitigation |
 |------|------------|
 | Macro complexity | Extensive testing, incremental development |
-| Parallel execution bugs | Use Task.Supervisor, proper error handling |
+| Parallel execution bugs | ✅ Using Task.Supervisor, proper error handling |
 | Context merge conflicts | Well-defined merge strategies, documentation |
 | Performance issues | Benchmark critical paths, use database indexes |
 | Breaking changes | Semantic versioning, deprecation warnings |

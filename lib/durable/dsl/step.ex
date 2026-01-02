@@ -341,4 +341,298 @@ defmodule Durable.DSL.Step do
   defp pattern_to_key(string) when is_binary(string), do: string
   defp pattern_to_key(int) when is_integer(int), do: int
   defp pattern_to_key(_), do: :match
+
+  @doc """
+  Defines a parallel execution block within a workflow.
+
+  All steps inside the parallel block execute concurrently.
+  Execution continues after the block only when ALL parallel steps complete.
+
+  ## Options
+
+  - `:merge` - Context merge strategy (default: `:deep_merge`)
+    - `:deep_merge` - Deep merge all step contexts
+    - `:last_wins` - Last step's context wins on conflicts
+    - `:collect` - Collect into `%{step_name => context_changes}`
+  - `:on_error` - Error handling strategy (default: `:fail_fast`)
+    - `:fail_fast` - Cancel siblings on first failure
+    - `:complete_all` - Wait for all, collect errors
+
+  ## Examples
+
+      workflow "onboard_user" do
+        step :create_user do
+          put_context(:user_id, Users.create(input()))
+        end
+
+        parallel do
+          step :send_welcome_email do
+            Mailer.send_welcome(get_context(:user_id))
+          end
+
+          step :provision_workspace do
+            Workspaces.create(get_context(:user_id))
+          end
+
+          step :setup_billing do
+            Billing.setup(get_context(:user_id))
+          end
+        end
+
+        step :complete do
+          Logger.info("Onboarding complete")
+        end
+      end
+
+  With options:
+
+      parallel merge: :collect, on_error: :complete_all do
+        step :task_a do ... end
+        step :task_b do ... end
+      end
+
+  """
+  defmacro parallel(opts \\ [], do: block) do
+    parallel_id = :erlang.unique_integer([:positive])
+
+    # Extract nested steps from block
+    step_defs = extract_parallel_steps(block, parallel_id)
+    step_names = Enum.map(step_defs, fn {name, _, _} -> name end)
+
+    # Options with defaults
+    merge_strategy = Keyword.get(opts, :merge, :deep_merge)
+    error_strategy = Keyword.get(opts, :on_error, :fail_fast)
+
+    # Generate step function definitions
+    step_code =
+      Enum.map(step_defs, fn {qualified_name, body, step_opts} ->
+        quote do
+          @doc false
+          def unquote(:"__step_body__#{qualified_name}")(_ctx) do
+            unquote(body)
+          end
+
+          @durable_current_steps %Durable.Definition.Step{
+            name: unquote(qualified_name),
+            type: :step,
+            module: __MODULE__,
+            opts: unquote(Macro.escape(step_opts))
+          }
+        end
+      end)
+
+    quote do
+      # Register the parallel control step FIRST
+      @durable_current_steps %Durable.Definition.Step{
+        name: unquote(:"parallel_#{parallel_id}"),
+        type: :parallel,
+        module: __MODULE__,
+        opts: %{
+          steps: unquote(step_names),
+          all_steps: unquote(step_names),
+          merge_strategy: unquote(merge_strategy),
+          error_strategy: unquote(error_strategy)
+        }
+      }
+
+      # Include all nested step definitions AFTER the parallel control
+      unquote_splicing(step_code)
+    end
+  end
+
+  # Extract step calls from parallel block body
+  defp extract_parallel_steps(body, parallel_id) do
+    case body do
+      {:__block__, _, statements} ->
+        Enum.flat_map(statements, &extract_parallel_step_call(&1, parallel_id))
+
+      statement ->
+        extract_parallel_step_call(statement, parallel_id)
+    end
+  end
+
+  defp extract_parallel_step_call({:step, _meta, [name | rest]}, parallel_id)
+       when is_atom(name) do
+    {opts, body} = parse_step_args(rest)
+    qualified_name = :"parallel_#{parallel_id}__#{name}"
+
+    step_opts =
+      opts
+      |> normalize_step_opts()
+      |> Map.merge(%{
+        parallel_id: parallel_id,
+        original_name: name
+      })
+
+    [{qualified_name, body, step_opts}]
+  end
+
+  defp extract_parallel_step_call(_other, _parallel_id), do: []
+
+  # ============================================================================
+  # ForEach Macro
+  # ============================================================================
+
+  @doc """
+  Defines a foreach block that iterates over a collection.
+
+  Each item in the collection is processed by the steps defined within the block.
+  The current item is accessible via `current_item()` from `Durable.Context`.
+
+  ## Options
+
+  - `:items` - Required. Specifies where to get the collection. Can be:
+    - An atom (context key): `items: :my_items` - reads from context
+    - A `{module, function, args}` tuple: `items: {MyModule, :get_items, []}`
+  - `:concurrency` - Optional. Number of items to process concurrently (default: 1).
+    When set to 1, items are processed sequentially.
+  - `:on_error` - Error handling strategy (default: `:fail_fast`)
+    - `:fail_fast` - Stop processing on first error
+    - `:continue` - Continue processing, collect errors
+  - `:collect_as` - Optional. Context key to store results as a list
+
+  ## Examples
+
+  Sequential processing with context key:
+
+      workflow "process_orders" do
+        step :fetch_orders do
+          put_context(:orders, Orders.fetch_pending())
+        end
+
+        foreach :process_each_order, items: :orders do
+          step :process do
+            order = current_item()
+            result = Orders.process(order)
+            append_context(:processed, result)
+          end
+        end
+
+        step :notify do
+          Logger.info("Processed \#{length(get_context(:processed))} orders")
+        end
+      end
+
+  Concurrent processing with limit:
+
+      foreach :process_items, items: :items, concurrency: 5 do
+        step :process do
+          item = current_item()
+          # Process item
+        end
+      end
+
+  With MFA tuple for dynamic item fetching:
+
+      foreach :process_items,
+        items: {MyModule, :get_pending_items, []},
+        on_error: :continue do
+
+        step :send do
+          process(current_item())
+        end
+      end
+
+  """
+  defmacro foreach(name, opts, do: block) when is_atom(name) do
+    foreach_id = :erlang.unique_integer([:positive])
+
+    # items is required - can be an atom (context key) or {mod, fun, args} tuple
+    items_spec =
+      Keyword.get(opts, :items) ||
+        raise ArgumentError, "foreach requires :items option"
+
+    # Validate items_spec at compile time
+    items_spec =
+      case items_spec do
+        key when is_atom(key) ->
+          {:context_key, key}
+
+        {mod, fun, args} when is_atom(mod) and is_atom(fun) and is_list(args) ->
+          {:mfa, {mod, fun, args}}
+
+        other ->
+          raise ArgumentError,
+                "foreach :items must be an atom (context key) or {module, function, args} tuple, got: #{inspect(other)}"
+      end
+
+    # Options with defaults
+    concurrency = Keyword.get(opts, :concurrency, 1)
+    on_error = Keyword.get(opts, :on_error, :fail_fast)
+    collect_as = Keyword.get(opts, :collect_as)
+
+    # Extract nested steps from block
+    step_defs = extract_foreach_steps(block, foreach_id, name)
+    step_names = Enum.map(step_defs, fn {step_name, _, _} -> step_name end)
+
+    # Generate step function definitions
+    step_code =
+      Enum.map(step_defs, fn {qualified_name, body, step_opts} ->
+        quote do
+          @doc false
+          def unquote(:"__step_body__#{qualified_name}")(_ctx) do
+            unquote(body)
+          end
+
+          @durable_current_steps %Durable.Definition.Step{
+            name: unquote(qualified_name),
+            type: :step,
+            module: __MODULE__,
+            opts: unquote(Macro.escape(step_opts))
+          }
+        end
+      end)
+
+    quote do
+      # Register the foreach control step
+      @durable_current_steps %Durable.Definition.Step{
+        name: unquote(:"foreach_#{name}"),
+        type: :foreach,
+        module: __MODULE__,
+        opts: %{
+          foreach_id: unquote(foreach_id),
+          foreach_name: unquote(name),
+          items_spec: unquote(Macro.escape(items_spec)),
+          concurrency: unquote(concurrency),
+          on_error: unquote(on_error),
+          collect_as: unquote(collect_as),
+          steps: unquote(step_names),
+          all_steps: unquote(step_names)
+        }
+      }
+
+      # Include all nested step definitions
+      unquote_splicing(step_code)
+    end
+  end
+
+  # Extract step calls from foreach block body
+  defp extract_foreach_steps(body, foreach_id, foreach_name) do
+    case body do
+      {:__block__, _, statements} ->
+        Enum.flat_map(statements, &extract_foreach_step_call(&1, foreach_id, foreach_name))
+
+      statement ->
+        extract_foreach_step_call(statement, foreach_id, foreach_name)
+    end
+  end
+
+  defp extract_foreach_step_call({:step, _meta, [name | rest]}, foreach_id, foreach_name)
+       when is_atom(name) do
+    {opts, body} = parse_step_args(rest)
+    qualified_name = :"foreach_#{foreach_name}__#{name}"
+
+    step_opts =
+      opts
+      |> normalize_step_opts()
+      |> Map.merge(%{
+        foreach_id: foreach_id,
+        foreach_name: foreach_name,
+        original_name: name
+      })
+
+    [{qualified_name, body, step_opts}]
+  end
+
+  defp extract_foreach_step_call(_other, _foreach_id, _foreach_name), do: []
 end

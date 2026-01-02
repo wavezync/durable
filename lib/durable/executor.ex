@@ -13,7 +13,10 @@ defmodule Durable.Executor do
   alias Durable.Context
   alias Durable.Definition.Workflow
   alias Durable.Executor.StepRunner
+  alias Durable.Storage.Schemas.StepExecution
   alias Durable.Storage.Schemas.WorkflowExecution
+
+  import Ecto.Query
 
   require Logger
 
@@ -201,13 +204,13 @@ defmodule Durable.Executor do
     repo = config.repo
 
     # Find the starting point (for resumed workflows)
-    {steps_to_run, _skipped} =
+    {_already_completed, steps_to_run} =
       if execution.current_step do
         # Find and skip to current step
         current_step_atom = String.to_existing_atom(execution.current_step)
         Enum.split_while(steps, fn step -> step.name != current_step_atom end)
       else
-        {steps, []}
+        {[], steps}
       end
 
     # Build step index for validation
@@ -238,11 +241,12 @@ defmodule Durable.Executor do
   end
 
   defp execute_steps_recursive([step | remaining_steps], execution, step_index, config) do
-    # Handle branch step type specially
-    if step.type == :branch do
-      execute_branch(step, remaining_steps, execution, step_index, config)
-    else
-      execute_regular_step(step, remaining_steps, execution, step_index, config)
+    # Handle special step types
+    case step.type do
+      :branch -> execute_branch(step, remaining_steps, execution, step_index, config)
+      :parallel -> execute_parallel(step, remaining_steps, execution, step_index, config)
+      :foreach -> execute_foreach(step, remaining_steps, execution, step_index, config)
+      _ -> execute_regular_step(step, remaining_steps, execution, step_index, config)
     end
   end
 
@@ -393,6 +397,551 @@ defmodule Durable.Executor do
   defp skip_branch_steps(remaining_steps, all_branch_step_names) do
     Enum.reject(remaining_steps, fn step ->
       step.name in all_branch_step_names
+    end)
+  end
+
+  # ============================================================================
+  # Parallel Execution
+  # ============================================================================
+
+  defp execute_parallel(parallel_step, remaining_steps, execution, step_index, config) do
+    repo = config.repo
+    {:ok, exec} = update_current_step(repo, execution, parallel_step.name)
+
+    # Get parallel configuration
+    opts = parallel_step.opts
+    parallel_step_names = opts[:steps] || []
+    all_parallel_steps = opts[:all_steps] || []
+    merge_strategy = opts[:merge_strategy] || :deep_merge
+    error_strategy = opts[:error_strategy] || :fail_fast
+
+    # Find actual step definitions for parallel steps
+    steps_to_execute =
+      Enum.filter(remaining_steps, fn step ->
+        step.name in parallel_step_names
+      end)
+
+    # Order steps according to step_names
+    ordered_steps =
+      Enum.map(parallel_step_names, fn name ->
+        Enum.find(steps_to_execute, fn s -> s.name == name end)
+      end)
+      |> Enum.reject(&is_nil/1)
+
+    # Save context before parallel execution
+    {:ok, exec} = save_context(repo, exec)
+    base_context = Context.get_current_context()
+    input = Context.input()
+
+    # DURABILITY: Check which parallel steps already completed (for resume)
+    {completed_names, completed_contexts} =
+      get_completed_parallel_steps_with_context(exec.id, parallel_step_names, config)
+
+    # Merge contexts from completed steps into base context
+    base_context_with_completed =
+      Enum.reduce(completed_contexts, base_context, &deep_merge(&2, &1))
+
+    # Filter to only incomplete steps
+    incomplete_steps = Enum.reject(ordered_steps, &(&1.name in completed_names))
+
+    # If all steps already completed, skip execution
+    if incomplete_steps == [] do
+      Context.restore_context(base_context_with_completed, input, exec.id)
+      {:ok, exec} = save_context(repo, exec)
+      after_parallel = skip_parallel_steps(remaining_steps, all_parallel_steps)
+      execute_steps_recursive(after_parallel, exec, step_index, config)
+    else
+      # Execute only incomplete steps in parallel
+      case execute_parallel_steps(
+             incomplete_steps,
+             exec,
+             config,
+             base_context_with_completed,
+             input,
+             merge_strategy,
+             error_strategy
+           ) do
+        {:ok, merged_context} ->
+          # Restore merged context and continue
+          Context.restore_context(merged_context, input, exec.id)
+          {:ok, exec} = save_context(repo, exec)
+
+          # Skip past all parallel steps and continue
+          after_parallel = skip_parallel_steps(remaining_steps, all_parallel_steps)
+          execute_steps_recursive(after_parallel, exec, step_index, config)
+
+        {:error, error} ->
+          mark_failed(repo, exec, error)
+      end
+    end
+  end
+
+  defp execute_parallel_steps(
+         steps,
+         execution,
+         config,
+         base_context,
+         input,
+         merge_strategy,
+         error_strategy
+       ) do
+    # Get the Task.Supervisor for this Durable instance
+    task_sup = Config.task_supervisor(config.name)
+
+    # Create a supervised Task for each step
+    tasks =
+      Enum.map(steps, fn step ->
+        Task.Supervisor.async(task_sup, fn ->
+          # Each task needs its own context copy
+          Context.restore_context(base_context, input, execution.id)
+
+          case StepRunner.execute(step, execution.id, config) do
+            {:ok, _output} ->
+              # Return the context changes from this step
+              {:ok, step.name, Context.get_current_context()}
+
+            {:error, error} ->
+              {:error, step.name, error}
+
+            # For now, treat wait primitives as errors in parallel context
+            # (we can enhance this later for parallel wait support)
+            {:sleep, _opts} ->
+              {:error, step.name,
+               %{
+                 type: "parallel_wait_not_supported",
+                 message: "sleep not supported in parallel blocks yet"
+               }}
+
+            {:wait_for_event, _opts} ->
+              {:error, step.name,
+               %{
+                 type: "parallel_wait_not_supported",
+                 message: "wait_for_event not supported in parallel blocks yet"
+               }}
+
+            {:wait_for_input, _opts} ->
+              {:error, step.name,
+               %{
+                 type: "parallel_wait_not_supported",
+                 message: "wait_for_input not supported in parallel blocks yet"
+               }}
+          end
+        end)
+      end)
+
+    # Wait for all tasks based on error strategy
+    results =
+      case error_strategy do
+        :fail_fast -> await_tasks_fail_fast(tasks)
+        :complete_all -> await_tasks_complete_all(tasks)
+        _ -> await_tasks_complete_all(tasks)
+      end
+
+    # Process results
+    process_parallel_results(results, base_context, merge_strategy)
+  end
+
+  defp await_tasks_fail_fast(tasks) do
+    # Await all - in a real fail_fast we'd cancel on first error
+    # For now, just await all and return results
+    Enum.map(tasks, fn task ->
+      case Task.await(task, :infinity) do
+        result -> result
+      end
+    end)
+  end
+
+  defp await_tasks_complete_all(tasks) do
+    Task.await_many(tasks, :infinity)
+  end
+
+  defp process_parallel_results(results, base_context, merge_strategy) do
+    errors = Enum.filter(results, &match?({:error, _, _}, &1))
+    successes = Enum.filter(results, &match?({:ok, _, _}, &1))
+
+    cond do
+      # Any errors -> fail
+      errors != [] ->
+        error_details =
+          Enum.map(errors, fn {:error, step, err} ->
+            %{step: step, error: err}
+          end)
+
+        {:error,
+         %{
+           type: "parallel_error",
+           message: "One or more parallel steps failed",
+           errors: error_details
+         }}
+
+      # All succeeded -> merge contexts
+      true ->
+        contexts = Enum.map(successes, fn {:ok, step_name, ctx} -> {step_name, ctx} end)
+        merged = merge_parallel_contexts(contexts, base_context, merge_strategy)
+        {:ok, merged}
+    end
+  end
+
+  defp merge_parallel_contexts(step_contexts, base_context, :deep_merge) do
+    Enum.reduce(step_contexts, base_context, fn {_step_name, ctx}, acc ->
+      deep_merge(acc, ctx)
+    end)
+  end
+
+  defp merge_parallel_contexts(step_contexts, _base_context, :last_wins) do
+    case List.last(step_contexts) do
+      nil -> %{}
+      {_step_name, ctx} -> ctx
+    end
+  end
+
+  defp merge_parallel_contexts(step_contexts, base_context, :collect) do
+    collected =
+      Enum.into(step_contexts, %{}, fn {step_name, ctx} ->
+        # Extract only the changes from base_context
+        changes = Map.drop(ctx, Map.keys(base_context))
+        {Atom.to_string(step_name), changes}
+      end)
+
+    Map.put(base_context, "__parallel_results__", collected)
+  end
+
+  defp merge_parallel_contexts(step_contexts, base_context, _unknown) do
+    merge_parallel_contexts(step_contexts, base_context, :deep_merge)
+  end
+
+  defp deep_merge(left, right) when is_map(left) and is_map(right) do
+    Map.merge(left, right, fn _k, l, r -> deep_merge(l, r) end)
+  end
+
+  defp deep_merge(_left, right), do: right
+
+  defp skip_parallel_steps(remaining_steps, all_parallel_step_names) do
+    Enum.reject(remaining_steps, fn step ->
+      step.name in all_parallel_step_names
+    end)
+  end
+
+  # Get completed parallel steps with their stored contexts for durability
+  defp get_completed_parallel_steps_with_context(workflow_id, step_names, config) do
+    repo = config.repo
+    step_name_strings = Enum.map(step_names, &Atom.to_string/1)
+
+    completed =
+      repo.all(
+        from(s in StepExecution,
+          where: s.workflow_id == ^workflow_id,
+          where: s.step_name in ^step_name_strings,
+          where: s.status == :completed,
+          select: {s.step_name, s.output}
+        )
+      )
+
+    names =
+      Enum.map(completed, fn {name, _} ->
+        String.to_existing_atom(name)
+      end)
+
+    contexts =
+      Enum.map(completed, fn {_, output} ->
+        # Extract context from stored output (parallel steps store it under "__context__")
+        (output || %{})["__context__"] || %{}
+      end)
+
+    {names, contexts}
+  end
+
+  # ============================================================================
+  # ForEach Execution
+  # ============================================================================
+
+  defp execute_foreach(foreach_step, remaining_steps, execution, step_index, config) do
+    repo = config.repo
+    {:ok, exec} = update_current_step(repo, execution, foreach_step.name)
+
+    # Get foreach configuration
+    opts = foreach_step.opts
+    foreach_step_names = opts[:steps] || []
+    all_foreach_steps = opts[:all_steps] || []
+    items_spec = opts[:items_spec]
+    concurrency = opts[:concurrency] || 1
+    on_error = opts[:on_error] || :fail_fast
+    collect_as = opts[:collect_as]
+
+    # Get items based on spec type
+    items =
+      case items_spec do
+        {:context_key, key} ->
+          Context.get_context(key) || []
+
+        {:mfa, {mod, fun, args}} ->
+          apply(mod, fun, args)
+
+        _ ->
+          []
+      end
+
+    # Find actual step definitions for foreach steps
+    steps_to_execute =
+      Enum.filter(remaining_steps, fn step ->
+        step.name in foreach_step_names
+      end)
+
+    # Save context before foreach execution
+    {:ok, exec} = save_context(repo, exec)
+    base_context = Context.get_current_context()
+    input = Context.input()
+
+    # Execute based on concurrency
+    result =
+      if concurrency == 1 do
+        execute_foreach_sequential(
+          items,
+          steps_to_execute,
+          exec,
+          config,
+          base_context,
+          input,
+          on_error,
+          collect_as
+        )
+      else
+        execute_foreach_concurrent(
+          items,
+          steps_to_execute,
+          exec,
+          config,
+          base_context,
+          input,
+          concurrency,
+          on_error,
+          collect_as
+        )
+      end
+
+    case result do
+      {:ok, final_context} ->
+        Context.restore_context(final_context, input, exec.id)
+        {:ok, exec} = save_context(repo, exec)
+        after_foreach = skip_foreach_steps(remaining_steps, all_foreach_steps)
+        execute_steps_recursive(after_foreach, exec, step_index, config)
+
+      {:error, error} ->
+        mark_failed(repo, exec, error)
+    end
+  end
+
+  defp execute_foreach_sequential(
+         items,
+         steps,
+         execution,
+         config,
+         base_context,
+         input,
+         on_error,
+         collect_as
+       ) do
+    initial_acc = %{context: base_context, results: [], errors: []}
+
+    final_acc =
+      items
+      |> Enum.with_index()
+      |> Enum.reduce_while(initial_acc, fn {item, index}, acc ->
+        # Set the current item and index in context
+        Context.restore_context(acc.context, input, execution.id)
+        Context.set_foreach_item(item, index)
+
+        # Execute all steps for this item
+        case execute_foreach_item_steps(steps, execution.id, config) do
+          {:ok, item_context} ->
+            Context.clear_foreach_item()
+            new_context = deep_merge(acc.context, item_context)
+
+            new_results =
+              if collect_as do
+                acc.results ++ [extract_item_result(item_context, acc.context)]
+              else
+                acc.results
+              end
+
+            {:cont, %{acc | context: new_context, results: new_results}}
+
+          {:error, error} ->
+            Context.clear_foreach_item()
+
+            case on_error do
+              :fail_fast ->
+                {:halt, %{acc | errors: [{index, error} | acc.errors]}}
+
+              :continue ->
+                {:cont, %{acc | errors: [{index, error} | acc.errors]}}
+            end
+        end
+      end)
+
+    case final_acc.errors do
+      [] ->
+        final_context =
+          if collect_as do
+            Map.put(final_acc.context, collect_as, final_acc.results)
+          else
+            final_acc.context
+          end
+
+        {:ok, final_context}
+
+      errors ->
+        {:error,
+         %{
+           type: "foreach_error",
+           message: "One or more foreach items failed",
+           errors: format_foreach_errors(errors)
+         }}
+    end
+  end
+
+  defp execute_foreach_concurrent(
+         items,
+         steps,
+         execution,
+         config,
+         base_context,
+         input,
+         concurrency,
+         on_error,
+         collect_as
+       ) do
+    task_sup = Config.task_supervisor(config.name)
+
+    # Process items in chunks of concurrency
+    items
+    |> Enum.with_index()
+    |> Enum.chunk_every(concurrency)
+    |> Enum.reduce_while({:ok, base_context, [], []}, fn chunk,
+                                                         {:ok, current_ctx, results, errors} ->
+      # Create tasks for this chunk
+      tasks =
+        Enum.map(chunk, fn {item, index} ->
+          Task.Supervisor.async(task_sup, fn ->
+            Context.restore_context(current_ctx, input, execution.id)
+            Context.set_foreach_item(item, index)
+
+            case execute_foreach_item_steps(steps, execution.id, config) do
+              {:ok, item_context} ->
+                Context.clear_foreach_item()
+                {:ok, index, item_context}
+
+              {:error, error} ->
+                Context.clear_foreach_item()
+                {:error, index, error}
+            end
+          end)
+        end)
+
+      # Await all tasks in chunk
+      task_results = Task.await_many(tasks, :infinity)
+
+      # Process results
+      {new_ctx, new_results, new_errors} =
+        Enum.reduce(task_results, {current_ctx, results, errors}, fn
+          {:ok, _index, item_ctx}, {ctx, res, errs} ->
+            merged = deep_merge(ctx, item_ctx)
+            item_result = if collect_as, do: [extract_item_result(item_ctx, ctx)], else: []
+            {merged, res ++ item_result, errs}
+
+          {:error, index, error}, {ctx, res, errs} ->
+            {ctx, res, [{index, error} | errs]}
+        end)
+
+      # Check if we should stop or continue
+      case {on_error, new_errors} do
+        {:fail_fast, [_ | _]} ->
+          {:halt, {:error, new_errors}}
+
+        _ ->
+          {:cont, {:ok, new_ctx, new_results, new_errors}}
+      end
+    end)
+    |> case do
+      {:ok, final_ctx, results, []} ->
+        final_context =
+          if collect_as do
+            Map.put(final_ctx, collect_as, results)
+          else
+            final_ctx
+          end
+
+        {:ok, final_context}
+
+      {:ok, _ctx, _results, errors} ->
+        {:error,
+         %{
+           type: "foreach_error",
+           message: "One or more foreach items failed",
+           errors: format_foreach_errors(errors)
+         }}
+
+      {:error, errors} ->
+        {:error,
+         %{
+           type: "foreach_error",
+           message: "One or more foreach items failed",
+           errors: format_foreach_errors(errors)
+         }}
+    end
+  end
+
+  defp execute_foreach_item_steps(steps, workflow_id, config) do
+    # Execute each step for the current item
+    Enum.reduce_while(steps, {:ok, %{}}, fn step, {:ok, _acc_ctx} ->
+      case StepRunner.execute(step, workflow_id, config) do
+        {:ok, _output} ->
+          {:cont, {:ok, Context.get_current_context()}}
+
+        {:error, error} ->
+          {:halt, {:error, error}}
+
+        # Wait primitives not supported in foreach
+        {:sleep, _opts} ->
+          {:halt,
+           {:error,
+            %{
+              type: "foreach_wait_not_supported",
+              message: "sleep not supported in foreach blocks"
+            }}}
+
+        {:wait_for_event, _opts} ->
+          {:halt,
+           {:error,
+            %{
+              type: "foreach_wait_not_supported",
+              message: "wait_for_event not supported in foreach blocks"
+            }}}
+
+        {:wait_for_input, _opts} ->
+          {:halt,
+           {:error,
+            %{
+              type: "foreach_wait_not_supported",
+              message: "wait_for_input not supported in foreach blocks"
+            }}}
+      end
+    end)
+  end
+
+  defp extract_item_result(item_context, base_context) do
+    Map.drop(item_context, Map.keys(base_context))
+  end
+
+  defp format_foreach_errors(errors) do
+    Enum.map(errors, fn {index, error} ->
+      %{index: index, error: error}
+    end)
+  end
+
+  defp skip_foreach_steps(remaining_steps, all_foreach_step_names) do
+    Enum.reject(remaining_steps, fn step ->
+      step.name in all_foreach_step_names
     end)
   end
 

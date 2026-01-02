@@ -92,21 +92,35 @@ defmodule Durable.Supervisor do
     # Attach log capture handler (idempotent)
     :ok = Handler.attach()
 
+    # Task supervisor for parallel step execution
+    task_sup_name = task_supervisor_name(config.name)
+
+    # Base children always include the task supervisor
+    base_children = [
+      {Task.Supervisor, name: task_sup_name}
+    ]
+
     children =
       if config.queue_enabled do
         Logger.info(
           "Durable #{inspect(config.name)} starting with queues: #{inspect(Map.keys(config.queues))}"
         )
 
-        [
-          {Durable.Queue.Manager, config: config}
-        ]
+        base_children ++ [{Durable.Queue.Manager, config: config}]
       else
         Logger.info("Durable #{inspect(config.name)} starting with queue processing disabled")
-        []
+        base_children
       end
 
     Supervisor.init(children, strategy: :one_for_one)
+  end
+
+  @doc """
+  Returns the Task.Supervisor name for a Durable instance.
+  """
+  @spec task_supervisor_name(atom()) :: atom()
+  def task_supervisor_name(name) do
+    Module.concat(name, TaskSupervisor)
   end
 
   @doc """
