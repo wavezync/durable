@@ -3,10 +3,10 @@ defmodule Durable.Executor.StepRunner do
   Executes individual workflow steps with retry logic and log capture.
   """
 
+  alias Durable.Config
   alias Durable.Context
   alias Durable.Definition.Step
   alias Durable.Executor.Backoff
-  alias Durable.Repo
   alias Durable.Storage.Schemas.StepExecution
 
   require Logger
@@ -18,21 +18,23 @@ defmodule Durable.Executor.StepRunner do
 
   Returns `{:ok, output}` on success or `{:error, reason}` after all retries exhausted.
   """
-  @spec execute(Step.t(), String.t()) :: result()
-  def execute(%Step{} = step, workflow_id) do
+  @spec execute(Step.t(), String.t(), Config.t()) :: result()
+  def execute(%Step{} = step, workflow_id, %Config{} = config) do
     max_attempts = get_max_attempts(step)
-    execute_with_retry(step, workflow_id, 1, max_attempts)
+    execute_with_retry(step, workflow_id, 1, max_attempts, config)
   end
 
-  defp execute_with_retry(step, workflow_id, attempt, max_attempts) do
+  defp execute_with_retry(step, workflow_id, attempt, max_attempts, config) do
+    repo = config.repo
+
     # Set current step in context
     Context.set_current_step(step.name)
 
     # Create step execution record
-    {:ok, step_exec} = create_step_execution(workflow_id, step, attempt)
+    {:ok, step_exec} = create_step_execution(repo, workflow_id, step, attempt)
 
     # Mark as running
-    {:ok, step_exec} = update_step_execution(step_exec, :running)
+    {:ok, step_exec} = update_step_execution(repo, step_exec, :running)
 
     # Start log capture for this step
     Durable.LogCapture.start_capture()
@@ -69,28 +71,28 @@ defmodule Durable.Executor.StepRunner do
     case result do
       {:ok, output} ->
         # Handle decision steps with routing
-        handle_step_result(step, step_exec, output, logs, duration_ms)
+        handle_step_result(repo, step, step_exec, output, logs, duration_ms)
 
       {:throw, {:sleep, opts}} ->
         # Sleep signal - workflow should suspend
-        {:ok, _} = update_step_execution(step_exec, :waiting)
+        {:ok, _} = update_step_execution(repo, step_exec, :waiting)
         {:sleep, opts}
 
       {:throw, {:wait_for_event, opts}} ->
         # Wait for event signal
-        {:ok, _} = update_step_execution(step_exec, :waiting)
+        {:ok, _} = update_step_execution(repo, step_exec, :waiting)
         {:wait_for_event, opts}
 
       {:throw, {:wait_for_input, opts}} ->
         # Wait for input signal
-        {:ok, _} = update_step_execution(step_exec, :waiting)
+        {:ok, _} = update_step_execution(repo, step_exec, :waiting)
         {:wait_for_input, opts}
 
       {:error, error} ->
         # Failure - check if we should retry
         if attempt < max_attempts do
           # Mark this attempt as failed
-          {:ok, _} = fail_step_execution(step_exec, error, logs, duration_ms)
+          {:ok, _} = fail_step_execution(repo, step_exec, error, logs, duration_ms)
 
           # Calculate backoff and sleep
           retry_opts = get_retry_opts(step)
@@ -98,10 +100,10 @@ defmodule Durable.Executor.StepRunner do
           Backoff.sleep(backoff_strategy, attempt, retry_opts)
 
           # Retry
-          execute_with_retry(step, workflow_id, attempt + 1, max_attempts)
+          execute_with_retry(step, workflow_id, attempt + 1, max_attempts, config)
         else
           # All retries exhausted
-          {:ok, _} = fail_step_execution(step_exec, error, logs, duration_ms)
+          {:ok, _} = fail_step_execution(repo, step_exec, error, logs, duration_ms)
           {:error, error}
         end
     end
@@ -123,7 +125,7 @@ defmodule Durable.Executor.StepRunner do
     end
   end
 
-  defp create_step_execution(workflow_id, step, attempt) do
+  defp create_step_execution(repo, workflow_id, step, attempt) do
     attrs = %{
       workflow_id: workflow_id,
       step_name: Atom.to_string(step.name),
@@ -134,33 +136,33 @@ defmodule Durable.Executor.StepRunner do
 
     %StepExecution{}
     |> StepExecution.changeset(attrs)
-    |> Repo.insert()
+    |> repo.insert()
   end
 
-  defp update_step_execution(step_exec, :running) do
+  defp update_step_execution(repo, step_exec, :running) do
     step_exec
     |> StepExecution.start_changeset()
-    |> Repo.update()
+    |> repo.update()
   end
 
-  defp update_step_execution(step_exec, :waiting) do
+  defp update_step_execution(repo, step_exec, :waiting) do
     step_exec
     |> Ecto.Changeset.change(status: :waiting)
-    |> Repo.update()
+    |> repo.update()
   end
 
-  defp complete_step_execution(step_exec, output, logs, duration_ms) do
+  defp complete_step_execution(repo, step_exec, output, logs, duration_ms) do
     serializable_output = serialize_output(output)
 
     step_exec
     |> StepExecution.complete_changeset(serializable_output, logs, duration_ms)
-    |> Repo.update()
+    |> repo.update()
   end
 
-  defp fail_step_execution(step_exec, error, logs, duration_ms) do
+  defp fail_step_execution(repo, step_exec, error, logs, duration_ms) do
     step_exec
     |> StepExecution.fail_changeset(error, logs, duration_ms)
-    |> Repo.update()
+    |> repo.update()
   end
 
   defp serialize_output(output) when is_map(output), do: output
@@ -173,37 +175,51 @@ defmodule Durable.Executor.StepRunner do
   defp serialize_output(output), do: %{value: inspect(output)}
 
   # Handle decision step results with routing
-  defp handle_step_result(%Step{type: :decision}, step_exec, {:goto, target}, logs, duration_ms)
+  defp handle_step_result(
+         repo,
+         %Step{type: :decision},
+         step_exec,
+         {:goto, target},
+         logs,
+         duration_ms
+       )
        when is_atom(target) do
     decision_output = %{
       decision_type: "goto",
       target_step: Atom.to_string(target)
     }
 
-    {:ok, _} = complete_step_execution(step_exec, decision_output, logs, duration_ms)
+    {:ok, _} = complete_step_execution(repo, step_exec, decision_output, logs, duration_ms)
     {:decision, target}
   end
 
-  defp handle_step_result(%Step{type: :decision}, step_exec, {:continue}, logs, duration_ms) do
+  defp handle_step_result(repo, %Step{type: :decision}, step_exec, {:continue}, logs, duration_ms) do
     decision_output = %{decision_type: "continue"}
-    {:ok, _} = complete_step_execution(step_exec, decision_output, logs, duration_ms)
+    {:ok, _} = complete_step_execution(repo, step_exec, decision_output, logs, duration_ms)
     {:ok, {:continue}}
   end
 
-  defp handle_step_result(%Step{type: :decision}, step_exec, other_output, logs, duration_ms) do
+  defp handle_step_result(
+         repo,
+         %Step{type: :decision},
+         step_exec,
+         other_output,
+         logs,
+         duration_ms
+       ) do
     # Decision returned a plain value - treat as continue
     decision_output = %{
       decision_type: "continue",
       value: serialize_output(other_output)
     }
 
-    {:ok, _} = complete_step_execution(step_exec, decision_output, logs, duration_ms)
+    {:ok, _} = complete_step_execution(repo, step_exec, decision_output, logs, duration_ms)
     {:ok, other_output}
   end
 
   # Regular step - standard handling
-  defp handle_step_result(_step, step_exec, output, logs, duration_ms) do
-    {:ok, _} = complete_step_execution(step_exec, output, logs, duration_ms)
+  defp handle_step_result(repo, _step, step_exec, output, logs, duration_ms) do
+    {:ok, _} = complete_step_execution(repo, step_exec, output, logs, duration_ms)
     {:ok, output}
   end
 end

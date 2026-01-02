@@ -17,19 +17,19 @@ defmodule Durable.Queue.Worker do
 
   require Logger
 
+  alias Durable.Config
   alias Durable.Queue.Adapter
 
-  defstruct [:job, :poller_pid, :started_at, :task_ref, :heartbeat_timer]
+  defstruct [:job, :config, :poller_pid, :started_at, :task_ref, :heartbeat_timer]
 
   @type t :: %__MODULE__{
           job: map(),
+          config: Config.t(),
           poller_pid: pid(),
           started_at: integer(),
           task_ref: reference() | nil,
           heartbeat_timer: reference() | nil
         }
-
-  @default_heartbeat_interval 30_000
 
   @doc """
   Starts a worker process to execute a job.
@@ -37,6 +37,7 @@ defmodule Durable.Queue.Worker do
   ## Options
 
   - `:job` - The job map to execute (required)
+  - `:config` - The Durable configuration (required)
   - `:poller_pid` - The poller process to report completion to (required)
   """
   @spec start_link(keyword()) :: GenServer.on_start()
@@ -49,10 +50,12 @@ defmodule Durable.Queue.Worker do
   @impl true
   def init(opts) do
     job = Keyword.fetch!(opts, :job)
+    config = Keyword.fetch!(opts, :config)
     poller_pid = Keyword.fetch!(opts, :poller_pid)
 
     state = %__MODULE__{
       job: job,
+      config: config,
       poller_pid: poller_pid,
       started_at: System.monotonic_time(:millisecond),
       task_ref: nil,
@@ -65,10 +68,10 @@ defmodule Durable.Queue.Worker do
   @impl true
   def handle_continue(:start_execution, state) do
     # Spawn job execution in a separate process so we can handle heartbeats
-    task = Task.async(fn -> execute_job(state.job) end)
+    task = Task.async(fn -> execute_job(state.job, state.config) end)
 
     # Start heartbeat timer
-    timer = schedule_heartbeat()
+    timer = schedule_heartbeat(state.config.heartbeat_interval)
 
     {:noreply, %{state | task_ref: task.ref, heartbeat_timer: timer}}
   end
@@ -76,7 +79,9 @@ defmodule Durable.Queue.Worker do
   @impl true
   def handle_info(:heartbeat, state) do
     # Send heartbeat to update locked_at
-    case Adapter.adapter().heartbeat(state.job.id) do
+    adapter = Adapter.default_adapter()
+
+    case adapter.heartbeat(state.config, state.job.id) do
       :ok ->
         :ok
 
@@ -88,7 +93,7 @@ defmodule Durable.Queue.Worker do
     emit_heartbeat_telemetry(state.job)
 
     # Schedule next heartbeat
-    timer = schedule_heartbeat()
+    timer = schedule_heartbeat(state.config.heartbeat_interval)
     {:noreply, %{state | heartbeat_timer: timer}}
   end
 
@@ -130,8 +135,8 @@ defmodule Durable.Queue.Worker do
 
   # Private functions
 
-  defp execute_job(job) do
-    case Durable.Executor.execute_workflow(job.id) do
+  defp execute_job(job, config) do
+    case Durable.Executor.execute_workflow(job.id, config) do
       {:ok, _execution} ->
         :ok
 
@@ -165,8 +170,7 @@ defmodule Durable.Queue.Worker do
        }}
   end
 
-  defp schedule_heartbeat do
-    interval = Application.get_env(:durable, :heartbeat_interval, @default_heartbeat_interval)
+  defp schedule_heartbeat(interval) do
     Process.send_after(self(), :heartbeat, interval)
   end
 

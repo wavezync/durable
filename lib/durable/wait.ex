@@ -27,7 +27,7 @@ defmodule Durable.Wait do
 
   """
 
-  alias Durable.Repo
+  alias Durable.Config
   alias Durable.Storage.Schemas.{PendingInput, WorkflowExecution}
 
   import Ecto.Query
@@ -149,16 +149,22 @@ defmodule Durable.Wait do
 
   Called from external code (API, UI, etc.) to continue a workflow.
 
+  ## Options
+
+  - `:durable` - The Durable instance name (default: Durable)
+
   ## Examples
 
       Durable.provide_input(workflow_id, "approval", %{approved: true})
 
   """
-  @spec provide_input(String.t(), String.t(), map()) :: :ok | {:error, term()}
-  def provide_input(workflow_id, input_name, data) do
-    with {:ok, pending} <- find_pending_input(workflow_id, input_name),
-         {:ok, _} <- complete_pending_input(pending, data),
-         {:ok, _} <- Durable.Executor.resume_workflow(workflow_id, %{input_name => data}) do
+  @spec provide_input(String.t(), String.t(), map(), keyword()) :: :ok | {:error, term()}
+  def provide_input(workflow_id, input_name, data, opts \\ []) do
+    repo = get_repo(opts)
+
+    with {:ok, pending} <- find_pending_input(repo, workflow_id, input_name),
+         {:ok, _} <- complete_pending_input(repo, pending, data),
+         {:ok, _} <- Durable.Executor.resume_workflow(workflow_id, %{input_name => data}, opts) do
       :ok
     end
   end
@@ -166,18 +172,24 @@ defmodule Durable.Wait do
   @doc """
   Sends an event to a waiting workflow.
 
+  ## Options
+
+  - `:durable` - The Durable instance name (default: Durable)
+
   ## Examples
 
       Durable.send_event(workflow_id, "payment_confirmed", %{amount: 99.99})
 
   """
-  @spec send_event(String.t(), String.t(), map()) :: :ok | {:error, term()}
-  def send_event(workflow_id, event_name, payload) do
-    with {:ok, execution} <- get_waiting_execution(workflow_id),
+  @spec send_event(String.t(), String.t(), map(), keyword()) :: :ok | {:error, term()}
+  def send_event(workflow_id, event_name, payload, opts \\ []) do
+    repo = get_repo(opts)
+
+    with {:ok, execution} <- get_waiting_execution(repo, workflow_id),
          true <- execution.status == :waiting || {:error, :not_waiting} do
       # Store event in context and resume
       event_data = %{event_name => payload}
-      Durable.Executor.resume_workflow(workflow_id, event_data)
+      Durable.Executor.resume_workflow(workflow_id, event_data, opts)
       :ok
     end
   end
@@ -190,10 +202,12 @@ defmodule Durable.Wait do
   - `:workflow` - Filter by workflow module
   - `:status` - Filter by status (default: :pending)
   - `:timeout_before` - Filter inputs timing out before this datetime
+  - `:durable` - The Durable instance name (default: Durable)
 
   """
   @spec list_pending_inputs(keyword()) :: [map()]
   def list_pending_inputs(filters \\ []) do
+    repo = get_repo(filters)
     status = Keyword.get(filters, :status, :pending)
     limit = Keyword.get(filters, :limit, 50)
 
@@ -211,13 +225,18 @@ defmodule Durable.Wait do
         datetime -> from(p in query, where: p.timeout_at <= ^datetime)
       end
 
-    Repo.all(query)
+    repo.all(query)
     |> Enum.map(&pending_input_to_map/1)
   end
 
   # Private functions
 
-  defp find_pending_input(workflow_id, input_name) do
+  defp get_repo(opts) do
+    durable_name = Keyword.get(opts, :durable, Durable)
+    Config.repo(durable_name)
+  end
+
+  defp find_pending_input(repo, workflow_id, input_name) do
     query =
       from(p in PendingInput,
         where:
@@ -226,20 +245,20 @@ defmodule Durable.Wait do
             p.status == :pending
       )
 
-    case Repo.one(query) do
+    case repo.one(query) do
       nil -> {:error, :not_found}
       pending -> {:ok, pending}
     end
   end
 
-  defp complete_pending_input(pending, response) do
+  defp complete_pending_input(repo, pending, response) do
     pending
     |> PendingInput.complete_changeset(response)
-    |> Repo.update()
+    |> repo.update()
   end
 
-  defp get_waiting_execution(workflow_id) do
-    case Repo.get(WorkflowExecution, workflow_id) do
+  defp get_waiting_execution(repo, workflow_id) do
+    case repo.get(WorkflowExecution, workflow_id) do
       nil -> {:error, :not_found}
       execution -> {:ok, execution}
     end

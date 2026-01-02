@@ -5,7 +5,7 @@ defmodule Durable.Query do
 
   import Ecto.Query
 
-  alias Durable.Repo
+  alias Durable.Config
   alias Durable.Storage.Schemas.{StepExecution, WorkflowExecution}
 
   @doc """
@@ -15,10 +15,12 @@ defmodule Durable.Query do
 
   - `:include_steps` - Include step executions (default: false)
   - `:include_logs` - Include logs in step executions (default: false)
+  - `:durable` - The Durable instance name (default: Durable)
 
   """
   @spec get_execution(String.t(), keyword()) :: {:ok, map()} | {:error, :not_found}
   def get_execution(workflow_id, opts \\ []) do
+    repo = get_repo(opts)
     include_steps = Keyword.get(opts, :include_steps, false)
     include_logs = Keyword.get(opts, :include_logs, false)
 
@@ -31,7 +33,7 @@ defmodule Durable.Query do
         query
       end
 
-    case Repo.one(query) do
+    case repo.one(query) do
       nil ->
         {:error, :not_found}
 
@@ -52,10 +54,12 @@ defmodule Durable.Query do
   - `:queue` - Filter by queue
   - `:limit` - Maximum results (default: 50)
   - `:offset` - Offset for pagination (default: 0)
+  - `:durable` - The Durable instance name (default: Durable)
 
   """
   @spec list_executions(keyword()) :: [map()]
   def list_executions(filters \\ []) do
+    repo = get_repo(filters)
     limit = Keyword.get(filters, :limit, 50)
     offset = Keyword.get(filters, :offset, 0)
 
@@ -68,7 +72,7 @@ defmodule Durable.Query do
 
     query = apply_filters(query, filters)
 
-    Repo.all(query)
+    repo.all(query)
     |> Enum.map(&execution_to_map(&1, false, false))
   end
 
@@ -77,31 +81,37 @@ defmodule Durable.Query do
   """
   @spec count_executions(keyword()) :: non_neg_integer()
   def count_executions(filters \\ []) do
+    repo = get_repo(filters)
     query = from(w in WorkflowExecution, select: count(w.id))
     query = apply_filters(query, filters)
-    Repo.one(query)
+    repo.one(query)
   end
 
   @doc """
   Gets step executions for a workflow.
   """
-  @spec get_step_executions(String.t()) :: [map()]
-  def get_step_executions(workflow_id) do
+  @spec get_step_executions(String.t(), keyword()) :: [map()]
+  def get_step_executions(workflow_id, opts \\ []) do
+    repo = get_repo(opts)
+
     query =
       from(s in StepExecution,
         where: s.workflow_id == ^workflow_id,
         order_by: [asc: s.inserted_at]
       )
 
-    Repo.all(query)
+    repo.all(query)
     |> Enum.map(&step_to_map/1)
   end
 
   @doc """
   Gets logs for a specific step.
   """
-  @spec get_step_logs(String.t(), atom() | String.t()) :: {:ok, [map()]} | {:error, :not_found}
-  def get_step_logs(workflow_id, step_name) do
+  @spec get_step_logs(String.t(), atom() | String.t(), keyword()) ::
+          {:ok, [map()]} | {:error, :not_found}
+  def get_step_logs(workflow_id, step_name, opts \\ []) do
+    repo = get_repo(opts)
+
     step_name_str =
       if is_atom(step_name), do: Atom.to_string(step_name), else: step_name
 
@@ -112,13 +122,18 @@ defmodule Durable.Query do
         limit: 1
       )
 
-    case Repo.one(query) do
+    case repo.one(query) do
       nil -> {:error, :not_found}
       step -> {:ok, step.logs || []}
     end
   end
 
   # Private functions
+
+  defp get_repo(opts) do
+    durable_name = Keyword.get(opts, :durable, Durable)
+    Config.repo(durable_name)
+  end
 
   defp apply_filters(query, filters) do
     Enum.reduce(filters, query, fn

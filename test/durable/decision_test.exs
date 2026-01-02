@@ -1,8 +1,8 @@
 defmodule Durable.DecisionTest do
   use Durable.DataCase, async: false
 
+  alias Durable.Config
   alias Durable.Executor
-  alias Durable.Repo
   alias Durable.Storage.Schemas.{StepExecution, WorkflowExecution}
 
   import Ecto.Query
@@ -61,8 +61,10 @@ defmodule Durable.DecisionTest do
     test "decision step records goto in output" do
       {:ok, execution} = create_and_execute_workflow(GotoTestWorkflow, %{amount: 1500})
 
+      repo = Config.get(Durable).repo
+
       decision_exec =
-        Repo.one(
+        repo.one(
           from(s in StepExecution,
             where: s.workflow_id == ^execution.id and s.step_name == "check_amount"
           )
@@ -110,8 +112,10 @@ defmodule Durable.DecisionTest do
     test "decision step with plain return value proceeds to next step" do
       {:ok, execution} = create_and_execute_workflow(PlainReturnTestWorkflow, %{})
 
+      repo = Config.get(Durable).repo
+
       decision_exec =
-        Repo.one(
+        repo.one(
           from(s in StepExecution,
             where: s.workflow_id == ^execution.id and s.step_name == "decide"
           )
@@ -183,6 +187,8 @@ defmodule Durable.DecisionTest do
 
   # Helper functions
   defp create_and_execute_workflow(module, input) do
+    config = Config.get(Durable)
+    repo = config.repo
     {:ok, workflow_def} = module.__default_workflow__()
 
     # Use Atom.to_string to get the full module name with Elixir prefix
@@ -199,14 +205,17 @@ defmodule Durable.DecisionTest do
     {:ok, execution} =
       %WorkflowExecution{}
       |> WorkflowExecution.changeset(attrs)
-      |> Repo.insert()
+      |> repo.insert()
 
-    Executor.execute_workflow(execution.id)
-    {:ok, Repo.get!(WorkflowExecution, execution.id)}
+    Executor.execute_workflow(execution.id, config)
+    {:ok, repo.get!(WorkflowExecution, execution.id)}
   end
 
   defp get_step_executions(workflow_id) do
-    Repo.all(
+    config = Config.get(Durable)
+    repo = config.repo
+
+    repo.all(
       from(s in StepExecution,
         where: s.workflow_id == ^workflow_id,
         order_by: [asc: s.inserted_at]

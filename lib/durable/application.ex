@@ -10,12 +10,9 @@ defmodule Durable.Application do
     # Register log capture handler for workflow step logging
     :ok = Handler.attach()
 
-    children = [
-      Durable.Repo,
-      Durable.Queue.Manager
-    ]
-
-    opts = [strategy: :one_for_one, name: Durable.Supervisor]
-    Supervisor.start_link(children, opts)
+    # Start a minimal supervisor - the actual Durable processes are started
+    # when users add Durable to their own supervision tree
+    opts = [strategy: :one_for_one, name: Durable.Application.Supervisor]
+    Supervisor.start_link([], opts)
   end
 end

@@ -9,10 +9,10 @@ defmodule Durable.Executor do
   - Handling workflow suspension and resumption
   """
 
+  alias Durable.Config
   alias Durable.Context
   alias Durable.Definition.Workflow
   alias Durable.Executor.StepRunner
-  alias Durable.Repo
   alias Durable.Storage.Schemas.WorkflowExecution
 
   require Logger
@@ -26,6 +26,7 @@ defmodule Durable.Executor do
   - `:queue` - The queue to use (default: "default")
   - `:priority` - Priority level (default: 0)
   - `:scheduled_at` - Schedule for future execution
+  - `:durable` - The Durable instance name (default: Durable)
 
   ## Returns
 
@@ -34,11 +35,15 @@ defmodule Durable.Executor do
   """
   @spec start_workflow(module(), map(), keyword()) :: {:ok, String.t()} | {:error, term()}
   def start_workflow(module, input, opts \\ []) do
+    durable_name = Keyword.get(opts, :durable, Durable)
+    config = Config.get(durable_name)
+    repo = config.repo
+
     with {:ok, workflow_def} <- get_workflow_definition(module, opts),
-         {:ok, execution} <- create_execution(module, workflow_def, input, opts) do
+         {:ok, execution} <- create_execution(repo, module, workflow_def, input, opts) do
       # For inline/synchronous execution (useful for testing)
       if Keyword.get(opts, :inline, false) do
-        execute_workflow(execution.id)
+        execute_workflow(execution.id, config)
       end
 
       # Otherwise, the queue poller will pick up the job
@@ -49,9 +54,12 @@ defmodule Durable.Executor do
   @doc """
   Cancels a running or pending workflow.
   """
-  @spec cancel_workflow(String.t(), String.t() | nil) :: :ok | {:error, term()}
-  def cancel_workflow(workflow_id, reason \\ nil) do
-    case Repo.get(WorkflowExecution, workflow_id) do
+  @spec cancel_workflow(String.t(), String.t() | nil, keyword()) :: :ok | {:error, term()}
+  def cancel_workflow(workflow_id, reason \\ nil, opts \\ []) do
+    durable_name = Keyword.get(opts, :durable, Durable)
+    repo = Config.repo(durable_name)
+
+    case repo.get(WorkflowExecution, workflow_id) do
       nil ->
         {:error, :not_found}
 
@@ -63,7 +71,7 @@ defmodule Durable.Executor do
           error: error,
           completed_at: DateTime.utc_now()
         })
-        |> Repo.update()
+        |> repo.update()
 
         :ok
 
@@ -77,16 +85,19 @@ defmodule Durable.Executor do
 
   This is called internally by queue workers or directly for immediate execution.
   """
-  @spec execute_workflow(String.t()) :: {:ok, map()} | {:error, term()}
-  def execute_workflow(workflow_id) do
-    with {:ok, execution} <- load_execution(workflow_id),
+  @spec execute_workflow(String.t(), Config.t()) ::
+          {:ok, map()} | {:waiting, map()} | {:error, term()}
+  def execute_workflow(workflow_id, %Config{} = config) do
+    repo = config.repo
+
+    with {:ok, execution} <- load_execution(repo, workflow_id),
          {:ok, workflow_def} <- get_workflow_definition_from_execution(execution),
-         {:ok, execution} <- mark_running(execution) do
+         {:ok, execution} <- mark_running(repo, execution) do
       # Initialize context
       Context.restore_context(execution.context, execution.input, execution.id)
 
       # Execute steps
-      result = execute_steps(workflow_def.steps, execution)
+      result = execute_steps(workflow_def.steps, execution, config)
 
       # Cleanup context
       Context.cleanup()
@@ -101,10 +112,15 @@ defmodule Durable.Executor do
   ## Options
 
   - `:inline` - If true, execute synchronously instead of via queue (default: false)
+  - `:durable` - The Durable instance name (default: Durable)
   """
   @spec resume_workflow(String.t(), map(), keyword()) :: {:ok, String.t()} | {:error, term()}
   def resume_workflow(workflow_id, additional_context \\ %{}, opts \\ []) do
-    with {:ok, execution} <- load_execution(workflow_id),
+    durable_name = Keyword.get(opts, :durable, Durable)
+    config = Config.get(durable_name)
+    repo = config.repo
+
+    with {:ok, execution} <- load_execution(repo, workflow_id),
          true <- execution.status == :waiting || {:error, :not_waiting} do
       # Merge additional context
       new_context = Map.merge(execution.context || %{}, additional_context)
@@ -116,11 +132,11 @@ defmodule Durable.Executor do
         locked_by: nil,
         locked_at: nil
       )
-      |> Repo.update()
+      |> repo.update()
 
       # For inline/synchronous execution (useful for testing)
       if Keyword.get(opts, :inline, false) do
-        execute_workflow(workflow_id)
+        execute_workflow(workflow_id, config)
       end
 
       # Otherwise, the queue poller will pick up the job
@@ -151,7 +167,7 @@ defmodule Durable.Executor do
       {:error, :module_not_found}
   end
 
-  defp create_execution(module, %Workflow{} = workflow_def, input, opts) do
+  defp create_execution(repo, module, %Workflow{} = workflow_def, input, opts) do
     attrs = %{
       workflow_module: inspect(module),
       workflow_name: workflow_def.name,
@@ -165,23 +181,25 @@ defmodule Durable.Executor do
 
     %WorkflowExecution{}
     |> WorkflowExecution.changeset(attrs)
-    |> Repo.insert()
+    |> repo.insert()
   end
 
-  defp load_execution(workflow_id) do
-    case Repo.get(WorkflowExecution, workflow_id) do
+  defp load_execution(repo, workflow_id) do
+    case repo.get(WorkflowExecution, workflow_id) do
       nil -> {:error, :not_found}
       execution -> {:ok, execution}
     end
   end
 
-  defp mark_running(execution) do
+  defp mark_running(repo, execution) do
     execution
     |> WorkflowExecution.status_changeset(:running, %{started_at: DateTime.utc_now()})
-    |> Repo.update()
+    |> repo.update()
   end
 
-  defp execute_steps(steps, execution) do
+  defp execute_steps(steps, execution, config) do
+    repo = config.repo
+
     # Find the starting point (for resumed workflows)
     {steps_to_run, _skipped} =
       if execution.current_step do
@@ -196,12 +214,12 @@ defmodule Durable.Executor do
     step_index = build_step_index(steps)
 
     # Execute steps with decision support
-    case execute_steps_recursive(steps_to_run, execution, step_index) do
+    case execute_steps_recursive(steps_to_run, execution, step_index, config) do
       {:ok, exec} ->
-        mark_completed(exec)
+        mark_completed(repo, exec)
 
       {:waiting, exec} ->
-        {:ok, exec}
+        {:waiting, exec}
 
       {:error, _} = error ->
         error
@@ -215,57 +233,60 @@ defmodule Durable.Executor do
     |> Map.new()
   end
 
-  defp execute_steps_recursive([], execution, _step_index) do
+  defp execute_steps_recursive([], execution, _step_index, _config) do
     {:ok, execution}
   end
 
-  defp execute_steps_recursive([step | remaining_steps], execution, step_index) do
+  defp execute_steps_recursive([step | remaining_steps], execution, step_index, config) do
     # Handle branch step type specially
     if step.type == :branch do
-      execute_branch(step, remaining_steps, execution, step_index)
+      execute_branch(step, remaining_steps, execution, step_index, config)
     else
-      execute_regular_step(step, remaining_steps, execution, step_index)
+      execute_regular_step(step, remaining_steps, execution, step_index, config)
     end
   end
 
-  defp execute_regular_step(step, remaining_steps, execution, step_index) do
-    # Update current step
-    {:ok, exec} = update_current_step(execution, step.name)
+  defp execute_regular_step(step, remaining_steps, execution, step_index, config) do
+    repo = config.repo
 
-    case StepRunner.execute(step, exec.id) do
+    # Update current step
+    {:ok, exec} = update_current_step(repo, execution, step.name)
+
+    case StepRunner.execute(step, exec.id, config) do
       {:ok, _output} ->
         # Save context and continue to next step
-        {:ok, exec} = save_context(exec)
-        execute_steps_recursive(remaining_steps, exec, step_index)
+        {:ok, exec} = save_context(repo, exec)
+        execute_steps_recursive(remaining_steps, exec, step_index, config)
 
       {:decision, target_step} ->
         # Decision step wants to jump - find target in remaining steps
-        {:ok, exec} = save_context(exec)
+        {:ok, exec} = save_context(repo, exec)
 
         case find_jump_target(target_step, remaining_steps, step.name, step_index) do
           {:ok, target_steps} ->
-            execute_steps_recursive(target_steps, exec, step_index)
+            execute_steps_recursive(target_steps, exec, step_index, config)
 
           {:error, reason} ->
-            mark_failed(exec, decision_error(step.name, target_step, reason))
+            mark_failed(repo, exec, decision_error(step.name, target_step, reason))
         end
 
       {:sleep, opts} ->
-        {:waiting, handle_sleep(exec, opts) |> elem(1)}
+        {:waiting, handle_sleep(repo, exec, opts) |> elem(1)}
 
       {:wait_for_event, opts} ->
-        {:waiting, handle_wait_for_event(exec, opts) |> elem(1)}
+        {:waiting, handle_wait_for_event(repo, exec, opts) |> elem(1)}
 
       {:wait_for_input, opts} ->
-        {:waiting, handle_wait_for_input(exec, opts) |> elem(1)}
+        {:waiting, handle_wait_for_input(repo, exec, opts) |> elem(1)}
 
       {:error, error} ->
-        mark_failed(exec, error)
+        mark_failed(repo, exec, error)
     end
   end
 
-  defp execute_branch(branch_step, remaining_steps, execution, step_index) do
-    {:ok, exec} = update_current_step(execution, branch_step.name)
+  defp execute_branch(branch_step, remaining_steps, execution, step_index, config) do
+    repo = config.repo
+    {:ok, exec} = update_current_step(repo, execution, branch_step.name)
 
     # Get branch configuration
     opts = branch_step.opts
@@ -284,21 +305,21 @@ defmodule Durable.Executor do
 
     case condition_value do
       {:error, error} ->
-        mark_failed(exec, %{type: "branch_error", message: error})
+        mark_failed(repo, exec, %{type: "branch_error", message: error})
 
       value ->
         # Find matching clause steps
         matching_steps = find_matching_clause_steps(value, clauses)
 
         # Save context before executing branch steps
-        {:ok, exec} = save_context(exec)
+        {:ok, exec} = save_context(repo, exec)
 
         # Execute only the matching branch's steps
-        case execute_branch_steps(matching_steps, remaining_steps, exec, step_index) do
+        case execute_branch_steps(matching_steps, remaining_steps, exec, step_index, config) do
           {:ok, exec} ->
             # Skip past all branch steps in remaining and continue
             after_branch = skip_branch_steps(remaining_steps, all_branch_steps)
-            execute_steps_recursive(after_branch, exec, step_index)
+            execute_steps_recursive(after_branch, exec, step_index, config)
 
           {:waiting, exec} ->
             {:waiting, exec}
@@ -325,7 +346,7 @@ defmodule Durable.Executor do
     end)
   end
 
-  defp execute_branch_steps(step_names, remaining_steps, execution, step_index) do
+  defp execute_branch_steps(step_names, remaining_steps, execution, step_index, config) do
     # Find the actual step definitions from remaining_steps
     steps_to_execute =
       Enum.filter(remaining_steps, fn step ->
@@ -339,32 +360,33 @@ defmodule Durable.Executor do
       end)
       |> Enum.reject(&is_nil/1)
 
-    execute_branch_steps_sequential(ordered_steps, execution, step_index)
+    execute_branch_steps_sequential(ordered_steps, execution, step_index, config)
   end
 
-  defp execute_branch_steps_sequential([], execution, _step_index) do
+  defp execute_branch_steps_sequential([], execution, _step_index, _config) do
     {:ok, execution}
   end
 
-  defp execute_branch_steps_sequential([step | rest], execution, step_index) do
-    {:ok, exec} = update_current_step(execution, step.name)
+  defp execute_branch_steps_sequential([step | rest], execution, step_index, config) do
+    repo = config.repo
+    {:ok, exec} = update_current_step(repo, execution, step.name)
 
-    case StepRunner.execute(step, exec.id) do
+    case StepRunner.execute(step, exec.id, config) do
       {:ok, _output} ->
-        {:ok, exec} = save_context(exec)
-        execute_branch_steps_sequential(rest, exec, step_index)
+        {:ok, exec} = save_context(repo, exec)
+        execute_branch_steps_sequential(rest, exec, step_index, config)
 
       {:sleep, opts} ->
-        {:waiting, handle_sleep(exec, opts) |> elem(1)}
+        {:waiting, handle_sleep(repo, exec, opts) |> elem(1)}
 
       {:wait_for_event, opts} ->
-        {:waiting, handle_wait_for_event(exec, opts) |> elem(1)}
+        {:waiting, handle_wait_for_event(repo, exec, opts) |> elem(1)}
 
       {:wait_for_input, opts} ->
-        {:waiting, handle_wait_for_input(exec, opts) |> elem(1)}
+        {:waiting, handle_wait_for_input(repo, exec, opts) |> elem(1)}
 
       {:error, error} ->
-        mark_failed(exec, error)
+        mark_failed(repo, exec, error)
     end
   end
 
@@ -424,21 +446,21 @@ defmodule Durable.Executor do
     }
   end
 
-  defp update_current_step(execution, step_name) do
+  defp update_current_step(repo, execution, step_name) do
     execution
     |> Ecto.Changeset.change(current_step: Atom.to_string(step_name))
-    |> Repo.update()
+    |> repo.update()
   end
 
-  defp save_context(execution) do
+  defp save_context(repo, execution) do
     current_context = Context.get_current_context()
 
     execution
     |> Ecto.Changeset.change(context: current_context)
-    |> Repo.update()
+    |> repo.update()
   end
 
-  defp mark_completed(execution) do
+  defp mark_completed(repo, execution) do
     current_context = Context.get_current_context()
 
     {:ok, execution} =
@@ -449,12 +471,12 @@ defmodule Durable.Executor do
         current_step: nil
       })
       |> Ecto.Changeset.change(locked_by: nil, locked_at: nil)
-      |> Repo.update()
+      |> repo.update()
 
     {:ok, execution}
   end
 
-  defp mark_failed(execution, error) do
+  defp mark_failed(repo, execution, error) do
     current_context = Context.get_current_context()
 
     execution
@@ -464,36 +486,36 @@ defmodule Durable.Executor do
       completed_at: DateTime.utc_now()
     })
     |> Ecto.Changeset.change(locked_by: nil, locked_at: nil)
-    |> Repo.update()
+    |> repo.update()
 
     {:error, error}
   end
 
-  defp handle_sleep(execution, opts) do
+  defp handle_sleep(repo, execution, opts) do
     wake_at = calculate_wake_time(opts)
 
     {:ok, execution} =
       execution
       |> Ecto.Changeset.change(status: :waiting, scheduled_at: wake_at)
-      |> Repo.update()
+      |> repo.update()
 
     {:waiting, execution}
   end
 
-  defp handle_wait_for_event(execution, _opts) do
+  defp handle_wait_for_event(repo, execution, _opts) do
     {:ok, execution} =
       execution
       |> Ecto.Changeset.change(status: :waiting)
-      |> Repo.update()
+      |> repo.update()
 
     {:waiting, execution}
   end
 
-  defp handle_wait_for_input(execution, _opts) do
+  defp handle_wait_for_input(repo, execution, _opts) do
     {:ok, execution} =
       execution
       |> Ecto.Changeset.change(status: :waiting)
-      |> Repo.update()
+      |> repo.update()
 
     {:waiting, execution}
   end

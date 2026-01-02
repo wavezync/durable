@@ -1,6 +1,6 @@
 import Config
 
-config :durable, Durable.Repo,
+config :durable, Durable.TestRepo,
   username: "postgres",
   password: "postgres",
   hostname: "localhost",

@@ -1,8 +1,8 @@
 defmodule Durable.LogCapture.IntegrationTest do
   use Durable.DataCase, async: false
 
+  alias Durable.Config
   alias Durable.Executor
-  alias Durable.Repo
   alias Durable.Storage.Schemas.{StepExecution, WorkflowExecution}
 
   import Ecto.Query
@@ -20,9 +20,11 @@ defmodule Durable.LogCapture.IntegrationTest do
       # Wait for async logger
       Process.sleep(100)
 
+      repo = Config.get(Durable).repo
+
       # Query the step execution
       step_exec =
-        Repo.one(
+        repo.one(
           from(s in StepExecution,
             where: s.workflow_id == ^execution.id and s.step_name == "log_various_levels"
           )
@@ -45,8 +47,10 @@ defmodule Durable.LogCapture.IntegrationTest do
 
       Process.sleep(100)
 
+      repo = Config.get(Durable).repo
+
       step_exec =
-        Repo.one(
+        repo.one(
           from(s in StepExecution,
             where: s.workflow_id == ^execution.id and s.step_name == "io_output"
           )
@@ -70,8 +74,10 @@ defmodule Durable.LogCapture.IntegrationTest do
 
       Process.sleep(100)
 
+      repo = Config.get(Durable).repo
+
       step_execs =
-        Repo.all(
+        repo.all(
           from(s in StepExecution,
             where: s.workflow_id == ^execution.id,
             order_by: [asc: s.inserted_at]
@@ -99,8 +105,10 @@ defmodule Durable.LogCapture.IntegrationTest do
 
       Process.sleep(100)
 
+      repo = Config.get(Durable).repo
+
       step_exec =
-        Repo.one(
+        repo.one(
           from(s in StepExecution,
             where: s.workflow_id == ^execution.id and s.step_name == "log_various_levels"
           )
@@ -124,8 +132,10 @@ defmodule Durable.LogCapture.IntegrationTest do
 
       Process.sleep(100)
 
+      repo = Config.get(Durable).repo
+
       step_exec =
-        Repo.one(
+        repo.one(
           from(s in StepExecution,
             where: s.workflow_id == ^execution.id and s.step_name == "log_various_levels"
           )
@@ -143,6 +153,9 @@ defmodule Durable.LogCapture.IntegrationTest do
 
   # Helper to create and execute a workflow synchronously
   defp create_and_execute_workflow(module, input) do
+    config = Config.get(Durable)
+    repo = config.repo
+
     # Get workflow definition
     {:ok, workflow_def} = module.__default_workflow__()
 
@@ -161,13 +174,13 @@ defmodule Durable.LogCapture.IntegrationTest do
     {:ok, execution} =
       %WorkflowExecution{}
       |> WorkflowExecution.changeset(attrs)
-      |> Repo.insert()
+      |> repo.insert()
 
     # Execute directly
-    Executor.execute_workflow(execution.id)
+    Executor.execute_workflow(execution.id, config)
 
     # Reload to get updated status
-    {:ok, Repo.get!(WorkflowExecution, execution.id)}
+    {:ok, repo.get!(WorkflowExecution, execution.id)}
   end
 end
 

@@ -9,6 +9,33 @@ defmodule Durable do
   - **Observability**: Built-in log capture and graph visualization
   - **Composability**: Decision steps, loops, parallel execution, and more
 
+  ## Installation
+
+  Add Durable to your supervision tree:
+
+      defmodule MyApp.Application do
+        use Application
+
+        def start(_type, _args) do
+          children = [
+            MyApp.Repo,
+            {Durable, repo: MyApp.Repo}
+          ]
+
+          opts = [strategy: :one_for_one, name: MyApp.Supervisor]
+          Supervisor.start_link(children, opts)
+        end
+      end
+
+  Create a migration for Durable tables:
+
+      defmodule MyApp.Repo.Migrations.AddDurable do
+        use Ecto.Migration
+
+        def up, do: Durable.Migration.up()
+        def down, do: Durable.Migration.down()
+      end
+
   ## Quick Start
 
   Define a workflow using the DSL:
@@ -37,16 +64,15 @@ defmodule Durable do
 
       {:ok, execution} = Durable.get_execution(workflow_id)
 
-  ## Configuration
+  ## Configuration Options
 
-  Configure Durable in your `config/config.exs`:
+  * `:repo` - The Ecto repo module (required)
+  * `:name` - Instance name for multiple Durable instances (default: `Durable`)
+  * `:prefix` - PostgreSQL schema name (default: `"durable"`)
+  * `:queues` - Queue configuration map
+  * `:queue_enabled` - Enable/disable queue processing (default: `true`)
 
-      config :durable,
-        repo: MyApp.Repo,
-        queues: %{
-          default: [concurrency: 10],
-          high_priority: [concurrency: 20]
-        }
+  See `Durable.Config` for the complete list of options.
 
   """
 
@@ -250,5 +276,60 @@ defmodule Durable do
   @spec send_event(String.t(), String.t(), map()) :: :ok | {:error, term()}
   def send_event(workflow_id, event_name, payload) do
     Durable.Wait.send_event(workflow_id, event_name, payload)
+  end
+
+  # Supervision tree integration
+
+  @doc """
+  Starts a Durable instance.
+
+  This function is used when adding Durable to your supervision tree.
+
+  ## Options
+
+  * `:repo` - The Ecto repo module (required)
+  * `:name` - Instance name (default: `Durable`)
+  * `:prefix` - Database schema prefix (default: `"durable"`)
+  * `:queues` - Queue configuration
+
+  See `Durable.Config` for the complete list of options.
+
+  ## Examples
+
+      # In your application supervisor
+      children = [
+        MyApp.Repo,
+        {Durable, repo: MyApp.Repo}
+      ]
+
+      # With custom queues
+      {Durable,
+       repo: MyApp.Repo,
+       queues: %{
+         default: [concurrency: 10],
+         high_priority: [concurrency: 20]
+       }}
+
+  """
+  @spec start_link(keyword()) :: Supervisor.on_start()
+  def start_link(opts) do
+    Durable.Supervisor.start_link(opts)
+  end
+
+  @doc """
+  Returns a child specification for Durable.
+
+  This allows Durable to be used in supervision trees with the
+  `{Durable, opts}` syntax.
+  """
+  @spec child_spec(keyword()) :: Supervisor.child_spec()
+  def child_spec(opts) do
+    name = Keyword.get(opts, :name, __MODULE__)
+
+    %{
+      id: name,
+      start: {__MODULE__, :start_link, [opts]},
+      type: :supervisor
+    }
   end
 end

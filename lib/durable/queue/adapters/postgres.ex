@@ -9,35 +9,37 @@ defmodule Durable.Queue.Adapters.Postgres do
 
   @behaviour Durable.Queue.Adapter
 
-  alias Durable.Repo
+  alias Durable.Config
   alias Durable.Storage.Schemas.WorkflowExecution
   alias Ecto.Adapters.SQL
 
   import Ecto.Query
 
-  @default_lock_timeout 300
-
   @impl true
-  def fetch_jobs(queue, limit, node_id) when is_binary(queue) and limit > 0 do
+  def fetch_jobs(%Config{} = config, queue, limit, node_id)
+      when is_binary(queue) and limit > 0 do
+    repo = config.repo
+    prefix = config.prefix
+
     # Use raw SQL for FOR UPDATE SKIP LOCKED which Ecto doesn't support directly
     sql = """
     WITH claimable AS (
-      SELECT id FROM workflow_executions
+      SELECT id FROM #{prefix}.workflow_executions
       WHERE status = 'pending'
         AND queue = $1
         AND (scheduled_at IS NULL OR scheduled_at <= NOW())
-        AND (locked_by IS NULL OR locked_at < NOW() - INTERVAL '#{lock_timeout_seconds()} seconds')
+        AND (locked_by IS NULL OR locked_at < NOW() - INTERVAL '#{config.stale_lock_timeout} seconds')
       ORDER BY priority DESC, scheduled_at ASC NULLS FIRST, inserted_at ASC
       LIMIT $2
       FOR UPDATE SKIP LOCKED
     )
-    UPDATE workflow_executions
+    UPDATE #{prefix}.workflow_executions
     SET locked_by = $3, locked_at = NOW(), status = 'running'
     WHERE id IN (SELECT id FROM claimable)
     RETURNING id, workflow_module, workflow_name, queue, priority, input, context, scheduled_at, current_step;
     """
 
-    case SQL.query(Repo, sql, [queue, limit, node_id]) do
+    case SQL.query(repo, sql, [queue, limit, node_id]) do
       {:ok, %{rows: rows, columns: columns}} ->
         rows
         |> Enum.map(&parse_row(&1, columns))
@@ -50,23 +52,27 @@ defmodule Durable.Queue.Adapters.Postgres do
   end
 
   @impl true
-  def ack(job_id) when is_binary(job_id) do
-    case Repo.get(WorkflowExecution, job_id) do
+  def ack(%Config{} = config, job_id) when is_binary(job_id) do
+    repo = config.repo
+
+    case repo.get(WorkflowExecution, job_id) do
       nil ->
         {:error, :not_found}
 
       execution ->
         execution
         |> WorkflowExecution.unlock_changeset()
-        |> Repo.update()
+        |> repo.update()
 
         :ok
     end
   end
 
   @impl true
-  def nack(job_id, reason) when is_binary(job_id) do
-    case Repo.get(WorkflowExecution, job_id) do
+  def nack(%Config{} = config, job_id, reason) when is_binary(job_id) do
+    repo = config.repo
+
+    case repo.get(WorkflowExecution, job_id) do
       nil ->
         {:error, :not_found}
 
@@ -81,15 +87,17 @@ defmodule Durable.Queue.Adapters.Postgres do
           locked_by: nil,
           locked_at: nil
         )
-        |> Repo.update()
+        |> repo.update()
 
         :ok
     end
   end
 
   @impl true
-  def reschedule(job_id, run_at) when is_binary(job_id) do
-    case Repo.get(WorkflowExecution, job_id) do
+  def reschedule(%Config{} = config, job_id, run_at) when is_binary(job_id) do
+    repo = config.repo
+
+    case repo.get(WorkflowExecution, job_id) do
       nil ->
         {:error, :not_found}
 
@@ -101,14 +109,15 @@ defmodule Durable.Queue.Adapters.Postgres do
           locked_by: nil,
           locked_at: nil
         )
-        |> Repo.update()
+        |> repo.update()
 
         :ok
     end
   end
 
   @impl true
-  def recover_stale_locks(timeout_seconds) when timeout_seconds > 0 do
+  def recover_stale_locks(%Config{} = config, timeout_seconds) when timeout_seconds > 0 do
+    repo = config.repo
     cutoff = DateTime.add(DateTime.utc_now(), -timeout_seconds, :second)
 
     {count, _} =
@@ -117,7 +126,7 @@ defmodule Durable.Queue.Adapters.Postgres do
         where: not is_nil(w.locked_by),
         where: w.locked_at < ^cutoff
       )
-      |> Repo.update_all(
+      |> repo.update_all(
         set: [
           status: :pending,
           locked_by: nil,
@@ -129,7 +138,8 @@ defmodule Durable.Queue.Adapters.Postgres do
   end
 
   @impl true
-  def heartbeat(job_id) when is_binary(job_id) do
+  def heartbeat(%Config{} = config, job_id) when is_binary(job_id) do
+    repo = config.repo
     now = DateTime.utc_now()
 
     {count, _} =
@@ -137,7 +147,7 @@ defmodule Durable.Queue.Adapters.Postgres do
         where: w.id == ^job_id,
         where: w.status == :running
       )
-      |> Repo.update_all(set: [locked_at: now])
+      |> repo.update_all(set: [locked_at: now])
 
     if count == 1 do
       :ok
@@ -147,28 +157,29 @@ defmodule Durable.Queue.Adapters.Postgres do
   end
 
   @impl true
-  def get_stats(queue) when is_binary(queue) do
+  def get_stats(%Config{} = config, queue) when is_binary(queue) do
+    repo = config.repo
     base_query = from(w in WorkflowExecution, where: w.queue == ^queue)
 
     pending =
       from(w in base_query, where: w.status == :pending)
-      |> Repo.aggregate(:count)
+      |> repo.aggregate(:count)
 
     running =
       from(w in base_query, where: w.status == :running)
-      |> Repo.aggregate(:count)
+      |> repo.aggregate(:count)
 
     completed =
       from(w in base_query, where: w.status == :completed)
-      |> Repo.aggregate(:count)
+      |> repo.aggregate(:count)
 
     failed =
       from(w in base_query, where: w.status == :failed)
-      |> Repo.aggregate(:count)
+      |> repo.aggregate(:count)
 
     waiting =
       from(w in base_query, where: w.status == :waiting)
-      |> Repo.aggregate(:count)
+      |> repo.aggregate(:count)
 
     scheduled =
       from(w in base_query,
@@ -176,7 +187,7 @@ defmodule Durable.Queue.Adapters.Postgres do
         where: not is_nil(w.scheduled_at),
         where: w.scheduled_at > ^DateTime.utc_now()
       )
-      |> Repo.aggregate(:count)
+      |> repo.aggregate(:count)
 
     %{
       queue: queue,
@@ -191,10 +202,6 @@ defmodule Durable.Queue.Adapters.Postgres do
   end
 
   # Private functions
-
-  defp lock_timeout_seconds do
-    Application.get_env(:durable, :stale_lock_timeout, @default_lock_timeout)
-  end
 
   defp parse_row(row, columns) do
     columns

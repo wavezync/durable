@@ -4,6 +4,8 @@ Build reliable AI agent workflows with automatic retries, state persistence, and
 
 ## Setup
 
+### 1. Add Dependencies
+
 ```elixir
 # mix.exs
 defp deps do
@@ -11,6 +13,42 @@ defp deps do
     {:durable, "~> 0.1.0"},
     {:req_llm, "~> 1.1"}
   ]
+end
+```
+
+### 2. Create Migration
+
+```bash
+mix ecto.gen.migration add_durable
+```
+
+```elixir
+# priv/repo/migrations/XXXXXX_add_durable.exs
+defmodule MyApp.Repo.Migrations.AddDurable do
+  use Ecto.Migration
+
+  def up, do: Durable.Migration.up()
+  def down, do: Durable.Migration.down()
+end
+```
+
+### 3. Add to Supervision Tree
+
+```elixir
+# lib/my_app/application.ex
+def start(_type, _args) do
+  children = [
+    MyApp.Repo,
+    {Durable,
+      repo: MyApp.Repo,
+      queues: %{
+        default: [concurrency: 10, poll_interval: 1000],
+        ai: [concurrency: 5, poll_interval: 2000]  # Separate queue for AI tasks
+      }}
+  ]
+
+  opts = [strategy: :one_for_one, name: MyApp.Supervisor]
+  Supervisor.start_link(children, opts)
 end
 ```
 

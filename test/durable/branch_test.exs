@@ -1,8 +1,8 @@
 defmodule Durable.BranchTest do
   use Durable.DataCase, async: false
 
+  alias Durable.Config
   alias Durable.Executor
-  alias Durable.Repo
   alias Durable.Storage.Schemas.{StepExecution, WorkflowExecution}
 
   import Ecto.Query
@@ -166,6 +166,8 @@ defmodule Durable.BranchTest do
 
   # Helper functions
   defp create_and_execute_workflow(module, input) do
+    config = Config.get(Durable)
+    repo = config.repo
     {:ok, workflow_def} = module.__default_workflow__()
 
     attrs = %{
@@ -181,14 +183,17 @@ defmodule Durable.BranchTest do
     {:ok, execution} =
       %WorkflowExecution{}
       |> WorkflowExecution.changeset(attrs)
-      |> Repo.insert()
+      |> repo.insert()
 
-    Executor.execute_workflow(execution.id)
-    {:ok, Repo.get!(WorkflowExecution, execution.id)}
+    Executor.execute_workflow(execution.id, config)
+    {:ok, repo.get!(WorkflowExecution, execution.id)}
   end
 
   defp get_step_executions(workflow_id) do
-    Repo.all(
+    config = Config.get(Durable)
+    repo = config.repo
+
+    repo.all(
       from(s in StepExecution,
         where: s.workflow_id == ^workflow_id,
         order_by: [asc: s.inserted_at]

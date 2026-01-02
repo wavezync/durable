@@ -29,26 +29,62 @@ end
 
 ## 🚀 Quick Start
 
-### 1. Configure the Repo
+### 1. Create the Migration
 
-```elixir
-# config/config.exs
-config :durable,
-  ecto_repos: [Durable.Repo]
-
-config :durable, Durable.Repo,
-  username: "postgres",
-  password: "postgres",
-  hostname: "localhost",
-  database: "durable_dev"
-```
-
-### 2. Run Migrations
+Durable stores all data in a dedicated PostgreSQL schema called `durable`. Create a migration:
 
 ```bash
-mix ecto.create
+mix ecto.gen.migration add_durable
+```
+
+```elixir
+# priv/repo/migrations/XXXXXX_add_durable.exs
+defmodule MyApp.Repo.Migrations.AddDurable do
+  use Ecto.Migration
+
+  def up, do: Durable.Migration.up()
+  def down, do: Durable.Migration.down()
+end
+```
+
+Run the migration:
+
+```bash
 mix ecto.migrate
 ```
+
+### 2. Add to Supervision Tree
+
+Add Durable to your application's supervision tree:
+
+```elixir
+# lib/my_app/application.ex
+def start(_type, _args) do
+  children = [
+    MyApp.Repo,
+    {Durable,
+      repo: MyApp.Repo,
+      queues: %{
+        default: [concurrency: 10, poll_interval: 1000]
+      }}
+  ]
+
+  opts = [strategy: :one_for_one, name: MyApp.Supervisor]
+  Supervisor.start_link(children, opts)
+end
+```
+
+#### Configuration Options
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `:repo` | atom | **required** | Your Ecto repo module |
+| `:name` | atom | `Durable` | Instance name (for multiple instances) |
+| `:prefix` | string | `"durable"` | PostgreSQL schema name |
+| `:queues` | map | `%{default: [...]}` | Queue configurations |
+| `:queue_enabled` | boolean | `true` | Enable/disable queue processing |
+| `:stale_lock_timeout` | integer | `300` | Seconds before a lock is considered stale |
+| `:heartbeat_interval` | integer | `30_000` | Milliseconds between worker heartbeats |
 
 ### 3. Define a Workflow
 

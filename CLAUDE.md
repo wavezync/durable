@@ -2,6 +2,8 @@
 
 Durable workflow engine for Elixir - provides resumable, reliable workflows with automatic retries, sleep/wait primitives, and PostgreSQL-backed persistence.
 
+Durable is an **embeddable library** - users add it to their supervision tree and provide their own Ecto repo.
+
 ## Quick Reference
 
 ```bash
@@ -9,11 +11,6 @@ Durable workflow engine for Elixir - provides resumable, reliable workflows with
 mix deps.get          # Install dependencies
 mix compile           # Compile
 mix test              # Run tests (creates/migrates DB automatically)
-
-# Database
-mix ecto.setup        # Create and migrate database
-mix ecto.reset        # Drop and recreate database
-mix ecto.migrate      # Run migrations
 
 # Code quality
 mix format            # Format code
@@ -25,6 +22,9 @@ mix dialyzer          # Type checking
 
 ```
 lib/durable/
+├── config.ex               # Configuration management (NimbleOptions, persistent_term)
+├── migration.ex            # Programmatic migrations (up/down)
+├── supervisor.ex           # Main supervisor for embedding
 ├── dsl/                    # Workflow DSL macros
 │   ├── workflow.ex         # workflow/2 macro
 │   ├── step.ex             # step/2/3, decision/2, each/3 macros
@@ -44,13 +44,12 @@ lib/durable/
 │   ├── poller.ex           # Queue polling
 │   ├── manager.ex          # Queue supervisor
 │   └── stale_job_recovery.ex # Recovers crashed jobs
-├── storage/schemas/        # Ecto schemas
+├── storage/schemas/        # Ecto schemas (all use @schema_prefix "durable")
 │   ├── workflow_execution.ex
 │   ├── step_execution.ex
 │   ├── pending_input.ex
 │   └── scheduled_workflow.ex
-├── repo.ex                 # Ecto repo
-└── application.ex          # OTP application
+└── application.ex          # OTP application (minimal - just log handler)
 ```
 
 ## Key Concepts
@@ -84,17 +83,34 @@ end
 - Workers send heartbeats to prevent stale lock recovery during long-running jobs
 - Each worker runs in isolated process under DynamicSupervisor
 
-### Configuration
+### Installation
+
+Durable is added to your application's supervision tree:
 
 ```elixir
-# config/config.exs
-config :durable,
-  ecto_repos: [Durable.Repo],
-  queue_adapter: Durable.Queue.Adapters.Postgres,
-  queues: %{default: [concurrency: 10, poll_interval: 1000]},
-  stale_lock_timeout: 300,      # seconds
-  heartbeat_interval: 30_000    # milliseconds
+# 1. Create migration
+defmodule MyApp.Repo.Migrations.AddDurable do
+  use Ecto.Migration
+  def up, do: Durable.Migration.up()
+  def down, do: Durable.Migration.down()
+end
+
+# 2. Add to supervision tree
+children = [
+  MyApp.Repo,
+  {Durable, repo: MyApp.Repo, queues: %{default: [concurrency: 10]}}
+]
 ```
+
+### Configuration Options
+
+- `:repo` - Your Ecto repo module (required)
+- `:name` - Instance name for multi-tenancy (default: `Durable`)
+- `:prefix` - PostgreSQL schema name (default: `"durable"`)
+- `:queues` - Queue configs (default: `%{default: [concurrency: 10, poll_interval: 1000]}`)
+- `:queue_enabled` - Enable queue processing (default: `true`)
+- `:stale_lock_timeout` - Seconds before lock is stale (default: `300`)
+- `:heartbeat_interval` - Worker heartbeat interval in ms (default: `30_000`)
 
 ## Testing
 
@@ -107,6 +123,6 @@ use Durable.DataCase, async: false
 
 ## Database
 
-Primary tables: `workflow_executions`, `step_executions`, `pending_inputs`, `scheduled_workflows`
+All tables live in the `durable` PostgreSQL schema: `durable.workflow_executions`, `durable.step_executions`, `durable.pending_inputs`, `durable.scheduled_workflows`
 
-Migrations in `priv/repo/migrations/`. Uses binary UUIDs as primary keys.
+Uses binary UUIDs as primary keys.

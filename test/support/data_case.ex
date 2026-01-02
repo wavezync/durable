@@ -12,7 +12,7 @@ defmodule Durable.DataCase do
 
   using do
     quote do
-      alias Durable.Repo
+      alias Durable.TestRepo
       import Ecto
       import Ecto.Changeset
       import Ecto.Query
@@ -22,6 +22,10 @@ defmodule Durable.DataCase do
 
   setup tags do
     Durable.DataCase.setup_sandbox(tags)
+
+    # Start Durable with test repo and queue disabled for unit tests
+    start_supervised!({Durable, repo: Durable.TestRepo, queue_enabled: false})
+
     :ok
   end
 
@@ -29,7 +33,7 @@ defmodule Durable.DataCase do
   Sets up the sandbox based on the test tags.
   """
   def setup_sandbox(tags) do
-    pid = Sandbox.start_owner!(Durable.Repo, shared: not tags[:async])
+    pid = Sandbox.start_owner!(Durable.TestRepo, shared: not tags[:async])
     on_exit(fn -> Sandbox.stop_owner(pid) end)
   end
 

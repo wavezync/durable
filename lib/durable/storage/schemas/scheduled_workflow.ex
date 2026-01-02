@@ -28,6 +28,7 @@ defmodule Durable.Storage.Schemas.ScheduledWorkflow do
 
   @primary_key {:id, :binary_id, autogenerate: true}
   @foreign_key_type :binary_id
+  @schema_prefix "durable"
   schema "scheduled_workflows" do
     field(:name, :string)
     field(:workflow_module, :string)

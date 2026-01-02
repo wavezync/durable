@@ -15,10 +15,12 @@ defmodule Durable.Queue.Poller do
 
   require Logger
 
+  alias Durable.Config
   alias Durable.Queue.Adapter
   alias Durable.Queue.Worker
 
   defstruct [
+    :config,
     :queue_name,
     :concurrency,
     :poll_interval,
@@ -31,6 +33,7 @@ defmodule Durable.Queue.Poller do
   ]
 
   @type t :: %__MODULE__{
+          config: Config.t(),
           queue_name: String.t(),
           concurrency: pos_integer(),
           poll_interval: pos_integer(),
@@ -52,6 +55,7 @@ defmodule Durable.Queue.Poller do
 
   ## Options
 
+  - `:config` - The Durable configuration (required)
   - `:queue_name` - The name of the queue to poll (required)
   - `:concurrency` - Maximum concurrent workers (default: 10)
   - `:poll_interval` - Milliseconds between polls (default: 1000)
@@ -59,8 +63,7 @@ defmodule Durable.Queue.Poller do
   """
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts) do
-    queue_name = Keyword.fetch!(opts, :queue_name)
-    name = opts[:name] || via_tuple(queue_name)
+    name = Keyword.fetch!(opts, :name)
     GenServer.start_link(__MODULE__, opts, name: name)
   end
 
@@ -103,10 +106,12 @@ defmodule Durable.Queue.Poller do
 
   @impl true
   def init(opts) do
+    config = Keyword.fetch!(opts, :config)
     queue_name = Keyword.fetch!(opts, :queue_name)
     worker_supervisor = Keyword.fetch!(opts, :worker_supervisor)
 
     state = %__MODULE__{
+      config: config,
       queue_name: queue_name,
       concurrency: Keyword.get(opts, :concurrency, @default_concurrency),
       poll_interval: Keyword.get(opts, :poll_interval, @default_poll_interval),
@@ -243,8 +248,8 @@ defmodule Durable.Queue.Poller do
     available_slots = state.concurrency - MapSet.size(state.active_jobs)
 
     if available_slots > 0 do
-      adapter = Adapter.adapter()
-      jobs = adapter.fetch_jobs(state.queue_name, available_slots, state.node_id)
+      adapter = Adapter.default_adapter()
+      jobs = adapter.fetch_jobs(state.config, state.queue_name, available_slots, state.node_id)
 
       emit_poll_telemetry(state.queue_name, length(jobs), available_slots)
 
@@ -257,7 +262,7 @@ defmodule Durable.Queue.Poller do
   defp start_worker(job, state) do
     case DynamicSupervisor.start_child(
            state.worker_supervisor,
-           {Worker, job: job, poller_pid: self()}
+           {Worker, job: job, config: state.config, poller_pid: self()}
          ) do
       {:ok, pid} ->
         ref = Process.monitor(pid)
@@ -277,11 +282,11 @@ defmodule Durable.Queue.Poller do
   end
 
   defp handle_job_completion(state, job_id, result) do
-    adapter = Adapter.adapter()
+    adapter = Adapter.default_adapter()
 
     case result do
       :ok ->
-        adapter.ack(job_id)
+        adapter.ack(state.config, job_id)
 
       :waiting ->
         # Job is waiting for sleep/event/input - don't ack, leave as-is
@@ -289,7 +294,7 @@ defmodule Durable.Queue.Poller do
         :ok
 
       {:error, reason} ->
-        adapter.nack(job_id, reason)
+        adapter.nack(state.config, job_id, reason)
     end
 
     # Find and remove the monitor ref for this job
@@ -324,10 +329,6 @@ defmodule Durable.Queue.Poller do
       end
 
     "#{hostname}-#{:erlang.system_info(:scheduler_id)}-#{System.unique_integer([:positive])}"
-  end
-
-  defp via_tuple(queue_name) do
-    {:via, Registry, {Durable.Queue.Registry, {:poller, queue_name}}}
   end
 
   defp emit_poll_telemetry(queue_name, jobs_fetched, available_slots) do

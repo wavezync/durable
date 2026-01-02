@@ -1,23 +1,11 @@
 import Config
 
+# Durable is now an embeddable library - this config is for development/testing only.
+# In production, users provide their own repo when adding Durable to their supervision tree.
+
 config :durable,
-  ecto_repos: [Durable.Repo],
-
-  # Queue adapter (default: PostgreSQL)
-  queue_adapter: Durable.Queue.Adapters.Postgres,
-
-  # Queue configuration
-  queues: %{
-    default: [concurrency: 10, poll_interval: 1000]
-  },
-
-  # Stale lock recovery timeout (seconds)
-  stale_lock_timeout: 300,
-
-  # Heartbeat interval (milliseconds)
-  # Workers send heartbeats to update locked_at and prevent stale lock recovery
-  # Should be less than stale_lock_timeout / 2
-  heartbeat_interval: 30_000,
+  # Test repo for library's internal tests
+  ecto_repos: [Durable.TestRepo],
 
   # Log capture configuration
   # Captures Logger and IO output during workflow step execution
@@ -31,7 +19,7 @@ config :durable,
     metadata_filter: [:request_id, :user_id, :module, :function, :line]
   ]
 
-config :durable, Durable.Repo,
+config :durable, Durable.TestRepo,
   migration_primary_key: [type: :binary_id],
   migration_timestamps: [type: :utc_datetime_usec]
 
