@@ -283,41 +283,65 @@ defmodule Durable.Executor do
         execute_steps_recursive(remaining_steps, exec, step_index, workflow_def, config)
 
       {:decision, target_step} ->
-        # Decision step wants to jump - find target in remaining steps
-        {:ok, exec} = save_context(repo, exec)
+        handle_decision_result(
+          exec,
+          target_step,
+          remaining_steps,
+          step,
+          step_index,
+          workflow_def,
+          config
+        )
 
-        case find_jump_target(target_step, remaining_steps, step.name, step_index) do
-          {:ok, target_steps} ->
-            execute_steps_recursive(target_steps, exec, step_index, workflow_def, config)
-
-          {:error, reason} ->
-            handle_step_failure(
-              exec,
-              decision_error(step.name, target_step, reason),
-              workflow_def,
-              config
-            )
-        end
-
-      {:sleep, opts} ->
-        {:waiting, handle_sleep(repo, exec, opts) |> elem(1)}
-
-      {:wait_for_event, opts} ->
-        {:waiting, handle_wait_for_event(repo, exec, opts) |> elem(1)}
-
-      {:wait_for_input, opts} ->
-        {:waiting, handle_wait_for_input(repo, exec, opts) |> elem(1)}
-
-      {:wait_for_any, opts} ->
-        {:waiting, handle_wait_for_any(repo, exec, opts) |> elem(1)}
-
-      {:wait_for_all, opts} ->
-        {:waiting, handle_wait_for_all(repo, exec, opts) |> elem(1)}
+      {wait_type, opts}
+      when wait_type in [:sleep, :wait_for_event, :wait_for_input, :wait_for_any, :wait_for_all] ->
+        handle_wait_result(repo, exec, wait_type, opts)
 
       {:error, error} ->
         handle_step_failure(exec, error, workflow_def, config)
     end
   end
+
+  defp handle_decision_result(
+         exec,
+         target_step,
+         remaining_steps,
+         step,
+         step_index,
+         workflow_def,
+         config
+       ) do
+    repo = config.repo
+    {:ok, exec} = save_context(repo, exec)
+
+    case find_jump_target(target_step, remaining_steps, step.name, step_index) do
+      {:ok, target_steps} ->
+        execute_steps_recursive(target_steps, exec, step_index, workflow_def, config)
+
+      {:error, reason} ->
+        handle_step_failure(
+          exec,
+          decision_error(step.name, target_step, reason),
+          workflow_def,
+          config
+        )
+    end
+  end
+
+  defp handle_wait_result(repo, exec, :sleep, opts),
+    do: {:waiting, handle_sleep(repo, exec, opts) |> elem(1)}
+
+  defp handle_wait_result(repo, exec, :wait_for_event, opts),
+    do: {:waiting, handle_wait_for_event(repo, exec, opts) |> elem(1)}
+
+  defp handle_wait_result(repo, exec, :wait_for_input, opts),
+    do: {:waiting, handle_wait_for_input(repo, exec, opts) |> elem(1)}
+
+  defp handle_wait_result(repo, exec, :wait_for_any, opts),
+    do: {:waiting, handle_wait_for_any(repo, exec, opts) |> elem(1)}
+
+  defp handle_wait_result(repo, exec, :wait_for_all, opts),
+    do: {:waiting, handle_wait_for_all(repo, exec, opts) |> elem(1)}
 
   defp execute_branch(branch_step, remaining_steps, execution, step_index, workflow_def, config) do
     repo = config.repo

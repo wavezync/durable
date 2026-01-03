@@ -560,7 +560,7 @@ defmodule Durable.WaitTest do
 
       inputs = Wait.list_pending_inputs()
 
-      assert length(inputs) >= 1
+      assert inputs != []
       assert Enum.any?(inputs, fn i -> i.workflow_id == execution.id end)
     end
 
@@ -593,7 +593,7 @@ defmodule Durable.WaitTest do
 
       events = Wait.list_pending_events()
 
-      assert length(events) >= 1
+      assert events != []
       assert Enum.any?(events, fn e -> e.workflow_id == execution.id end)
     end
 
