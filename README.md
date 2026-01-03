@@ -53,20 +53,35 @@ defmodule MyApp.OrderWorkflow do
   use Durable
   use Durable.Context
 
-  workflow "process_order" do
-    step :charge, retry: [max_attempts: 3, backoff: :exponential] do
-      {:ok, charge} = Payments.charge(input().order)
+  workflow "process_order", timeout: hours(2) do
+    step :validate do
+      order = input().order
+      put_context(:order_id, order.id)
+      put_context(:items, order.items)
+    end
+
+    step :calculate_total do
+      total =
+        get_context(:items)
+        |> Enum.map(& &1.price)
+        |> Enum.sum()
+
+      put_context(:total, total)
+    end
+
+    step :charge_payment, retry: [max_attempts: 3, backoff: :exponential] do
+      {:ok, charge} = PaymentService.charge(get_context(:order_id), get_context(:total))
       put_context(:charge_id, charge.id)
     end
 
-    step :notify do
-      Mailer.send_receipt(input().email, get_context(:charge_id))
+    step :send_confirmation do
+      EmailService.send_confirmation(get_context(:order_id))
     end
   end
 end
 
 # Start it
-{:ok, id} = Durable.start(MyApp.OrderWorkflow, %{order: order, email: "user@example.com"})
+{:ok, id} = Durable.start(MyApp.OrderWorkflow, %{order: order})
 ```
 
 ## Examples
