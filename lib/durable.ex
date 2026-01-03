@@ -92,6 +92,9 @@ defmodule Durable do
       end
 
   """
+
+  alias Durable.Scheduler.API, as: SchedulerAPI
+
   defmacro __using__(_opts) do
     quote do
       import Durable.DSL.Workflow
@@ -314,7 +317,7 @@ defmodule Durable do
   """
   @spec schedule(module(), String.t(), keyword()) :: {:ok, term()} | {:error, term()}
   def schedule(module, cron_expression, opts \\ []) do
-    Durable.Scheduler.API.schedule(module, cron_expression, opts)
+    SchedulerAPI.schedule(module, cron_expression, opts)
   end
 
   @doc """
@@ -335,7 +338,7 @@ defmodule Durable do
   """
   @spec list_schedules(keyword()) :: [term()]
   def list_schedules(filters \\ []) do
-    Durable.Scheduler.API.list_schedules(filters)
+    SchedulerAPI.list_schedules(filters)
   end
 
   @doc """
@@ -348,7 +351,7 @@ defmodule Durable do
   """
   @spec get_schedule(String.t(), keyword()) :: {:ok, term()} | {:error, :not_found}
   def get_schedule(name, opts \\ []) do
-    Durable.Scheduler.API.get_schedule(name, opts)
+    SchedulerAPI.get_schedule(name, opts)
   end
 
   @doc """
@@ -369,7 +372,7 @@ defmodule Durable do
   """
   @spec update_schedule(String.t(), keyword()) :: {:ok, term()} | {:error, term()}
   def update_schedule(name, changes) do
-    Durable.Scheduler.API.update_schedule(name, changes)
+    SchedulerAPI.update_schedule(name, changes)
   end
 
   @doc """
@@ -382,7 +385,7 @@ defmodule Durable do
   """
   @spec delete_schedule(String.t(), keyword()) :: :ok | {:error, :not_found}
   def delete_schedule(name, opts \\ []) do
-    Durable.Scheduler.API.delete_schedule(name, opts)
+    SchedulerAPI.delete_schedule(name, opts)
   end
 
   @doc """
@@ -395,7 +398,7 @@ defmodule Durable do
   """
   @spec enable_schedule(String.t(), keyword()) :: {:ok, term()} | {:error, term()}
   def enable_schedule(name, opts \\ []) do
-    Durable.Scheduler.API.enable_schedule(name, opts)
+    SchedulerAPI.enable_schedule(name, opts)
   end
 
   @doc """
@@ -408,7 +411,7 @@ defmodule Durable do
   """
   @spec disable_schedule(String.t(), keyword()) :: {:ok, term()} | {:error, term()}
   def disable_schedule(name, opts \\ []) do
-    Durable.Scheduler.API.disable_schedule(name, opts)
+    SchedulerAPI.disable_schedule(name, opts)
   end
 
   @doc """
@@ -428,7 +431,7 @@ defmodule Durable do
   """
   @spec trigger_schedule(String.t(), keyword()) :: {:ok, String.t()} | {:error, term()}
   def trigger_schedule(name, opts \\ []) do
-    Durable.Scheduler.API.trigger_schedule(name, opts)
+    SchedulerAPI.trigger_schedule(name, opts)
   end
 
   # Supervision tree integration

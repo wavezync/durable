@@ -26,6 +26,8 @@ defmodule Durable.DSL.Workflow do
 
   """
 
+  alias Durable.Scheduler.DSL, as: SchedulerDSL
+
   @doc """
   Defines a workflow with the given name and options.
   """
@@ -67,7 +69,7 @@ defmodule Durable.DSL.Workflow do
 
       # Capture any @schedule attribute for this workflow
       if Code.ensure_loaded?(Durable.Scheduler.DSL) do
-        Durable.Scheduler.DSL.capture_schedule(__MODULE__, unquote(name))
+        SchedulerDSL.capture_schedule(__MODULE__, unquote(name))
       end
     end
   end
