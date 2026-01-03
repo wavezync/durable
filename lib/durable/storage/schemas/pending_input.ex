@@ -25,7 +25,13 @@ defmodule Durable.Storage.Schemas.PendingInput do
           status: status(),
           response: map() | nil,
           timeout_at: DateTime.t() | nil,
+          timeout_value: term() | nil,
+          on_timeout: :resume | :fail,
+          metadata: map() | nil,
           completed_at: DateTime.t() | nil,
+          parallel_id: integer() | nil,
+          foreach_id: integer() | nil,
+          foreach_index: integer() | nil,
           inserted_at: DateTime.t(),
           updated_at: DateTime.t()
         }
@@ -53,7 +59,15 @@ defmodule Durable.Storage.Schemas.PendingInput do
 
     field(:response, :map)
     field(:timeout_at, :utc_datetime_usec)
+    field(:timeout_value, :map)
+    field(:on_timeout, Ecto.Enum, values: [:resume, :fail], default: :resume)
+    field(:metadata, :map)
     field(:completed_at, :utc_datetime_usec)
+
+    # For parallel/foreach context
+    field(:parallel_id, :integer)
+    field(:foreach_id, :integer)
+    field(:foreach_index, :integer)
 
     belongs_to(:workflow, Durable.Storage.Schemas.WorkflowExecution, foreign_key: :workflow_id)
 
@@ -69,7 +83,13 @@ defmodule Durable.Storage.Schemas.PendingInput do
     :status,
     :response,
     :timeout_at,
-    :completed_at
+    :timeout_value,
+    :on_timeout,
+    :metadata,
+    :completed_at,
+    :parallel_id,
+    :foreach_id,
+    :foreach_index
   ]
 
   @doc """

@@ -101,7 +101,7 @@ defmodule Durable.Context do
       order_id = get_context(:order_id)
 
   """
-  @spec get_context(atom()) :: any()
+  @spec get_context(atom() | String.t()) :: any()
   def get_context(key) do
     get_context(key, nil)
   end
@@ -112,12 +112,13 @@ defmodule Durable.Context do
   ## Examples
 
       count = get_context(:retry_count, 0)
+      count = get_context("retry_count", 0)
 
   """
-  @spec get_context(atom(), any()) :: any()
+  @spec get_context(atom() | String.t(), any()) :: any()
   def get_context(key, default) do
     context()
-    |> Map.get(key, default)
+    |> Map.get(normalize_key(key), default)
   end
 
   @doc """
@@ -126,11 +127,12 @@ defmodule Durable.Context do
   ## Examples
 
       put_context(:order_id, 123)
+      put_context("order_id", 123)
 
   """
-  @spec put_context(atom(), any()) :: :ok
+  @spec put_context(atom() | String.t(), any()) :: :ok
   def put_context(key, value) do
-    new_context = Map.put(context(), key, value)
+    new_context = Map.put(context(), normalize_key(key), value)
     Process.put(@context_key, new_context)
     :ok
   end
@@ -159,7 +161,7 @@ defmodule Durable.Context do
       update_context(:items, &[new_item | &1])
 
   """
-  @spec update_context(atom(), (any() -> any())) :: :ok
+  @spec update_context(atom() | String.t(), (any() -> any())) :: :ok
   def update_context(key, fun) when is_function(fun, 1) do
     current_value = get_context(key)
     new_value = fun.(current_value)
@@ -187,11 +189,12 @@ defmodule Durable.Context do
   ## Examples
 
       delete_context(:temporary_data)
+      delete_context("temporary_data")
 
   """
-  @spec delete_context(atom()) :: :ok
+  @spec delete_context(atom() | String.t()) :: :ok
   def delete_context(key) do
-    new_context = Map.delete(context(), key)
+    new_context = Map.delete(context(), normalize_key(key))
     Process.put(@context_key, new_context)
     :ok
   end
@@ -206,9 +209,9 @@ defmodule Durable.Context do
       end
 
   """
-  @spec has_context?(atom()) :: boolean()
+  @spec has_context?(atom() | String.t()) :: boolean()
   def has_context?(key) do
-    Map.has_key?(context(), key)
+    Map.has_key?(context(), normalize_key(key))
   end
 
   @doc """
@@ -260,7 +263,7 @@ defmodule Durable.Context do
       append_context(:events, %{type: :clicked, timestamp: DateTime.utc_now()})
 
   """
-  @spec append_context(atom(), any()) :: :ok
+  @spec append_context(atom() | String.t(), any()) :: :ok
   def append_context(key, value) do
     current = get_context(key, [])
     put_context(key, current ++ [value])
@@ -277,7 +280,7 @@ defmodule Durable.Context do
       increment_context(:processed_items, 1)
 
   """
-  @spec increment_context(atom(), number()) :: :ok
+  @spec increment_context(atom() | String.t(), number()) :: :ok
   def increment_context(key, amount \\ 1) do
     current = get_context(key, 0)
     put_context(key, current + amount)
@@ -331,10 +334,21 @@ defmodule Durable.Context do
 
   @doc false
   def restore_context(context_map, input, workflow_id) do
-    Process.put(@context_key, context_map || %{})
+    # Convert string keys to atoms since JSON encoding converts atoms to strings
+    atomized_context = atomize_keys(context_map || %{})
+    Process.put(@context_key, atomized_context)
     Process.put(@input_key, input)
     Process.put(@workflow_id_key, workflow_id)
     :ok
+  end
+
+  # Convert string keys to atoms (for context restored from database)
+  # Only converts top-level keys, nested maps keep their original keys
+  defp atomize_keys(map) when is_map(map) do
+    Map.new(map, fn
+      {key, value} when is_binary(key) -> {String.to_atom(key), value}
+      {key, value} -> {key, value}
+    end)
   end
 
   @doc false
@@ -378,6 +392,11 @@ defmodule Durable.Context do
   end
 
   # Helper functions
+
+  # Normalize keys to atoms for consistency
+  # (JSON encoding converts atoms to strings, so we normalize back)
+  defp normalize_key(key) when is_atom(key), do: key
+  defp normalize_key(key) when is_binary(key), do: String.to_atom(key)
 
   defp deep_merge(left, right) do
     Map.merge(left, right, fn

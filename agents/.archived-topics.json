@@ -3,6 +3,38 @@
   "lastUpdated": "2026-01-03",
   "topics": [
     {
+      "slug": "wait-primitives-complete",
+      "title": "Wait Primitives Complete",
+      "description": "Complete Phase 3 with resumability testing, context key bug fix, string key support, and documentation updates",
+      "created": "2026-01-03",
+      "lastUpdated": "2026-01-03",
+      "sessionCount": 1,
+      "status": "completed",
+      "tags": [
+        "wait-primitives",
+        "resumability",
+        "context",
+        "bug-fix",
+        "documentation",
+        "phase-3"
+      ],
+      "keyFiles": [
+        "lib/durable/context.ex",
+        "lib/durable/wait.ex",
+        "test/durable/wait_test.exs",
+        "guides/waiting.md"
+      ],
+      "sessions": [
+        {
+          "number": 1,
+          "date": "2026-01-03",
+          "file": "sessions/2026-01-03-session-01.md",
+          "focus": "Resumability testing, bug fixes, documentation",
+          "status": "completed"
+        }
+      ]
+    },
+    {
       "slug": "embeddable-library-transformation",
       "title": "Embeddable Library Transformation",
       "description": "Transform Durable from standalone application to Oban-style embeddable library",

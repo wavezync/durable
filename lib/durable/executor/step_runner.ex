@@ -88,6 +88,16 @@ defmodule Durable.Executor.StepRunner do
         {:ok, _} = update_step_execution(repo, step_exec, :waiting)
         {:wait_for_input, opts}
 
+      {:throw, {:wait_for_any, opts}} ->
+        # Wait for any event signal
+        {:ok, _} = update_step_execution(repo, step_exec, :waiting)
+        {:wait_for_any, opts}
+
+      {:throw, {:wait_for_all, opts}} ->
+        # Wait for all events signal
+        {:ok, _} = update_step_execution(repo, step_exec, :waiting)
+        {:wait_for_all, opts}
+
       {:error, error} ->
         # Failure - check if we should retry
         if attempt < max_attempts do

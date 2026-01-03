@@ -14,7 +14,10 @@ defmodule Durable.Executor do
   alias Durable.Definition.Workflow
   alias Durable.Executor.CompensationRunner
   alias Durable.Executor.StepRunner
+  alias Durable.Storage.Schemas.PendingEvent
+  alias Durable.Storage.Schemas.PendingInput
   alias Durable.Storage.Schemas.StepExecution
+  alias Durable.Storage.Schemas.WaitGroup
   alias Durable.Storage.Schemas.WorkflowExecution
 
   import Ecto.Query
@@ -305,6 +308,12 @@ defmodule Durable.Executor do
       {:wait_for_input, opts} ->
         {:waiting, handle_wait_for_input(repo, exec, opts) |> elem(1)}
 
+      {:wait_for_any, opts} ->
+        {:waiting, handle_wait_for_any(repo, exec, opts) |> elem(1)}
+
+      {:wait_for_all, opts} ->
+        {:waiting, handle_wait_for_all(repo, exec, opts) |> elem(1)}
+
       {:error, error} ->
         handle_step_failure(exec, error, workflow_def, config)
     end
@@ -424,6 +433,12 @@ defmodule Durable.Executor do
 
       {:wait_for_input, opts} ->
         {:waiting, handle_wait_for_input(repo, exec, opts) |> elem(1)}
+
+      {:wait_for_any, opts} ->
+        {:waiting, handle_wait_for_any(repo, exec, opts) |> elem(1)}
+
+      {:wait_for_all, opts} ->
+        {:waiting, handle_wait_for_all(repo, exec, opts) |> elem(1)}
 
       {:error, error} ->
         handle_step_failure(exec, error, workflow_def, config)
@@ -1172,7 +1187,25 @@ defmodule Durable.Executor do
     {:waiting, execution}
   end
 
-  defp handle_wait_for_event(repo, execution, _opts) do
+  defp handle_wait_for_event(repo, execution, opts) do
+    event_name = Keyword.fetch!(opts, :event_name)
+    timeout_at = calculate_timeout_at(opts)
+
+    # Create pending event record
+    attrs = %{
+      workflow_id: execution.id,
+      event_name: event_name,
+      step_name: execution.current_step,
+      timeout_at: timeout_at,
+      timeout_value: serialize_timeout_value(Keyword.get(opts, :timeout_value)),
+      wait_type: :single
+    }
+
+    {:ok, _pending_event} =
+      %PendingEvent{}
+      |> PendingEvent.changeset(attrs)
+      |> repo.insert()
+
     {:ok, execution} =
       execution
       |> Ecto.Changeset.change(status: :waiting)
@@ -1181,7 +1214,82 @@ defmodule Durable.Executor do
     {:waiting, execution}
   end
 
-  defp handle_wait_for_input(repo, execution, _opts) do
+  defp handle_wait_for_input(repo, execution, opts) do
+    input_name = Keyword.fetch!(opts, :input_name)
+    timeout_at = calculate_timeout_at(opts)
+
+    # Create pending input record
+    attrs = %{
+      workflow_id: execution.id,
+      input_name: input_name,
+      step_name: execution.current_step,
+      input_type: Keyword.get(opts, :type, :free_text),
+      prompt: Keyword.get(opts, :prompt),
+      fields: Keyword.get(opts, :fields),
+      metadata: Keyword.get(opts, :metadata),
+      timeout_at: timeout_at,
+      timeout_value: serialize_timeout_value(Keyword.get(opts, :timeout_value)),
+      on_timeout: Keyword.get(opts, :on_timeout, :resume)
+    }
+
+    {:ok, _pending_input} =
+      %PendingInput{}
+      |> PendingInput.changeset(attrs)
+      |> repo.insert()
+
+    {:ok, execution} =
+      execution
+      |> Ecto.Changeset.change(status: :waiting)
+      |> repo.update()
+
+    {:waiting, execution}
+  end
+
+  defp handle_wait_for_any(repo, execution, opts) do
+    handle_wait_group(repo, execution, opts, :any)
+  end
+
+  defp handle_wait_for_all(repo, execution, opts) do
+    handle_wait_group(repo, execution, opts, :all)
+  end
+
+  defp handle_wait_group(repo, execution, opts, wait_type) do
+    event_names = Keyword.fetch!(opts, :event_names)
+    timeout_at = calculate_timeout_at(opts)
+
+    # Create wait group record
+    group_attrs = %{
+      workflow_id: execution.id,
+      step_name: execution.current_step,
+      wait_type: wait_type,
+      event_names: event_names,
+      timeout_at: timeout_at,
+      timeout_value: serialize_timeout_value(Keyword.get(opts, :timeout_value))
+    }
+
+    {:ok, wait_group} =
+      %WaitGroup{}
+      |> WaitGroup.changeset(group_attrs)
+      |> repo.insert()
+
+    # Create pending event records for each event in the group
+    Enum.each(event_names, fn event_name ->
+      event_attrs = %{
+        workflow_id: execution.id,
+        event_name: event_name,
+        step_name: execution.current_step,
+        wait_group_id: wait_group.id,
+        wait_type: wait_type,
+        timeout_at: timeout_at,
+        timeout_value: serialize_timeout_value(Keyword.get(opts, :timeout_value))
+      }
+
+      {:ok, _} =
+        %PendingEvent{}
+        |> PendingEvent.changeset(event_attrs)
+        |> repo.insert()
+    end)
+
     {:ok, execution} =
       execution
       |> Ecto.Changeset.change(status: :waiting)
@@ -1194,6 +1302,9 @@ defmodule Durable.Executor do
     cond do
       Keyword.has_key?(opts, :until) ->
         opts[:until]
+
+      Keyword.has_key?(opts, :duration_ms) ->
+        DateTime.add(DateTime.utc_now(), opts[:duration_ms], :millisecond)
 
       Keyword.has_key?(opts, :seconds) ->
         DateTime.add(DateTime.utc_now(), opts[:seconds], :second)
@@ -1211,4 +1322,22 @@ defmodule Durable.Executor do
         DateTime.add(DateTime.utc_now(), 60, :second)
     end
   end
+
+  defp calculate_timeout_at(opts) do
+    case Keyword.get(opts, :timeout) do
+      nil ->
+        nil
+
+      timeout_ms when is_integer(timeout_ms) ->
+        DateTime.add(DateTime.utc_now(), timeout_ms, :millisecond)
+    end
+  end
+
+  defp serialize_timeout_value(nil), do: nil
+  defp serialize_timeout_value(value) when is_map(value), do: value
+
+  defp serialize_timeout_value(value) when is_atom(value),
+    do: %{"__atom__" => Atom.to_string(value)}
+
+  defp serialize_timeout_value(value), do: %{"__value__" => value}
 end

@@ -13,8 +13,8 @@ defmodule Durable.Migration.Migrator do
   # List of all migration modules in order.
   # When adding new migrations, append them to this list.
   @migrations [
-    Durable.Migration.Migrations.V20260103000000InitialSchema
-    # Future migrations go here
+    Durable.Migration.Migrations.V20260103000000InitialSchema,
+    Durable.Migration.Migrations.V20260104000000AddWaitPrimitives
   ]
 
   @doc """

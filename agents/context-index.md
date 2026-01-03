@@ -6,19 +6,33 @@ This index provides quick access to archived development discussions and impleme
 
 | Topic | Last Updated | Sessions | Status |
 |-------|--------------|----------|--------|
-| [Embeddable Library Transformation](./conversations/embeddable-library-transformation/) | 2026-01-02 | 1 | Completed |
-| [Parallel Durability Implementation](./conversations/parallel-durability-implementation/) | 2026-01-03 | 1 | Completed |
-| [CI Fix Parallel Jobs](./conversations/ci-fix-parallel-jobs/) | 2026-01-03 | 1 | Completed |
+| [Wait Primitives Complete](./conversations/wait-primitives-complete/) | 2026-01-03 | 1 | Completed |
 
 ## Completed Topics
 
 | Topic | Completed | Description |
 |-------|-----------|-------------|
-| [Embeddable Library Transformation](./conversations/embeddable-library-transformation/) | 2026-01-02 | Transformed Durable into an Oban-style embeddable library |
-| [Parallel Durability Implementation](./conversations/parallel-durability-implementation/) | 2026-01-03 | Made parallel execution truly durable and resumable |
+| [Wait Primitives Complete](./conversations/wait-primitives-complete/) | 2026-01-03 | Resumability testing, context key bug fix, string key support, documentation |
 | [CI Fix Parallel Jobs](./conversations/ci-fix-parallel-jobs/) | 2026-01-03 | Fixed CI failures after parallel jobs feature |
+| [Parallel Durability Implementation](./conversations/parallel-durability-implementation/) | 2026-01-03 | Made parallel execution truly durable and resumable |
+| [Embeddable Library Transformation](./conversations/embeddable-library-transformation/) | 2026-01-02 | Transformed Durable into an Oban-style embeddable library |
 
 ## Topic Quick Reference
+
+### Wait Primitives Complete
+**Path**: `agents/conversations/wait-primitives-complete/`
+
+Covers the completion of Phase 3 (Wait Primitives) including resumability testing, context key bug fixes, and documentation updates. Key outcomes:
+- Added 4 resumability tests for wait/resume cycles
+- Fixed atom/string key mismatch via `atomize_keys/1` helper
+- All context functions now accept both atom and string keys
+- Comprehensive rewrite of `guides/waiting.md`
+
+**Key Files Modified**:
+- `lib/durable/context.ex`
+- `lib/durable/wait.ex`
+- `test/durable/wait_test.exs`
+- `guides/waiting.md`
 
 ### Embeddable Library Transformation
 **Path**: `agents/conversations/embeddable-library-transformation/`

@@ -12,9 +12,20 @@ defmodule MyApp.MyWorkflow do
 end
 ```
 
+## Duration Helpers
+
+Use these helpers to specify durations:
+
+```elixir
+seconds(30)   # 30 seconds in ms
+minutes(5)    # 5 minutes in ms
+hours(2)      # 2 hours in ms
+days(1)       # 1 day in ms
+```
+
 ## Sleep Functions
 
-### `sleep_for/1` - Duration-Based Sleep
+### `sleep/1` - Duration-Based Sleep
 
 Suspend the workflow for a specific duration.
 
@@ -25,7 +36,7 @@ workflow "delayed_task" do
   end
 
   step :wait do
-    sleep_for(minutes: 30)
+    sleep(minutes(30))
   end
 
   step :continue do
@@ -34,35 +45,59 @@ workflow "delayed_task" do
 end
 ```
 
-**Duration options:**
+**Duration examples:**
 
-| Option | Example |
-|--------|---------|
-| `:seconds` | `sleep_for(seconds: 30)` |
-| `:minutes` | `sleep_for(minutes: 5)` |
-| `:hours` | `sleep_for(hours: 2)` |
-| `:days` | `sleep_for(days: 1)` |
+| Duration | Code |
+|----------|------|
+| 30 seconds | `sleep(seconds(30))` |
+| 5 minutes | `sleep(minutes(5))` |
+| 2 hours | `sleep(hours(2))` |
+| 1 day | `sleep(days(1))` |
 
-### `sleep_until/1` - Time-Based Sleep
+### `schedule_at/1` - Time-Based Sleep
 
 Suspend until a specific datetime.
 
 ```elixir
 step :schedule do
   # Wake up at midnight UTC
-  sleep_until(~U[2025-12-25 00:00:00Z])
+  schedule_at(~U[2025-12-25 00:00:00Z])
 end
 
-# Or calculate dynamically
+# Or use time helpers
 step :wait_until_business_hours do
-  next_9am = calculate_next_9am()
-  sleep_until(next_9am)
+  schedule_at(next_business_day(hour: 9))
 end
+
+step :wait_for_monday do
+  schedule_at(next_weekday(:monday, hour: 9))
+end
+```
+
+### Time Helpers
+
+Use these with `schedule_at/1`:
+
+| Helper | Description | Example |
+|--------|-------------|---------|
+| `next_business_day/0,1` | Next Mon-Fri | `next_business_day(hour: 9)` |
+| `next_weekday/1,2` | Next specific day | `next_weekday(:friday, hour: 17)` |
+| `end_of_day/0,1` | End of current day | `end_of_day()` |
+
+```elixir
+# Wake up at 9am on the next business day
+schedule_at(next_business_day(hour: 9))
+
+# Wake up at 5pm next Friday
+schedule_at(next_weekday(:friday, hour: 17))
+
+# Wake up at end of today
+schedule_at(end_of_day())
 ```
 
 ## Event Waiting
 
-### `wait_for_event/2` - External Events
+### `wait_for_event/2` - Single Event
 
 Suspend until an external system sends an event.
 
@@ -99,6 +134,64 @@ end
 | `:timeout` | Max wait time (e.g., `minutes(15)`) |
 | `:timeout_value` | Value returned on timeout |
 
+### `wait_for_any/2` - First Event Wins
+
+Wait for any one of multiple events. Returns `{event_name, payload}`.
+
+```elixir
+workflow "order_status" do
+  step :await_result do
+    {event, payload} = wait_for_any(["success", "failure", "cancelled"],
+      timeout: hours(24),
+      timeout_value: {:timeout, nil}
+    )
+
+    put_context(:result_event, event)
+    put_context(:result_data, payload)
+  end
+
+  step :handle_result do
+    case get_context(:result_event) do
+      "success" -> process_success(get_context(:result_data))
+      "failure" -> process_failure(get_context(:result_data))
+      "cancelled" -> process_cancellation()
+    end
+  end
+end
+```
+
+### `wait_for_all/2` - All Events Required
+
+Wait for all specified events. Returns `%{event_name => payload}`.
+
+```elixir
+workflow "multi_approval" do
+  step :await_approvals do
+    results = wait_for_all(["manager_approval", "legal_approval", "finance_approval"],
+      timeout: days(7),
+      timeout_value: {:timeout, :partial}
+    )
+
+    put_context(:approvals, results)
+  end
+
+  step :process_approvals do
+    approvals = get_context(:approvals)
+
+    case approvals do
+      {:timeout, :partial} ->
+        handle_incomplete_approvals()
+      %{} = all_approvals ->
+        if Enum.all?(all_approvals, fn {_k, v} -> v.approved end) do
+          proceed_with_request()
+        else
+          reject_request()
+        end
+    end
+  end
+end
+```
+
 ### Sending Events
 
 From your application code (webhook handler, API endpoint, etc.):
@@ -114,7 +207,7 @@ Durable.Wait.send_event(
 
 ## Human-in-the-Loop
 
-### `wait_for_input/2` - Human Input
+### `wait_for_input/2` - Generic Human Input
 
 Suspend until a human provides input.
 
@@ -126,6 +219,8 @@ workflow "approval_flow" do
 
   step :await_approval do
     result = wait_for_input("manager_approval",
+      type: :approval,
+      prompt: "Approve this request?",
       timeout: days(3),
       timeout_value: :auto_rejected
     )
@@ -152,6 +247,7 @@ end
 |--------|-------------|
 | `:type` | Input type (see below) |
 | `:prompt` | Message to show user |
+| `:metadata` | Additional data for UI |
 | `:timeout` | Max wait time |
 | `:timeout_value` | Value on timeout |
 | `:fields` | Field definitions for forms |
@@ -164,43 +260,80 @@ end
 | `:approval` | Simple yes/no decision |
 | `:form` | Structured data entry |
 | `:single_choice` | Pick one option |
-| `:multi_choice` | Pick multiple options |
 | `:free_text` | Open text input |
 
-### Form Input Example
+### Convenience Wrappers
+
+#### `wait_for_approval/2`
+
+Wait for an approval decision. Returns `:approved` or `:rejected`.
 
 ```elixir
-step :collect_details do
-  result = wait_for_input("equipment_request",
-    type: :form,
-    prompt: "Please specify equipment needs",
-    fields: [
-      %{name: :laptop, type: :select, options: ["MacBook Pro", "ThinkPad X1"]},
-      %{name: :monitor, type: :select, options: ["24 inch", "27 inch", "None"]},
-      %{name: :notes, type: :text, required: false}
-    ]
+step :manager_review do
+  result = wait_for_approval("expense_approval",
+    prompt: "Approve expense for $500?",
+    metadata: %{employee: "John", amount: 500},
+    timeout: days(3),
+    timeout_value: :auto_approved
   )
 
-  put_context(:equipment, result)
+  put_context(:approved, result == :approved)
 end
 ```
 
-### Choice Input Example
+#### `wait_for_choice/2`
+
+Wait for a single choice selection.
 
 ```elixir
-step :select_priority do
-  priority = wait_for_input("priority_selection",
-    type: :single_choice,
-    prompt: "Select issue priority",
+step :select_shipping do
+  method = wait_for_choice("shipping_method",
+    prompt: "Select shipping method:",
     choices: [
-      %{value: :critical, label: "Critical - System down"},
-      %{value: :high, label: "High - Major impact"},
-      %{value: :medium, label: "Medium - Some impact"},
-      %{value: :low, label: "Low - Minor issue"}
-    ]
+      %{value: :express, label: "Express ($15)"},
+      %{value: :standard, label: "Standard (Free)"}
+    ],
+    timeout: hours(24),
+    timeout_value: :standard
   )
 
-  put_context(:priority, priority)
+  put_context(:shipping, method)
+end
+```
+
+#### `wait_for_text/2`
+
+Wait for text input.
+
+```elixir
+step :get_reason do
+  reason = wait_for_text("rejection_reason",
+    prompt: "Please provide a reason for rejection:",
+    timeout: hours(4),
+    timeout_value: "No reason provided"
+  )
+
+  put_context(:reason, reason)
+end
+```
+
+#### `wait_for_form/2`
+
+Wait for form submission.
+
+```elixir
+step :collect_details do
+  result = wait_for_form("equipment_request",
+    prompt: "Please specify equipment needs",
+    fields: [
+      %{name: :laptop, type: :select, options: ["MacBook Pro", "ThinkPad X1"], required: true},
+      %{name: :monitor, type: :select, options: ["24 inch", "27 inch", "None"], required: false},
+      %{name: :notes, type: :text, required: false}
+    ],
+    timeout: days(7)
+  )
+
+  put_context(:equipment, result)
 end
 ```
 
@@ -247,12 +380,11 @@ workflow "expense_approval" do
 
   step :manager_review do
     if get_context(:amount) > 1000 do
-      result = wait_for_input("manager_approval",
-        type: :approval,
+      result = wait_for_approval("manager_approval",
         prompt: "Approve expense of $#{get_context(:amount)}?",
         timeout: days(2)
       )
-      put_context(:manager_approved, result[:approved] || false)
+      put_context(:manager_approved, result == :approved)
     else
       put_context(:manager_approved, true)
     end
@@ -260,11 +392,10 @@ workflow "expense_approval" do
 
   step :finance_review do
     if get_context(:amount) > 5000 and get_context(:manager_approved) do
-      result = wait_for_input("finance_approval",
-        type: :approval,
+      result = wait_for_approval("finance_approval",
         timeout: days(3)
       )
-      put_context(:finance_approved, result[:approved] || false)
+      put_context(:finance_approved, result == :approved)
     else
       put_context(:finance_approved, true)
     end
@@ -339,7 +470,7 @@ workflow "subscription_renewal" do
     expires_at = get_context(:expires_at)
     reminder_time = DateTime.add(expires_at, -7, :day)  # 7 days before
 
-    sleep_until(reminder_time)
+    schedule_at(reminder_time)
   end
 
   step :send_reminder do
@@ -362,6 +493,62 @@ workflow "subscription_renewal" do
         Subscriptions.expire(get_context(:subscription).id)
       _ ->
         Logger.info("Subscription renewed")
+    end
+  end
+end
+```
+
+### Parallel Approvals
+
+```elixir
+workflow "contract_approval" do
+  step :submit_contract do
+    put_context(:contract, input())
+  end
+
+  step :await_all_approvals do
+    # Wait for all three departments to approve
+    results = wait_for_all(["legal", "finance", "management"],
+      timeout: days(5),
+      timeout_value: {:timeout, :incomplete}
+    )
+
+    put_context(:approval_results, results)
+  end
+
+  step :finalize do
+    case get_context(:approval_results) do
+      {:timeout, :incomplete} ->
+        put_context(:status, :timed_out)
+      approvals ->
+        all_approved = Enum.all?(approvals, fn {_, v} -> v["approved"] end)
+        put_context(:status, if(all_approved, do: :approved, else: :rejected))
+    end
+  end
+end
+```
+
+### Race Condition Handling
+
+```elixir
+workflow "payment_with_timeout" do
+  step :await_payment_or_cancel do
+    # First event wins
+    {event, data} = wait_for_any(["payment_received", "user_cancelled", "fraud_detected"],
+      timeout: hours(1),
+      timeout_value: {:timeout, nil}
+    )
+
+    put_context(:result_event, event)
+    put_context(:result_data, data)
+  end
+
+  step :handle_result do
+    case get_context(:result_event) do
+      "payment_received" -> complete_order()
+      "user_cancelled" -> refund_if_needed()
+      "fraud_detected" -> flag_for_review()
+      :timeout -> expire_order()
     end
   end
 end
@@ -409,4 +596,17 @@ step :prepare_and_wait do
   # Now wait
   wait_for_input("approval")
 end
+```
+
+### Use Convenience Wrappers
+
+```elixir
+# Good - clear intent
+wait_for_approval("manager_approval", prompt: "Approve?")
+wait_for_choice("priority", choices: [...])
+wait_for_text("comments")
+wait_for_form("details", fields: [...])
+
+# Also works but less clear
+wait_for_input("approval", type: :approval)
 ```

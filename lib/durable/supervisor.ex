@@ -106,7 +106,11 @@ defmodule Durable.Supervisor do
           "Durable #{inspect(config.name)} starting with queues: #{inspect(Map.keys(config.queues))}"
         )
 
-        base_children ++ [{Durable.Queue.Manager, config: config}]
+        base_children ++
+          [
+            {Durable.Queue.Manager, config: config},
+            {Durable.Wait.TimeoutWorker, config: config}
+          ]
       else
         Logger.info("Durable #{inspect(config.name)} starting with queue processing disabled")
         base_children
