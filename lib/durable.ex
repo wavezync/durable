@@ -278,6 +278,159 @@ defmodule Durable do
     Durable.Wait.send_event(workflow_id, event_name, payload)
   end
 
+  # Scheduling API
+
+  @doc """
+  Creates a new scheduled workflow.
+
+  ## Arguments
+
+  - `module` - The workflow module
+  - `cron_expression` - Cron expression (e.g., "0 9 * * *" for 9am daily)
+  - `opts` - Options
+
+  ## Options
+
+  - `:name` - Schedule name (defaults to workflow name)
+  - `:workflow` - Workflow name (defaults to first workflow in module)
+  - `:input` - Input data for each execution
+  - `:timezone` - Timezone for cron (default: "UTC")
+  - `:queue` - Queue to run on (default: :default)
+  - `:enabled` - Whether schedule is active (default: true)
+  - `:durable` - Durable instance name (default: Durable)
+
+  ## Examples
+
+      {:ok, schedule} = Durable.schedule(MyApp.DailyReport, "0 9 * * *")
+
+      {:ok, schedule} = Durable.schedule(
+        MyApp.Reports,
+        "0 9 * * MON-FRI",
+        name: "weekday_report",
+        workflow: "generate_report",
+        timezone: "America/New_York"
+      )
+
+  """
+  @spec schedule(module(), String.t(), keyword()) :: {:ok, term()} | {:error, term()}
+  def schedule(module, cron_expression, opts \\ []) do
+    Durable.Scheduler.API.schedule(module, cron_expression, opts)
+  end
+
+  @doc """
+  Lists scheduled workflows.
+
+  ## Filters
+
+  - `:enabled` - Filter by enabled status
+  - `:workflow_module` - Filter by module
+  - `:queue` - Filter by queue
+  - `:limit` - Maximum results (default: 100)
+  - `:durable` - Durable instance name
+
+  ## Examples
+
+      schedules = Durable.list_schedules(enabled: true)
+
+  """
+  @spec list_schedules(keyword()) :: [term()]
+  def list_schedules(filters \\ []) do
+    Durable.Scheduler.API.list_schedules(filters)
+  end
+
+  @doc """
+  Gets a scheduled workflow by name.
+
+  ## Examples
+
+      {:ok, schedule} = Durable.get_schedule("daily_report")
+
+  """
+  @spec get_schedule(String.t(), keyword()) :: {:ok, term()} | {:error, :not_found}
+  def get_schedule(name, opts \\ []) do
+    Durable.Scheduler.API.get_schedule(name, opts)
+  end
+
+  @doc """
+  Updates a scheduled workflow.
+
+  ## Updatable Fields
+
+  - `:cron_expression` - New cron expression
+  - `:timezone` - New timezone
+  - `:input` - New input data
+  - `:queue` - New queue
+  - `:enabled` - Enable/disable
+
+  ## Examples
+
+      {:ok, schedule} = Durable.update_schedule("daily_report", cron_expression: "0 10 * * *")
+
+  """
+  @spec update_schedule(String.t(), keyword()) :: {:ok, term()} | {:error, term()}
+  def update_schedule(name, changes) do
+    Durable.Scheduler.API.update_schedule(name, changes)
+  end
+
+  @doc """
+  Deletes a scheduled workflow.
+
+  ## Examples
+
+      :ok = Durable.delete_schedule("daily_report")
+
+  """
+  @spec delete_schedule(String.t(), keyword()) :: :ok | {:error, :not_found}
+  def delete_schedule(name, opts \\ []) do
+    Durable.Scheduler.API.delete_schedule(name, opts)
+  end
+
+  @doc """
+  Enables a scheduled workflow.
+
+  ## Examples
+
+      {:ok, schedule} = Durable.enable_schedule("daily_report")
+
+  """
+  @spec enable_schedule(String.t(), keyword()) :: {:ok, term()} | {:error, term()}
+  def enable_schedule(name, opts \\ []) do
+    Durable.Scheduler.API.enable_schedule(name, opts)
+  end
+
+  @doc """
+  Disables a scheduled workflow.
+
+  ## Examples
+
+      {:ok, schedule} = Durable.disable_schedule("daily_report")
+
+  """
+  @spec disable_schedule(String.t(), keyword()) :: {:ok, term()} | {:error, term()}
+  def disable_schedule(name, opts \\ []) do
+    Durable.Scheduler.API.disable_schedule(name, opts)
+  end
+
+  @doc """
+  Triggers a scheduled workflow immediately.
+
+  This starts a new workflow execution without waiting for the next scheduled time.
+
+  ## Options
+
+  - `:input` - Override the schedule's input
+  - `:durable` - Durable instance name
+
+  ## Examples
+
+      {:ok, workflow_id} = Durable.trigger_schedule("daily_report")
+
+  """
+  @spec trigger_schedule(String.t(), keyword()) :: {:ok, String.t()} | {:error, term()}
+  def trigger_schedule(name, opts \\ []) do
+    Durable.Scheduler.API.trigger_schedule(name, opts)
+  end
+
   # Supervision tree integration
 
   @doc """

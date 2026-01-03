@@ -41,7 +41,9 @@ defmodule Durable.Config do
           queues: map(),
           queue_enabled: boolean(),
           stale_lock_timeout: pos_integer(),
-          heartbeat_interval: pos_integer()
+          heartbeat_interval: pos_integer(),
+          scheduled_modules: [module()],
+          scheduler_interval: pos_integer()
         }
 
   defstruct [
@@ -51,7 +53,9 @@ defmodule Durable.Config do
     :queues,
     :queue_enabled,
     :stale_lock_timeout,
-    :heartbeat_interval
+    :heartbeat_interval,
+    :scheduled_modules,
+    :scheduler_interval
   ]
 
   @schema [
@@ -89,6 +93,16 @@ defmodule Durable.Config do
       type: :pos_integer,
       default: 30_000,
       doc: "Milliseconds between worker heartbeats"
+    ],
+    scheduled_modules: [
+      type: {:list, :atom},
+      default: [],
+      doc: "List of workflow modules with @schedule decorators to register on startup"
+    ],
+    scheduler_interval: [
+      type: :pos_integer,
+      default: 60_000,
+      doc: "Milliseconds between scheduler polls for due schedules"
     ]
   ]
 

@@ -4,7 +4,7 @@
 
 This document outlines the complete implementation plan for **Durable**, a durable, resumable workflow engine for Elixir.
 
-**Current State:** ~70% implemented (Phase 0+1+3 complete, substantial Phase 2+5)
+**Current State:** ~75% implemented (Phase 0+1+3 complete, substantial Phase 2+5)
 **Target:** Production-ready workflow engine replacing Oban
 
 ### Completed Features (as of Jan 2026)
@@ -19,12 +19,13 @@ This document outlines the complete implementation plan for **Durable**, a durab
   - 3.6: Parallel execution (merge strategies, error handling) ✅
   - 3.7: ForEach loops (concurrency, collect_as, on_error) ✅
   - 3.9: Compensation/Saga pattern (compensate macro, rollback) ✅
+  - 3.10: Cron Scheduling (@schedule decorator, multi-node safety) ✅
   - Resumability: Context preserved across wait/resume cycles ✅
   - Bug fix: Atom/string key mismatch after JSON encoding ✅
   - String key support: All context functions accept atom or string keys ✅
 - Phase 5 (partial): Query API, time helpers, test DataCase, documentation guides ✅
 
-**Stats:** 35+ modules, 169 passing tests
+**Stats:** 41 modules, 214 passing tests
 
 ---
 
@@ -1590,7 +1591,7 @@ both atom and string keys for flexibility.
 
 ---
 
-### Milestone 3.12: Cron Scheduling
+### Milestone 3.12: Cron Scheduling ✅ COMPLETE
 
 **Objective:** Implement decorator-based cron scheduling.
 
@@ -1599,13 +1600,12 @@ both atom and string keys for flexibility.
 1. **DSL:**
    ```elixir
    defmodule ReportWorkflow do
-     use DurableWorkflow
-     use DurableWorkflow.Cron
+     use Durable
+     use Durable.Scheduler.DSL
 
-     @cron "0 9 * * *"  # Daily at 9 AM
-     @cron_queue :reports
-     @cron_input %{type: :daily}
-     @cron_timezone "America/New_York"
+     @schedule "0 9 * * *"  # Daily at 9 AM
+     @schedule_queue :reports
+     @schedule_input %{type: :daily}
      workflow "daily_report" do
        step :generate do
          ReportService.generate(input().type)
@@ -1616,36 +1616,38 @@ both atom and string keys for flexibility.
 
 2. **Scheduler Implementation:**
    - Parse cron expressions (use `crontab` library)
-   - Calculate next run time
-   - GenServer for scheduling loop
+   - Calculate next run time via `Crontab.Scheduler.get_next_run_date!/2`
+   - GenServer polling every 60 seconds (configurable)
+   - Multi-node safety via `FOR UPDATE SKIP LOCKED`
    - Store schedule in `scheduled_workflows` table
 
 3. **Management API:**
    ```elixir
-   DurableWorkflow.Scheduler.list_schedules()
-   DurableWorkflow.Scheduler.enable(schedule_name)
-   DurableWorkflow.Scheduler.disable(schedule_name)
-   DurableWorkflow.Scheduler.trigger_now(schedule_name)
-   DurableWorkflow.Scheduler.update_schedule(name, cron: "0 */2 * * *")
+   Durable.schedule(module, cron_expression, opts)
+   Durable.list_schedules(filters)
+   Durable.get_schedule(name)
+   Durable.update_schedule(name, changes)
+   Durable.delete_schedule(name)
+   Durable.enable_schedule(name)
+   Durable.disable_schedule(name)
+   Durable.trigger_schedule(name)
    ```
 
-4. **Auto-registration:**
-   ```elixir
-   # On application start
-   DurableWorkflow.Scheduler.register_all_crons([
-     ReportWorkflow,
-     CleanupWorkflow,
-     SyncWorkflow
-   ])
-   ```
+4. **Implementation Files:**
+   - `lib/durable/scheduler/scheduler.ex` - GenServer (245 lines)
+   - `lib/durable/scheduler/api.ex` - CRUD API
+   - `lib/durable/scheduler/dsl.ex` - @schedule decorator
+   - `test/durable/scheduler_test.exs` - 45 tests
 
 **Success Criteria:**
-- [ ] @cron decorator works
-- [ ] Cron expressions parsed correctly
-- [ ] Jobs scheduled at correct times
-- [ ] Timezone support works
-- [ ] Enable/disable works
-- [ ] Manual trigger works
+- [x] @schedule decorator works
+- [x] Cron expressions parsed correctly
+- [x] Jobs scheduled at correct times
+- [x] Timezone support works
+- [x] Enable/disable works
+- [x] Manual trigger works
+- [x] Multi-node safe via SKIP LOCKED
+- [x] Telemetry events emitted
 
 ---
 

@@ -64,6 +64,11 @@ defmodule Durable.DSL.Workflow do
 
       # Register the workflow
       @durable_workflows {unquote(name), workflow_def}
+
+      # Capture any @schedule attribute for this workflow
+      if Code.ensure_loaded?(Durable.Scheduler.DSL) do
+        Durable.Scheduler.DSL.capture_schedule(__MODULE__, unquote(name))
+      end
     end
   end
 

@@ -81,6 +81,40 @@ defmodule Durable.Storage.Schemas.ScheduledWorkflow do
     |> cast(%{enabled: enabled}, [:enabled])
   end
 
+  @doc """
+  Creates a changeset for upserting during registration.
+
+  Updates cron, timezone, input, and queue, but preserves enabled status
+  and run times for existing records.
+  """
+  def upsert_changeset(scheduled_workflow, attrs) do
+    # Only update these fields during registration - preserve enabled, last_run_at, next_run_at
+    upsert_fields = [
+      :workflow_module,
+      :workflow_name,
+      :cron_expression,
+      :timezone,
+      :input,
+      :queue
+    ]
+
+    scheduled_workflow
+    |> cast(attrs, [:name | upsert_fields])
+    |> validate_required(@required_fields)
+    |> validate_cron_expression()
+  end
+
+  @doc """
+  Creates a changeset for updating a schedule's configuration.
+  """
+  def update_changeset(scheduled_workflow, attrs) do
+    update_fields = [:cron_expression, :timezone, :input, :queue, :enabled, :next_run_at]
+
+    scheduled_workflow
+    |> cast(attrs, update_fields)
+    |> validate_cron_expression()
+  end
+
   defp validate_cron_expression(changeset) do
     case get_change(changeset, :cron_expression) do
       nil ->

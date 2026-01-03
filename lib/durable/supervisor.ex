@@ -109,7 +109,11 @@ defmodule Durable.Supervisor do
         base_children ++
           [
             {Durable.Queue.Manager, config: config},
-            {Durable.Wait.TimeoutWorker, config: config}
+            {Durable.Wait.TimeoutWorker, config: config},
+            {Durable.Scheduler,
+             config: config,
+             interval: config.scheduler_interval,
+             scheduled_modules: config.scheduled_modules}
           ]
       else
         Logger.info("Durable #{inspect(config.name)} starting with queue processing disabled")
