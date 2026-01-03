@@ -111,7 +111,7 @@ defmodule Durable.ParallelTest do
       assert execution.error["type"] == "parallel_error"
       # Should have collected error from failing step
       errors = execution.error["errors"]
-      assert length(errors) >= 1
+      assert errors != []
     end
   end
 
@@ -182,7 +182,8 @@ defmodule Durable.ParallelTest do
 
       # Manually create a completed step execution for one of the parallel steps
       # This simulates a partial execution (task_a completed, task_b did not)
-      task_a_name = Enum.find(parallel_step_names, &(Atom.to_string(&1) |> String.contains?("task_a")))
+      task_a_name =
+        Enum.find(parallel_step_names, &(Atom.to_string(&1) |> String.contains?("task_a")))
 
       {:ok, _step_exec} =
         %StepExecution{}
@@ -254,7 +255,9 @@ defmodule Durable.ParallelTest do
       # Mark BOTH parallel steps as completed (simulating all done)
       for step_name <- parallel_step_names do
         name_str = Atom.to_string(step_name)
-        context_key = if String.contains?(name_str, "task_a"), do: "from_task_a", else: "from_task_b"
+
+        context_key =
+          if String.contains?(name_str, "task_a"), do: "from_task_a", else: "from_task_b"
 
         {:ok, _} =
           %StepExecution{}

@@ -148,7 +148,7 @@ defmodule Durable.IntegrationTest do
 
     test "rejected request follows rejection path" do
       input = %{
-        "amount" => 10000,
+        "amount" => 10_000,
         "items" => ["contract1"],
         "approval_result" => "rejected"
       }
@@ -289,15 +289,23 @@ defmodule Durable.IntegrationTest do
         |> repo.insert()
 
       # Find the final parallel block
-      parallel_step = Enum.find(workflow_def.steps, fn step ->
-        step.type == :parallel and
-        Enum.any?(step.opts[:steps] || [], &(Atom.to_string(&1) |> String.contains?("send_confirmation")))
-      end)
+      parallel_step =
+        Enum.find(workflow_def.steps, fn step ->
+          step.type == :parallel and
+            Enum.any?(
+              step.opts[:steps] || [],
+              &(Atom.to_string(&1) |> String.contains?("send_confirmation"))
+            )
+        end)
 
       parallel_step_names = parallel_step.opts[:steps]
 
       # Pre-create completed step execution for send_confirmation
-      confirmation_step = Enum.find(parallel_step_names, &(Atom.to_string(&1) |> String.contains?("send_confirmation")))
+      confirmation_step =
+        Enum.find(
+          parallel_step_names,
+          &(Atom.to_string(&1) |> String.contains?("send_confirmation"))
+        )
 
       {:ok, _} =
         %StepExecution{}
@@ -338,7 +346,10 @@ defmodule Durable.IntegrationTest do
 
       # send_confirmation should only have 1 execution (not re-run)
       step_execs = get_step_executions(execution.id)
-      confirmation_execs = Enum.filter(step_execs, &String.contains?(&1.step_name, "send_confirmation"))
+
+      confirmation_execs =
+        Enum.filter(step_execs, &String.contains?(&1.step_name, "send_confirmation"))
+
       assert length(confirmation_execs) == 1
     end
   end
@@ -541,7 +552,8 @@ defmodule BatchMigrationWorkflow do
     # If empty, jump to finalize (skipping parallel and mark_success)
     decision :check_results do
       ids = get_context(:migrated_ids, [])
-      if length(ids) > 0 do
+
+      if ids != [] do
         {:continue}
       else
         {:goto, :finalize}
@@ -574,6 +586,7 @@ defmodule BatchMigrationWorkflow do
       if !has_context?(:migration_status) do
         put_context(:migration_status, "empty")
       end
+
       put_context(:completed_at, true)
     end
   end
