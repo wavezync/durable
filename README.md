@@ -3,461 +3,328 @@
 [![Build Status](https://github.com/wavezync/durable/actions/workflows/ci.yml/badge.svg)](https://github.com/wavezync/durable/actions/workflows/ci.yml)
 [![Hex.pm](https://img.shields.io/hexpm/v/durable.svg)](https://hex.pm/packages/durable)
 
-A durable, resumable workflow engine for Elixir, similar to Temporal/Inngest.
+A durable, resumable workflow engine for Elixir. Similar to Temporal/Inngest.
 
-## ✨ Features
+## Features
 
-- 📝 **Declarative DSL** - Clean macro-based workflow definitions
-- ⏸️ **Resumability** - Sleep, wait for events, wait for human input
-- 🔀 **Conditional Branching** - Intuitive `branch` construct for flow control
-- ⚡ **Parallel Execution** - Run steps concurrently with `parallel`
-- 🔄 **Reliability** - Automatic retries with configurable backoff strategies
-- 🔍 **Observability** - Built-in log capture per step
-- 💾 **Persistence** - PostgreSQL-backed execution state
+- **Declarative DSL** - Clean macro-based workflow definitions
+- **Resumability** - Sleep, wait for events, wait for human input
+- **Branching** - Pattern-matched conditional flow control
+- **Parallel** - Run steps concurrently with merge strategies
+- **ForEach** - Process collections with configurable concurrency
+- **Compensations** - Saga pattern with automatic rollback
+- **Cron Scheduling** - Recurring workflows with cron expressions
+- **Reliability** - Automatic retries with exponential/linear/constant backoff
+- **Persistence** - PostgreSQL-backed execution state
 
-## 📦 Installation
-
-Add `durable` to your list of dependencies in `mix.exs`:
+## Installation
 
 ```elixir
 def deps do
-  [
-    {:durable, "~> 0.0.0-alpha"}
-  ]
+  [{:durable, "~> 0.0.0-alpha"}]
 end
 ```
 
-## 🚀 Quick Start
+## Quick Start
 
-### 1. Create the Migration
-
-Durable stores all data in a dedicated PostgreSQL schema called `durable`. Create a migration:
-
-```bash
-mix ecto.gen.migration add_durable
-```
+### 1. Create Migration
 
 ```elixir
-# priv/repo/migrations/XXXXXX_add_durable.exs
 defmodule MyApp.Repo.Migrations.AddDurable do
   use Ecto.Migration
-
   def up, do: Durable.Migration.up()
   def down, do: Durable.Migration.down()
 end
 ```
 
-Run the migration:
-
-```bash
-mix ecto.migrate
-```
-
 ### 2. Add to Supervision Tree
 
-Add Durable to your application's supervision tree:
-
 ```elixir
-# lib/my_app/application.ex
-def start(_type, _args) do
-  children = [
-    MyApp.Repo,
-    {Durable,
-      repo: MyApp.Repo,
-      queues: %{
-        default: [concurrency: 10, poll_interval: 1000]
-      }}
-  ]
-
-  opts = [strategy: :one_for_one, name: MyApp.Supervisor]
-  Supervisor.start_link(children, opts)
-end
+children = [
+  MyApp.Repo,
+  {Durable, repo: MyApp.Repo, queues: %{default: [concurrency: 10]}}
+]
 ```
 
-#### Configuration Options
-
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `:repo` | atom | **required** | Your Ecto repo module |
-| `:name` | atom | `Durable` | Instance name (for multiple instances) |
-| `:prefix` | string | `"durable"` | PostgreSQL schema name |
-| `:queues` | map | `%{default: [...]}` | Queue configurations |
-| `:queue_enabled` | boolean | `true` | Enable/disable queue processing |
-| `:stale_lock_timeout` | integer | `300` | Seconds before a lock is considered stale |
-| `:heartbeat_interval` | integer | `30_000` | Milliseconds between worker heartbeats |
-
-### 3. Define a Workflow
+### 3. Define & Run
 
 ```elixir
 defmodule MyApp.OrderWorkflow do
   use Durable
   use Durable.Context
 
-  workflow "process_order", timeout: hours(2) do
-    step :validate do
-      order = input().order
-      put_context(:order_id, order.id)
-      put_context(:items, order.items)
-    end
-
-    step :calculate_total do
-      items = get_context(:items)
-      total = Enum.sum(Enum.map(items, & &1.price))
-      put_context(:total, total)
-    end
-
-    step :charge_payment, retry: [max_attempts: 3, backoff: :exponential] do
-      total = get_context(:total)
-      {:ok, charge} = PaymentService.charge(get_context(:order_id), total)
+  workflow "process_order" do
+    step :charge, retry: [max_attempts: 3, backoff: :exponential] do
+      {:ok, charge} = Payments.charge(input().order)
       put_context(:charge_id, charge.id)
     end
 
-    step :send_confirmation do
-      EmailService.send_confirmation(get_context(:order_id))
+    step :notify do
+      Mailer.send_receipt(input().email, get_context(:charge_id))
     end
   end
 end
+
+# Start it
+{:ok, id} = Durable.start(MyApp.OrderWorkflow, %{order: order, email: "user@example.com"})
 ```
 
-### 4. Start a Workflow
+## Examples
+
+### Approval Workflow
+
+Wait for human approval with timeout fallback.
 
 ```elixir
-{:ok, workflow_id} = Durable.start(MyApp.OrderWorkflow, %{order: order})
+defmodule MyApp.ExpenseApproval do
+  use Durable
+  use Durable.Context
+  use Durable.Wait
+
+  workflow "expense_approval" do
+    step :request_approval do
+      result = wait_for_approval("manager",
+        prompt: "Approve $#{input().amount} expense?",
+        timeout: days(3),
+        timeout_value: :auto_rejected
+      )
+      put_context(:decision, result)
+    end
+
+    branch on: get_context(:decision) do
+      :approved -> step :process, do: Expenses.reimburse(input().employee_id, input().amount)
+      _ -> step :notify_rejection, do: Mailer.send_rejection(input().employee_id)
+    end
+  end
+end
+
+# Approve externally
+Durable.provide_input(workflow_id, "manager", :approved)
 ```
 
-### 5. Query Execution Status
+### Parallel Data Fetch
+
+Fetch data concurrently, then combine.
 
 ```elixir
-{:ok, execution} = Durable.get_execution(workflow_id)
-execution.status  # => :completed
-execution.context # => %{order_id: 123, total: 99.99, charge_id: "ch_xxx"}
-```
-
-## 📄 Document Processing Example
-
-Durable shines for multi-step pipelines that need reliability and clear flow control:
-
-```elixir
-defmodule MyApp.DocumentProcessor do
+defmodule MyApp.DashboardBuilder do
   use Durable
   use Durable.Context
 
-  workflow "process_document" do
-    step :fetch do
-      doc = DocumentStore.get(input()["doc_id"])
-      put_context(:doc, doc)
-      put_context(:doc_type, doc.type)
+  workflow "build_dashboard" do
+    parallel do
+      step :user, do: put_context(:user, Users.get(input().user_id))
+      step :orders, do: put_context(:orders, Orders.recent(input().user_id))
+      step :notifications, do: put_context(:notifs, Notifications.unread(input().user_id))
     end
 
-    # Conditional branching - only ONE path executes
-    branch on: get_context(:doc_type) do
-      :invoice ->
-        step :process_invoice, retry: [max_attempts: 3] do
-          invoice = InvoiceParser.parse(get_context(:doc))
-          put_context(:result, invoice)
-        end
-
-        step :validate_invoice do
-          invoice = get_context(:result)
-          put_context(:valid, invoice.total == Enum.sum(invoice.line_items))
-        end
-
-      :contract ->
-        step :process_contract do
-          contract = ContractParser.parse(get_context(:doc))
-          put_context(:result, contract)
-        end
-
-      _ ->
-        step :flag_for_review do
-          put_context(:needs_review, true)
-        end
-    end
-
-    # Runs after any branch completes
-    step :store do
-      DocumentStore.update(get_context(:doc).id, %{
-        doc_type: get_context(:doc_type),
-        processed_data: get_context(:result, %{}),
-        needs_review: get_context(:needs_review, false)
-      })
+    step :render do
+      Dashboard.build(get_context(:user), get_context(:orders), get_context(:notifs))
     end
   end
 end
 ```
 
-**Key benefits:**
+### Batch Processing
 
-- 🔄 **Automatic Retries** - Failed steps retry with configurable backoff
-- 💾 **State Persistence** - Workflow resumes from the last step after crashes
-- 🔀 **Clear Flow Control** - The `branch` construct makes conditional logic readable
-- 🔍 **Observability** - Each step's logs are captured for debugging
-
-## 📖 DSL Reference
-
-### Workflow Definition
+Process items with controlled concurrency.
 
 ```elixir
-workflow "name", timeout: hours(2), max_retries: 3 do
-  # steps...
-end
-```
+defmodule MyApp.BulkEmailer do
+  use Durable
+  use Durable.Context
 
-### Step Definition
-
-```elixir
-step :name do
-  # step logic
-end
-
-step :name, retry: [max_attempts: 3, backoff: :exponential] do
-  # step with retry
-end
-
-step :name, timeout: minutes(5) do
-  # step with timeout
-end
-```
-
-### 🔀 Branch (Conditional Flow)
-
-The `branch` macro provides intuitive conditional execution. Only ONE branch executes based on the condition, then execution continues after the branch block.
-
-```elixir
-branch on: get_context(:status) do
-  :approved ->
-    step :process_approved do
-      # Handle approved case
+  workflow "send_campaign" do
+    step :load do
+      put_context(:recipients, Subscribers.active(input().campaign_id))
     end
 
-  :rejected ->
-    step :process_rejected do
-      # Handle rejected case
-    end
-
-  _ ->
-    step :process_default do
-      # Default case
-    end
-end
-```
-
-Features:
-- Pattern matching on atoms, strings, integers, and booleans
-- Default clause with `_` wildcard
-- Multiple steps per branch
-- Execution continues after the branch block
-
-### ⚡ Parallel Execution
-
-Run multiple steps concurrently and wait for all to complete:
-
-```elixir
-parallel do
-  step :fetch_user do
-    put_context(:user, UserService.get(input().user_id))
-  end
-
-  step :fetch_orders do
-    put_context(:orders, OrderService.list(input().user_id))
-  end
-
-  step :fetch_preferences do
-    put_context(:prefs, PreferenceService.get(input().user_id))
-  end
-end
-
-# Continues after all parallel steps complete
-step :build_dashboard do
-  Dashboard.build(
-    get_context(:user),
-    get_context(:orders),
-    get_context(:prefs)
-  )
-end
-```
-
-#### 🚀 Advanced: Parallel Workflows
-
-Nest `parallel` inside `branch` to run different concurrent tasks based on conditions. This example processes documents differently by type - contracts run 3 extractions in parallel, while invoices use a single step:
-
-```elixir
-workflow "process_document" do
-  step :fetch do
-    doc = DocumentStore.get(input()["doc_id"])
-    put_context(:doc, doc)
-  end
-
-  step :classify, retry: [max_attempts: 3] do
-    result = AI.classify(get_context(:doc).content)
-    put_context(:doc_type, result.type)
-  end
-
-  branch on: get_context(:doc_type) do
-    :contract ->
-      # Run multiple AI extractions in parallel
-      parallel do
-        step :extract_parties do
-          put_context(:parties, AI.extract_parties(get_context(:doc)))
-        end
-
-        step :extract_terms do
-          put_context(:terms, AI.extract_terms(get_context(:doc)))
-        end
-
-        step :check_signatures do
-          put_context(:signatures, AI.detect_signatures(get_context(:doc)))
-        end
+    foreach :send_emails, items: :recipients, concurrency: 10, on_error: :continue do
+      step :send do
+        Mailer.send_campaign(current_item(), input().campaign_id)
       end
-
-      step :merge_results do
-        put_context(:extracted, %{
-          parties: get_context(:parties),
-          terms: get_context(:terms),
-          signatures: get_context(:signatures)
-        })
-      end
-
-    :invoice ->
-      step :extract_invoice do
-        put_context(:extracted, AI.extract_invoice(get_context(:doc)))
-      end
-
-    _ ->
-      step :flag_review do
-        put_context(:needs_review, true)
-      end
-  end
-
-  step :store do
-    DocumentStore.save(get_context(:doc).id, get_context(:extracted, %{}))
+    end
   end
 end
 ```
 
-### 📦 Context Management
+### Trip Booking (Saga)
+
+Book multiple services with automatic rollback on failure.
 
 ```elixir
-use Durable.Context
+defmodule MyApp.TripBooking do
+  use Durable
+  use Durable.Context
 
-# Read
-context()                    # Get entire context
-get_context(:key)            # Get specific key
-get_context(:key, default)   # Get with default
-input()                      # Get initial input
-workflow_id()                # Get current workflow ID
+  workflow "book_trip" do
+    step :book_flight, compensate: :cancel_flight do
+      put_context(:flight, Flights.book(input().flight))
+    end
 
-# Write
-put_context(:key, value)     # Set single key
-put_context(%{k1: v1})       # Merge map
-update_context(:key, &(&1 + 1))
-delete_context(:key)
+    step :book_hotel, compensate: :cancel_hotel do
+      put_context(:hotel, Hotels.book(input().hotel))
+    end
 
-# Accumulators
-append_context(:list, value)
-increment_context(:counter, 1)
-```
+    step :charge do
+      total = get_context(:flight).price + get_context(:hotel).price
+      Payments.charge(input().card, total)
+    end
 
-### ⏰ Time Helpers
-
-```elixir
-seconds(30)   # 30,000 ms
-minutes(5)    # 300,000 ms
-hours(2)      # 7,200,000 ms
-days(7)       # 604,800,000 ms
-```
-
-### ⏸️ Wait Primitives
-
-```elixir
-use Durable.Wait
-
-# Sleep for duration
-sleep_for(seconds: 30)
-sleep_for(minutes: 5)
-sleep_for(hours: 24)
-
-# Sleep until specific time
-sleep_until(~U[2025-12-25 00:00:00Z])
-
-# Wait for external event
-wait_for_event("payment_confirmed", timeout: minutes(5))
-
-# Wait for human input
-wait_for_input("manager_decision", timeout: days(3))
-```
-
-### 🔄 Retry Strategies
-
-- `:exponential` - Delay = base^attempt * 1000ms (default)
-- `:linear` - Delay = attempt * base * 1000ms
-- `:constant` - Fixed delay between retries
-
-```elixir
-step :api_call, retry: [
-  max_attempts: 5,
-  backoff: :exponential,
-  base: 2,
-  max_backoff: 60_000  # Cap at 1 minute
-] do
-  ExternalAPI.call()
+    compensate :cancel_flight, do: Flights.cancel(get_context(:flight).id)
+    compensate :cancel_hotel, do: Hotels.cancel(get_context(:hotel).id)
+  end
 end
 ```
 
-## 🔌 API Reference
+### Scheduled Reports
 
-### Starting Workflows
+Run daily at 9am.
+
+```elixir
+defmodule MyApp.DailyReport do
+  use Durable
+  use Durable.Scheduler.DSL
+  use Durable.Context
+
+  @schedule cron: "0 9 * * *", timezone: "America/New_York"
+  workflow "daily_sales_report" do
+    step :generate do
+      report = Reports.sales_summary(Date.utc_today())
+      put_context(:report, report)
+    end
+
+    step :distribute do
+      Mailer.send_report(get_context(:report), to: "team@company.com")
+      Slack.post_summary(get_context(:report), channel: "#sales")
+    end
+  end
+end
+
+# Register in supervision tree
+{Durable, repo: MyApp.Repo, scheduled_modules: [MyApp.DailyReport]}
+```
+
+### Delayed & Scheduled Execution
+
+Sleep, schedule for specific times, and wait for events.
+
+```elixir
+defmodule MyApp.TrialReminder do
+  use Durable
+  use Durable.Context
+  use Durable.Wait
+
+  workflow "trial_reminder" do
+    step :welcome do
+      Mailer.send_welcome(input().user_id)
+    end
+
+    step :wait_3_days do
+      sleep(days(3))
+    end
+
+    step :check_in do
+      Mailer.send_tips(input().user_id)
+    end
+
+    step :wait_until_trial_ends do
+      trial_end = DateTime.add(input().trial_started_at, 14, :day)
+      schedule_at(trial_end)
+    end
+
+    step :convert_or_remind do
+      if Subscriptions.active?(input().user_id) do
+        put_context(:converted, true)
+      else
+        Mailer.send_upgrade_reminder(input().user_id)
+      end
+    end
+  end
+end
+```
+
+### Event-Driven Workflow
+
+Wait for external webhook events.
+
+```elixir
+defmodule MyApp.PaymentFlow do
+  use Durable
+  use Durable.Context
+  use Durable.Wait
+
+  workflow "payment_flow" do
+    step :create_invoice do
+      invoice = Invoices.create(input().order_id, input().amount)
+      put_context(:invoice_id, invoice.id)
+    end
+
+    step :await_payment do
+      {event, _payload} = wait_for_any(["payment.success", "payment.failed"],
+        timeout: days(7),
+        timeout_value: {"payment.expired", nil}
+      )
+      put_context(:result, event)
+    end
+
+    branch on: get_context(:result) do
+      "payment.success" -> step :fulfill, do: Orders.fulfill(input().order_id)
+      _ -> step :cancel, do: Orders.cancel(input().order_id)
+    end
+  end
+end
+
+# Webhook handler sends event
+Durable.send_event(workflow_id, "payment.success", %{transaction_id: "txn_123"})
+```
+
+## Reference
+
+### Context
+
+```elixir
+input()                       # Initial workflow input
+get_context(:key)             # Get value
+get_context(:key, default)    # With default
+put_context(:key, value)      # Set value
+append_context(:list, item)   # Append to list
+```
+
+### Time Helpers
+
+```elixir
+seconds(30)   # 30_000 ms
+minutes(5)    # 300_000 ms
+hours(2)      # 7_200_000 ms
+days(7)       # 604_800_000 ms
+```
+
+### API
 
 ```elixir
 Durable.start(Module, input)
-Durable.start(Module, input,
-  workflow: "name",
-  queue: :high_priority,
-  priority: 10,
-  scheduled_at: ~U[2025-01-01 00:00:00Z]
-)
+Durable.start(Module, input, queue: :priority, scheduled_at: datetime)
+Durable.get_execution(id)
+Durable.list_executions(workflow: Module, status: :running)
+Durable.cancel(id, "reason")
+Durable.send_event(id, "event", payload)
+Durable.provide_input(id, "input_name", data)
 ```
 
-### Querying Executions
+## Guides
 
-```elixir
-Durable.get_execution(workflow_id)
-Durable.get_execution(workflow_id, include_steps: true)
+- [Branching](guides/branching.md) - Conditional flow control
+- [Parallel](guides/parallel.md) - Concurrent execution
+- [ForEach](guides/foreach.md) - Collection processing
+- [Compensations](guides/compensations.md) - Saga pattern
+- [Waiting](guides/waiting.md) - Sleep, events, human input
 
-Durable.list_executions(
-  workflow: MyApp.OrderWorkflow,
-  status: :running,
-  limit: 100
-)
-```
+## Coming Soon
 
-### Controlling Workflows
+- Workflow orchestration (parent/child workflows)
+- Phoenix LiveView dashboard
 
-```elixir
-Durable.cancel(workflow_id)
-Durable.cancel(workflow_id, "reason")
-```
-
-### Providing Input/Events
-
-```elixir
-# Resume a waiting workflow with input
-Durable.provide_input(workflow_id, "manager_decision", %{approved: true})
-
-# Send an event to a waiting workflow
-Durable.send_event(workflow_id, "payment_confirmed", %{payment_id: "pay_123"})
-```
-
-## 🔮 Coming Soon
-
-- 🔁 Collection iteration (`each items, as: :item do ... end`)
-- 🔗 Workflow orchestration - Call child workflows from steps
-- 🔧 Pipe-based API - Functional workflow composition
-- ↩️ Compensation/Saga patterns
-- 📅 Cron scheduling
-- 📊 Graph visualization
-- 🖥️ Phoenix LiveView dashboard
-
-## 📄 License
+## License
 
 MIT
