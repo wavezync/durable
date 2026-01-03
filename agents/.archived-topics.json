@@ -64,6 +64,38 @@
           "status": "completed"
         }
       ]
+    },
+    {
+      "slug": "ci-fix-parallel-jobs",
+      "title": "CI Fix Parallel Jobs",
+      "description": "Fix CI failures after pushing resumable parallel jobs feature",
+      "created": "2026-01-03",
+      "lastUpdated": "2026-01-03",
+      "sessionCount": 1,
+      "status": "completed",
+      "tags": [
+        "ci",
+        "credo",
+        "formatting",
+        "refactoring",
+        "code-quality",
+        "precommit"
+      ],
+      "keyFiles": [
+        "lib/durable/executor.ex",
+        "mix.exs",
+        "test/durable/integration_test.exs",
+        "test/durable/parallel_test.exs"
+      ],
+      "sessions": [
+        {
+          "number": 1,
+          "date": "2026-01-03",
+          "file": "sessions/2026-01-03-session-01.md",
+          "focus": "Fix all CI failures post parallel jobs feature",
+          "status": "completed"
+        }
+      ]
     }
   ]
 }

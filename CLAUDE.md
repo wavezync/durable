@@ -14,8 +14,11 @@ mix test              # Run tests (creates/migrates DB automatically)
 
 # Code quality
 mix format            # Format code
-mix credo             # Lint
+mix credo --strict    # Lint (strict mode)
 mix dialyzer          # Type checking
+
+# Precommit (matches CI)
+mix precommit         # Runs: format, compile --warnings-as-errors, credo --strict, test
 ```
 
 ## Architecture
@@ -126,3 +129,29 @@ use Durable.DataCase, async: false
 All tables live in the `durable` PostgreSQL schema: `durable.workflow_executions`, `durable.step_executions`, `durable.pending_inputs`, `durable.scheduled_workflows`
 
 Uses binary UUIDs as primary keys.
+
+## Code Style (Credo Strict Mode)
+
+This project uses `credo --strict`. Key requirements:
+
+- **Max nesting depth**: 2 levels (use helper functions to reduce nesting)
+- **Max function arity**: 8 parameters (use opts maps for more)
+- **Max cyclomatic complexity**: ~10 (split complex functions)
+- **Numbers**: Use underscores for readability (`10_000` not `10000`)
+- **List checks**: Use `list != []` instead of `length(list) > 0` (O(1) vs O(n))
+- **Conditionals**: Use `if` instead of `cond` with only a true branch
+
+### Opts Map Pattern
+
+For functions with many parameters, use an opts map:
+
+```elixir
+# Instead of many parameters
+def my_function(a, b, c, d, e, f, g, h, i)
+
+# Use opts map
+def my_function(a, b, opts) do
+  %{c: c, d: d, e: e, f: f, g: g, h: h, i: i} = opts
+  # ...
+end
+```

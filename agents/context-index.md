@@ -8,6 +8,7 @@ This index provides quick access to archived development discussions and impleme
 |-------|--------------|----------|--------|
 | [Embeddable Library Transformation](./conversations/embeddable-library-transformation/) | 2026-01-02 | 1 | Completed |
 | [Parallel Durability Implementation](./conversations/parallel-durability-implementation/) | 2026-01-03 | 1 | Completed |
+| [CI Fix Parallel Jobs](./conversations/ci-fix-parallel-jobs/) | 2026-01-03 | 1 | Completed |
 
 ## Completed Topics
 
@@ -15,6 +16,7 @@ This index provides quick access to archived development discussions and impleme
 |-------|-----------|-------------|
 | [Embeddable Library Transformation](./conversations/embeddable-library-transformation/) | 2026-01-02 | Transformed Durable into an Oban-style embeddable library |
 | [Parallel Durability Implementation](./conversations/parallel-durability-implementation/) | 2026-01-03 | Made parallel execution truly durable and resumable |
+| [CI Fix Parallel Jobs](./conversations/ci-fix-parallel-jobs/) | 2026-01-03 | Fixed CI failures after parallel jobs feature |
 
 ## Topic Quick Reference
 
@@ -45,6 +47,21 @@ Covers making parallel steps truly durable so completed steps are NOT re-execute
 **Key Files Modified**:
 - `lib/durable/executor.ex`
 - `lib/durable/executor/step_runner.ex`
+- `test/durable/integration_test.exs`
+- `test/durable/parallel_test.exs`
+
+### CI Fix Parallel Jobs
+**Path**: `agents/conversations/ci-fix-parallel-jobs/`
+
+Covers fixing CI failures after the parallel jobs feature. Key outcomes:
+- Updated precommit alias to match CI behavior
+- Documented Credo strict mode requirements
+- Refactored executor.ex to reduce complexity
+- Extracted 11 helper functions for better maintainability
+
+**Key Files Modified**:
+- `lib/durable/executor.ex`
+- `mix.exs`
 - `test/durable/integration_test.exs`
 - `test/durable/parallel_test.exs`
 
