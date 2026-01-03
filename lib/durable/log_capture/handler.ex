@@ -31,7 +31,7 @@ defmodule Durable.LogCapture.Handler do
   @doc """
   Attaches the log capture handler to the Logger.
 
-  Called from `Durable.Application.start/2` during application startup.
+  Called from the application's start callback during application startup.
   Returns `:ok` on success.
 
   If the handler is already attached, this is a no-op.
