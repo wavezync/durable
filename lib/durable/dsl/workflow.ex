@@ -37,17 +37,28 @@ defmodule Durable.DSL.Workflow do
       Module.delete_attribute(__MODULE__, :durable_current_steps)
       Module.register_attribute(__MODULE__, :durable_current_steps, accumulate: true)
 
-      # Execute the block to collect steps
+      # Reset compensations accumulator
+      Module.delete_attribute(__MODULE__, :durable_compensations)
+      Module.register_attribute(__MODULE__, :durable_compensations, accumulate: true)
+
+      # Execute the block to collect steps and compensations
       unquote(block)
 
       # Get collected steps (in reverse order due to accumulation)
       steps = Module.get_attribute(__MODULE__, :durable_current_steps) |> Enum.reverse()
+
+      # Get collected compensations and build map
+      compensations =
+        __MODULE__
+        |> Module.get_attribute(:durable_compensations)
+        |> Enum.reduce(%{}, fn comp, acc -> Map.put(acc, comp.name, comp) end)
 
       # Build workflow definition
       workflow_def = %Durable.Definition.Workflow{
         name: unquote(name),
         module: __MODULE__,
         steps: steps,
+        compensations: compensations,
         opts: unquote(Macro.escape(normalized_opts))
       }
 

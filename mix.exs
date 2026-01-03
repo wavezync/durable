@@ -71,7 +71,15 @@ defmodule Durable.MixProject do
       main: "readme",
       source_url: @source_url,
       source_ref: "v#{@version}",
-      extras: ["README.md"]
+      extras: [
+        "README.md",
+        "guides/ai_workflows.md",
+        "guides/branching.md",
+        "guides/compensations.md",
+        "guides/foreach.md",
+        "guides/parallel.md",
+        "guides/waiting.md"
+      ]
     ]
   end
 

@@ -139,6 +139,71 @@ defmodule Durable.DSL.Step do
   end
 
   @doc """
+  Defines a compensation handler for saga pattern.
+
+  Compensations are executed in reverse order when a workflow step fails
+  and the workflow needs to undo previously completed steps.
+
+  ## Examples
+
+      workflow "book_trip" do
+        step :book_flight, compensate: :cancel_flight do
+          FlightAPI.book(get_context(:flight))
+        end
+
+        step :book_hotel, compensate: :cancel_hotel do
+          HotelAPI.book(get_context(:hotel))
+        end
+
+        step :charge_payment do
+          # If this fails, compensations run in reverse order:
+          # cancel_hotel first, then cancel_flight
+          PaymentService.charge(get_context(:total))
+        end
+
+        compensate :cancel_flight do
+          FlightAPI.cancel(get_context(:flight_booking))
+        end
+
+        compensate :cancel_hotel do
+          HotelAPI.cancel(get_context(:hotel_booking))
+        end
+      end
+
+  ## Options
+
+  - `:retry` - Retry configuration for the compensation
+    - `:max_attempts` - Maximum retry attempts (default: 1)
+    - `:backoff` - Backoff strategy: `:exponential`, `:linear`, `:constant`
+  - `:timeout` - Compensation timeout in milliseconds
+
+  """
+  defmacro compensate(name, opts \\ [], do: body) do
+    normalized_opts = normalize_compensate_opts(opts)
+
+    quote do
+      @doc false
+      def unquote(:"__compensation_body__#{name}")(_ctx) do
+        unquote(body)
+      end
+
+      @durable_compensations %Durable.Definition.Compensation{
+        name: unquote(name),
+        module: __MODULE__,
+        opts: unquote(Macro.escape(normalized_opts))
+      }
+    end
+  end
+
+  @doc false
+  def normalize_compensate_opts(opts) do
+    opts
+    |> Keyword.take([:retry, :timeout])
+    |> Enum.into(%{})
+    |> normalize_retry_opts()
+  end
+
+  @doc """
   Defines a conditional branch within a workflow.
 
   The `branch` macro provides intuitive conditional execution that reads

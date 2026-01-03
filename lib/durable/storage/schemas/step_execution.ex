@@ -25,6 +25,8 @@ defmodule Durable.Storage.Schemas.StepExecution do
           started_at: DateTime.t() | nil,
           completed_at: DateTime.t() | nil,
           duration_ms: integer() | nil,
+          compensation_for: String.t() | nil,
+          is_compensation: boolean(),
           inserted_at: DateTime.t(),
           updated_at: DateTime.t()
         }
@@ -50,6 +52,10 @@ defmodule Durable.Storage.Schemas.StepExecution do
     field(:completed_at, :utc_datetime_usec)
     field(:duration_ms, :integer)
 
+    # Compensation/Saga support
+    field(:compensation_for, :string)
+    field(:is_compensation, :boolean, default: false)
+
     belongs_to(:workflow, Durable.Storage.Schemas.WorkflowExecution, foreign_key: :workflow_id)
 
     timestamps(type: :utc_datetime_usec)
@@ -66,7 +72,9 @@ defmodule Durable.Storage.Schemas.StepExecution do
     :logs,
     :started_at,
     :completed_at,
-    :duration_ms
+    :duration_ms,
+    :compensation_for,
+    :is_compensation
   ]
 
   @doc """

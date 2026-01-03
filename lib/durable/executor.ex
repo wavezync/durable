@@ -12,6 +12,7 @@ defmodule Durable.Executor do
   alias Durable.Config
   alias Durable.Context
   alias Durable.Definition.Workflow
+  alias Durable.Executor.CompensationRunner
   alias Durable.Executor.StepRunner
   alias Durable.Storage.Schemas.StepExecution
   alias Durable.Storage.Schemas.WorkflowExecution
@@ -203,6 +204,9 @@ defmodule Durable.Executor do
   defp execute_steps(steps, execution, config) do
     repo = config.repo
 
+    # Get workflow definition for compensation lookup
+    {:ok, workflow_def} = get_workflow_definition_from_execution(execution)
+
     # Find the starting point (for resumed workflows)
     {_already_completed, steps_to_run} =
       if execution.current_step do
@@ -217,7 +221,7 @@ defmodule Durable.Executor do
     step_index = build_step_index(steps)
 
     # Execute steps with decision support
-    case execute_steps_recursive(steps_to_run, execution, step_index, config) do
+    case execute_steps_recursive(steps_to_run, execution, step_index, workflow_def, config) do
       {:ok, exec} ->
         mark_completed(repo, exec)
 
@@ -236,21 +240,34 @@ defmodule Durable.Executor do
     |> Map.new()
   end
 
-  defp execute_steps_recursive([], execution, _step_index, _config) do
+  defp execute_steps_recursive([], execution, _step_index, _workflow_def, _config) do
     {:ok, execution}
   end
 
-  defp execute_steps_recursive([step | remaining_steps], execution, step_index, config) do
+  defp execute_steps_recursive(
+         [step | remaining_steps],
+         execution,
+         step_index,
+         workflow_def,
+         config
+       ) do
     # Handle special step types
     case step.type do
-      :branch -> execute_branch(step, remaining_steps, execution, step_index, config)
-      :parallel -> execute_parallel(step, remaining_steps, execution, step_index, config)
-      :foreach -> execute_foreach(step, remaining_steps, execution, step_index, config)
-      _ -> execute_regular_step(step, remaining_steps, execution, step_index, config)
+      :branch ->
+        execute_branch(step, remaining_steps, execution, step_index, workflow_def, config)
+
+      :parallel ->
+        execute_parallel(step, remaining_steps, execution, step_index, workflow_def, config)
+
+      :foreach ->
+        execute_foreach(step, remaining_steps, execution, step_index, workflow_def, config)
+
+      _ ->
+        execute_regular_step(step, remaining_steps, execution, step_index, workflow_def, config)
     end
   end
 
-  defp execute_regular_step(step, remaining_steps, execution, step_index, config) do
+  defp execute_regular_step(step, remaining_steps, execution, step_index, workflow_def, config) do
     repo = config.repo
 
     # Update current step
@@ -260,7 +277,7 @@ defmodule Durable.Executor do
       {:ok, _output} ->
         # Save context and continue to next step
         {:ok, exec} = save_context(repo, exec)
-        execute_steps_recursive(remaining_steps, exec, step_index, config)
+        execute_steps_recursive(remaining_steps, exec, step_index, workflow_def, config)
 
       {:decision, target_step} ->
         # Decision step wants to jump - find target in remaining steps
@@ -268,10 +285,15 @@ defmodule Durable.Executor do
 
         case find_jump_target(target_step, remaining_steps, step.name, step_index) do
           {:ok, target_steps} ->
-            execute_steps_recursive(target_steps, exec, step_index, config)
+            execute_steps_recursive(target_steps, exec, step_index, workflow_def, config)
 
           {:error, reason} ->
-            mark_failed(repo, exec, decision_error(step.name, target_step, reason))
+            handle_step_failure(
+              exec,
+              decision_error(step.name, target_step, reason),
+              workflow_def,
+              config
+            )
         end
 
       {:sleep, opts} ->
@@ -284,11 +306,11 @@ defmodule Durable.Executor do
         {:waiting, handle_wait_for_input(repo, exec, opts) |> elem(1)}
 
       {:error, error} ->
-        mark_failed(repo, exec, error)
+        handle_step_failure(exec, error, workflow_def, config)
     end
   end
 
-  defp execute_branch(branch_step, remaining_steps, execution, step_index, config) do
+  defp execute_branch(branch_step, remaining_steps, execution, step_index, workflow_def, config) do
     repo = config.repo
     {:ok, exec} = update_current_step(repo, execution, branch_step.name)
 
@@ -309,7 +331,7 @@ defmodule Durable.Executor do
 
     case condition_value do
       {:error, error} ->
-        mark_failed(repo, exec, %{type: "branch_error", message: error})
+        handle_step_failure(exec, %{type: "branch_error", message: error}, workflow_def, config)
 
       value ->
         # Find matching clause steps
@@ -319,11 +341,18 @@ defmodule Durable.Executor do
         {:ok, exec} = save_context(repo, exec)
 
         # Execute only the matching branch's steps
-        case execute_branch_steps(matching_steps, remaining_steps, exec, step_index, config) do
+        case execute_branch_steps(
+               matching_steps,
+               remaining_steps,
+               exec,
+               step_index,
+               workflow_def,
+               config
+             ) do
           {:ok, exec} ->
             # Skip past all branch steps in remaining and continue
             after_branch = skip_branch_steps(remaining_steps, all_branch_steps)
-            execute_steps_recursive(after_branch, exec, step_index, config)
+            execute_steps_recursive(after_branch, exec, step_index, workflow_def, config)
 
           {:waiting, exec} ->
             {:waiting, exec}
@@ -350,7 +379,14 @@ defmodule Durable.Executor do
     end)
   end
 
-  defp execute_branch_steps(step_names, remaining_steps, execution, step_index, config) do
+  defp execute_branch_steps(
+         step_names,
+         remaining_steps,
+         execution,
+         step_index,
+         workflow_def,
+         config
+       ) do
     # Find the actual step definitions from remaining_steps
     steps_to_execute =
       Enum.filter(remaining_steps, fn step ->
@@ -364,21 +400,21 @@ defmodule Durable.Executor do
       end)
       |> Enum.reject(&is_nil/1)
 
-    execute_branch_steps_sequential(ordered_steps, execution, step_index, config)
+    execute_branch_steps_sequential(ordered_steps, execution, step_index, workflow_def, config)
   end
 
-  defp execute_branch_steps_sequential([], execution, _step_index, _config) do
+  defp execute_branch_steps_sequential([], execution, _step_index, _workflow_def, _config) do
     {:ok, execution}
   end
 
-  defp execute_branch_steps_sequential([step | rest], execution, step_index, config) do
+  defp execute_branch_steps_sequential([step | rest], execution, step_index, workflow_def, config) do
     repo = config.repo
     {:ok, exec} = update_current_step(repo, execution, step.name)
 
     case StepRunner.execute(step, exec.id, config) do
       {:ok, _output} ->
         {:ok, exec} = save_context(repo, exec)
-        execute_branch_steps_sequential(rest, exec, step_index, config)
+        execute_branch_steps_sequential(rest, exec, step_index, workflow_def, config)
 
       {:sleep, opts} ->
         {:waiting, handle_sleep(repo, exec, opts) |> elem(1)}
@@ -390,7 +426,7 @@ defmodule Durable.Executor do
         {:waiting, handle_wait_for_input(repo, exec, opts) |> elem(1)}
 
       {:error, error} ->
-        mark_failed(repo, exec, error)
+        handle_step_failure(exec, error, workflow_def, config)
     end
   end
 
@@ -404,7 +440,14 @@ defmodule Durable.Executor do
   # Parallel Execution
   # ============================================================================
 
-  defp execute_parallel(parallel_step, remaining_steps, execution, step_index, config) do
+  defp execute_parallel(
+         parallel_step,
+         remaining_steps,
+         execution,
+         step_index,
+         workflow_def,
+         config
+       ) do
     repo = config.repo
     {:ok, exec} = update_current_step(repo, execution, parallel_step.name)
 
@@ -449,7 +492,7 @@ defmodule Durable.Executor do
       Context.restore_context(base_context_with_completed, input, exec.id)
       {:ok, exec} = save_context(repo, exec)
       after_parallel = skip_parallel_steps(remaining_steps, all_parallel_steps)
-      execute_steps_recursive(after_parallel, exec, step_index, config)
+      execute_steps_recursive(after_parallel, exec, step_index, workflow_def, config)
     else
       # Execute only incomplete steps in parallel
       case execute_parallel_steps(
@@ -468,10 +511,10 @@ defmodule Durable.Executor do
 
           # Skip past all parallel steps and continue
           after_parallel = skip_parallel_steps(remaining_steps, all_parallel_steps)
-          execute_steps_recursive(after_parallel, exec, step_index, config)
+          execute_steps_recursive(after_parallel, exec, step_index, workflow_def, config)
 
         {:error, error} ->
-          mark_failed(repo, exec, error)
+          handle_step_failure(exec, error, workflow_def, config)
       end
     end
   end
@@ -652,7 +695,7 @@ defmodule Durable.Executor do
   # ForEach Execution
   # ============================================================================
 
-  defp execute_foreach(foreach_step, remaining_steps, execution, step_index, config) do
+  defp execute_foreach(foreach_step, remaining_steps, execution, step_index, workflow_def, config) do
     repo = config.repo
     {:ok, exec} = update_current_step(repo, execution, foreach_step.name)
 
@@ -677,7 +720,16 @@ defmodule Durable.Executor do
     }
 
     result = do_execute_foreach(items, steps_to_execute, exec, config, concurrency, foreach_opts)
-    handle_foreach_result(result, remaining_steps, all_foreach_steps, exec, step_index, config)
+
+    handle_foreach_result(
+      result,
+      remaining_steps,
+      all_foreach_steps,
+      exec,
+      step_index,
+      workflow_def,
+      config
+    )
   end
 
   defp resolve_foreach_items({:context_key, key}), do: Context.get_context(key) || []
@@ -692,15 +744,23 @@ defmodule Durable.Executor do
     execute_foreach_concurrent(items, steps, execution, config, concurrency, opts)
   end
 
-  defp handle_foreach_result({:ok, final_context}, remaining, all_foreach_steps, exec, idx, cfg) do
-    Context.restore_context(final_context, Context.input(), exec.id)
+  defp handle_foreach_result(
+         {:ok, ctx},
+         remaining,
+         all_foreach_steps,
+         exec,
+         idx,
+         workflow_def,
+         cfg
+       ) do
+    Context.restore_context(ctx, Context.input(), exec.id)
     {:ok, exec} = save_context(cfg.repo, exec)
     after_foreach = skip_foreach_steps(remaining, all_foreach_steps)
-    execute_steps_recursive(after_foreach, exec, idx, cfg)
+    execute_steps_recursive(after_foreach, exec, idx, workflow_def, cfg)
   end
 
-  defp handle_foreach_result({:error, error}, _remaining, _all_foreach_steps, exec, _idx, cfg) do
-    mark_failed(cfg.repo, exec, error)
+  defp handle_foreach_result({:error, error}, _remaining, _all, exec, _idx, workflow_def, cfg) do
+    handle_step_failure(exec, error, workflow_def, cfg)
   end
 
   defp execute_foreach_sequential(items, steps, execution, config, opts) do
@@ -994,6 +1054,112 @@ defmodule Durable.Executor do
 
     {:error, error}
   end
+
+  # ============================================================================
+  # Compensation/Saga Support
+  # ============================================================================
+
+  # Handles step failure by running compensations if needed
+  defp handle_step_failure(execution, error, workflow_def, config) do
+    repo = config.repo
+
+    # Get the compensation stack from completed steps
+    compensation_stack = build_compensation_stack(execution.id, workflow_def, config)
+
+    if compensation_stack == [] do
+      # No compensations to run - just mark as failed
+      mark_failed(repo, execution, error)
+    else
+      # Run compensations
+      run_compensations(execution, error, compensation_stack, workflow_def, config)
+    end
+  end
+
+  # Builds the compensation stack from completed steps in reverse order
+  defp build_compensation_stack(workflow_id, workflow_def, config) do
+    repo = config.repo
+
+    # Get completed non-compensation steps
+    completed_steps =
+      repo.all(
+        from(s in StepExecution,
+          where: s.workflow_id == ^workflow_id,
+          where: s.status == :completed,
+          where: s.is_compensation == false,
+          order_by: [desc: s.completed_at],
+          select: s.step_name
+        )
+      )
+
+    # Map to steps that have compensations
+    completed_steps
+    |> Enum.map(&String.to_atom/1)
+    |> Enum.flat_map(&find_step_compensation(&1, workflow_def))
+  end
+
+  defp find_step_compensation(step_name, workflow_def) do
+    step_def = Enum.find(workflow_def.steps, &(&1.name == step_name))
+    get_compensation_for_step(step_name, step_def, workflow_def.compensations)
+  end
+
+  defp get_compensation_for_step(step_name, %{opts: %{compensate: comp_name}}, compensations)
+       when not is_nil(comp_name) do
+    case Map.get(compensations, comp_name) do
+      nil -> []
+      compensation -> [{step_name, compensation}]
+    end
+  end
+
+  defp get_compensation_for_step(_step_name, _step_def, _compensations), do: []
+
+  # Runs compensations in order and handles results
+  defp run_compensations(execution, original_error, compensation_stack, _workflow_def, config) do
+    repo = config.repo
+
+    # Mark workflow as compensating
+    {:ok, exec} =
+      execution
+      |> WorkflowExecution.compensating_changeset()
+      |> repo.update()
+
+    # Run each compensation, collecting results
+    results =
+      Enum.map(compensation_stack, fn {step_name, compensation} ->
+        result = CompensationRunner.execute(compensation, exec.id, step_name, config)
+
+        %{
+          step: Atom.to_string(step_name),
+          compensation: Atom.to_string(compensation.name),
+          result: format_compensation_result(result)
+        }
+      end)
+
+    # Check if any compensations failed
+    failed_count = Enum.count(results, &(&1.result.status == "failed"))
+
+    if failed_count > 0 do
+      # Some compensations failed
+      {:ok, _exec} =
+        exec
+        |> WorkflowExecution.compensation_failed_changeset(results, original_error)
+        |> Ecto.Changeset.change(locked_by: nil, locked_at: nil)
+        |> repo.update()
+
+      {:error, original_error}
+    else
+      # All compensations succeeded
+      {:ok, _exec} =
+        exec
+        |> WorkflowExecution.compensated_changeset(results)
+        |> Ecto.Changeset.change(locked_by: nil, locked_at: nil, error: original_error)
+        |> repo.update()
+
+      {:error, original_error}
+    end
+  end
+
+  defp format_compensation_result({:ok, _output}), do: %{status: "completed"}
+  defp format_compensation_result({:error, error}), do: %{status: "failed", error: error}
 
   defp handle_sleep(repo, execution, opts) do
     wake_at = calculate_wake_time(opts)

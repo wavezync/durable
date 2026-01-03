@@ -9,7 +9,16 @@ defmodule Durable.Storage.Schemas.WorkflowExecution do
   use Ecto.Schema
   import Ecto.Changeset
 
-  @type status :: :pending | :running | :completed | :failed | :waiting | :cancelled
+  @type status ::
+          :pending
+          | :running
+          | :completed
+          | :failed
+          | :waiting
+          | :cancelled
+          | :compensating
+          | :compensated
+          | :compensation_failed
 
   @type t :: %__MODULE__{
           id: Ecto.UUID.t(),
@@ -28,6 +37,8 @@ defmodule Durable.Storage.Schemas.WorkflowExecution do
           completed_at: DateTime.t() | nil,
           locked_by: String.t() | nil,
           locked_at: DateTime.t() | nil,
+          compensation_results: list(map()),
+          compensated_at: DateTime.t() | nil,
           inserted_at: DateTime.t(),
           updated_at: DateTime.t()
         }
@@ -40,7 +51,17 @@ defmodule Durable.Storage.Schemas.WorkflowExecution do
     field(:workflow_name, :string)
 
     field(:status, Ecto.Enum,
-      values: [:pending, :running, :completed, :failed, :waiting, :cancelled],
+      values: [
+        :pending,
+        :running,
+        :completed,
+        :failed,
+        :waiting,
+        :cancelled,
+        :compensating,
+        :compensated,
+        :compensation_failed
+      ],
       default: :pending
     )
 
@@ -56,6 +77,10 @@ defmodule Durable.Storage.Schemas.WorkflowExecution do
     field(:completed_at, :utc_datetime_usec)
     field(:locked_by, :string)
     field(:locked_at, :utc_datetime_usec)
+
+    # Compensation/Saga support
+    field(:compensation_results, {:array, :map}, default: [])
+    field(:compensated_at, :utc_datetime_usec)
 
     has_many(:step_executions, Durable.Storage.Schemas.StepExecution, foreign_key: :workflow_id)
     has_many(:pending_inputs, Durable.Storage.Schemas.PendingInput, foreign_key: :workflow_id)
@@ -77,7 +102,9 @@ defmodule Durable.Storage.Schemas.WorkflowExecution do
     :started_at,
     :completed_at,
     :locked_by,
-    :locked_at
+    :locked_at,
+    :compensation_results,
+    :compensated_at
   ]
 
   @doc """
@@ -118,5 +145,44 @@ defmodule Durable.Storage.Schemas.WorkflowExecution do
   def unlock_changeset(execution) do
     execution
     |> cast(%{locked_by: nil, locked_at: nil}, [:locked_by, :locked_at])
+  end
+
+  @doc """
+  Creates a changeset for marking workflow as compensating.
+  """
+  def compensating_changeset(execution) do
+    execution
+    |> cast(%{status: :compensating}, [:status])
+  end
+
+  @doc """
+  Creates a changeset for marking workflow as compensated (all compensations succeeded).
+  """
+  def compensated_changeset(execution, results) do
+    execution
+    |> cast(
+      %{
+        status: :compensated,
+        compensation_results: results,
+        compensated_at: DateTime.utc_now()
+      },
+      [:status, :compensation_results, :compensated_at]
+    )
+  end
+
+  @doc """
+  Creates a changeset for marking workflow compensation as failed.
+  """
+  def compensation_failed_changeset(execution, results, error) do
+    execution
+    |> cast(
+      %{
+        status: :compensation_failed,
+        compensation_results: results,
+        error: error,
+        compensated_at: DateTime.utc_now()
+      },
+      [:status, :compensation_results, :error, :compensated_at]
+    )
   end
 end

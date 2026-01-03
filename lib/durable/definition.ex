@@ -52,6 +52,38 @@ defmodule Durable.Definition do
     end
   end
 
+  defmodule Compensation do
+    @moduledoc """
+    Represents a compensation handler for a step.
+
+    Compensations are executed in reverse order when a workflow fails
+    and needs to undo previously completed steps (Saga pattern).
+    """
+
+    @type t :: %__MODULE__{
+            name: atom(),
+            module: module(),
+            opts: %{
+              optional(:retry) => Step.retry_opts(),
+              optional(:timeout) => pos_integer()
+            }
+          }
+
+    @enforce_keys [:name, :module]
+    defstruct [
+      :name,
+      :module,
+      opts: %{}
+    ]
+
+    @doc """
+    Executes the compensation body by calling the generated function in the module.
+    """
+    def execute(%__MODULE__{name: name, module: module}, context) do
+      apply(module, :"__compensation_body__#{name}", [context])
+    end
+  end
+
   defmodule Workflow do
     @moduledoc """
     Represents a complete workflow definition.
@@ -61,6 +93,7 @@ defmodule Durable.Definition do
             name: String.t(),
             module: module(),
             steps: [Step.t()],
+            compensations: %{atom() => Compensation.t()},
             opts: %{
               optional(:timeout) => pos_integer(),
               optional(:max_retries) => pos_integer(),
@@ -73,6 +106,7 @@ defmodule Durable.Definition do
       :name,
       :module,
       steps: [],
+      compensations: %{},
       opts: %{}
     ]
   end
