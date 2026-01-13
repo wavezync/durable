@@ -136,7 +136,8 @@ defmodule Durable.SchedulerTest do
           input: %{key: "value"}
         )
 
-      assert schedule.input == %{"key" => "value"} || schedule.input == %{key: "value"}
+      # Input is stored as-is (atom keys preserved in schedule record)
+      assert schedule.input == %{key: "value"}
     end
 
     test "creates schedule with queue" do

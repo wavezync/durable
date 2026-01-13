@@ -97,6 +97,36 @@ defmodule Durable.CompensationTest do
     end
   end
 
+  # Workflow where first compensation succeeds but second fails (partial compensation)
+  defmodule PartialCompensationWorkflow do
+    use Durable
+    use Durable.Helpers
+
+    workflow "partial_compensation" do
+      step(:step_one, [compensate: :undo_one], fn data ->
+        {:ok, assign(data, :one, true)}
+      end)
+
+      step(:step_two, [compensate: :undo_two], fn data ->
+        {:ok, assign(data, :two, true)}
+      end)
+
+      step(:fail_step, fn _data ->
+        raise "Step failed"
+      end)
+
+      # This compensation runs first (reverse order) and succeeds
+      compensate(:undo_two, fn data ->
+        {:ok, assign(data, :two_undone, true)}
+      end)
+
+      # This compensation runs second and fails
+      compensate(:undo_one, fn _data ->
+        raise "Compensation for step_one failed"
+      end)
+    end
+  end
+
   describe "compensation DSL" do
     test "compensate macro creates compensation definition" do
       {:ok, workflow_def} = BookTripWorkflow.__workflow_definition__("book_trip")
@@ -194,6 +224,25 @@ defmodule Durable.CompensationTest do
         )
 
       assert compensation_steps == []
+    end
+
+    test "records partial success when some compensations succeed and others fail" do
+      {:ok, execution} = create_and_execute_workflow(PartialCompensationWorkflow, %{})
+
+      # Workflow should be in compensation_failed state
+      assert execution.status == :compensation_failed
+
+      # Should have results for both compensations
+      results = execution.compensation_results
+      assert length(results) == 2
+
+      # First compensation (undo_two) should succeed, second (undo_one) should fail
+      [first_comp, second_comp] = results
+      assert first_comp["step"] == "step_two"
+      assert first_comp["result"]["status"] == "completed"
+
+      assert second_comp["step"] == "step_one"
+      assert second_comp["result"]["status"] == "failed"
     end
   end
 

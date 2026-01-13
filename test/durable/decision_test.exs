@@ -154,6 +154,15 @@ defmodule Durable.DecisionTest do
       assert execution.error["type"] == "decision_error"
       assert execution.error["message"] =~ "jump to self"
     end
+
+    test "fails gracefully when decision function raises an exception" do
+      {:ok, execution} = create_and_execute_workflow(ExceptionDecisionTestWorkflow, %{})
+
+      assert execution.status == :failed
+      assert execution.error != nil
+      # The exception should be caught and converted to an error
+      assert execution.error["message"] =~ "Intentional exception"
+    end
   end
 
   describe "decision with context" do
@@ -473,6 +482,25 @@ defmodule DecisionChainTestWorkflow do
 
     step(:very_high, fn data ->
       {:ok, assign(data, :result, "very_high")}
+    end)
+  end
+end
+
+defmodule ExceptionDecisionTestWorkflow do
+  use Durable
+  use Durable.Helpers
+
+  workflow "exception_decision" do
+    step(:setup, fn data ->
+      {:ok, data}
+    end)
+
+    decision(:boom, fn _data ->
+      raise "Intentional exception in decision"
+    end)
+
+    step(:never_reached, fn data ->
+      {:ok, data}
     end)
   end
 end

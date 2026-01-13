@@ -120,5 +120,12 @@ defmodule DurableTest do
     test "backoff respects max_backoff" do
       assert Backoff.calculate(:exponential, 20, %{base: 1000, max_backoff: 5000}) == 5000
     end
+
+    test "handles attempt 0 edge case" do
+      # Attempt 0: exponential = 2^0 * base = base, linear = 0 * base = 0
+      assert Backoff.calculate(:exponential, 0, %{base: 1000}) == 1000
+      assert Backoff.calculate(:linear, 0, %{base: 1000}) == 0
+      assert Backoff.calculate(:constant, 0, %{base: 1000}) == 1000
+    end
   end
 end
