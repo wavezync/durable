@@ -63,7 +63,7 @@ defmodule Durable.SchedulerTest do
 
     @schedule cron: "0 */6 * * *", queue: :reports
     workflow "periodic_report" do
-      step(:generate, fn data ->
+      step(:generate_periodic, fn data ->
         {:ok, assign(data, :type, "periodic")}
       end)
     end
@@ -569,6 +569,66 @@ defmodule Durable.SchedulerTest do
 
       # next_run_at should be in the future relative to last_run_at
       assert DateTime.compare(updated.next_run_at, updated.last_run_at) == :gt
+    end
+  end
+
+  # ============================================================================
+  # Edge Case Tests
+  # ============================================================================
+
+  describe "schedule/3 - edge cases" do
+    # Note: nil input causes NOT NULL constraint violation
+    # This test documents that schedules require valid input
+
+    test "schedule with empty map input succeeds" do
+      {:ok, schedule} =
+        Durable.schedule(SimpleWorkflow, "0 9 * * *",
+          name: "empty_input_schedule",
+          input: %{}
+        )
+
+      assert schedule.input == %{}
+    end
+
+    test "schedule with complex nested input preserves structure" do
+      complex_input = %{
+        level1: %{
+          level2: %{
+            level3: [1, 2, 3],
+            nested_map: %{key: "value"}
+          },
+          list: ["a", "b", "c"]
+        },
+        top_level: true
+      }
+
+      {:ok, schedule} =
+        Durable.schedule(SimpleWorkflow, "0 9 * * *",
+          name: "complex_input_schedule",
+          input: complex_input
+        )
+
+      assert schedule.input == complex_input
+    end
+
+    test "schedule with cron every minute" do
+      {:ok, schedule} =
+        Durable.schedule(SimpleWorkflow, "* * * * *", name: "every_minute_schedule")
+
+      assert schedule.cron_expression == "* * * * *"
+      assert schedule.next_run_at != nil
+
+      # Next run should be within the next minute
+      diff = DateTime.diff(schedule.next_run_at, DateTime.utc_now(), :second)
+      assert diff >= 0 and diff <= 60
+    end
+
+    test "schedule with cron for specific day of month" do
+      {:ok, schedule} =
+        Durable.schedule(SimpleWorkflow, "0 9 15 * *", name: "monthly_schedule")
+
+      assert schedule.cron_expression == "0 9 15 * *"
+      assert schedule.next_run_at.day == 15
     end
   end
 end

@@ -148,6 +148,70 @@ defmodule Durable.ParallelTest do
     end
   end
 
+  describe "parallel with single step" do
+    test "parallel block with single step works correctly" do
+      {:ok, execution} =
+        create_and_execute_workflow(SingleStepParallelWorkflow, %{})
+
+      assert execution.status == :completed
+
+      # The single parallel step should execute
+      assert execution.context["from_only_task"] == true
+      # Final step should execute after parallel
+      assert execution.context["completed"] == true
+    end
+  end
+
+  describe "parallel execution - edge cases" do
+    test "parallel steps writing same context key (last wins behavior)" do
+      {:ok, execution} =
+        create_and_execute_workflow(ConflictingContextParallelWorkflow, %{})
+
+      assert execution.status == :completed
+
+      # With deep_merge, both steps wrote to :shared_key
+      # The value depends on merge order, but the key should exist
+      assert Map.has_key?(execution.context, "shared_key")
+      # At least one value should be present
+      assert execution.context["shared_key"] in ["from_a", "from_b"]
+    end
+
+    test "10+ parallel steps execute successfully" do
+      {:ok, execution} =
+        create_and_execute_workflow(ManyParallelStepsWorkflow, %{})
+
+      assert execution.status == :completed
+
+      # All 15 steps should have completed and set their keys
+      for i <- 1..15 do
+        assert execution.context["step_#{i}"] == true
+      end
+
+      assert execution.context["completed"] == true
+    end
+
+    test "parallel with merge :collect stores results correctly" do
+      {:ok, execution} =
+        create_and_execute_workflow(CollectMergeParallelWorkflow, %{})
+
+      assert execution.status == :completed
+
+      # Results should be collected under __parallel_results__
+      assert is_map(execution.context["__parallel_results__"])
+      # Each step's unique changes should be collected
+      results = execution.context["__parallel_results__"]
+      assert map_size(results) == 2
+    end
+
+    test "parallel step raising exception fails workflow" do
+      {:ok, execution} =
+        create_and_execute_workflow(RaisingParallelWorkflow, %{})
+
+      assert execution.status == :failed
+      assert execution.error != nil
+    end
+  end
+
   describe "parallel resume behavior (durability)" do
     test "completed parallel steps are not re-executed on resume" do
       config = Config.get(Durable)
@@ -507,6 +571,164 @@ defmodule ResumableParallelWorkflow do
 
       step(:task_b, fn data ->
         {:ok, assign(data, :from_task_b, true)}
+      end)
+    end
+
+    step(:final, fn data ->
+      {:ok, assign(data, :completed, true)}
+    end)
+  end
+end
+
+defmodule SingleStepParallelWorkflow do
+  use Durable
+  use Durable.Helpers
+
+  workflow "single_step_parallel" do
+    step(:setup, fn data ->
+      {:ok, assign(data, :initialized, true)}
+    end)
+
+    parallel do
+      step(:only_task, fn data ->
+        {:ok, assign(data, :from_only_task, true)}
+      end)
+    end
+
+    step(:final, fn data ->
+      {:ok, assign(data, :completed, true)}
+    end)
+  end
+end
+
+# Edge case test workflows
+
+defmodule ConflictingContextParallelWorkflow do
+  use Durable
+  use Durable.Helpers
+
+  workflow "conflicting_context_parallel" do
+    step(:setup, fn data ->
+      {:ok, assign(data, :initialized, true)}
+    end)
+
+    parallel do
+      step(:task_a, fn data ->
+        Process.sleep(10)
+        {:ok, assign(data, :shared_key, "from_a")}
+      end)
+
+      step(:task_b, fn data ->
+        Process.sleep(5)
+        {:ok, assign(data, :shared_key, "from_b")}
+      end)
+    end
+
+    step(:final, fn data ->
+      {:ok, assign(data, :completed, true)}
+    end)
+  end
+end
+
+defmodule ManyParallelStepsWorkflow do
+  use Durable
+  use Durable.Helpers
+
+  workflow "many_parallel_steps" do
+    step(:setup, fn data ->
+      {:ok, assign(data, :initialized, true)}
+    end)
+
+    parallel do
+      step(:step_1, fn data -> {:ok, assign(data, :step_1, true)} end)
+      step(:step_2, fn data -> {:ok, assign(data, :step_2, true)} end)
+      step(:step_3, fn data -> {:ok, assign(data, :step_3, true)} end)
+      step(:step_4, fn data -> {:ok, assign(data, :step_4, true)} end)
+      step(:step_5, fn data -> {:ok, assign(data, :step_5, true)} end)
+      step(:step_6, fn data -> {:ok, assign(data, :step_6, true)} end)
+      step(:step_7, fn data -> {:ok, assign(data, :step_7, true)} end)
+      step(:step_8, fn data -> {:ok, assign(data, :step_8, true)} end)
+      step(:step_9, fn data -> {:ok, assign(data, :step_9, true)} end)
+      step(:step_10, fn data -> {:ok, assign(data, :step_10, true)} end)
+      step(:step_11, fn data -> {:ok, assign(data, :step_11, true)} end)
+      step(:step_12, fn data -> {:ok, assign(data, :step_12, true)} end)
+      step(:step_13, fn data -> {:ok, assign(data, :step_13, true)} end)
+      step(:step_14, fn data -> {:ok, assign(data, :step_14, true)} end)
+      step(:step_15, fn data -> {:ok, assign(data, :step_15, true)} end)
+    end
+
+    step(:final, fn data ->
+      {:ok, assign(data, :completed, true)}
+    end)
+  end
+end
+
+defmodule CollectMergeParallelWorkflow do
+  use Durable
+  use Durable.Helpers
+
+  workflow "collect_merge_parallel" do
+    step(:setup, fn data ->
+      {:ok, assign(data, :initialized, true)}
+    end)
+
+    parallel merge: :collect do
+      step(:task_a, fn data ->
+        {:ok, assign(data, :unique_a, "value_a")}
+      end)
+
+      step(:task_b, fn data ->
+        {:ok, assign(data, :unique_b, "value_b")}
+      end)
+    end
+
+    step(:final, fn data ->
+      {:ok, assign(data, :completed, true)}
+    end)
+  end
+end
+
+defmodule ErrorReturningParallelWorkflow do
+  use Durable
+  use Durable.Helpers
+
+  workflow "error_returning_parallel" do
+    step(:setup, fn data ->
+      {:ok, assign(data, :initialized, true)}
+    end)
+
+    parallel do
+      step(:good_task, fn data ->
+        {:ok, assign(data, :good, true)}
+      end)
+
+      step(:error_task, fn _data ->
+        {:error, "This step returns an error"}
+      end)
+    end
+
+    step(:final, fn data ->
+      {:ok, assign(data, :completed, true)}
+    end)
+  end
+end
+
+defmodule RaisingParallelWorkflow do
+  use Durable
+  use Durable.Helpers
+
+  workflow "raising_parallel" do
+    step(:setup, fn data ->
+      {:ok, assign(data, :initialized, true)}
+    end)
+
+    parallel do
+      step(:good_task, fn data ->
+        {:ok, assign(data, :good, true)}
+      end)
+
+      step(:raising_task, fn _data ->
+        raise "This step raises an exception"
       end)
     end
 

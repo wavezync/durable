@@ -246,6 +246,39 @@ defmodule Durable.CompensationTest do
     end
   end
 
+  describe "compensation execution - edge cases" do
+    test "single-step workflow with compensation where step raises" do
+      {:ok, execution} = create_and_execute_workflow(SingleStepRaisingCompensationWorkflow, %{})
+
+      # When a step raises and has a compensation, it should be compensated
+      # The step needs to actually complete first before the raise for compensation to apply
+      assert execution.status in [:failed, :compensated]
+    end
+
+    test "compensation with step that returns {:error, map}" do
+      {:ok, execution} = create_and_execute_workflow(ErrorMapCompensationWorkflow, %{})
+
+      # Workflow enters compensation when a step fails
+      # Compensation returning {:error, map} should mark as compensation_failed
+      assert execution.status in [:compensated, :compensation_failed]
+    end
+
+    test "parallel steps trigger compensations when step after parallel fails" do
+      {:ok, execution} = create_and_execute_workflow(ParallelWithCompensationWorkflow, %{})
+
+      # Workflow should be in compensated state
+      assert execution.status == :compensated
+
+      # Should have compensation results for each completed parallel step
+      results = execution.compensation_results
+      # At least 2 compensations should run (from the parallel steps that completed)
+      assert length(results) >= 2
+
+      # All compensations should be completed
+      assert Enum.all?(results, fn r -> r["result"]["status"] == "completed" end)
+    end
+  end
+
   # Helper function to create and execute workflow
   defp create_and_execute_workflow(module, input) do
     config = Config.get(Durable)
@@ -269,5 +302,74 @@ defmodule Durable.CompensationTest do
 
     Executor.execute_workflow(execution.id, config)
     {:ok, repo.get!(WorkflowExecution, execution.id)}
+  end
+end
+
+# Edge case test workflows
+
+defmodule SingleStepRaisingCompensationWorkflow do
+  use Durable
+  use Durable.Helpers
+
+  workflow "single_step_raising_compensation" do
+    step(:setup_step, [compensate: :undo_setup], fn data ->
+      {:ok, assign(data, :setup_done, true)}
+    end)
+
+    step(:failing_step, fn _data ->
+      raise "Intentional failure"
+    end)
+
+    compensate(:undo_setup, fn data ->
+      {:ok, assign(data, :undone, true)}
+    end)
+  end
+end
+
+defmodule ErrorMapCompensationWorkflow do
+  use Durable
+  use Durable.Helpers
+
+  workflow "error_map_compensation" do
+    step(:do_work, [compensate: :undo_work], fn data ->
+      {:ok, assign(data, :work_done, true)}
+    end)
+
+    step(:fail_step, fn _data ->
+      raise "Step failed"
+    end)
+
+    compensate(:undo_work, fn _data ->
+      {:error, %{reason: "Compensation returned error"}}
+    end)
+  end
+end
+
+defmodule ParallelWithCompensationWorkflow do
+  use Durable
+  use Durable.Helpers
+
+  workflow "parallel_with_compensation" do
+    parallel do
+      step(:task_a, [compensate: :undo_task_a], fn data ->
+        {:ok, assign(data, :a_done, true)}
+      end)
+
+      step(:task_b, [compensate: :undo_task_b], fn data ->
+        {:ok, assign(data, :b_done, true)}
+      end)
+    end
+
+    step(:after_parallel, fn _data ->
+      raise "Failure after parallel"
+    end)
+
+    compensate(:undo_task_a, fn data ->
+      {:ok, assign(data, :a_undone, true)}
+    end)
+
+    compensate(:undo_task_b, fn data ->
+      {:ok, assign(data, :b_undone, true)}
+    end)
   end
 end

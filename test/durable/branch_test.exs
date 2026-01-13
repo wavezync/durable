@@ -187,6 +187,74 @@ defmodule Durable.BranchTest do
     end
   end
 
+  describe "branch with string conditions" do
+    test "branch matches string condition correctly" do
+      {:ok, execution} =
+        create_and_execute_workflow(StringConditionBranchWorkflow, %{"category" => "electronics"})
+
+      assert execution.status == :completed
+      assert execution.context["processed_as"] == "electronics"
+    end
+
+    test "branch uses default when string does not match" do
+      {:ok, execution} =
+        create_and_execute_workflow(StringConditionBranchWorkflow, %{"category" => "unknown"})
+
+      assert execution.status == :completed
+      assert execution.context["processed_as"] == "other"
+    end
+  end
+
+  describe "branch execution - edge cases" do
+    test "branch with integer condition matches correctly" do
+      {:ok, execution} =
+        create_and_execute_workflow(IntegerConditionBranchWorkflow, %{"priority" => 1})
+
+      assert execution.status == :completed
+      assert execution.context["processed_as"] == "high"
+    end
+
+    test "branch with integer condition falls to default when no match" do
+      {:ok, execution} =
+        create_and_execute_workflow(IntegerConditionBranchWorkflow, %{"priority" => 99})
+
+      assert execution.status == :completed
+      assert execution.context["processed_as"] == "unknown"
+    end
+
+    test "branch with boolean false condition (not just falsy)" do
+      {:ok, execution} =
+        create_and_execute_workflow(BooleanConditionBranchWorkflow, %{"enabled" => false})
+
+      assert execution.status == :completed
+      assert execution.context["processed_as"] == "disabled"
+    end
+
+    test "branch with boolean true condition" do
+      {:ok, execution} =
+        create_and_execute_workflow(BooleanConditionBranchWorkflow, %{"enabled" => true})
+
+      assert execution.status == :completed
+      assert execution.context["processed_as"] == "enabled"
+    end
+
+    test "branch with nil condition value uses default if present" do
+      {:ok, execution} =
+        create_and_execute_workflow(NilConditionBranchWorkflow, %{"value" => nil})
+
+      assert execution.status == :completed
+      assert execution.context["processed_as"] == "nil_handled"
+    end
+
+    test "branch condition function raising exception fails workflow" do
+      {:ok, execution} =
+        create_and_execute_workflow(ExceptionConditionBranchWorkflow, %{})
+
+      assert execution.status == :failed
+      assert execution.error != nil
+    end
+  end
+
   # Helper functions
   defp create_and_execute_workflow(module, input) do
     config = Config.get(Durable)
@@ -338,6 +406,159 @@ defmodule ContextBranchWorkflow do
     end
 
     step(:complete, fn data ->
+      {:ok, data}
+    end)
+  end
+end
+
+defmodule StringConditionBranchWorkflow do
+  use Durable
+  use Durable.Helpers
+
+  workflow "string_condition_branch" do
+    step(:setup, fn data ->
+      # Keep the string type, don't convert to atom
+      {:ok, assign(data, :category, data["category"])}
+    end)
+
+    branch on: fn data -> data.category end do
+      "electronics" ->
+        step(:process_electronics, fn data ->
+          {:ok, assign(data, :processed_as, "electronics")}
+        end)
+
+      "clothing" ->
+        step(:process_clothing, fn data ->
+          {:ok, assign(data, :processed_as, "clothing")}
+        end)
+
+      _ ->
+        step(:process_other, fn data ->
+          {:ok, assign(data, :processed_as, "other")}
+        end)
+    end
+
+    step(:done, fn data ->
+      {:ok, data}
+    end)
+  end
+end
+
+# Edge case test workflows
+
+defmodule IntegerConditionBranchWorkflow do
+  use Durable
+  use Durable.Helpers
+
+  workflow "integer_condition_branch" do
+    step(:setup, fn data ->
+      {:ok, assign(data, :priority, data["priority"])}
+    end)
+
+    branch on: fn data -> data.priority end do
+      1 ->
+        step(:high_priority, fn data ->
+          {:ok, assign(data, :processed_as, "high")}
+        end)
+
+      2 ->
+        step(:medium_priority, fn data ->
+          {:ok, assign(data, :processed_as, "medium")}
+        end)
+
+      3 ->
+        step(:low_priority, fn data ->
+          {:ok, assign(data, :processed_as, "low")}
+        end)
+
+      _ ->
+        step(:unknown_priority, fn data ->
+          {:ok, assign(data, :processed_as, "unknown")}
+        end)
+    end
+
+    step(:done, fn data ->
+      {:ok, data}
+    end)
+  end
+end
+
+defmodule BooleanConditionBranchWorkflow do
+  use Durable
+  use Durable.Helpers
+
+  workflow "boolean_condition_branch" do
+    step(:setup, fn data ->
+      {:ok, assign(data, :enabled, data["enabled"])}
+    end)
+
+    branch on: fn data -> data.enabled end do
+      true ->
+        step(:process_enabled, fn data ->
+          {:ok, assign(data, :processed_as, "enabled")}
+        end)
+
+      false ->
+        step(:process_disabled, fn data ->
+          {:ok, assign(data, :processed_as, "disabled")}
+        end)
+    end
+
+    step(:done, fn data ->
+      {:ok, data}
+    end)
+  end
+end
+
+defmodule NilConditionBranchWorkflow do
+  use Durable
+  use Durable.Helpers
+
+  workflow "nil_condition_branch" do
+    step(:setup, fn data ->
+      {:ok, assign(data, :value, data["value"])}
+    end)
+
+    branch on: fn data -> data.value end do
+      nil ->
+        step(:handle_nil, fn data ->
+          {:ok, assign(data, :processed_as, "nil_handled")}
+        end)
+
+      _ ->
+        step(:handle_other, fn data ->
+          {:ok, assign(data, :processed_as, "other")}
+        end)
+    end
+
+    step(:done, fn data ->
+      {:ok, data}
+    end)
+  end
+end
+
+defmodule ExceptionConditionBranchWorkflow do
+  use Durable
+  use Durable.Helpers
+
+  workflow "exception_condition_branch" do
+    step(:setup, fn data ->
+      {:ok, data}
+    end)
+
+    branch on: fn _data -> raise "Condition evaluation failed" end do
+      :a ->
+        step(:process_a, fn data ->
+          {:ok, assign(data, :processed_as, "a")}
+        end)
+
+      _ ->
+        step(:process_default, fn data ->
+          {:ok, assign(data, :processed_as, "default")}
+        end)
+    end
+
+    step(:done, fn data ->
       {:ok, data}
     end)
   end

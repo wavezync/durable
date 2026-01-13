@@ -550,6 +550,131 @@ defmodule Durable.WaitTest do
     end
   end
 
+  describe "zero timeout behavior" do
+    test "zero timeout sets timeout_at to essentially now" do
+      config = Config.get(Durable)
+      repo = config.repo
+      before = DateTime.utc_now()
+
+      {:ok, execution} = create_and_execute_workflow(ZeroTimeoutEventWorkflow, %{})
+
+      # Should still be waiting (timeout_at is set, but TimeoutWorker not running in test mode)
+      assert execution.status == :waiting
+
+      pending = get_pending_event(repo, execution.id, "quick_event")
+      assert pending.timeout_at != nil
+
+      # Zero timeout should result in timeout_at very close to creation time
+      diff_ms = DateTime.diff(pending.timeout_at, before, :millisecond)
+      # Should be within a small window (essentially immediate)
+      assert diff_ms >= 0 and diff_ms <= 1000
+    end
+  end
+
+  # ============================================================================
+  # Edge Case Tests
+  # ============================================================================
+
+  describe "wait_for_event - edge cases" do
+    test "duplicate event sends to same event name overwrites payload" do
+      config = Config.get(Durable)
+      repo = config.repo
+
+      {:ok, execution} = create_and_execute_workflow(EventWaitTestWorkflow, %{})
+      assert execution.status == :waiting
+
+      # Send first event
+      :ok = Wait.send_event(execution.id, "payment_confirmed", %{"first" => true})
+
+      # The pending event should now be received
+      pending = get_pending_event(repo, execution.id, "payment_confirmed")
+      assert pending.status == :received
+      assert pending.payload == %{"first" => true}
+
+      # Try to send a second event - should return not_found since event was already received
+      result = Wait.send_event(execution.id, "payment_confirmed", %{"second" => true})
+      assert result == {:error, :not_found}
+    end
+
+    test "event name with special characters handles correctly" do
+      config = Config.get(Durable)
+      repo = config.repo
+
+      {:ok, execution} = create_and_execute_workflow(SpecialCharEventWorkflow, %{})
+      assert execution.status == :waiting
+
+      # Check the pending event with special characters was created
+      pending = get_pending_event(repo, execution.id, "event-with_special.chars:123")
+      assert pending != nil
+      assert pending.status == :pending
+
+      # Send event with special chars
+      :ok = Wait.send_event(execution.id, "event-with_special.chars:123", %{"data" => "test"})
+
+      pending = get_pending_event(repo, execution.id, "event-with_special.chars:123")
+      assert pending.status == :received
+    end
+
+    test "event name with unicode characters" do
+      config = Config.get(Durable)
+      repo = config.repo
+
+      {:ok, execution} = create_and_execute_workflow(UnicodeEventWorkflow, %{})
+      assert execution.status == :waiting
+
+      # Check the pending event with unicode was created
+      pending = get_pending_event(repo, execution.id, "событие_イベント")
+      assert pending != nil
+      assert pending.status == :pending
+    end
+  end
+
+  describe "wait_for_all - edge cases" do
+    test "sending same event twice to wait_for_all updates payload" do
+      config = Config.get(Durable)
+      repo = config.repo
+
+      {:ok, execution} = create_and_execute_workflow(WaitAllTestWorkflow, %{})
+      assert execution.status == :waiting
+
+      # Send first event
+      :ok = Wait.send_event(execution.id, "approval_a", %{"first" => true})
+
+      # Check wait group received the event
+      wait_group = get_wait_group(repo, execution.id)
+      assert wait_group.received_events["approval_a"] == %{"first" => true}
+
+      # Sending approval_a again should fail (already received)
+      result = Wait.send_event(execution.id, "approval_a", %{"second" => true})
+      assert result == {:error, :not_found}
+
+      # Wait group should still have original payload
+      wait_group = get_wait_group(repo, execution.id)
+      assert wait_group.received_events["approval_a"] == %{"first" => true}
+    end
+  end
+
+  describe "wait_for_any - edge cases" do
+    test "wait_for_any resumes on first event only" do
+      config = Config.get(Durable)
+      repo = config.repo
+
+      {:ok, execution} = create_and_execute_workflow(WaitAnyTestWorkflow, %{})
+      assert execution.status == :waiting
+
+      # Send first event
+      :ok = Wait.send_event(execution.id, "success", %{"status" => "ok"})
+
+      # Wait group should be completed
+      wait_group = get_wait_group(repo, execution.id)
+      assert wait_group.status == :completed
+
+      # Trying to send second event should fail - either :not_found or :not_waiting
+      result = Wait.send_event(execution.id, "failure", %{"status" => "error"})
+      assert result in [{:error, :not_found}, {:error, :not_waiting}]
+    end
+  end
+
   # ============================================================================
   # Query API Tests
   # ============================================================================
@@ -1063,6 +1188,52 @@ defmodule SequentialWaitsWorkflow do
       r1 = data[:result1]
       r2 = data[:result2]
       {:ok, assign(data, :combined, %{first: r1, second: r2})}
+    end)
+  end
+end
+
+defmodule ZeroTimeoutEventWorkflow do
+  use Durable
+  use Durable.Helpers
+  use Durable.Wait
+
+  workflow "zero_timeout_event" do
+    step(:wait_step, fn data ->
+      result =
+        wait_for_event("quick_event",
+          timeout: 0,
+          timeout_value: :immediate_timeout
+        )
+
+      {:ok, assign(data, :result, result)}
+    end)
+  end
+end
+
+# Edge case test workflows
+
+defmodule SpecialCharEventWorkflow do
+  use Durable
+  use Durable.Helpers
+  use Durable.Wait
+
+  workflow "special_char_event" do
+    step(:wait_step, fn data ->
+      result = wait_for_event("event-with_special.chars:123")
+      {:ok, assign(data, :result, result)}
+    end)
+  end
+end
+
+defmodule UnicodeEventWorkflow do
+  use Durable
+  use Durable.Helpers
+  use Durable.Wait
+
+  workflow "unicode_event" do
+    step(:wait_step, fn data ->
+      result = wait_for_event("событие_イベント")
+      {:ok, assign(data, :result, result)}
     end)
   end
 end

@@ -127,5 +127,20 @@ defmodule DurableTest do
       assert Backoff.calculate(:linear, 0, %{base: 1000}) == 0
       assert Backoff.calculate(:constant, 0, %{base: 1000}) == 1000
     end
+
+    test "handles negative attempt values" do
+      # Exponential with -1: 2^-1 * base = 0.5 * base = 500 (truncated)
+      exp_result = Backoff.calculate(:exponential, -1, %{base: 1000})
+      assert exp_result == 500
+
+      # Linear with -1: -1 * base = -1000
+      # NOTE: Current implementation returns negative values for negative attempts
+      # This documents the actual behavior - in practice, attempts should always be >= 1
+      linear_result = Backoff.calculate(:linear, -1, %{base: 1000})
+      assert linear_result == -1000
+
+      # Constant should always return base regardless of attempt
+      assert Backoff.calculate(:constant, -1, %{base: 1000}) == 1000
+    end
   end
 end
