@@ -48,6 +48,7 @@ defmodule Durable.MixProject do
       {:telemetry, "~> 1.3"},
       {:nimble_options, "~> 1.1"},
       {:crontab, "~> 1.1"},
+      {:igniter, "~> 0.6", optional: true},
 
       # Dev/Test
       {:ex_doc, "~> 0.34", only: :dev, runtime: false},
