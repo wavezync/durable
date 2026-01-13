@@ -106,6 +106,28 @@ defmodule Durable.BranchTest do
 
       assert execution.context["processed_as"] == "manual_review"
     end
+
+    test "skips branch and continues when no clause matches and no default exists" do
+      {:ok, execution} =
+        create_and_execute_workflow(SimpleBranchTestWorkflow, %{"doc_type" => "unknown"})
+
+      # Workflow completes - branch is skipped when no clause matches
+      assert execution.status == :completed
+
+      step_execs = get_step_executions(execution.id)
+      executed_steps = Enum.map(step_execs, & &1.step_name)
+
+      # Setup and final steps should execute
+      assert "setup" in executed_steps
+      assert "final" in executed_steps
+
+      # No branch steps should execute
+      refute Enum.any?(executed_steps, &String.contains?(&1, "__invoice__"))
+      refute Enum.any?(executed_steps, &String.contains?(&1, "__contract__"))
+
+      # No processed_as should be set
+      refute Map.has_key?(execution.context, "processed_as")
+    end
   end
 
   describe "branch with multiple steps per clause" do

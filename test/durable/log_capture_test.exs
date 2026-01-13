@@ -68,8 +68,8 @@ defmodule Durable.LogCaptureTest do
     end
 
     test "respects max_log_entries limit" do
-      # Add more logs than the limit
       Application.put_env(:durable, :log_capture, max_log_entries: 3)
+      on_exit(fn -> Application.delete_env(:durable, :log_capture) end)
 
       for i <- 1..10 do
         LogCapture.add_log(:info, "message #{i}", %{})
@@ -77,13 +77,11 @@ defmodule Durable.LogCaptureTest do
 
       logs = LogCapture.get_logs()
       assert length(logs) == 3
-
-      # Reset config
-      Application.delete_env(:durable, :log_capture)
     end
 
     test "filters by log level" do
       Application.put_env(:durable, :log_capture, levels: [:warning, :error])
+      on_exit(fn -> Application.delete_env(:durable, :log_capture) end)
 
       LogCapture.add_log(:debug, "debug", %{})
       LogCapture.add_log(:info, "info", %{})
@@ -94,13 +92,11 @@ defmodule Durable.LogCaptureTest do
       levels = Enum.map(logs, & &1.level)
 
       assert levels == ["warning", "error"]
-
-      # Reset config
-      Application.delete_env(:durable, :log_capture)
     end
 
     test "truncates long messages" do
       Application.put_env(:durable, :log_capture, max_message_length: 50)
+      on_exit(fn -> Application.delete_env(:durable, :log_capture) end)
 
       long_message = String.duplicate("a", 100)
       LogCapture.add_log(:info, long_message, %{})
@@ -108,9 +104,6 @@ defmodule Durable.LogCaptureTest do
       [log] = LogCapture.get_logs()
       assert String.length(log.message) < 100
       assert String.ends_with?(log.message, "... [truncated]")
-
-      # Reset config
-      Application.delete_env(:durable, :log_capture)
     end
   end
 

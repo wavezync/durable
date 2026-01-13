@@ -103,7 +103,7 @@ defmodule Durable.Supervisor do
     children =
       if config.queue_enabled do
         Logger.info(
-          "Durable #{inspect(config.name)} starting with queues: #{inspect(Map.keys(config.queues))}"
+          "#{inspect(config.name)} starting with queues: #{inspect(Map.keys(config.queues))}"
         )
 
         base_children ++
@@ -116,7 +116,7 @@ defmodule Durable.Supervisor do
              scheduled_modules: config.scheduled_modules}
           ]
       else
-        Logger.info("Durable #{inspect(config.name)} starting with queue processing disabled")
+        Logger.info("#{inspect(config.name)} starting with queue processing disabled")
         base_children
       end
 

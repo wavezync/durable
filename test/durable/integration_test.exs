@@ -84,12 +84,12 @@ defmodule Durable.IntegrationTest do
       step_execs = get_step_executions(execution.id)
       step_names = Enum.map(step_execs, & &1.step_name)
 
-      # Verify steps executed
+      # Verify steps executed - use qualified name patterns for generated step names
       assert "validate_order" in step_names
-      assert Enum.any?(step_names, &String.contains?(&1, "process_digital"))
-      assert Enum.any?(step_names, &String.contains?(&1, "process_item"))
-      assert Enum.any?(step_names, &String.contains?(&1, "send_confirmation"))
-      assert Enum.any?(step_names, &String.contains?(&1, "update_analytics"))
+      assert Enum.any?(step_names, &String.contains?(&1, "__process_digital"))
+      assert Enum.any?(step_names, &String.contains?(&1, "__process_item"))
+      assert Enum.any?(step_names, &String.contains?(&1, "__send_confirmation"))
+      assert Enum.any?(step_names, &String.contains?(&1, "__update_analytics"))
       assert "complete" in step_names
     end
   end
@@ -185,8 +185,8 @@ defmodule Durable.IntegrationTest do
       assert "finalize" in step_names
 
       # Should NOT have parallel or branch steps
-      refute Enum.any?(step_names, &String.contains?(&1, "notify"))
-      refute Enum.any?(step_names, &String.contains?(&1, "audit"))
+      refute Enum.any?(step_names, &String.contains?(&1, "__notify"))
+      refute Enum.any?(step_names, &String.contains?(&1, "__audit"))
     end
   end
 
@@ -250,9 +250,9 @@ defmodule Durable.IntegrationTest do
       step_names = Enum.map(step_execs, & &1.step_name)
 
       # All three parallel steps should have executed
-      assert Enum.any?(step_names, &String.contains?(&1, "generate_report"))
-      assert Enum.any?(step_names, &String.contains?(&1, "send_notifications"))
-      assert Enum.any?(step_names, &String.contains?(&1, "cleanup_temp"))
+      assert Enum.any?(step_names, &String.contains?(&1, "__generate_report"))
+      assert Enum.any?(step_names, &String.contains?(&1, "__send_notifications"))
+      assert Enum.any?(step_names, &String.contains?(&1, "__cleanup_temp"))
     end
   end
 
