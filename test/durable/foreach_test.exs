@@ -201,171 +201,192 @@ end
 
 defmodule SimpleForEachWorkflow do
   use Durable
-  use Durable.Context
+  use Durable.Helpers
 
   workflow "simple_foreach" do
-    step :setup do
-      put_context(:items, ["item_1", "item_2", "item_3"])
-      put_context(:results, [])
-      put_context(:processed_count, 0)
-    end
+    step(:setup, fn data ->
+      data =
+        data
+        |> assign(:items, ["item_1", "item_2", "item_3"])
+        |> assign(:results, [])
+        |> assign(:processed_count, 0)
 
-    foreach :process_items, items: :items do
-      step :process do
-        item = current_item()
+      {:ok, data}
+    end)
+
+    foreach :process_items, items: fn data -> data.items end do
+      step(:process, fn data, item, _idx ->
         result = "#{item}_processed"
-        append_context(:results, result)
-        increment_context(:processed_count, 1)
-      end
+        results = data[:results] || []
+        count = data[:processed_count] || 0
+
+        data =
+          data
+          |> assign(:results, results ++ [result])
+          |> assign(:processed_count, count + 1)
+
+        {:ok, data}
+      end)
     end
 
-    step :final do
-      put_context(:completed, true)
-    end
+    step(:final, fn data ->
+      {:ok, assign(data, :completed, true)}
+    end)
   end
 end
 
 defmodule IndexForEachWorkflow do
   use Durable
-  use Durable.Context
+  use Durable.Helpers
 
   workflow "index_foreach" do
-    step :setup do
-      put_context(:items, ["a", "b", "c"])
-      put_context(:indices, [])
+    step(:setup, fn data ->
+      data =
+        data
+        |> assign(:items, ["a", "b", "c"])
+        |> assign(:indices, [])
+
+      {:ok, data}
+    end)
+
+    foreach :track_indices, items: fn data -> data.items end do
+      step(:record_index, fn data, _item, idx ->
+        indices = data[:indices] || []
+        {:ok, assign(data, :indices, indices ++ [idx])}
+      end)
     end
 
-    foreach :track_indices, items: :items do
-      step :record_index do
-        idx = current_index()
-        append_context(:indices, idx)
-      end
-    end
-
-    step :done do
-      :ok
-    end
+    step(:done, fn data ->
+      {:ok, data}
+    end)
   end
 end
 
 defmodule AccumulatingForEachWorkflow do
   use Durable
-  use Durable.Context
+  use Durable.Helpers
 
   workflow "accumulating_foreach" do
-    step :setup do
-      put_context(:items, [1, 2, 3])
-      put_context(:counter, 0)
+    step(:setup, fn data ->
+      data =
+        data
+        |> assign(:items, [1, 2, 3])
+        |> assign(:counter, 0)
+
+      {:ok, data}
+    end)
+
+    foreach :count_items, items: fn data -> data.items end do
+      step(:increment, fn data, _item, _idx ->
+        counter = data[:counter] || 0
+        {:ok, assign(data, :counter, counter + 1)}
+      end)
     end
 
-    foreach :count_items, items: :items do
-      step :increment do
-        increment_context(:counter, 1)
-      end
-    end
-
-    step :done do
-      :ok
-    end
+    step(:done, fn data ->
+      {:ok, data}
+    end)
   end
 end
 
 defmodule ConcurrentForEachWorkflow do
   use Durable
-  use Durable.Context
+  use Durable.Helpers
 
   workflow "concurrent_foreach" do
-    step :setup do
-      put_context(:items, [1, 2, 3])
-    end
+    step(:setup, fn data ->
+      {:ok, assign(data, :items, [1, 2, 3])}
+    end)
 
-    foreach :process_concurrent, items: :items, concurrency: 3, collect_as: :item_results do
-      step :slow_process do
+    foreach :process_concurrent,
+      items: fn data -> data.items end,
+      concurrency: 3,
+      collect_as: :item_results do
+      step(:slow_process, fn data, item, _idx ->
         Process.sleep(50)
-        item = current_item()
-        put_context(:processed_value, item * 10)
-      end
+        {:ok, assign(data, :processed_value, item * 10)}
+      end)
     end
 
-    step :done do
-      :ok
-    end
+    step(:done, fn data ->
+      {:ok, data}
+    end)
   end
 end
 
 defmodule FailFastForEachWorkflow do
   use Durable
-  use Durable.Context
+  use Durable.Helpers
 
   workflow "fail_fast_foreach" do
-    step :setup do
-      put_context(:items, [1, 2, 3])
-    end
+    step(:setup, fn data ->
+      {:ok, assign(data, :items, [1, 2, 3])}
+    end)
 
-    foreach :process_items, items: :items do
-      step :maybe_fail do
-        item = current_item()
-
+    foreach :process_items, items: fn data -> data.items end do
+      step(:maybe_fail, fn data, item, _idx ->
         if item == 2 do
           raise "intentional failure at item 2"
         end
 
-        put_context(:processed, item)
-      end
+        {:ok, assign(data, :processed, item)}
+      end)
     end
 
-    step :never_reached do
-      put_context(:reached, true)
-    end
+    step(:never_reached, fn data ->
+      {:ok, assign(data, :reached, true)}
+    end)
   end
 end
 
 defmodule ContinueOnErrorForEachWorkflow do
   use Durable
-  use Durable.Context
+  use Durable.Helpers
 
   workflow "continue_foreach" do
-    step :setup do
-      put_context(:items, [1, 2, 3])
-      put_context(:processed, [])
-    end
+    step(:setup, fn data ->
+      data =
+        data
+        |> assign(:items, [1, 2, 3])
+        |> assign(:processed, [])
 
-    foreach :process_items, items: :items, on_error: :continue do
-      step :maybe_fail do
-        item = current_item()
+      {:ok, data}
+    end)
 
+    foreach :process_items, items: fn data -> data.items end, on_error: :continue do
+      step(:maybe_fail, fn data, item, _idx ->
         if item == 2 do
           raise "intentional failure at item 2"
         end
 
-        append_context(:processed, item)
-      end
+        processed = data[:processed] || []
+        {:ok, assign(data, :processed, processed ++ [item])}
+      end)
     end
 
-    step :done do
-      :ok
-    end
+    step(:done, fn data ->
+      {:ok, data}
+    end)
   end
 end
 
 defmodule CollectAsForEachWorkflow do
   use Durable
-  use Durable.Context
+  use Durable.Helpers
 
   workflow "collect_as_foreach" do
-    step :setup do
-      put_context(:items, ["a", "b", "c"])
+    step(:setup, fn data ->
+      {:ok, assign(data, :items, ["a", "b", "c"])}
+    end)
+
+    foreach :process_items, items: fn data -> data.items end, collect_as: :collected_results do
+      step(:transform, fn data, item, _idx ->
+        {:ok, assign(data, :result, String.upcase(item))}
+      end)
     end
 
-    foreach :process_items, items: :items, collect_as: :collected_results do
-      step :transform do
-        item = current_item()
-        put_context(:result, String.upcase(item))
-      end
-    end
-
-    step :done do
-      :ok
-    end
+    step(:done, fn data ->
+      {:ok, data}
+    end)
   end
 end

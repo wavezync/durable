@@ -5,17 +5,17 @@ defmodule DurableTest do
     test "workflow module compiles with use Durable" do
       defmodule TestWorkflow do
         use Durable
-        use Durable.Context
+        use Durable.Helpers
 
         workflow "test_workflow" do
-          step :first do
-            put_context(:value, 1)
-          end
+          step(:first, fn data ->
+            {:ok, assign(data, :value, 1)}
+          end)
 
-          step :second do
-            value = get_context(:value)
-            put_context(:result, value + 1)
-          end
+          step(:second, fn data ->
+            value = data[:value]
+            {:ok, assign(data, :result, value + 1)}
+          end)
         end
       end
 
@@ -30,9 +30,9 @@ defmodule DurableTest do
         use Durable
 
         workflow "retry_test" do
-          step :with_retry, retry: [max_attempts: 3, backoff: :exponential] do
-            :ok
-          end
+          step(:with_retry, [retry: [max_attempts: 3, backoff: :exponential]], fn _data ->
+            {:ok, :ok}
+          end)
         end
       end
 

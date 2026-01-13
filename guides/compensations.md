@@ -11,34 +11,37 @@ When a workflow performs actions with external side effects (booking flights, ch
 ```elixir
 defmodule MyApp.BookTripWorkflow do
   use Durable
-  use Durable.Context
+  use Durable.Helpers
 
   workflow "book_trip" do
     # Step 1: Book flight (with compensation)
-    step :book_flight, compensate: :cancel_flight do
-      booking = FlightAPI.book(input()["flight"])
-      put_context(:flight_id, booking.id)
+    step :book_flight, [compensate: :cancel_flight], fn data ->
+      booking = FlightAPI.book(data["flight"])
+      {:ok, assign(data, :flight_id, booking.id)}
     end
 
     # Step 2: Book hotel (with compensation)
-    step :book_hotel, compensate: :cancel_hotel do
-      booking = HotelAPI.book(input()["hotel"])
-      put_context(:hotel_id, booking.id)
+    step :book_hotel, [compensate: :cancel_hotel], fn data ->
+      booking = HotelAPI.book(data["hotel"])
+      {:ok, assign(data, :hotel_id, booking.id)}
     end
 
     # Step 3: Charge payment (no compensation needed - it's the last step)
-    step :charge_payment do
+    step :charge_payment, fn data ->
       # If this fails, compensations run automatically!
-      PaymentService.charge(get_context(:total))
+      PaymentService.charge(data.total)
+      {:ok, data}
     end
 
     # Compensation handlers
-    compensate :cancel_flight do
-      FlightAPI.cancel(get_context(:flight_id))
+    compensate :cancel_flight, fn data ->
+      FlightAPI.cancel(data.flight_id)
+      {:ok, data}
     end
 
-    compensate :cancel_hotel do
-      HotelAPI.cancel(get_context(:hotel_id))
+    compensate :cancel_hotel, fn data ->
+      HotelAPI.cancel(data.hotel_id)
+      {:ok, data}
     end
   end
 end
@@ -59,25 +62,28 @@ end
 ### Defining Compensations
 
 ```elixir
-compensate :handler_name do
+compensate :handler_name, fn data ->
   # Undo logic here
-  # Has access to workflow context
+  # Has access to workflow data
+  {:ok, data}
 end
 ```
 
 ### Linking Steps to Compensations
 
 ```elixir
-step :my_step, compensate: :my_handler do
+step :my_step, [compensate: :my_handler], fn data ->
   # Step logic
+  {:ok, data}
 end
 ```
 
 ### Compensation Options
 
 ```elixir
-compensate :handler_name, retry: [max_attempts: 3, backoff: :exponential] do
+compensate :handler_name, [retry: [max_attempts: 3, backoff: :exponential]], fn data ->
   # Compensation with retry
+  {:ok, data}
 end
 ```
 
@@ -104,30 +110,31 @@ end
 Compensations may run multiple times (retries, manual recovery). Design them to be safe to repeat:
 
 ```elixir
-compensate :cancel_booking do
-  booking_id = get_context(:booking_id)
+compensate :cancel_booking, fn data ->
+  booking_id = data.booking_id
 
   # Check if already cancelled before cancelling
   case BookingAPI.get(booking_id) do
-    {:ok, %{status: :cancelled}} -> :already_cancelled
-    {:ok, booking} -> BookingAPI.cancel(booking_id)
-    {:error, :not_found} -> :already_gone
+    {:ok, %{status: :cancelled}} -> {:ok, data}
+    {:ok, _booking} -> BookingAPI.cancel(booking_id); {:ok, data}
+    {:error, :not_found} -> {:ok, data}
   end
 end
 ```
 
 ### Store IDs for Cleanup
 
-Always store resource IDs in context so compensations can find them:
+Always store resource IDs in data so compensations can find them:
 
 ```elixir
-step :create_resource, compensate: :delete_resource do
-  resource = ExternalAPI.create(params)
-  put_context(:resource_id, resource.id)  # Store for compensation
+step :create_resource, [compensate: :delete_resource], fn data ->
+  resource = ExternalAPI.create(data.params)
+  {:ok, assign(data, :resource_id, resource.id)}  # Store for compensation
 end
 
-compensate :delete_resource do
-  ExternalAPI.delete(get_context(:resource_id))
+compensate :delete_resource, fn data ->
+  ExternalAPI.delete(data.resource_id)
+  {:ok, data}
 end
 ```
 
@@ -197,48 +204,51 @@ end)
 ```elixir
 defmodule MyApp.ProcessOrderWorkflow do
   use Durable
-  use Durable.Context
+  use Durable.Helpers
 
   workflow "process_order" do
-    step :reserve_inventory, compensate: :release_inventory do
-      items = input()["items"]
+    step :reserve_inventory, [compensate: :release_inventory], fn data ->
+      items = data["items"]
 
       reservations = Enum.map(items, fn item ->
         {:ok, res} = Inventory.reserve(item.sku, item.quantity)
         res.id
       end)
 
-      put_context(:reservation_ids, reservations)
+      {:ok, assign(data, :reservation_ids, reservations)}
     end
 
-    step :charge_customer, compensate: :refund_customer do
-      amount = input()["total"]
-      {:ok, charge} = Payments.charge(input()["customer_id"], amount)
-      put_context(:charge_id, charge.id)
+    step :charge_customer, [compensate: :refund_customer], fn data ->
+      amount = data["total"]
+      {:ok, charge} = Payments.charge(data["customer_id"], amount)
+      {:ok, assign(data, :charge_id, charge.id)}
     end
 
-    step :create_shipment do
+    step :create_shipment, fn data ->
       # If shipping fails, inventory is released and payment refunded
-      {:ok, shipment} = Shipping.create(input()["address"], input()["items"])
-      put_context(:shipment_id, shipment.id)
+      {:ok, shipment} = Shipping.create(data["address"], data["items"])
+      {:ok, assign(data, :shipment_id, shipment.id)}
     end
 
-    step :send_confirmation do
-      Email.send_order_confirmation(input()["customer_email"], %{
-        shipment_id: get_context(:shipment_id),
-        charge_id: get_context(:charge_id)
+    step :send_confirmation, fn data ->
+      Email.send_order_confirmation(data["customer_email"], %{
+        shipment_id: data.shipment_id,
+        charge_id: data.charge_id
       })
+      {:ok, data}
     end
 
     # Compensations
-    compensate :release_inventory do
-      Enum.each(get_context(:reservation_ids), fn id ->
+    compensate :release_inventory, fn data ->
+      Enum.each(data.reservation_ids, fn id ->
         Inventory.release(id)
       end)
+      {:ok, data}
     end
 
-    compensate :refund_customer do
-      Payments.refund(get_context(:charge_id))
+    compensate :refund_customer, fn data ->
+      Payments.refund(data.charge_id)
+      {:ok, data}
     end
   end
 end

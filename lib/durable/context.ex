@@ -358,6 +358,12 @@ defmodule Durable.Context do
   end
 
   @doc false
+  def set_workflow_id(workflow_id) do
+    Process.put(@workflow_id_key, workflow_id)
+    :ok
+  end
+
+  @doc false
   def get_current_context do
     context()
   end

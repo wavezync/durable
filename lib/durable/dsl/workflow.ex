@@ -34,6 +34,11 @@ defmodule Durable.DSL.Workflow do
   defmacro workflow(name, opts \\ [], do: block) do
     normalized_opts = normalize_workflow_opts(opts)
 
+    # Generate unique function names for this workflow
+    definition_fn = :"__workflow_def_#{name}__"
+    steps_fn = :"__workflow_steps_#{name}__"
+    compensations_fn = :"__workflow_compensations_#{name}__"
+
     quote do
       # Reset current steps accumulator
       Module.delete_attribute(__MODULE__, :durable_current_steps)
@@ -47,25 +52,41 @@ defmodule Durable.DSL.Workflow do
       unquote(block)
 
       # Get collected steps (in reverse order due to accumulation)
-      steps = Module.get_attribute(__MODULE__, :durable_current_steps) |> Enum.reverse()
+      # Store in module attribute for use in the steps function
+      @durable_collected_steps_list Module.get_attribute(__MODULE__, :durable_current_steps)
+                                    |> Enum.reverse()
 
-      # Get collected compensations and build map
-      compensations =
-        __MODULE__
-        |> Module.get_attribute(:durable_compensations)
+      # Get collected compensations
+      @durable_collected_comps_list Module.get_attribute(__MODULE__, :durable_compensations)
+
+      # Define a function that returns the steps list
+      # The steps contain function references like &Module.func/1 which are valid at runtime
+      @doc false
+      def unquote(steps_fn)() do
+        @durable_collected_steps_list
+      end
+
+      # Define a function that returns the compensations map
+      @doc false
+      def unquote(compensations_fn)() do
+        @durable_collected_comps_list
         |> Enum.reduce(%{}, fn comp, acc -> Map.put(acc, comp.name, comp) end)
+      end
 
-      # Build workflow definition
-      workflow_def = %Durable.Definition.Workflow{
-        name: unquote(name),
-        module: __MODULE__,
-        steps: steps,
-        compensations: compensations,
-        opts: unquote(Macro.escape(normalized_opts))
-      }
+      # Define a function that returns this workflow's definition
+      @doc false
+      def unquote(definition_fn)() do
+        %Durable.Definition.Workflow{
+          name: unquote(name),
+          module: __MODULE__,
+          steps: unquote(steps_fn)(),
+          compensations: unquote(compensations_fn)(),
+          opts: unquote(Macro.escape(normalized_opts))
+        }
+      end
 
-      # Register the workflow
-      @durable_workflows {unquote(name), workflow_def}
+      # Register just the workflow name and function reference
+      @durable_workflows {unquote(name), unquote(definition_fn)}
 
       # Capture any @schedule attribute for this workflow
       if Code.ensure_loaded?(Durable.Scheduler.DSL) do

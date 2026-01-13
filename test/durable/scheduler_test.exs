@@ -20,56 +20,58 @@ defmodule Durable.SchedulerTest do
 
   defmodule SimpleWorkflow do
     use Durable
-    use Durable.Context
+    use Durable.Helpers
 
     workflow "simple" do
-      step :do_work do
-        put_context(:executed, true)
-        put_context(:executed_at, DateTime.utc_now())
-      end
+      step(:do_work, fn data ->
+        {:ok,
+         data
+         |> assign(:executed, true)
+         |> assign(:executed_at, DateTime.utc_now())}
+      end)
     end
   end
 
   defmodule MultiWorkflow do
     use Durable
-    use Durable.Context
+    use Durable.Helpers
 
     workflow "workflow_a" do
-      step :a do
-        put_context(:workflow, "a")
-      end
+      step(:a, fn data ->
+        {:ok, assign(data, :workflow, "a")}
+      end)
     end
 
     workflow "workflow_b" do
-      step :b do
-        put_context(:workflow, "b")
-      end
+      step(:b, fn data ->
+        {:ok, assign(data, :workflow, "b")}
+      end)
     end
   end
 
   defmodule ScheduledWorkflowModule do
     use Durable
-    use Durable.Context
+    use Durable.Helpers
     use Durable.Scheduler.DSL
 
     @schedule cron: "0 9 * * *", timezone: "UTC"
     workflow "daily_report" do
-      step :generate do
-        put_context(:generated, true)
-      end
+      step(:generate, fn data ->
+        {:ok, assign(data, :generated, true)}
+      end)
     end
 
     @schedule cron: "0 */6 * * *", queue: :reports
     workflow "periodic_report" do
-      step :generate do
-        put_context(:type, "periodic")
-      end
+      step(:generate, fn data ->
+        {:ok, assign(data, :type, "periodic")}
+      end)
     end
 
     workflow "unscheduled" do
-      step :work do
-        put_context(:unscheduled, true)
-      end
+      step(:work, fn data ->
+        {:ok, assign(data, :unscheduled, true)}
+      end)
     end
   end
 

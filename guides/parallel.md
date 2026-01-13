@@ -7,35 +7,36 @@ Run multiple steps concurrently to speed up workflows.
 ```elixir
 defmodule MyApp.OnboardingWorkflow do
   use Durable
-  use Durable.Context
+  use Durable.Helpers
 
   workflow "onboard_user" do
-    step :create_user do
-      user = Users.create(input())
-      put_context(:user_id, user.id)
+    step :create_user, fn data ->
+      user = Users.create(data)
+      {:ok, %{user_id: user.id}}
     end
 
     # These three steps run concurrently
     parallel do
-      step :send_welcome_email do
-        Mailer.send_welcome(get_context(:user_id))
-        put_context(:email_sent, true)
+      step :send_welcome_email, fn data ->
+        Mailer.send_welcome(data.user_id)
+        {:ok, assign(data, :email_sent, true)}
       end
 
-      step :provision_workspace do
-        workspace = Workspaces.create(get_context(:user_id))
-        put_context(:workspace_id, workspace.id)
+      step :provision_workspace, fn data ->
+        workspace = Workspaces.create(data.user_id)
+        {:ok, assign(data, :workspace_id, workspace.id)}
       end
 
-      step :setup_billing do
-        Billing.setup(get_context(:user_id))
-        put_context(:billing_ready, true)
+      step :setup_billing, fn data ->
+        Billing.setup(data.user_id)
+        {:ok, assign(data, :billing_ready, true)}
       end
     end
 
     # Runs after ALL parallel steps complete
-    step :complete do
-      Logger.info("User onboarded: #{get_context(:user_id)}")
+    step :complete, fn data ->
+      Logger.info("User onboarded: #{data.user_id}")
+      {:ok, data}
     end
   end
 end
@@ -45,33 +46,33 @@ end
 
 ### Merge Strategy (`:merge`)
 
-Controls how context changes from parallel steps are combined.
+Controls how data changes from parallel steps are combined.
 
 | Strategy | Description |
 |----------|-------------|
-| `:deep_merge` | Deep merge all contexts (default) |
-| `:last_wins` | Last completed step's context wins on conflicts |
-| `:collect` | Collect into `%{step_name => context_changes}` |
+| `:deep_merge` | Deep merge all data (default) |
+| `:last_wins` | Last completed step's data wins on conflicts |
+| `:collect` | Collect into `%{step_name => data_changes}` |
 
 ```elixir
 # Deep merge (default) - combines all nested maps
 parallel merge: :deep_merge do
-  step :a do
-    put_context(:settings, %{notifications: true})
+  step :a, fn data ->
+    {:ok, assign(data, :settings, %{notifications: true})}
   end
-  step :b do
-    put_context(:settings, %{theme: "dark"})
+  step :b, fn data ->
+    {:ok, assign(data, :settings, %{theme: "dark"})}
   end
 end
 # Result: %{settings: %{notifications: true, theme: "dark"}}
 
 # Collect - keeps results separate
 parallel merge: :collect do
-  step :fetch_orders do
-    put_context(:count, Orders.count())
+  step :fetch_orders, fn data ->
+    {:ok, assign(data, :count, Orders.count())}
   end
-  step :fetch_users do
-    put_context(:count, Users.count())
+  step :fetch_users, fn data ->
+    {:ok, assign(data, :count, Users.count())}
   end
 end
 # Result: %{parallel_results: %{fetch_orders: %{count: 10}, fetch_users: %{count: 5}}}
@@ -89,18 +90,21 @@ Controls what happens when a parallel step fails.
 ```elixir
 # Fail fast (default) - stop everything on first error
 parallel on_error: :fail_fast do
-  step :critical_task do
+  step :critical_task, fn data ->
     # If this fails, other tasks are cancelled
+    {:ok, data}
   end
 end
 
 # Complete all - continue despite errors
 parallel on_error: :complete_all do
-  step :send_sms do
+  step :send_sms, fn data ->
     # Even if SMS fails...
+    {:ok, data}
   end
-  step :send_email do
+  step :send_email, fn data ->
     # ...email still runs
+    {:ok, data}
   end
 end
 ```
@@ -111,29 +115,34 @@ end
 
 ```elixir
 workflow "dashboard_data" do
+  step :init, fn input ->
+    {:ok, %{user_id: input["user_id"]}}
+  end
+
   parallel do
-    step :fetch_orders do
+    step :fetch_orders, fn data ->
       orders = Orders.recent(limit: 10)
-      put_context(:orders, orders)
+      {:ok, assign(data, :orders, orders)}
     end
 
-    step :fetch_metrics do
+    step :fetch_metrics, fn data ->
       metrics = Analytics.daily_metrics()
-      put_context(:metrics, metrics)
+      {:ok, assign(data, :metrics, metrics)}
     end
 
-    step :fetch_notifications do
+    step :fetch_notifications, fn data ->
       notifications = Notifications.unread()
-      put_context(:notifications, notifications)
+      {:ok, assign(data, :notifications, notifications)}
     end
   end
 
-  step :build_dashboard do
-    %{
-      orders: get_context(:orders),
-      metrics: get_context(:metrics),
-      notifications: get_context(:notifications)
+  step :build_dashboard, fn data ->
+    dashboard = %{
+      orders: data.orders,
+      metrics: data.metrics,
+      notifications: data.notifications
     }
+    {:ok, assign(data, :dashboard, dashboard)}
   end
 end
 ```
@@ -142,28 +151,31 @@ end
 
 ```elixir
 workflow "notify_all" do
-  step :prepare do
-    put_context(:user_id, input()["user_id"])
-    put_context(:message, input()["message"])
+  step :prepare, fn data ->
+    {:ok, %{user_id: data["user_id"], message: data["message"]}}
   end
 
   # All notifications run even if some fail
   parallel on_error: :complete_all do
-    step :send_email, retry: [max_attempts: 3] do
-      Mailer.send(get_context(:user_id), get_context(:message))
+    step :send_email, [retry: [max_attempts: 3]], fn data ->
+      Mailer.send(data.user_id, data.message)
+      {:ok, data}
     end
 
-    step :send_sms do
-      SMS.send(get_context(:user_id), get_context(:message))
+    step :send_sms, fn data ->
+      SMS.send(data.user_id, data.message)
+      {:ok, data}
     end
 
-    step :send_push do
-      Push.send(get_context(:user_id), get_context(:message))
+    step :send_push, fn data ->
+      Push.send(data.user_id, data.message)
+      {:ok, data}
     end
   end
 
-  step :log_results do
-    Logger.info("Notifications sent for user #{get_context(:user_id)}")
+  step :log_results, fn data ->
+    Logger.info("Notifications sent for user #{data.user_id}")
+    {:ok, data}
   end
 end
 ```
@@ -174,12 +186,14 @@ Individual steps in a parallel block can have their own retry configuration:
 
 ```elixir
 parallel do
-  step :external_api_call, retry: [max_attempts: 5, backoff: :exponential] do
-    ExternalAPI.fetch_data()
+  step :external_api_call, [retry: [max_attempts: 5, backoff: :exponential]], fn data ->
+    result = ExternalAPI.fetch_data()
+    {:ok, assign(data, :external, result)}
   end
 
-  step :quick_local_task do
-    LocalDB.query()
+  step :quick_local_task, fn data ->
+    result = LocalDB.query()
+    {:ok, assign(data, :local, result)}
   end
 end
 ```
@@ -187,35 +201,36 @@ end
 ## How It Works
 
 1. The parallel block starts all steps concurrently as separate tasks
-2. Each step runs independently with its own context snapshot
-3. When all steps complete, contexts are merged based on the merge strategy
+2. Each step runs independently with its own data snapshot
+3. When all steps complete, data is merged based on the merge strategy
 4. Execution continues to the next step after the parallel block
 
 ## Best Practices
 
 ### Keep Parallel Steps Independent
 
-Parallel steps shouldn't depend on each other's context changes:
+Parallel steps shouldn't depend on each other's data changes:
 
 ```elixir
 # Good - independent operations
 parallel do
-  step :a do
-    put_context(:result_a, compute_a())
+  step :a, fn data ->
+    {:ok, assign(data, :result_a, compute_a())}
   end
-  step :b do
-    put_context(:result_b, compute_b())
+  step :b, fn data ->
+    {:ok, assign(data, :result_b, compute_b())}
   end
 end
 
-# Bad - step b depends on step a's context
+# Bad - step b depends on step a's data
 parallel do
-  step :a do
-    put_context(:value, 42)
+  step :a, fn data ->
+    {:ok, assign(data, :value, 42)}
   end
-  step :b do
+  step :b, fn data ->
     # This won't see :value from step a!
-    x = get_context(:value)  # Returns nil
+    x = data[:value]  # Returns nil
+    {:ok, data}
   end
 end
 ```
@@ -232,19 +247,21 @@ Group related work into single steps rather than many tiny parallel steps:
 ```elixir
 # Good - logical grouping
 parallel do
-  step :process_images do
-    Enum.each(images, &process_image/1)
+  step :process_images, fn data ->
+    Enum.each(data.images, &process_image/1)
+    {:ok, data}
   end
-  step :process_documents do
-    Enum.each(documents, &process_doc/1)
+  step :process_documents, fn data ->
+    Enum.each(data.documents, &process_doc/1)
+    {:ok, data}
   end
 end
 
 # Less ideal - too many small parallel steps
 parallel do
-  step :image_1 do process_image(image_1) end
-  step :image_2 do process_image(image_2) end
-  step :image_3 do process_image(image_3) end
+  step :image_1, fn data -> process_image(data.image_1); {:ok, data} end
+  step :image_2, fn data -> process_image(data.image_2); {:ok, data} end
+  step :image_3, fn data -> process_image(data.image_3); {:ok, data} end
   # Use foreach for this pattern instead
 end
 ```

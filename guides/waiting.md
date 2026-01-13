@@ -7,7 +7,7 @@ Suspend workflows to wait for time, events, or human input.
 ```elixir
 defmodule MyApp.MyWorkflow do
   use Durable
-  use Durable.Context
+  use Durable.Helpers
   use Durable.Wait  # Import wait functions
 end
 ```
@@ -31,16 +31,19 @@ Suspend the workflow for a specific duration.
 
 ```elixir
 workflow "delayed_task" do
-  step :start do
+  step :start, fn data ->
     Logger.info("Starting task")
+    {:ok, data}
   end
 
-  step :wait do
+  step :wait, fn data ->
     sleep(minutes(30))
+    {:ok, data}
   end
 
-  step :continue do
+  step :continue, fn data ->
     Logger.info("Resumed after 30 minutes")
+    {:ok, data}
   end
 end
 ```
@@ -59,18 +62,21 @@ end
 Suspend until a specific datetime.
 
 ```elixir
-step :schedule do
+step :schedule, fn data ->
   # Wake up at midnight UTC
   schedule_at(~U[2025-12-25 00:00:00Z])
+  {:ok, data}
 end
 
 # Or use time helpers
-step :wait_until_business_hours do
+step :wait_until_business_hours, fn data ->
   schedule_at(next_business_day(hour: 9))
+  {:ok, data}
 end
 
-step :wait_for_monday do
+step :wait_for_monday, fn data ->
   schedule_at(next_weekday(:monday, hour: 9))
+  {:ok, data}
 end
 ```
 
@@ -103,26 +109,26 @@ Suspend until an external system sends an event.
 
 ```elixir
 workflow "payment_flow" do
-  step :initiate_payment do
-    payment = Payments.create(input()["amount"])
-    put_context(:payment_id, payment.id)
+  step :initiate_payment, fn data ->
+    payment = Payments.create(data["amount"])
+    {:ok, assign(data, :payment_id, payment.id)}
   end
 
-  step :await_confirmation do
+  step :await_confirmation, fn data ->
     result = wait_for_event("payment_confirmed",
       timeout: minutes(15),
       timeout_value: :timeout
     )
-
-    put_context(:payment_result, result)
+    {:ok, assign(data, :payment_result, result)}
   end
 
-  step :process_result do
-    case get_context(:payment_result) do
+  step :process_result, fn data ->
+    case data.payment_result do
       :timeout -> handle_timeout()
       %{status: "success"} -> handle_success()
       _ -> handle_failure()
     end
+    {:ok, data}
   end
 end
 ```
@@ -140,22 +146,23 @@ Wait for any one of multiple events. Returns `{event_name, payload}`.
 
 ```elixir
 workflow "order_status" do
-  step :await_result do
+  step :await_result, fn data ->
     {event, payload} = wait_for_any(["success", "failure", "cancelled"],
       timeout: hours(24),
       timeout_value: {:timeout, nil}
     )
-
-    put_context(:result_event, event)
-    put_context(:result_data, payload)
+    {:ok, data
+    |> assign(:result_event, event)
+    |> assign(:result_data, payload)}
   end
 
-  step :handle_result do
-    case get_context(:result_event) do
-      "success" -> process_success(get_context(:result_data))
-      "failure" -> process_failure(get_context(:result_data))
+  step :handle_result, fn data ->
+    case data.result_event do
+      "success" -> process_success(data.result_data)
+      "failure" -> process_failure(data.result_data)
       "cancelled" -> process_cancellation()
     end
+    {:ok, data}
   end
 end
 ```
@@ -166,19 +173,16 @@ Wait for all specified events. Returns `%{event_name => payload}`.
 
 ```elixir
 workflow "multi_approval" do
-  step :await_approvals do
+  step :await_approvals, fn data ->
     results = wait_for_all(["manager_approval", "legal_approval", "finance_approval"],
       timeout: days(7),
       timeout_value: {:timeout, :partial}
     )
-
-    put_context(:approvals, results)
+    {:ok, assign(data, :approvals, results)}
   end
 
-  step :process_approvals do
-    approvals = get_context(:approvals)
-
-    case approvals do
+  step :process_approvals, fn data ->
+    case data.approvals do
       {:timeout, :partial} ->
         handle_incomplete_approvals()
       %{} = all_approvals ->
@@ -188,6 +192,7 @@ workflow "multi_approval" do
           reject_request()
         end
     end
+    {:ok, data}
   end
 end
 ```
@@ -213,30 +218,27 @@ Suspend until a human provides input.
 
 ```elixir
 workflow "approval_flow" do
-  step :prepare_request do
-    put_context(:request, input())
+  step :prepare_request, fn data ->
+    {:ok, %{request: data}}
   end
 
-  step :await_approval do
+  step :await_approval, fn data ->
     result = wait_for_input("manager_approval",
       type: :approval,
       prompt: "Approve this request?",
       timeout: days(3),
       timeout_value: :auto_rejected
     )
-
-    put_context(:approval, result)
+    {:ok, assign(data, :approval, result)}
   end
 
-  step :process_decision do
-    case get_context(:approval) do
-      :auto_rejected ->
-        put_context(:status, :rejected_timeout)
-      %{approved: true} ->
-        put_context(:status, :approved)
-      _ ->
-        put_context(:status, :rejected)
+  step :process_decision, fn data ->
+    status = case data.approval do
+      :auto_rejected -> :rejected_timeout
+      %{approved: true} -> :approved
+      _ -> :rejected
     end
+    {:ok, assign(data, :status, status)}
   end
 end
 ```
@@ -269,15 +271,14 @@ end
 Wait for an approval decision. Returns `:approved` or `:rejected`.
 
 ```elixir
-step :manager_review do
+step :manager_review, fn data ->
   result = wait_for_approval("expense_approval",
     prompt: "Approve expense for $500?",
     metadata: %{employee: "John", amount: 500},
     timeout: days(3),
     timeout_value: :auto_approved
   )
-
-  put_context(:approved, result == :approved)
+  {:ok, assign(data, :approved, result == :approved)}
 end
 ```
 
@@ -286,7 +287,7 @@ end
 Wait for a single choice selection.
 
 ```elixir
-step :select_shipping do
+step :select_shipping, fn data ->
   method = wait_for_choice("shipping_method",
     prompt: "Select shipping method:",
     choices: [
@@ -296,8 +297,7 @@ step :select_shipping do
     timeout: hours(24),
     timeout_value: :standard
   )
-
-  put_context(:shipping, method)
+  {:ok, assign(data, :shipping, method)}
 end
 ```
 
@@ -306,14 +306,13 @@ end
 Wait for text input.
 
 ```elixir
-step :get_reason do
+step :get_reason, fn data ->
   reason = wait_for_text("rejection_reason",
     prompt: "Please provide a reason for rejection:",
     timeout: hours(4),
     timeout_value: "No reason provided"
   )
-
-  put_context(:reason, reason)
+  {:ok, assign(data, :reason, reason)}
 end
 ```
 
@@ -322,7 +321,7 @@ end
 Wait for form submission.
 
 ```elixir
-step :collect_details do
+step :collect_details, fn data ->
   result = wait_for_form("equipment_request",
     prompt: "Please specify equipment needs",
     fields: [
@@ -332,8 +331,7 @@ step :collect_details do
     ],
     timeout: days(7)
   )
-
-  put_context(:equipment, result)
+  {:ok, assign(data, :equipment, result)}
 end
 ```
 
@@ -373,40 +371,40 @@ soon = Durable.Wait.list_pending_inputs(
 
 ```elixir
 workflow "expense_approval" do
-  step :submit do
-    put_context(:expense, input())
-    put_context(:amount, input()["amount"])
+  step :submit, fn data ->
+    {:ok, %{expense: data, amount: data["amount"]}}
   end
 
-  step :manager_review do
-    if get_context(:amount) > 1000 do
+  step :manager_review, fn data ->
+    if data.amount > 1000 do
       result = wait_for_approval("manager_approval",
-        prompt: "Approve expense of $#{get_context(:amount)}?",
+        prompt: "Approve expense of $#{data.amount}?",
         timeout: days(2)
       )
-      put_context(:manager_approved, result == :approved)
+      {:ok, assign(data, :manager_approved, result == :approved)}
     else
-      put_context(:manager_approved, true)
+      {:ok, assign(data, :manager_approved, true)}
     end
   end
 
-  step :finance_review do
-    if get_context(:amount) > 5000 and get_context(:manager_approved) do
+  step :finance_review, fn data ->
+    if data.amount > 5000 and data.manager_approved do
       result = wait_for_approval("finance_approval",
         timeout: days(3)
       )
-      put_context(:finance_approved, result == :approved)
+      {:ok, assign(data, :finance_approved, result == :approved)}
     else
-      put_context(:finance_approved, true)
+      {:ok, assign(data, :finance_approved, true)}
     end
   end
 
-  step :finalize do
-    if get_context(:manager_approved) and get_context(:finance_approved) do
-      Expenses.approve(get_context(:expense))
+  step :finalize, fn data ->
+    if data.manager_approved and data.finance_approved do
+      Expenses.approve(data.expense)
     else
-      Expenses.reject(get_context(:expense))
+      Expenses.reject(data.expense)
     end
+    {:ok, data}
   end
 end
 ```
@@ -415,31 +413,34 @@ end
 
 ```elixir
 workflow "order_fulfillment" do
-  step :create_shipment do
-    shipment = Shipping.create(input()["order_id"])
-    put_context(:shipment_id, shipment.id)
-    put_context(:tracking_number, shipment.tracking)
+  step :create_shipment, fn data ->
+    shipment = Shipping.create(data["order_id"])
+    {:ok, %{
+      shipment_id: shipment.id,
+      tracking_number: shipment.tracking,
+      order_id: data["order_id"]
+    }}
   end
 
-  step :await_delivery do
+  step :await_delivery, fn data ->
     # Wait for webhook from shipping provider
     event = wait_for_event("shipment_delivered",
       timeout: days(14),
       timeout_value: :lost_package
     )
-
-    put_context(:delivery_status, event)
+    {:ok, assign(data, :delivery_status, event)}
   end
 
-  step :handle_delivery do
-    case get_context(:delivery_status) do
+  step :handle_delivery, fn data ->
+    case data.delivery_status do
       :lost_package ->
-        Support.create_ticket("Lost package", get_context(:shipment_id))
+        Support.create_ticket("Lost package", data.shipment_id)
       %{status: "delivered"} ->
-        Orders.mark_complete(input()["order_id"])
+        Orders.mark_complete(data.order_id)
       _ ->
-        Logger.warn("Unexpected delivery status")
+        Logger.warning("Unexpected delivery status")
     end
+    {:ok, data}
   end
 end
 
@@ -460,40 +461,38 @@ end
 
 ```elixir
 workflow "subscription_renewal" do
-  step :check_expiry do
-    subscription = Subscriptions.get(input()["subscription_id"])
-    put_context(:subscription, subscription)
-    put_context(:expires_at, subscription.expires_at)
+  step :check_expiry, fn data ->
+    subscription = Subscriptions.get(data["subscription_id"])
+    {:ok, %{subscription: subscription, expires_at: subscription.expires_at}}
   end
 
-  step :wait_for_reminder_time do
-    expires_at = get_context(:expires_at)
-    reminder_time = DateTime.add(expires_at, -7, :day)  # 7 days before
-
+  step :wait_for_reminder_time, fn data ->
+    reminder_time = DateTime.add(data.expires_at, -7, :day)  # 7 days before
     schedule_at(reminder_time)
+    {:ok, data}
   end
 
-  step :send_reminder do
-    subscription = get_context(:subscription)
-    Mailer.send_renewal_reminder(subscription.user_email)
+  step :send_reminder, fn data ->
+    Mailer.send_renewal_reminder(data.subscription.user_email)
+    {:ok, data}
   end
 
-  step :await_renewal do
+  step :await_renewal, fn data ->
     renewal = wait_for_event("subscription_renewed",
       timeout: days(7),
       timeout_value: :not_renewed
     )
-
-    put_context(:renewal_result, renewal)
+    {:ok, assign(data, :renewal_result, renewal)}
   end
 
-  step :handle_result do
-    case get_context(:renewal_result) do
+  step :handle_result, fn data ->
+    case data.renewal_result do
       :not_renewed ->
-        Subscriptions.expire(get_context(:subscription).id)
+        Subscriptions.expire(data.subscription.id)
       _ ->
         Logger.info("Subscription renewed")
     end
+    {:ok, data}
   end
 end
 ```
@@ -502,28 +501,27 @@ end
 
 ```elixir
 workflow "contract_approval" do
-  step :submit_contract do
-    put_context(:contract, input())
+  step :submit_contract, fn data ->
+    {:ok, %{contract: data}}
   end
 
-  step :await_all_approvals do
+  step :await_all_approvals, fn data ->
     # Wait for all three departments to approve
     results = wait_for_all(["legal", "finance", "management"],
       timeout: days(5),
       timeout_value: {:timeout, :incomplete}
     )
-
-    put_context(:approval_results, results)
+    {:ok, assign(data, :approval_results, results)}
   end
 
-  step :finalize do
-    case get_context(:approval_results) do
-      {:timeout, :incomplete} ->
-        put_context(:status, :timed_out)
+  step :finalize, fn data ->
+    status = case data.approval_results do
+      {:timeout, :incomplete} -> :timed_out
       approvals ->
         all_approved = Enum.all?(approvals, fn {_, v} -> v["approved"] end)
-        put_context(:status, if(all_approved, do: :approved, else: :rejected))
+        if all_approved, do: :approved, else: :rejected
     end
+    {:ok, assign(data, :status, status)}
   end
 end
 ```
@@ -532,24 +530,25 @@ end
 
 ```elixir
 workflow "payment_with_timeout" do
-  step :await_payment_or_cancel do
+  step :await_payment_or_cancel, fn data ->
     # First event wins
-    {event, data} = wait_for_any(["payment_received", "user_cancelled", "fraud_detected"],
+    {event, event_data} = wait_for_any(["payment_received", "user_cancelled", "fraud_detected"],
       timeout: hours(1),
       timeout_value: {:timeout, nil}
     )
-
-    put_context(:result_event, event)
-    put_context(:result_data, data)
+    {:ok, data
+    |> assign(:result_event, event)
+    |> assign(:result_data, event_data)}
   end
 
-  step :handle_result do
-    case get_context(:result_event) do
+  step :handle_result, fn data ->
+    case data.result_event do
       "payment_received" -> complete_order()
       "user_cancelled" -> refund_if_needed()
       "fraud_detected" -> flag_for_review()
       :timeout -> expire_order()
     end
+    {:ok, data}
   end
 end
 ```
@@ -559,7 +558,7 @@ end
 ### Always Handle Timeouts
 
 ```elixir
-step :await_response do
+step :await_response, fn data ->
   result = wait_for_input("approval",
     timeout: days(7),
     timeout_value: :timed_out  # Always provide a timeout value
@@ -569,6 +568,7 @@ step :await_response do
     :timed_out -> handle_timeout()
     response -> handle_response(response)
   end
+  {:ok, assign(data, :response, result)}
 end
 ```
 
@@ -585,16 +585,18 @@ wait_for_event("done")
 wait_for_event("event")
 ```
 
-### Store Context Before Waiting
+### Store Data Before Waiting
 
 ```elixir
-step :prepare_and_wait do
+step :prepare_and_wait, fn data ->
   # Save important data before suspending
-  put_context(:prepared_at, DateTime.utc_now())
-  put_context(:request_details, input())
+  data = data
+  |> assign(:prepared_at, DateTime.utc_now())
+  |> assign(:request_details, data)
 
   # Now wait
   wait_for_input("approval")
+  {:ok, data}
 end
 ```
 

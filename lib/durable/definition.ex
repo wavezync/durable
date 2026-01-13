@@ -10,9 +10,14 @@ defmodule Durable.Definition do
     @moduledoc """
     Represents a single step in a workflow.
 
-    The `body_fn` field contains a 0-arity function that returns the step body function.
-    This indirection allows the step definition to be stored at compile time while
-    the actual step logic is compiled into the module.
+    ## Pipeline Model
+
+    Steps use a pure pipeline model where data flows from step to step:
+    - Each step receives one argument: the data from the previous step
+    - First step receives the workflow input
+    - Each step returns `{:ok, data}` or `{:error, reason}`
+
+    The `body_fn` field contains the step function that processes data.
     """
 
     @type step_type :: :step | :decision | :branch | :parallel | :loop | :foreach | :switch
@@ -28,6 +33,7 @@ defmodule Durable.Definition do
             name: atom(),
             type: step_type(),
             module: module(),
+            body_fn: (map() -> {:ok, map()} | {:error, term()}) | nil,
             opts: %{
               optional(:retry) => retry_opts(),
               optional(:timeout) => pos_integer(),
@@ -41,14 +47,22 @@ defmodule Durable.Definition do
       :name,
       :type,
       :module,
+      :body_fn,
       opts: %{}
     ]
 
     @doc """
-    Executes the step body by calling the generated function in the module.
+    Executes the step with the given data.
+
+    For pipeline model steps, calls `body_fn.(data)`.
+    For foreach steps, calls `body_fn.(data, item, index)`.
     """
-    def execute(%__MODULE__{name: name, module: module}, context) do
-      apply(module, :"__step_body__#{name}", [context])
+    def execute(%__MODULE__{body_fn: body_fn}, data) when is_function(body_fn, 1) do
+      body_fn.(data)
+    end
+
+    def execute(%__MODULE__{body_fn: body_fn}, data, item, index) when is_function(body_fn, 3) do
+      body_fn.(data, item, index)
     end
   end
 
@@ -58,11 +72,21 @@ defmodule Durable.Definition do
 
     Compensations are executed in reverse order when a workflow fails
     and needs to undo previously completed steps (Saga pattern).
+
+    ## Pipeline Model
+
+    Compensation functions receive the current data and return `{:ok, data}`:
+
+        compensate :cancel_flight, fn data ->
+          FlightAPI.cancel(data.flight_booking_id)
+          {:ok, data}
+        end
     """
 
     @type t :: %__MODULE__{
             name: atom(),
             module: module(),
+            body_fn: (map() -> {:ok, map()} | {:error, term()}) | nil,
             opts: %{
               optional(:retry) => Step.retry_opts(),
               optional(:timeout) => pos_integer()
@@ -73,14 +97,15 @@ defmodule Durable.Definition do
     defstruct [
       :name,
       :module,
+      :body_fn,
       opts: %{}
     ]
 
     @doc """
-    Executes the compensation body by calling the generated function in the module.
+    Executes the compensation with the given data.
     """
-    def execute(%__MODULE__{name: name, module: module}, context) do
-      apply(module, :"__compensation_body__#{name}", [context])
+    def execute(%__MODULE__{body_fn: body_fn}, data) when is_function(body_fn, 1) do
+      body_fn.(data)
     end
   end
 

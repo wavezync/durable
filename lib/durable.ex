@@ -42,16 +42,16 @@ defmodule Durable do
 
       defmodule MyApp.OrderWorkflow do
         use Durable
-        use Durable.Context
+        use Durable.Helpers
 
         workflow "process_order", timeout: hours(2) do
-          step :validate do
-            order = input().order
-            put_context(:order_id, order.id)
+          step :validate, fn order ->
+            {:ok, %{order_id: order["id"], items: order["items"]}}
           end
 
-          step :charge, retry: [max_attempts: 3, backoff: :exponential] do
-            PaymentService.charge(get_context(:order_id))
+          step :charge, [retry: [max_attempts: 3, backoff: :exponential]], fn data ->
+            receipt = PaymentService.charge(data.order_id)
+            {:ok, assign(data, :receipt, receipt)}
           end
         end
       end
@@ -83,10 +83,11 @@ defmodule Durable do
 
       defmodule MyApp.OrderWorkflow do
         use Durable
+        use Durable.Helpers
 
         workflow "process_order" do
-          step :validate do
-            # ...
+          step :validate, fn data ->
+            {:ok, %{order_id: data["id"]}}
           end
         end
       end
@@ -110,14 +111,16 @@ defmodule Durable do
   @doc false
   defmacro __before_compile__(env) do
     workflows = Module.get_attribute(env.module, :durable_workflows) || []
-    workflow_names = Enum.map(workflows, fn {name, _def} -> name end)
+    workflow_names = Enum.map(workflows, fn {name, _def_fn} -> name end)
 
     # Generate a function clause for each workflow
+    # Each workflow registers {name, definition_fn} where definition_fn is a function
+    # that returns the workflow definition. We call that function at runtime.
     workflow_clauses =
-      Enum.map(workflows, fn {name, definition} ->
+      Enum.map(workflows, fn {name, definition_fn} ->
         quote do
           def __workflow_definition__(unquote(name)) do
-            {:ok, unquote(Macro.escape(definition, unquote: true))}
+            {:ok, unquote(definition_fn)()}
           end
         end
       end)
@@ -131,10 +134,10 @@ defmodule Durable do
     # Generate default workflow function
     default_workflow =
       case workflows do
-        [{_name, definition} | _] ->
+        [{_name, definition_fn} | _] ->
           quote do
             def __default_workflow__ do
-              {:ok, unquote(Macro.escape(definition, unquote: true))}
+              {:ok, unquote(definition_fn)()}
             end
           end
 

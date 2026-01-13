@@ -17,7 +17,8 @@ defmodule Durable.BranchTest do
       assert branch_step != nil
       assert branch_step.type == :branch
       assert branch_step.opts[:clauses] != nil
-      assert branch_step.opts[:condition_fn] != nil
+      # In the new DSL, condition function is stored in body_fn
+      assert branch_step.body_fn != nil
     end
 
     test "branch creates qualified step names for nested steps" do
@@ -206,112 +207,116 @@ end
 
 defmodule SimpleBranchTestWorkflow do
   use Durable
-  use Durable.Context
+  use Durable.Helpers
 
   workflow "simple_branch" do
-    step :setup do
-      put_context(:doc_type, String.to_atom(input()["doc_type"]))
-    end
+    step(:setup, fn data ->
+      # In pipeline model, first step receives workflow input directly
+      doc_type = String.to_atom(data["doc_type"])
+      {:ok, assign(data, :doc_type, doc_type)}
+    end)
 
-    branch on: get_context(:doc_type) do
+    branch on: fn data -> data.doc_type end do
       :invoice ->
-        step :process_invoice do
-          put_context(:processed_as, "invoice")
-        end
+        step(:process_invoice, fn data ->
+          {:ok, assign(data, :processed_as, "invoice")}
+        end)
 
       :contract ->
-        step :process_contract do
-          put_context(:processed_as, "contract")
-        end
+        step(:process_contract, fn data ->
+          {:ok, assign(data, :processed_as, "contract")}
+        end)
     end
 
-    step :final do
-      put_context(:completed, true)
-    end
+    step(:final, fn data ->
+      {:ok, assign(data, :completed, true)}
+    end)
   end
 end
 
 defmodule BranchWithDefaultWorkflow do
   use Durable
-  use Durable.Context
+  use Durable.Helpers
 
   workflow "branch_with_default" do
-    step :setup do
-      put_context(:doc_type, String.to_atom(input()["doc_type"]))
-    end
+    step(:setup, fn data ->
+      doc_type = String.to_atom(data["doc_type"])
+      {:ok, assign(data, :doc_type, doc_type)}
+    end)
 
-    branch on: get_context(:doc_type) do
+    branch on: fn data -> data.doc_type end do
       :invoice ->
-        step :process_invoice do
-          put_context(:processed_as, "invoice")
-        end
+        step(:process_invoice, fn data ->
+          {:ok, assign(data, :processed_as, "invoice")}
+        end)
 
       _ ->
-        step :manual_review do
-          put_context(:processed_as, "manual_review")
-        end
+        step(:manual_review, fn data ->
+          {:ok, assign(data, :processed_as, "manual_review")}
+        end)
     end
 
-    step :done do
-      :ok
-    end
+    step(:done, fn data ->
+      {:ok, data}
+    end)
   end
 end
 
 defmodule MultiStepBranchWorkflow do
   use Durable
-  use Durable.Context
+  use Durable.Helpers
 
   workflow "multi_step_branch" do
-    step :setup do
-      put_context(:doc_type, String.to_atom(input()["doc_type"]))
-    end
+    step(:setup, fn data ->
+      doc_type = String.to_atom(data["doc_type"])
+      {:ok, assign(data, :doc_type, doc_type)}
+    end)
 
-    branch on: get_context(:doc_type) do
+    branch on: fn data -> data.doc_type end do
       :invoice ->
-        step :extract_invoice do
-          put_context(:step_1, "extracted")
-        end
+        step(:extract_invoice, fn data ->
+          {:ok, assign(data, :step_1, "extracted")}
+        end)
 
-        step :validate_invoice do
-          put_context(:step_2, "validated")
-        end
+        step(:validate_invoice, fn data ->
+          {:ok, assign(data, :step_2, "validated")}
+        end)
 
       :contract ->
-        step :extract_contract do
-          put_context(:step_1, "extracted")
-        end
+        step(:extract_contract, fn data ->
+          {:ok, assign(data, :step_1, "extracted")}
+        end)
     end
 
-    step :store do
-      :ok
-    end
+    step(:store, fn data ->
+      {:ok, data}
+    end)
   end
 end
 
 defmodule ContextBranchWorkflow do
   use Durable
-  use Durable.Context
+  use Durable.Helpers
 
   workflow "context_branch" do
-    step :setup do
-      put_context(:amount, input()["amount"])
-    end
+    step(:setup, fn data ->
+      {:ok, assign(data, :amount, data["amount"])}
+    end)
 
-    branch on: get_context(:amount) > 1000 do
+    branch on: fn data -> data.amount > 1000 end do
       true ->
-        step :manager_approval do
-          put_context(:approval_type, "manager")
-        end
+        step(:manager_approval, fn data ->
+          {:ok, assign(data, :approval_type, "manager")}
+        end)
 
       false ->
-        step :auto_approval do
-          put_context(:approval_type, "auto")
-        end
+        step(:auto_approval, fn data ->
+          {:ok, assign(data, :approval_type, "auto")}
+        end)
     end
 
-    step :complete do
-      :ok
-    end
+    step(:complete, fn data ->
+      {:ok, data}
+    end)
   end
 end

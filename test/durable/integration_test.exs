@@ -405,53 +405,64 @@ defmodule OrderProcessingWorkflow do
   Features: Branch -> ForEach -> Parallel (sequential, not nested)
   """
   use Durable
-  use Durable.Context
+  use Durable.Helpers
 
   workflow "order_processing" do
-    step :validate_order do
-      order = input()
-      put_context(:order_type, order["type"])
-      put_context(:line_items, order["items"])
-    end
+    # First step receives workflow input as data
+    step(:validate_order, fn data ->
+      data =
+        data
+        |> assign(:order_type, data["type"])
+        |> assign(:line_items, data["items"])
+
+      {:ok, data}
+    end)
 
     # Branch based on order type
-    branch on: get_context(:order_type) do
+    branch on: fn data -> data.order_type end do
       "physical" ->
-        step :process_physical do
-          put_context(:processed_as, "physical")
-          put_context(:shipping_label, "SHIP-123")
-        end
+        step(:process_physical, fn data ->
+          data =
+            data
+            |> assign(:processed_as, "physical")
+            |> assign(:shipping_label, "SHIP-123")
+
+          {:ok, data}
+        end)
 
       "digital" ->
-        step :process_digital do
-          put_context(:processed_as, "digital")
-          put_context(:download_url, "https://example.com/download")
-        end
+        step(:process_digital, fn data ->
+          data =
+            data
+            |> assign(:processed_as, "digital")
+            |> assign(:download_url, "https://example.com/download")
+
+          {:ok, data}
+        end)
     end
 
     # ForEach to process line items (sequential)
-    foreach :process_items, items: :line_items do
-      step :process_item do
-        item = current_item()
-        current_list = get_context(:items_processed, [])
-        put_context(:items_processed, current_list ++ [item["name"]])
-      end
+    foreach :process_items, items: fn data -> data.line_items end do
+      step(:process_item, fn data, item, _idx ->
+        current_list = data[:items_processed] || []
+        {:ok, assign(data, :items_processed, current_list ++ [item["name"]])}
+      end)
     end
 
     # Parallel notification tasks
     parallel do
-      step :send_confirmation do
-        put_context(:email_sent, true)
-      end
+      step(:send_confirmation, fn data ->
+        {:ok, assign(data, :email_sent, true)}
+      end)
 
-      step :update_analytics do
-        put_context(:analytics_updated, true)
-      end
+      step(:update_analytics, fn data ->
+        {:ok, assign(data, :analytics_updated, true)}
+      end)
     end
 
-    step :complete do
-      put_context(:completed, true)
-    end
+    step(:complete, fn data ->
+      {:ok, assign(data, :completed, true)}
+    end)
   end
 end
 
@@ -461,67 +472,81 @@ defmodule DocumentApprovalWorkflow do
   Features: Decision (goto) -> Parallel -> Branch -> ForEach (sequential)
   """
   use Durable
-  use Durable.Context
+  use Durable.Helpers
 
   workflow "document_approval" do
-    step :create_request do
-      put_context(:amount, input()["amount"])
-      put_context(:affected_items, input()["items"])
-    end
+    # First step receives workflow input as data
+    step(:create_request, fn data ->
+      data =
+        data
+        |> assign(:amount, data["amount"])
+        |> assign(:affected_items, data["items"])
+        # Preserve original input for later steps
+        |> assign(:original_input, data)
+
+      {:ok, data}
+    end)
 
     # Decision - auto-approve low value, otherwise continue
-    decision :check_auto_approve do
-      if get_context(:amount) < 1000 do
-        {:goto, :finalize}
+    decision(:check_auto_approve, fn data ->
+      if data[:amount] < 1000 do
+        {:goto, :finalize, data}
       else
-        {:continue}
+        {:ok, data}
       end
-    end
+    end)
 
     # Parallel notification (only runs for high-value)
     parallel do
-      step :notify_approvers do
-        put_context(:notified, true)
-      end
+      step(:notify_approvers, fn data ->
+        {:ok, assign(data, :notified, true)}
+      end)
 
-      step :create_audit_log do
-        put_context(:audit_logged, true)
-      end
+      step(:create_audit_log, fn data ->
+        {:ok, assign(data, :audit_logged, true)}
+      end)
     end
 
-    step :set_approval do
-      result = input()["approval_result"] || "approved"
-      put_context(:approval_result, result)
-    end
+    step(:set_approval, fn data ->
+      # Access original input saved by first step
+      original = data[:original_input] || %{}
+      result = original["approval_result"] || "approved"
+      {:ok, assign(data, :approval_result, result)}
+    end)
 
     # Branch based on approval result
-    branch on: get_context(:approval_result) do
+    branch on: fn data -> data.approval_result end do
       "approved" ->
-        step :process_approved do
-          put_context(:approval_processed, "approved")
-        end
+        step(:process_approved, fn data ->
+          {:ok, assign(data, :approval_processed, "approved")}
+        end)
 
       "rejected" ->
-        step :process_rejected do
-          put_context(:approval_processed, "rejected")
-          put_context(:rejection_notified, true)
-        end
+        step(:process_rejected, fn data ->
+          data =
+            data
+            |> assign(:approval_processed, "rejected")
+            |> assign(:rejection_notified, true)
+
+          {:ok, data}
+        end)
     end
 
     # ForEach to update items (only runs for both, but only updates if approved)
-    foreach :update_items, items: :affected_items do
-      step :update_item do
-        if get_context(:approval_processed) == "approved" do
-          item = current_item()
-          current_list = get_context(:items_updated, [])
-          put_context(:items_updated, current_list ++ [item])
+    foreach :update_items, items: fn data -> data.affected_items end do
+      step(:update_item, fn data, item, _idx ->
+        if data[:approval_processed] == "approved" do
+          current_list = data[:items_updated] || []
+          {:ok, assign(data, :items_updated, current_list ++ [item])}
+        else
+          {:ok, data}
         end
-      end
+      end)
     end
 
-    step :finalize do
-      put_context(:finalized, true)
-    end
+    step(:finalize, fn data ->
+      {:ok, assign(data, :finalized, true)}
+    end)
   end
 end
 
@@ -531,63 +556,70 @@ defmodule BatchMigrationWorkflow do
   Features: ForEach -> Decision -> Parallel -> Branch (sequential)
   """
   use Durable
-  use Durable.Context
+  use Durable.Helpers
 
   workflow "batch_migration" do
-    step :initialize do
-      put_context(:batches, input()["batches"])
-      put_context(:migrated_ids, [])
-    end
+    # First step receives workflow input as data
+    step(:initialize, fn data ->
+      data =
+        data
+        |> assign(:batches, data["batches"])
+        |> assign(:migrated_ids, [])
+
+      {:ok, data}
+    end)
 
     # ForEach to process batches (sequential)
-    foreach :process_batches, items: :batches do
-      step :migrate_batch do
-        batch = current_item()
-        current_ids = get_context(:migrated_ids, [])
-        put_context(:migrated_ids, current_ids ++ [batch["id"]])
-      end
+    foreach :process_batches, items: fn data -> data.batches end do
+      step(:migrate_batch, fn data, batch, _idx ->
+        current_ids = data[:migrated_ids] || []
+        {:ok, assign(data, :migrated_ids, current_ids ++ [batch["id"]])}
+      end)
     end
 
     # Decision based on migration results
     # If empty, jump to finalize (skipping parallel and mark_success)
-    decision :check_results do
-      ids = get_context(:migrated_ids, [])
+    decision(:check_results, fn data ->
+      ids = data[:migrated_ids] || []
 
       if ids != [] do
-        {:continue}
+        {:ok, data}
       else
-        {:goto, :finalize}
+        {:goto, :finalize, data}
       end
-    end
+    end)
 
     # Parallel reporting (only runs if we have batches)
     parallel do
-      step :generate_report do
-        put_context(:report_generated, true)
-      end
+      step(:generate_report, fn data ->
+        {:ok, assign(data, :report_generated, true)}
+      end)
 
-      step :send_notifications do
-        put_context(:notifications_sent, true)
-      end
+      step(:send_notifications, fn data ->
+        {:ok, assign(data, :notifications_sent, true)}
+      end)
 
-      step :cleanup_temp do
-        put_context(:cleanup_done, true)
-      end
+      step(:cleanup_temp, fn data ->
+        {:ok, assign(data, :cleanup_done, true)}
+      end)
     end
 
     # Success path - set status
-    step :mark_success do
-      put_context(:migration_status, "success")
-    end
+    step(:mark_success, fn data ->
+      {:ok, assign(data, :migration_status, "success")}
+    end)
 
     # Final step - both paths end here
-    step :finalize do
+    step(:finalize, fn data ->
       # If status not set yet, it means we jumped here (empty path)
-      if !has_context?(:migration_status) do
-        put_context(:migration_status, "empty")
-      end
+      data =
+        if Map.has_key?(data, :migration_status) do
+          data
+        else
+          assign(data, :migration_status, "empty")
+        end
 
-      put_context(:completed_at, true)
-    end
+      {:ok, assign(data, :completed_at, true)}
+    end)
   end
 end

@@ -698,7 +698,7 @@ defmodule Durable.WaitTest do
 
       exec = repo.get!(WorkflowExecution, exec.id)
       assert exec.status == :completed
-      # put_context after wait_for_approval ran
+      # assign after wait_for_approval ran
       assert exec.context["approval"] == %{"approved" => true}
     end
   end
@@ -762,94 +762,99 @@ end
 
 defmodule SleepTestWorkflow do
   use Durable
-  use Durable.Context
+  use Durable.Helpers
   use Durable.Wait
 
   workflow "sleep_test" do
-    step :before_sleep do
-      put_context(:before, true)
-    end
+    step(:before_sleep, fn data ->
+      {:ok, assign(data, :before, true)}
+    end)
 
-    step :sleep_step do
+    step(:sleep_step, fn data ->
       sleep(seconds(30))
-      put_context(:after_sleep, true)
-    end
+      {:ok, assign(data, :after_sleep, true)}
+    end)
 
-    step :after_sleep do
-      put_context(:completed, true)
-    end
+    step(:after_sleep, fn data ->
+      {:ok, assign(data, :completed, true)}
+    end)
   end
 end
 
 defmodule ScheduleAtTestWorkflow do
   use Durable
-  use Durable.Context
+  use Durable.Helpers
   use Durable.Wait
 
   workflow "schedule_at_test" do
-    step :before_schedule do
-      put_context(:before, true)
-    end
+    step(:before_schedule, fn data ->
+      {:ok, assign(data, :before, true)}
+    end)
 
-    step :schedule_step do
+    step(:schedule_step, fn data ->
       schedule_at(next_business_day(hour: 9))
-      put_context(:after_schedule, true)
-    end
+      {:ok, assign(data, :after_schedule, true)}
+    end)
   end
 end
 
 defmodule EventWaitTestWorkflow do
   use Durable
-  use Durable.Context
+  use Durable.Helpers
   use Durable.Wait
 
   workflow "event_wait_test" do
-    step :wait_step do
+    step(:wait_step, fn data ->
       result =
         wait_for_event("payment_confirmed",
           timeout: hours(1),
           timeout_value: :timed_out
         )
 
-      put_context(:result, result)
-    end
+      {:ok, assign(data, :result, result)}
+    end)
   end
 end
 
 defmodule WaitAnyTestWorkflow do
   use Durable
-  use Durable.Context
+  use Durable.Helpers
   use Durable.Wait
 
   workflow "wait_any_test" do
-    step :wait_step do
+    step(:wait_step, fn data ->
       {event_name, payload} = wait_for_any(["success", "failure"])
-      put_context(:received_event, event_name)
-      put_context(:payload, payload)
-    end
+
+      data =
+        data
+        |> assign(:received_event, event_name)
+        |> assign(:payload, payload)
+
+      {:ok, data}
+    end)
   end
 end
 
 defmodule WaitAllTestWorkflow do
   use Durable
-  use Durable.Context
+  use Durable.Helpers
   use Durable.Wait
 
   workflow "wait_all_test" do
-    step :wait_step do
+    step(:wait_step, fn data ->
       results = wait_for_all(["approval_a", "approval_b"])
-      put_context(:results, results)
-    end
+      {:ok, assign(data, :results, results)}
+    end)
   end
 end
 
 defmodule InputWaitTestWorkflow do
   use Durable
-  use Durable.Context
+  use Durable.Helpers
   use Durable.Wait
 
   workflow "input_wait_test" do
-    step :wait_step do
+    step(:wait_step, fn data ->
       result =
         wait_for_approval("manager_approval",
           prompt: "Approve?",
@@ -858,31 +863,31 @@ defmodule InputWaitTestWorkflow do
           timeout_value: :auto_approved
         )
 
-      put_context(:approval, result)
-    end
+      {:ok, assign(data, :approval, result)}
+    end)
   end
 end
 
 defmodule ApprovalTestWorkflow do
   use Durable
-  use Durable.Context
+  use Durable.Helpers
   use Durable.Wait
 
   workflow "approval_test" do
-    step :wait_step do
+    step(:wait_step, fn data ->
       result = wait_for_approval("expense_approval", prompt: "Approve expense?")
-      put_context(:result, result)
-    end
+      {:ok, assign(data, :result, result)}
+    end)
   end
 end
 
 defmodule ChoiceTestWorkflow do
   use Durable
-  use Durable.Context
+  use Durable.Helpers
   use Durable.Wait
 
   workflow "choice_test" do
-    step :wait_step do
+    step(:wait_step, fn data ->
       result =
         wait_for_choice("shipping_method",
           prompt: "Select shipping:",
@@ -892,31 +897,31 @@ defmodule ChoiceTestWorkflow do
           ]
         )
 
-      put_context(:result, result)
-    end
+      {:ok, assign(data, :result, result)}
+    end)
   end
 end
 
 defmodule TextTestWorkflow do
   use Durable
-  use Durable.Context
+  use Durable.Helpers
   use Durable.Wait
 
   workflow "text_test" do
-    step :wait_step do
+    step(:wait_step, fn data ->
       result = wait_for_text("feedback", prompt: "Enter feedback:")
-      put_context(:result, result)
-    end
+      {:ok, assign(data, :result, result)}
+    end)
   end
 end
 
 defmodule FormTestWorkflow do
   use Durable
-  use Durable.Context
+  use Durable.Helpers
   use Durable.Wait
 
   workflow "form_test" do
-    step :wait_step do
+    step(:wait_step, fn data ->
       result =
         wait_for_form("equipment_request",
           prompt: "Select equipment:",
@@ -926,55 +931,55 @@ defmodule FormTestWorkflow do
           ]
         )
 
-      put_context(:result, result)
-    end
+      {:ok, assign(data, :result, result)}
+    end)
   end
 end
 
 defmodule ShortTimeoutInputWorkflow do
   use Durable
-  use Durable.Context
+  use Durable.Helpers
   use Durable.Wait
 
   workflow "short_timeout_input" do
-    step :wait_step do
+    step(:wait_step, fn data ->
       result =
         wait_for_input("quick_input",
           timeout: seconds(1),
           timeout_value: :timed_out
         )
 
-      put_context(:result, result)
-    end
+      {:ok, assign(data, :result, result)}
+    end)
   end
 end
 
 defmodule ShortTimeoutEventWorkflow do
   use Durable
-  use Durable.Context
+  use Durable.Helpers
   use Durable.Wait
 
   workflow "short_timeout_event" do
-    step :wait_step do
+    step(:wait_step, fn data ->
       result =
         wait_for_event("quick_event",
           timeout: seconds(1),
           timeout_value: :timed_out
         )
 
-      put_context(:result, result)
-    end
+      {:ok, assign(data, :result, result)}
+    end)
   end
 end
 
 defmodule SimpleCompletingWorkflow do
   use Durable
-  use Durable.Context
+  use Durable.Helpers
 
   workflow "simple_completing" do
-    step :complete do
-      put_context(:done, true)
-    end
+    step(:complete, fn data ->
+      {:ok, assign(data, :done, true)}
+    end)
   end
 end
 
@@ -984,67 +989,80 @@ end
 
 defmodule ContextPreservationWorkflow do
   use Durable
-  use Durable.Context
+  use Durable.Helpers
   use Durable.Wait
 
   workflow "context_preservation" do
-    step :setup do
-      put_context(:before_wait, "preserved")
-      put_context(:counter, 1)
-    end
+    step(:setup, fn data ->
+      data =
+        data
+        |> assign(:before_wait, "preserved")
+        |> assign(:counter, 1)
 
-    step :wait_and_check do
+      {:ok, data}
+    end)
+
+    step(:wait_and_check, fn data ->
       result = wait_for_event("continue")
       # These should still be accessible after resume
-      before = get_context(:before_wait)
-      put_context(:after_wait, result)
-      put_context(:verified_before, before)
-    end
+      before = data[:before_wait]
+
+      data =
+        data
+        |> assign(:after_wait, result)
+        |> assign(:verified_before, before)
+
+      {:ok, data}
+    end)
   end
 end
 
 defmodule MultiStepResumeWorkflow do
   use Durable
-  use Durable.Context
+  use Durable.Helpers
   use Durable.Wait
 
   workflow "multi_step_resume" do
-    step :first do
-      put_context(:step1, true)
-    end
+    step(:first, fn data ->
+      {:ok, assign(data, :step1, true)}
+    end)
 
-    step :wait_step do
+    step(:wait_step, fn data ->
       result = wait_for_event("trigger")
-      put_context(:wait_result, result)
-    end
+      {:ok, assign(data, :wait_result, result)}
+    end)
 
-    step :after_wait do
-      put_context(:step3, true)
-      put_context(:final, get_context(:step1) && get_context(:wait_result))
-    end
+    step(:after_wait, fn data ->
+      data =
+        data
+        |> assign(:step3, true)
+        |> assign(:final, data[:step1] && data[:wait_result])
+
+      {:ok, data}
+    end)
   end
 end
 
 defmodule SequentialWaitsWorkflow do
   use Durable
-  use Durable.Context
+  use Durable.Helpers
   use Durable.Wait
 
   workflow "sequential_waits" do
-    step :first_wait do
+    step(:first_wait, fn data ->
       result1 = wait_for_event("event1")
-      put_context(:result1, result1)
-    end
+      {:ok, assign(data, :result1, result1)}
+    end)
 
-    step :second_wait do
+    step(:second_wait, fn data ->
       result2 = wait_for_event("event2")
-      put_context(:result2, result2)
-    end
+      {:ok, assign(data, :result2, result2)}
+    end)
 
-    step :combine do
-      r1 = get_context(:result1)
-      r2 = get_context(:result2)
-      put_context(:combined, %{first: r1, second: r2})
-    end
+    step(:combine, fn data ->
+      r1 = data[:result1]
+      r2 = data[:result2]
+      {:ok, assign(data, :combined, %{first: r1, second: r2})}
+    end)
   end
 end

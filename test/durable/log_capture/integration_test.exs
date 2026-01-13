@@ -187,48 +187,48 @@ end
 # Define test workflow modules at top level so they can be looked up
 defmodule LoggingTestWorkflow do
   use Durable
-  use Durable.Context
+  use Durable.Helpers
 
   require Logger
 
   workflow "logging_test" do
-    step :log_various_levels do
+    step(:log_various_levels, fn data ->
       Logger.info("Info message from workflow")
       Logger.warning("Warning message from workflow")
 
-      put_context(:logged, true)
-    end
+      {:ok, assign(data, :logged, true)}
+    end)
   end
 end
 
 defmodule IOLoggingTestWorkflow do
   use Durable
-  use Durable.Context
+  use Durable.Helpers
 
   workflow "io_logging_test" do
-    step :io_output do
+    step(:io_output, fn data ->
       IO.puts("IO.puts output from workflow")
 
-      put_context(:io_logged, true)
-    end
+      {:ok, assign(data, :io_logged, true)}
+    end)
   end
 end
 
 defmodule MultiStepLoggingTestWorkflow do
   use Durable
-  use Durable.Context
+  use Durable.Helpers
 
   require Logger
 
   workflow "multi_step_logging" do
-    step :first_step do
+    step(:first_step, fn data ->
       Logger.info("First step log")
-      put_context(:step1, true)
-    end
+      {:ok, assign(data, :step1, true)}
+    end)
 
-    step :second_step do
+    step(:second_step, fn data ->
       Logger.info("Second step log")
-      put_context(:step2, true)
-    end
+      {:ok, assign(data, :step2, true)}
+    end)
   end
 end

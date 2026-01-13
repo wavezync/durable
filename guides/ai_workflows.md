@@ -57,33 +57,33 @@ end
 ```elixir
 defmodule MyApp.DocumentProcessor do
   use Durable
-  use Durable.Context
+  use Durable.Helpers
 
   workflow "process_document" do
-    step :fetch do
-      doc = DocumentStore.get(input()["doc_id"])
-      put_context(:doc, doc)
+    step :fetch, fn data ->
+      doc = DocumentStore.get(data["doc_id"])
+      {:ok, %{doc: doc}}
     end
 
     # AI classification with automatic retry
-    step :classify, retry: [max_attempts: 3, backoff: :exponential] do
-      content = get_context(:doc).content
+    step :classify, [retry: [max_attempts: 3, backoff: :exponential]], fn data ->
+      content = data.doc.content
 
       doc_type = ReqLLM.generate_text!(
         "anthropic:claude-sonnet-4-20250514",
         "Classify this document as :invoice, :contract, or :other. Reply with only the atom.\n\n#{content}"
       ) |> String.trim() |> String.to_atom()
 
-      put_context(:doc_type, doc_type)
+      {:ok, assign(data, :doc_type, doc_type)}
     end
 
     # Conditional branching - only ONE path executes
-    branch on: get_context(:doc_type) do
+    branch on: fn data -> data.doc_type end do
       :invoice ->
-        step :extract_invoice, retry: [max_attempts: 3] do
-          content = get_context(:doc).content
+        step :extract_invoice, [retry: [max_attempts: 3]], fn data ->
+          content = data.doc.content
 
-          {:ok, data} = ReqLLM.generate_object(
+          {:ok, extracted} = ReqLLM.generate_object(
             "anthropic:claude-sonnet-4-20250514",
             "Extract invoice fields from:\n\n#{content}",
             schema: %{
@@ -94,20 +94,20 @@ defmodule MyApp.DocumentProcessor do
             }
           )
 
-          put_context(:extracted, data)
+          {:ok, assign(data, :extracted, extracted)}
         end
 
-        step :validate_invoice do
-          data = get_context(:extracted)
-          calculated = Enum.sum(Enum.map(data.line_items, & &1.amount))
-          put_context(:valid, abs(calculated - data.total) < 0.01)
+        step :validate_invoice, fn data ->
+          extracted = data.extracted
+          calculated = Enum.sum(Enum.map(extracted.line_items, & &1.amount))
+          {:ok, assign(data, :valid, abs(calculated - extracted.total) < 0.01)}
         end
 
       :contract ->
-        step :extract_contract, retry: [max_attempts: 3] do
-          content = get_context(:doc).content
+        step :extract_contract, [retry: [max_attempts: 3]], fn data ->
+          content = data.doc.content
 
-          {:ok, data} = ReqLLM.generate_object(
+          {:ok, extracted} = ReqLLM.generate_object(
             "anthropic:claude-sonnet-4-20250514",
             "Extract contract details:\n\n#{content}",
             schema: %{
@@ -117,24 +117,26 @@ defmodule MyApp.DocumentProcessor do
             }
           )
 
-          put_context(:extracted, data)
+          {:ok, assign(data, :extracted, extracted)}
         end
 
       _ ->
-        step :flag_for_review do
-          put_context(:needs_review, true)
+        step :flag_for_review, fn data ->
+          {:ok, assign(data, :needs_review, true)}
         end
     end
 
     # Runs after any branch completes
-    step :store do
-      doc = get_context(:doc)
+    step :store, fn data ->
+      doc = data.doc
 
       DocumentStore.update(doc.id, %{
-        doc_type: get_context(:doc_type),
-        extracted_data: get_context(:extracted, %{}),
-        needs_review: get_context(:needs_review, false)
+        doc_type: data.doc_type,
+        extracted_data: Map.get(data, :extracted, %{}),
+        needs_review: Map.get(data, :needs_review, false)
       })
+
+      {:ok, data}
     end
   end
 end
@@ -148,17 +150,18 @@ end
 ### Retries for API Calls
 
 ```elixir
-step :ai_call, retry: [max_attempts: 3, backoff: :exponential] do
-  ReqLLM.generate_text!("anthropic:claude-sonnet-4-20250514", prompt)
+step :ai_call, [retry: [max_attempts: 3, backoff: :exponential]], fn data ->
+  result = ReqLLM.generate_text!("anthropic:claude-sonnet-4-20250514", data.prompt)
+  {:ok, assign(data, :result, result)}
 end
 ```
 
 ### Validate AI Outputs
 
 ```elixir
-step :extract do
-  case ReqLLM.generate_object(model, prompt, schema: schema) do
-    {:ok, data} -> put_context(:data, data)
+step :extract, fn data ->
+  case ReqLLM.generate_object(model, data.prompt, schema: schema) do
+    {:ok, extracted} -> {:ok, assign(data, :data, extracted)}
     {:error, _} -> raise "Invalid response"  # Triggers retry
   end
 end
@@ -169,10 +172,12 @@ end
 ```elixir
 use Durable.Wait
 
-step :review do
-  if get_context(:confidence) < 0.8 do
+step :review, fn data ->
+  if data.confidence < 0.8 do
     result = wait_for_input("human_review", timeout: hours(24))
-    put_context(:human_verified, result)
+    {:ok, assign(data, :human_verified, result)}
+  else
+    {:ok, data}
   end
 end
 ```
@@ -180,10 +185,13 @@ end
 ### Branch on AI Classification
 
 ```elixir
-branch on: get_context(:category) do
-  :billing -> step :handle_billing do ... end
-  :technical -> step :handle_technical do ... end
-  _ -> step :handle_default do ... end
+branch on: fn data -> data.category end do
+  :billing ->
+    step :handle_billing, fn data -> {:ok, data} end
+  :technical ->
+    step :handle_technical, fn data -> {:ok, data} end
+  _ ->
+    step :handle_default, fn data -> {:ok, data} end
 end
 ```
 
@@ -193,7 +201,7 @@ end
 # Get execution status
 {:ok, execution} = Durable.get_execution(workflow_id)
 execution.status   # :running, :completed, :failed, :waiting
-execution.context  # All accumulated context
+execution.context  # All accumulated data
 
 # With step details
 {:ok, execution} = Durable.get_execution(workflow_id, include_steps: true)

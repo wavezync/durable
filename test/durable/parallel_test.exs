@@ -341,183 +341,183 @@ end
 
 defmodule SimpleParallelTestWorkflow do
   use Durable
-  use Durable.Context
+  use Durable.Helpers
 
   workflow "simple_parallel" do
-    step :setup do
-      put_context(:initialized, true)
-    end
+    step(:setup, fn data ->
+      {:ok, assign(data, :initialized, true)}
+    end)
 
     parallel do
-      step :task_a do
-        put_context(:from_task_a, true)
-      end
+      step(:task_a, fn data ->
+        {:ok, assign(data, :from_task_a, true)}
+      end)
 
-      step :task_b do
-        put_context(:from_task_b, true)
-      end
+      step(:task_b, fn data ->
+        {:ok, assign(data, :from_task_b, true)}
+      end)
     end
 
-    step :final do
-      put_context(:completed, true)
-    end
+    step(:final, fn data ->
+      {:ok, assign(data, :completed, true)}
+    end)
   end
 end
 
 defmodule TimingParallelWorkflow do
   use Durable
-  use Durable.Context
+  use Durable.Helpers
 
   workflow "timing_parallel" do
-    step :setup do
-      :ok
-    end
+    step(:setup, fn data ->
+      {:ok, data}
+    end)
 
     parallel do
-      step :slow_a do
+      step(:slow_a, fn data ->
         Process.sleep(50)
-        put_context(:a_done, true)
-      end
+        {:ok, assign(data, :a_done, true)}
+      end)
 
-      step :slow_b do
+      step(:slow_b, fn data ->
         Process.sleep(50)
-        put_context(:b_done, true)
-      end
+        {:ok, assign(data, :b_done, true)}
+      end)
     end
 
-    step :done do
-      :ok
-    end
+    step(:done, fn data ->
+      {:ok, data}
+    end)
   end
 end
 
 defmodule FailingParallelWorkflow do
   use Durable
-  use Durable.Context
+  use Durable.Helpers
 
   workflow "failing_parallel" do
-    step :setup do
-      :ok
-    end
+    step(:setup, fn data ->
+      {:ok, data}
+    end)
 
     parallel do
-      step :good_task do
-        put_context(:good, true)
-      end
+      step(:good_task, fn data ->
+        {:ok, assign(data, :good, true)}
+      end)
 
-      step :bad_task do
+      step(:bad_task, fn _data ->
         raise "intentional failure"
-      end
+      end)
     end
 
-    step :never_reached do
-      put_context(:reached, true)
-    end
+    step(:never_reached, fn data ->
+      {:ok, assign(data, :reached, true)}
+    end)
   end
 end
 
 defmodule CompleteAllParallelWorkflow do
   use Durable
-  use Durable.Context
+  use Durable.Helpers
 
   workflow "complete_all_parallel" do
-    step :setup do
-      :ok
-    end
+    step(:setup, fn data ->
+      {:ok, data}
+    end)
 
     parallel on_error: :complete_all do
-      step :good_task do
+      step(:good_task, fn data ->
         Process.sleep(10)
-        put_context(:good, true)
-      end
+        {:ok, assign(data, :good, true)}
+      end)
 
-      step :bad_task do
+      step(:bad_task, fn _data ->
         raise "intentional failure"
-      end
+      end)
     end
 
-    step :never_reached do
-      put_context(:reached, true)
-    end
+    step(:never_reached, fn data ->
+      {:ok, assign(data, :reached, true)}
+    end)
   end
 end
 
 defmodule DeepMergeParallelWorkflow do
   use Durable
-  use Durable.Context
+  use Durable.Helpers
 
   workflow "deep_merge_parallel" do
-    step :setup do
-      put_context(:nested, %{})
-    end
+    step(:setup, fn data ->
+      {:ok, assign(data, :nested, %{})}
+    end)
 
     parallel merge: :deep_merge do
-      step :task_a do
-        nested = get_context(:nested) || %{}
-        put_context(:nested, Map.put(nested, :from_a, true))
-      end
+      step(:task_a, fn data ->
+        nested = data[:nested] || %{}
+        {:ok, assign(data, :nested, Map.put(nested, :from_a, true))}
+      end)
 
-      step :task_b do
-        nested = get_context(:nested) || %{}
-        put_context(:nested, Map.put(nested, :from_b, true))
-      end
+      step(:task_b, fn data ->
+        nested = data[:nested] || %{}
+        {:ok, assign(data, :nested, Map.put(nested, :from_b, true))}
+      end)
     end
 
-    step :done do
-      :ok
-    end
+    step(:done, fn data ->
+      {:ok, data}
+    end)
   end
 end
 
 defmodule CollectParallelWorkflow do
   use Durable
-  use Durable.Context
+  use Durable.Helpers
 
   workflow "collect_parallel" do
-    step :setup do
-      :ok
-    end
+    step(:setup, fn data ->
+      {:ok, data}
+    end)
 
     parallel merge: :collect do
-      step :task_a do
-        put_context(:result_a, "value_a")
-      end
+      step(:task_a, fn data ->
+        {:ok, assign(data, :result_a, "value_a")}
+      end)
 
-      step :task_b do
-        put_context(:result_b, "value_b")
-      end
+      step(:task_b, fn data ->
+        {:ok, assign(data, :result_b, "value_b")}
+      end)
     end
 
-    step :done do
-      :ok
-    end
+    step(:done, fn data ->
+      {:ok, data}
+    end)
   end
 end
 
 defmodule ResumableParallelWorkflow do
   use Durable
-  use Durable.Context
+  use Durable.Helpers
 
   workflow "resumable_parallel" do
-    step :setup do
-      put_context(:initialized, true)
-    end
+    step(:setup, fn data ->
+      {:ok, assign(data, :initialized, true)}
+    end)
 
     parallel do
-      step :task_a do
+      step(:task_a, fn data ->
         # This will be tracked to verify it doesn't re-run
-        current_runs = get_context(:task_a_runs, 0)
-        put_context(:task_a_runs, current_runs + 1)
-        put_context(:from_task_a, true)
-      end
+        current_runs = data[:task_a_runs] || 0
+        data = assign(data, :task_a_runs, current_runs + 1)
+        {:ok, assign(data, :from_task_a, true)}
+      end)
 
-      step :task_b do
-        put_context(:from_task_b, true)
-      end
+      step(:task_b, fn data ->
+        {:ok, assign(data, :from_task_b, true)}
+      end)
     end
 
-    step :final do
-      put_context(:completed, true)
-    end
+    step(:final, fn data ->
+      {:ok, assign(data, :completed, true)}
+    end)
   end
 end

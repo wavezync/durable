@@ -9,87 +9,91 @@ defmodule Durable.CompensationTest do
   # A workflow that books a trip - compensation test example
   defmodule BookTripWorkflow do
     use Durable
-    use Durable.Context
+    use Durable.Helpers
 
     workflow "book_trip" do
-      step :book_flight, compensate: :cancel_flight do
-        put_context(:flight_booked, true)
-        put_context(:flight_id, "FL-123")
-      end
+      step(:book_flight, [compensate: :cancel_flight], fn data ->
+        {:ok,
+         data
+         |> assign(:flight_booked, true)
+         |> assign(:flight_id, "FL-123")}
+      end)
 
-      step :book_hotel, compensate: :cancel_hotel do
-        put_context(:hotel_booked, true)
-        put_context(:hotel_id, "HT-456")
-      end
+      step(:book_hotel, [compensate: :cancel_hotel], fn data ->
+        {:ok,
+         data
+         |> assign(:hotel_booked, true)
+         |> assign(:hotel_id, "HT-456")}
+      end)
 
-      step :charge_payment do
+      step(:charge_payment, fn _data ->
         # This step fails, triggering compensations
         raise "Payment failed"
-      end
+      end)
 
-      compensate :cancel_flight do
-        put_context(:flight_cancelled, true)
-      end
+      compensate(:cancel_flight, fn data ->
+        {:ok, assign(data, :flight_cancelled, true)}
+      end)
 
-      compensate :cancel_hotel do
-        put_context(:hotel_cancelled, true)
-      end
+      compensate(:cancel_hotel, fn data ->
+        {:ok, assign(data, :hotel_cancelled, true)}
+      end)
     end
   end
 
   # Workflow where compensation also fails
   defmodule FailingCompensationWorkflow do
     use Durable
-    use Durable.Context
+    use Durable.Helpers
 
     workflow "failing_compensation" do
-      step :do_work, compensate: :undo_work do
-        put_context(:work_done, true)
-      end
+      step(:do_work, [compensate: :undo_work], fn data ->
+        {:ok, assign(data, :work_done, true)}
+      end)
 
-      step :fail_step do
+      step(:fail_step, fn _data ->
         raise "Step failed"
-      end
+      end)
 
-      compensate :undo_work do
+      compensate(:undo_work, fn _data ->
         raise "Compensation failed too"
-      end
+      end)
     end
   end
 
   # Workflow with no compensations
   defmodule NoCompensationWorkflow do
     use Durable
-    use Durable.Context
+    use Durable.Helpers
 
     workflow "no_compensation" do
-      step :step_one do
-        put_context(:one, true)
-      end
+      step(:step_one, fn data ->
+        {:ok, assign(data, :one, true)}
+      end)
 
-      step :step_two do
+      step(:step_two, fn _data ->
         raise "No compensation here"
-      end
+      end)
     end
   end
 
   # Workflow that succeeds (no compensations needed)
   defmodule SuccessfulWorkflow do
     use Durable
-    use Durable.Context
+    use Durable.Helpers
 
     workflow "successful" do
-      step :step_one, compensate: :undo_one do
-        put_context(:one, true)
-      end
+      step(:step_one, [compensate: :undo_one], fn data ->
+        {:ok, assign(data, :one, true)}
+      end)
 
-      step :step_two do
-        put_context(:two, true)
-      end
+      step(:step_two, fn data ->
+        {:ok, assign(data, :two, true)}
+      end)
 
-      compensate :undo_one do
-        put_context(:one_undone, true)
-      end
+      compensate(:undo_one, fn data ->
+        {:ok, assign(data, :one_undone, true)}
+      end)
     end
   end
 

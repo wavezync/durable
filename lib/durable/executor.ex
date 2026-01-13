@@ -100,17 +100,33 @@ defmodule Durable.Executor do
     with {:ok, execution} <- load_execution(repo, workflow_id),
          {:ok, workflow_def} <- get_workflow_definition_from_execution(execution),
          {:ok, execution} <- mark_running(repo, execution) do
-      # Initialize context
-      Context.restore_context(execution.context, execution.input, execution.id)
+      # Set workflow ID for logging/observability
+      Context.set_workflow_id(execution.id)
 
-      # Execute steps
-      result = execute_steps(workflow_def.steps, execution, config)
+      # Pipeline model: start with workflow input or restored context
+      initial_data =
+        if execution.context && execution.context != %{} do
+          atomize_keys(execution.context)
+        else
+          execution.input
+        end
 
-      # Cleanup context
+      # Execute steps with pipeline data flow
+      result = execute_steps(workflow_def.steps, execution, config, initial_data)
+
+      # Cleanup
       Context.cleanup()
 
       result
     end
+  end
+
+  # Atomize top-level keys in map (for context restored from DB)
+  defp atomize_keys(map) when is_map(map) do
+    Map.new(map, fn
+      {key, value} when is_binary(key) -> {String.to_atom(key), value}
+      {key, value} -> {key, value}
+    end)
   end
 
   @doc """
@@ -204,7 +220,7 @@ defmodule Durable.Executor do
     |> repo.update()
   end
 
-  defp execute_steps(steps, execution, config) do
+  defp execute_steps(steps, execution, config, initial_data) do
     repo = config.repo
 
     # Get workflow definition for compensation lookup
@@ -223,10 +239,17 @@ defmodule Durable.Executor do
     # Build step index for validation
     step_index = build_step_index(steps)
 
-    # Execute steps with decision support
-    case execute_steps_recursive(steps_to_run, execution, step_index, workflow_def, config) do
-      {:ok, exec} ->
-        mark_completed(repo, exec)
+    # Execute steps with pipeline data flow
+    case execute_steps_recursive(
+           steps_to_run,
+           execution,
+           step_index,
+           workflow_def,
+           config,
+           initial_data
+         ) do
+      {:ok, exec, final_data} ->
+        mark_completed(repo, exec, final_data)
 
       {:waiting, exec} ->
         {:waiting, exec}
@@ -243,8 +266,8 @@ defmodule Durable.Executor do
     |> Map.new()
   end
 
-  defp execute_steps_recursive([], execution, _step_index, _workflow_def, _config) do
-    {:ok, execution}
+  defp execute_steps_recursive([], execution, _step_index, _workflow_def, _config, data) do
+    {:ok, execution, data}
   end
 
   defp execute_steps_recursive(
@@ -252,40 +275,58 @@ defmodule Durable.Executor do
          execution,
          step_index,
          workflow_def,
-         config
+         config,
+         data
        ) do
     # Handle special step types
     case step.type do
       :branch ->
-        execute_branch(step, remaining_steps, execution, step_index, workflow_def, config)
+        execute_branch(step, remaining_steps, execution, step_index, workflow_def, config, data)
 
       :parallel ->
-        execute_parallel(step, remaining_steps, execution, step_index, workflow_def, config)
+        execute_parallel(step, remaining_steps, execution, step_index, workflow_def, config, data)
 
       :foreach ->
-        execute_foreach(step, remaining_steps, execution, step_index, workflow_def, config)
+        execute_foreach(step, remaining_steps, execution, step_index, workflow_def, config, data)
 
       _ ->
-        execute_regular_step(step, remaining_steps, execution, step_index, workflow_def, config)
+        execute_regular_step(
+          step,
+          remaining_steps,
+          execution,
+          step_index,
+          workflow_def,
+          config,
+          data
+        )
     end
   end
 
-  defp execute_regular_step(step, remaining_steps, execution, step_index, workflow_def, config) do
+  defp execute_regular_step(
+         step,
+         remaining_steps,
+         execution,
+         step_index,
+         workflow_def,
+         config,
+         data
+       ) do
     repo = config.repo
 
     # Update current step
     {:ok, exec} = update_current_step(repo, execution, step.name)
 
-    case StepRunner.execute(step, exec.id, config) do
-      {:ok, _output} ->
-        # Save context and continue to next step
-        {:ok, exec} = save_context(repo, exec)
-        execute_steps_recursive(remaining_steps, exec, step_index, workflow_def, config)
+    case StepRunner.execute(step, data, exec.id, config) do
+      {:ok, new_data} ->
+        # Save data as context and continue to next step with new_data
+        {:ok, exec} = save_data_as_context(repo, exec, new_data)
+        execute_steps_recursive(remaining_steps, exec, step_index, workflow_def, config, new_data)
 
-      {:decision, target_step} ->
+      {:decision, target_step, new_data} ->
         handle_decision_result(
           exec,
           target_step,
+          new_data,
           remaining_steps,
           step,
           step_index,
@@ -295,6 +336,8 @@ defmodule Durable.Executor do
 
       {wait_type, opts}
       when wait_type in [:sleep, :wait_for_event, :wait_for_input, :wait_for_any, :wait_for_all] ->
+        # Save current data before waiting
+        {:ok, exec} = save_data_as_context(repo, exec, data)
         handle_wait_result(repo, exec, wait_type, opts)
 
       {:error, error} ->
@@ -305,6 +348,7 @@ defmodule Durable.Executor do
   defp handle_decision_result(
          exec,
          target_step,
+         data,
          remaining_steps,
          step,
          step_index,
@@ -312,11 +356,11 @@ defmodule Durable.Executor do
          config
        ) do
     repo = config.repo
-    {:ok, exec} = save_context(repo, exec)
+    {:ok, exec} = save_data_as_context(repo, exec, data)
 
     case find_jump_target(target_step, remaining_steps, step.name, step_index) do
       {:ok, target_steps} ->
-        execute_steps_recursive(target_steps, exec, step_index, workflow_def, config)
+        execute_steps_recursive(target_steps, exec, step_index, workflow_def, config, data)
 
       {:error, reason} ->
         handle_step_failure(
@@ -343,20 +387,40 @@ defmodule Durable.Executor do
   defp handle_wait_result(repo, exec, :wait_for_all, opts),
     do: {:waiting, handle_wait_for_all(repo, exec, opts) |> elem(1)}
 
-  defp execute_branch(branch_step, remaining_steps, execution, step_index, workflow_def, config) do
+  defp execute_branch(
+         branch_step,
+         remaining_steps,
+         execution,
+         step_index,
+         workflow_def,
+         config,
+         data
+       ) do
     repo = config.repo
     {:ok, exec} = update_current_step(repo, execution, branch_step.name)
 
     # Get branch configuration
     opts = branch_step.opts
-    condition_fn = opts[:condition_fn]
+    # In the new DSL, the condition function is stored in body_fn
+    condition_fn = branch_step.body_fn
     clauses = opts[:clauses]
     all_branch_steps = opts[:all_steps] || []
 
-    # Evaluate the condition by calling the module function
+    # Evaluate the condition by calling the function with data
     condition_value =
       try do
-        apply(branch_step.module, condition_fn, [])
+        if is_function(condition_fn, 1) do
+          condition_fn.(data)
+        else
+          # Legacy: fall back to opts[:condition_fn]
+          legacy_fn = opts[:condition_fn]
+
+          if is_function(legacy_fn, 1) do
+            legacy_fn.(data)
+          else
+            apply(branch_step.module, legacy_fn, [data])
+          end
+        end
       rescue
         e ->
           {:error, Exception.message(e)}
@@ -370,8 +434,8 @@ defmodule Durable.Executor do
         # Find matching clause steps
         matching_steps = find_matching_clause_steps(value, clauses)
 
-        # Save context before executing branch steps
-        {:ok, exec} = save_context(repo, exec)
+        # Save data before executing branch steps
+        {:ok, exec} = save_data_as_context(repo, exec, data)
 
         # Execute only the matching branch's steps
         case execute_branch_steps(
@@ -380,12 +444,21 @@ defmodule Durable.Executor do
                exec,
                step_index,
                workflow_def,
-               config
+               config,
+               data
              ) do
-          {:ok, exec} ->
-            # Skip past all branch steps in remaining and continue
+          {:ok, exec, branch_data} ->
+            # Skip past all branch steps in remaining and continue with updated data
             after_branch = skip_branch_steps(remaining_steps, all_branch_steps)
-            execute_steps_recursive(after_branch, exec, step_index, workflow_def, config)
+
+            execute_steps_recursive(
+              after_branch,
+              exec,
+              step_index,
+              workflow_def,
+              config,
+              branch_data
+            )
 
           {:waiting, exec} ->
             {:waiting, exec}
@@ -418,7 +491,8 @@ defmodule Durable.Executor do
          execution,
          step_index,
          workflow_def,
-         config
+         config,
+         data
        ) do
     # Find the actual step definitions from remaining_steps
     steps_to_execute =
@@ -433,35 +507,59 @@ defmodule Durable.Executor do
       end)
       |> Enum.reject(&is_nil/1)
 
-    execute_branch_steps_sequential(ordered_steps, execution, step_index, workflow_def, config)
+    execute_branch_steps_sequential(
+      ordered_steps,
+      execution,
+      step_index,
+      workflow_def,
+      config,
+      data
+    )
   end
 
-  defp execute_branch_steps_sequential([], execution, _step_index, _workflow_def, _config) do
-    {:ok, execution}
+  defp execute_branch_steps_sequential([], execution, _step_index, _workflow_def, _config, data) do
+    {:ok, execution, data}
   end
 
-  defp execute_branch_steps_sequential([step | rest], execution, step_index, workflow_def, config) do
+  defp execute_branch_steps_sequential(
+         [step | rest],
+         execution,
+         step_index,
+         workflow_def,
+         config,
+         data
+       ) do
     repo = config.repo
     {:ok, exec} = update_current_step(repo, execution, step.name)
 
-    case StepRunner.execute(step, exec.id, config) do
-      {:ok, _output} ->
-        {:ok, exec} = save_context(repo, exec)
-        execute_branch_steps_sequential(rest, exec, step_index, workflow_def, config)
+    case StepRunner.execute(step, data, exec.id, config) do
+      {:ok, new_data} ->
+        {:ok, exec} = save_data_as_context(repo, exec, new_data)
+        execute_branch_steps_sequential(rest, exec, step_index, workflow_def, config, new_data)
+
+      {:decision, target_step, new_data} ->
+        # Decisions within branches - save and return for outer handler
+        {:ok, exec} = save_data_as_context(repo, exec, new_data)
+        {:decision, exec, target_step, new_data}
 
       {:sleep, opts} ->
+        {:ok, exec} = save_data_as_context(repo, exec, data)
         {:waiting, handle_sleep(repo, exec, opts) |> elem(1)}
 
       {:wait_for_event, opts} ->
+        {:ok, exec} = save_data_as_context(repo, exec, data)
         {:waiting, handle_wait_for_event(repo, exec, opts) |> elem(1)}
 
       {:wait_for_input, opts} ->
+        {:ok, exec} = save_data_as_context(repo, exec, data)
         {:waiting, handle_wait_for_input(repo, exec, opts) |> elem(1)}
 
       {:wait_for_any, opts} ->
+        {:ok, exec} = save_data_as_context(repo, exec, data)
         {:waiting, handle_wait_for_any(repo, exec, opts) |> elem(1)}
 
       {:wait_for_all, opts} ->
+        {:ok, exec} = save_data_as_context(repo, exec, data)
         {:waiting, handle_wait_for_all(repo, exec, opts) |> elem(1)}
 
       {:error, error} ->
@@ -485,7 +583,8 @@ defmodule Durable.Executor do
          execution,
          step_index,
          workflow_def,
-         config
+         config,
+         data
        ) do
     repo = config.repo
     {:ok, exec} = update_current_step(repo, execution, parallel_step.name)
@@ -510,47 +609,58 @@ defmodule Durable.Executor do
       end)
       |> Enum.reject(&is_nil/1)
 
-    # Save context before parallel execution
-    {:ok, exec} = save_context(repo, exec)
-    base_context = Context.get_current_context()
-    input = Context.input()
+    # Save data before parallel execution
+    {:ok, exec} = save_data_as_context(repo, exec, data)
 
     # DURABILITY: Check which parallel steps already completed (for resume)
-    {completed_names, completed_contexts} =
-      get_completed_parallel_steps_with_context(exec.id, parallel_step_names, config)
+    {completed_names, completed_data} =
+      get_completed_parallel_steps_with_data(exec.id, parallel_step_names, config)
 
-    # Merge contexts from completed steps into base context
-    base_context_with_completed =
-      Enum.reduce(completed_contexts, base_context, &deep_merge(&2, &1))
+    # Merge data from completed steps into base data
+    base_data_with_completed =
+      Enum.reduce(completed_data, data, &deep_merge(&2, &1))
 
     # Filter to only incomplete steps
     incomplete_steps = Enum.reject(ordered_steps, &(&1.name in completed_names))
 
     # If all steps already completed, skip execution
     if incomplete_steps == [] do
-      Context.restore_context(base_context_with_completed, input, exec.id)
-      {:ok, exec} = save_context(repo, exec)
+      {:ok, exec} = save_data_as_context(repo, exec, base_data_with_completed)
       after_parallel = skip_parallel_steps(remaining_steps, all_parallel_steps)
-      execute_steps_recursive(after_parallel, exec, step_index, workflow_def, config)
+
+      execute_steps_recursive(
+        after_parallel,
+        exec,
+        step_index,
+        workflow_def,
+        config,
+        base_data_with_completed
+      )
     else
       # Execute only incomplete steps in parallel
       case execute_parallel_steps(
              incomplete_steps,
              exec,
              config,
-             base_context_with_completed,
-             input,
+             base_data_with_completed,
              merge_strategy,
              error_strategy
            ) do
-        {:ok, merged_context} ->
-          # Restore merged context and continue
-          Context.restore_context(merged_context, input, exec.id)
-          {:ok, exec} = save_context(repo, exec)
+        {:ok, merged_data} ->
+          # Save merged data and continue
+          {:ok, exec} = save_data_as_context(repo, exec, merged_data)
 
           # Skip past all parallel steps and continue
           after_parallel = skip_parallel_steps(remaining_steps, all_parallel_steps)
-          execute_steps_recursive(after_parallel, exec, step_index, workflow_def, config)
+
+          execute_steps_recursive(
+            after_parallel,
+            exec,
+            step_index,
+            workflow_def,
+            config,
+            merged_data
+          )
 
         {:error, error} ->
           handle_step_failure(exec, error, workflow_def, config)
@@ -562,13 +672,12 @@ defmodule Durable.Executor do
          steps,
          execution,
          config,
-         base_context,
-         input,
+         base_data,
          merge_strategy,
          error_strategy
        ) do
     task_sup = Config.task_supervisor(config.name)
-    task_opts = %{context: base_context, input: input, execution_id: execution.id, config: config}
+    task_opts = %{data: base_data, execution_id: execution.id, config: config}
 
     tasks =
       Enum.map(steps, fn step ->
@@ -578,19 +687,27 @@ defmodule Durable.Executor do
       end)
 
     results = await_parallel_tasks(tasks, error_strategy)
-    process_parallel_results(results, base_context, merge_strategy)
+    process_parallel_results(results, base_data, merge_strategy)
   end
 
   defp run_parallel_step_task(step, task_opts) do
-    %{context: ctx, input: input, execution_id: exec_id, config: config} = task_opts
-    Context.restore_context(ctx, input, exec_id)
+    %{data: data, execution_id: exec_id, config: config} = task_opts
 
-    result = StepRunner.execute(step, exec_id, config)
+    # Each parallel task gets a copy of the data and returns its result
+    result = StepRunner.execute(step, data, exec_id, config)
     handle_parallel_step_result(result, step.name)
   end
 
-  defp handle_parallel_step_result({:ok, _output}, step_name) do
-    {:ok, step_name, Context.get_current_context()}
+  defp handle_parallel_step_result({:ok, output_data}, step_name) do
+    {:ok, step_name, output_data}
+  end
+
+  defp handle_parallel_step_result({:decision, _target, _data}, step_name) do
+    {:error, step_name,
+     %{
+       type: "parallel_decision_not_supported",
+       message: "decisions not supported in parallel blocks"
+     }}
   end
 
   defp handle_parallel_step_result({:error, error}, step_name) do
@@ -654,39 +771,39 @@ defmodule Durable.Executor do
          errors: error_details
        }}
     else
-      # All succeeded -> merge contexts
-      contexts = Enum.map(successes, fn {:ok, step_name, ctx} -> {step_name, ctx} end)
-      merged = merge_parallel_contexts(contexts, base_context, merge_strategy)
+      # All succeeded -> merge data
+      step_data = Enum.map(successes, fn {:ok, step_name, data} -> {step_name, data} end)
+      merged = merge_parallel_data(step_data, base_context, merge_strategy)
       {:ok, merged}
     end
   end
 
-  defp merge_parallel_contexts(step_contexts, base_context, :deep_merge) do
-    Enum.reduce(step_contexts, base_context, fn {_step_name, ctx}, acc ->
-      deep_merge(acc, ctx)
+  defp merge_parallel_data(step_data, base_data, :deep_merge) do
+    Enum.reduce(step_data, base_data, fn {_step_name, data}, acc ->
+      deep_merge(acc, data)
     end)
   end
 
-  defp merge_parallel_contexts(step_contexts, _base_context, :last_wins) do
-    case List.last(step_contexts) do
+  defp merge_parallel_data(step_data, _base_data, :last_wins) do
+    case List.last(step_data) do
       nil -> %{}
-      {_step_name, ctx} -> ctx
+      {_step_name, data} -> data
     end
   end
 
-  defp merge_parallel_contexts(step_contexts, base_context, :collect) do
+  defp merge_parallel_data(step_data, base_data, :collect) do
     collected =
-      Enum.into(step_contexts, %{}, fn {step_name, ctx} ->
-        # Extract only the changes from base_context
-        changes = Map.drop(ctx, Map.keys(base_context))
+      Enum.into(step_data, %{}, fn {step_name, data} ->
+        # Extract only the changes from base_data
+        changes = Map.drop(data, Map.keys(base_data))
         {Atom.to_string(step_name), changes}
       end)
 
-    Map.put(base_context, "__parallel_results__", collected)
+    Map.put(base_data, "__parallel_results__", collected)
   end
 
-  defp merge_parallel_contexts(step_contexts, base_context, _unknown) do
-    merge_parallel_contexts(step_contexts, base_context, :deep_merge)
+  defp merge_parallel_data(step_data, base_data, _unknown) do
+    merge_parallel_data(step_data, base_data, :deep_merge)
   end
 
   defp deep_merge(left, right) when is_map(left) and is_map(right) do
@@ -701,8 +818,8 @@ defmodule Durable.Executor do
     end)
   end
 
-  # Get completed parallel steps with their stored contexts for durability
-  defp get_completed_parallel_steps_with_context(workflow_id, step_names, config) do
+  # Get completed parallel steps with their stored data for durability
+  defp get_completed_parallel_steps_with_data(workflow_id, step_names, config) do
     repo = config.repo
     step_name_strings = Enum.map(step_names, &Atom.to_string/1)
 
@@ -721,20 +838,28 @@ defmodule Durable.Executor do
         String.to_existing_atom(name)
       end)
 
-    contexts =
+    data_list =
       Enum.map(completed, fn {_, output} ->
-        # Extract context from stored output (parallel steps store it under "__context__")
+        # Extract data from stored output (parallel steps store it under "__context__")
         (output || %{})["__context__"] || %{}
       end)
 
-    {names, contexts}
+    {names, data_list}
   end
 
   # ============================================================================
   # ForEach Execution
   # ============================================================================
 
-  defp execute_foreach(foreach_step, remaining_steps, execution, step_index, workflow_def, config) do
+  defp execute_foreach(
+         foreach_step,
+         remaining_steps,
+         execution,
+         step_index,
+         workflow_def,
+         config,
+         data
+       ) do
     repo = config.repo
     {:ok, exec} = update_current_step(repo, execution, foreach_step.name)
 
@@ -744,16 +869,17 @@ defmodule Durable.Executor do
     all_foreach_steps = step_opts[:all_steps] || []
     concurrency = step_opts[:concurrency] || 1
 
-    items = resolve_foreach_items(step_opts[:items_spec])
+    # Extract items using the body_fn (function that receives data)
+    # In the new DSL, body_fn contains the items extraction function
+    items = resolve_foreach_items(foreach_step.body_fn, data)
     steps_to_execute = Enum.filter(remaining_steps, &(&1.name in foreach_step_names))
 
-    # Save context before foreach execution
-    {:ok, exec} = save_context(repo, exec)
+    # Save data before foreach execution
+    {:ok, exec} = save_data_as_context(repo, exec, data)
 
     # Bundle options for child functions
     foreach_opts = %{
-      context: Context.get_current_context(),
-      input: Context.input(),
+      data: data,
       on_error: step_opts[:on_error] || :fail_fast,
       collect_as: step_opts[:collect_as]
     }
@@ -771,9 +897,11 @@ defmodule Durable.Executor do
     )
   end
 
-  defp resolve_foreach_items({:context_key, key}), do: Context.get_context(key) || []
-  defp resolve_foreach_items({:mfa, {mod, fun, args}}), do: apply(mod, fun, args)
-  defp resolve_foreach_items(_), do: []
+  # Resolve items: can be a function that takes data, or legacy specs
+  defp resolve_foreach_items(items_fn, data) when is_function(items_fn, 1), do: items_fn.(data)
+  defp resolve_foreach_items({:context_key, key}, data), do: Map.get(data, key) || []
+  defp resolve_foreach_items({:mfa, {mod, fun, args}}, _data), do: apply(mod, fun, args)
+  defp resolve_foreach_items(_, _data), do: []
 
   defp do_execute_foreach(items, steps, execution, config, 1, opts) do
     execute_foreach_sequential(items, steps, execution, config, opts)
@@ -784,7 +912,7 @@ defmodule Durable.Executor do
   end
 
   defp handle_foreach_result(
-         {:ok, ctx},
+         {:ok, result_data},
          remaining,
          all_foreach_steps,
          exec,
@@ -792,10 +920,9 @@ defmodule Durable.Executor do
          workflow_def,
          cfg
        ) do
-    Context.restore_context(ctx, Context.input(), exec.id)
-    {:ok, exec} = save_context(cfg.repo, exec)
+    {:ok, exec} = save_data_as_context(cfg.repo, exec, result_data)
     after_foreach = skip_foreach_steps(remaining, all_foreach_steps)
-    execute_steps_recursive(after_foreach, exec, idx, workflow_def, cfg)
+    execute_steps_recursive(after_foreach, exec, idx, workflow_def, cfg, result_data)
   end
 
   defp handle_foreach_result({:error, error}, _remaining, _all, exec, _idx, workflow_def, cfg) do
@@ -803,52 +930,47 @@ defmodule Durable.Executor do
   end
 
   defp execute_foreach_sequential(items, steps, execution, config, opts) do
-    %{context: base_context, input: input, on_error: on_error, collect_as: collect_as} = opts
-    initial_acc = %{context: base_context, results: [], errors: []}
+    %{data: base_data, on_error: on_error, collect_as: collect_as} = opts
+    initial_acc = %{data: base_data, results: [], errors: []}
 
     final_acc =
       items
       |> Enum.with_index()
       |> Enum.reduce_while(initial_acc, fn {item, index}, acc ->
-        Context.restore_context(acc.context, input, execution.id)
-        Context.set_foreach_item(item, index)
-
-        result = execute_foreach_item_steps(steps, execution.id, config)
+        # Execute foreach steps with (data, item, index)
+        result = execute_foreach_item_steps(steps, acc.data, item, index, execution.id, config)
         handle_foreach_item_result(result, index, acc, on_error, collect_as)
       end)
 
     finalize_foreach_result(final_acc, collect_as)
   end
 
-  defp handle_foreach_item_result({:ok, item_context}, _index, acc, _on_error, collect_as) do
-    Context.clear_foreach_item()
-    new_context = deep_merge(acc.context, item_context)
-    new_results = maybe_collect_result(acc.results, item_context, acc.context, collect_as)
-    {:cont, %{acc | context: new_context, results: new_results}}
+  defp handle_foreach_item_result({:ok, item_data}, _index, acc, _on_error, collect_as) do
+    new_data = deep_merge(acc.data, item_data)
+    new_results = maybe_collect_result(acc.results, item_data, acc.data, collect_as)
+    {:cont, %{acc | data: new_data, results: new_results}}
   end
 
   defp handle_foreach_item_result({:error, error}, index, acc, :fail_fast, _collect_as) do
-    Context.clear_foreach_item()
     {:halt, %{acc | errors: [{index, error} | acc.errors]}}
   end
 
   defp handle_foreach_item_result({:error, error}, index, acc, :continue, _collect_as) do
-    Context.clear_foreach_item()
     {:cont, %{acc | errors: [{index, error} | acc.errors]}}
   end
 
-  defp maybe_collect_result(results, _item_context, _base_context, nil), do: results
+  defp maybe_collect_result(results, _item_data, _base_data, nil), do: results
 
-  defp maybe_collect_result(results, item_context, base_context, _collect_as) do
-    results ++ [extract_item_result(item_context, base_context)]
+  defp maybe_collect_result(results, item_data, base_data, _collect_as) do
+    results ++ [extract_item_result(item_data, base_data)]
   end
 
-  defp finalize_foreach_result(%{errors: [], context: ctx, results: _results}, nil) do
-    {:ok, ctx}
+  defp finalize_foreach_result(%{errors: [], data: data, results: _results}, nil) do
+    {:ok, data}
   end
 
-  defp finalize_foreach_result(%{errors: [], context: ctx, results: results}, collect_as) do
-    {:ok, Map.put(ctx, collect_as, results)}
+  defp finalize_foreach_result(%{errors: [], data: data, results: results}, collect_as) do
+    {:ok, Map.put(data, collect_as, results)}
   end
 
   defp finalize_foreach_result(%{errors: errors}, _collect_as) do
@@ -861,73 +983,71 @@ defmodule Durable.Executor do
   end
 
   defp execute_foreach_concurrent(items, steps, execution, config, concurrency, opts) do
-    %{context: base_context, input: input, on_error: on_error, collect_as: collect_as} = opts
+    %{data: base_data, on_error: on_error, collect_as: collect_as} = opts
     task_sup = Config.task_supervisor(config.name)
-    task_opts = %{steps: steps, execution_id: execution.id, config: config, input: input}
+    task_opts = %{steps: steps, execution_id: execution.id, config: config}
 
     items
     |> Enum.with_index()
     |> Enum.chunk_every(concurrency)
-    |> Enum.reduce_while({:ok, base_context, [], []}, fn chunk, {:ok, ctx, results, errors} ->
-      tasks = spawn_foreach_chunk_tasks(chunk, ctx, task_sup, task_opts)
+    |> Enum.reduce_while({:ok, base_data, [], []}, fn chunk,
+                                                      {:ok, current_data, results, errors} ->
+      tasks = spawn_foreach_chunk_tasks(chunk, current_data, task_sup, task_opts)
       task_results = Task.await_many(tasks, :infinity)
 
-      {new_ctx, new_results, new_errors} =
-        merge_chunk_results(task_results, ctx, results, errors, collect_as)
+      {new_data, new_results, new_errors} =
+        merge_chunk_results(task_results, current_data, results, errors, collect_as)
 
-      check_chunk_continue(on_error, new_ctx, new_results, new_errors)
+      check_chunk_continue(on_error, new_data, new_results, new_errors)
     end)
     |> finalize_concurrent_foreach(collect_as)
   end
 
-  defp spawn_foreach_chunk_tasks(chunk, current_ctx, task_sup, task_opts) do
+  defp spawn_foreach_chunk_tasks(chunk, current_data, task_sup, task_opts) do
     Enum.map(chunk, fn {item, index} ->
       Task.Supervisor.async(task_sup, fn ->
-        run_foreach_item_task(item, index, current_ctx, task_opts)
+        run_foreach_item_task(item, index, current_data, task_opts)
       end)
     end)
   end
 
-  defp run_foreach_item_task(item, index, ctx, task_opts) do
-    %{steps: steps, execution_id: exec_id, config: config, input: input} = task_opts
-    Context.restore_context(ctx, input, exec_id)
-    Context.set_foreach_item(item, index)
+  defp run_foreach_item_task(item, index, data, task_opts) do
+    %{steps: steps, execution_id: exec_id, config: config} = task_opts
 
-    result = execute_foreach_item_steps(steps, exec_id, config)
-    Context.clear_foreach_item()
+    result = execute_foreach_item_steps(steps, data, item, index, exec_id, config)
 
     case result do
-      {:ok, item_context} -> {:ok, index, item_context}
+      {:ok, item_data} -> {:ok, index, item_data}
       {:error, error} -> {:error, index, error}
     end
   end
 
-  defp merge_chunk_results(task_results, ctx, results, errors, collect_as) do
-    Enum.reduce(task_results, {ctx, results, errors}, fn
-      {:ok, _index, item_ctx}, {c, r, e} ->
-        merged = deep_merge(c, item_ctx)
-        item_result = if collect_as, do: [extract_item_result(item_ctx, c)], else: []
+  defp merge_chunk_results(task_results, data, results, errors, collect_as) do
+    Enum.reduce(task_results, {data, results, errors}, fn
+      {:ok, _index, item_data}, {d, r, e} ->
+        merged = deep_merge(d, item_data)
+        item_result = if collect_as, do: [extract_item_result(item_data, d)], else: []
         {merged, r ++ item_result, e}
 
-      {:error, index, error}, {c, r, e} ->
-        {c, r, [{index, error} | e]}
+      {:error, index, error}, {d, r, e} ->
+        {d, r, [{index, error} | e]}
     end)
   end
 
-  defp check_chunk_continue(:fail_fast, _ctx, _results, [_ | _] = errors) do
+  defp check_chunk_continue(:fail_fast, _data, _results, [_ | _] = errors) do
     {:halt, {:error, errors}}
   end
 
-  defp check_chunk_continue(_on_error, ctx, results, errors) do
-    {:cont, {:ok, ctx, results, errors}}
+  defp check_chunk_continue(_on_error, data, results, errors) do
+    {:cont, {:ok, data, results, errors}}
   end
 
-  defp finalize_concurrent_foreach({:ok, ctx, _results, []}, nil), do: {:ok, ctx}
+  defp finalize_concurrent_foreach({:ok, data, _results, []}, nil), do: {:ok, data}
 
-  defp finalize_concurrent_foreach({:ok, ctx, results, []}, collect_as),
-    do: {:ok, Map.put(ctx, collect_as, results)}
+  defp finalize_concurrent_foreach({:ok, data, results, []}, collect_as),
+    do: {:ok, Map.put(data, collect_as, results)}
 
-  defp finalize_concurrent_foreach({:ok, _ctx, _results, errors}, _collect_as) do
+  defp finalize_concurrent_foreach({:ok, _data, _results, errors}, _collect_as) do
     {:error,
      %{
        type: "foreach_error",
@@ -945,40 +1065,15 @@ defmodule Durable.Executor do
      }}
   end
 
-  defp execute_foreach_item_steps(steps, workflow_id, config) do
-    # Execute each step for the current item
-    Enum.reduce_while(steps, {:ok, %{}}, fn step, {:ok, _acc_ctx} ->
-      case StepRunner.execute(step, workflow_id, config) do
-        {:ok, _output} ->
-          {:cont, {:ok, Context.get_current_context()}}
+  # Execute foreach item steps using StepRunner.execute_foreach which passes (data, item, index)
+  defp execute_foreach_item_steps(steps, data, item, index, workflow_id, config) do
+    Enum.reduce_while(steps, {:ok, data}, fn step, {:ok, current_data} ->
+      case StepRunner.execute_foreach(step, current_data, item, index, workflow_id, config) do
+        {:ok, new_data} ->
+          {:cont, {:ok, new_data}}
 
         {:error, error} ->
           {:halt, {:error, error}}
-
-        # Wait primitives not supported in foreach
-        {:sleep, _opts} ->
-          {:halt,
-           {:error,
-            %{
-              type: "foreach_wait_not_supported",
-              message: "sleep not supported in foreach blocks"
-            }}}
-
-        {:wait_for_event, _opts} ->
-          {:halt,
-           {:error,
-            %{
-              type: "foreach_wait_not_supported",
-              message: "wait_for_event not supported in foreach blocks"
-            }}}
-
-        {:wait_for_input, _opts} ->
-          {:halt,
-           {:error,
-            %{
-              type: "foreach_wait_not_supported",
-              message: "wait_for_input not supported in foreach blocks"
-            }}}
       end
     end)
   end
@@ -1055,21 +1150,18 @@ defmodule Durable.Executor do
     |> repo.update()
   end
 
-  defp save_context(repo, execution) do
-    current_context = Context.get_current_context()
-
+  # Saves data as the workflow context in DB (for persistence/resume)
+  defp save_data_as_context(repo, execution, data) do
     execution
-    |> Ecto.Changeset.change(context: current_context)
+    |> Ecto.Changeset.change(context: data)
     |> repo.update()
   end
 
-  defp mark_completed(repo, execution) do
-    current_context = Context.get_current_context()
-
+  defp mark_completed(repo, execution, final_data) do
     {:ok, execution} =
       execution
       |> WorkflowExecution.status_changeset(:completed, %{
-        context: current_context,
+        context: final_data,
         completed_at: DateTime.utc_now(),
         current_step: nil
       })
@@ -1080,11 +1172,8 @@ defmodule Durable.Executor do
   end
 
   defp mark_failed(repo, execution, error) do
-    current_context = Context.get_current_context()
-
     execution
     |> WorkflowExecution.status_changeset(:failed, %{
-      context: current_context,
       error: error,
       completed_at: DateTime.utc_now()
     })

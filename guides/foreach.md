@@ -7,47 +7,48 @@ Process collections of items with support for sequential or concurrent execution
 ```elixir
 defmodule MyApp.OrderProcessor do
   use Durable
-  use Durable.Context
+  use Durable.Helpers
 
   workflow "process_orders" do
-    step :fetch_orders do
+    step :fetch_orders, fn _input ->
       orders = Orders.fetch_pending()
-      put_context(:orders, orders)
+      {:ok, %{orders: orders, processed: []}}
     end
 
     # Process each order sequentially
-    foreach :process_each, items: :orders do
-      step :process do
-        order = current_item()
+    foreach :process_each, items: fn data -> data.orders end do
+      # Foreach steps receive (data, item, index)
+      step :process, fn data, order, _idx ->
         result = Orders.process(order)
-        append_context(:processed, result)
+        {:ok, append(data, :processed, result)}
       end
     end
 
-    step :summary do
-      count = length(get_context(:processed, []))
+    step :summary, fn data ->
+      count = length(data.processed)
       Logger.info("Processed #{count} orders")
+      {:ok, data}
     end
   end
 end
 ```
 
-## Accessing Current Item
+## Accessing Item and Index
 
-Inside a foreach block, use these functions from `Durable.Context`:
+Inside a foreach block, step functions receive three arguments:
 
-| Function | Description |
+| Argument | Description |
 |----------|-------------|
-| `current_item()` | The current item being processed |
-| `current_index()` | The 0-based index of the current item |
+| `data` | The accumulated workflow data |
+| `item` | The current item being processed |
+| `index` | The 0-based index of the current item |
 
 ```elixir
-foreach :send_emails, items: :recipients do
-  step :send do
-    recipient = current_item()
-    index = current_index()
-
-    Email.send(recipient, subject: "Email #{index + 1} of #{length(get_context(:recipients))}")
+foreach :send_emails, items: fn data -> data.recipients end do
+  step :send, fn data, recipient, index ->
+    total = length(data.recipients)
+    Email.send(recipient, subject: "Email #{index + 1} of #{total}")
+    {:ok, increment(data, :sent_count)}
   end
 end
 ```
@@ -56,17 +57,17 @@ end
 
 ### Item Source (`:items`) - Required
 
-Specifies where to get the collection:
+A function that extracts the collection from the data:
 
 ```elixir
-# From context key
-foreach :process, items: :my_items do
-  # ...
+# From data key
+foreach :process, items: fn data -> data.my_items end do
+  step :work, fn data, item, _idx -> {:ok, data} end
 end
 
-# From MFA tuple (called at runtime)
-foreach :process, items: {Orders, :fetch_pending, []} do
-  # ...
+# Computed items
+foreach :process, items: fn data -> Enum.filter(data.items, & &1.active) end do
+  step :work, fn data, item, _idx -> {:ok, data} end
 end
 ```
 
@@ -76,13 +77,15 @@ Process multiple items simultaneously:
 
 ```elixir
 # Sequential (default)
-foreach :process, items: :items, concurrency: 1 do
+foreach :process, items: fn data -> data.items end, concurrency: 1 do
   # Items processed one at a time
+  step :work, fn data, item, _idx -> {:ok, data} end
 end
 
 # Process 5 items at once
-foreach :process, items: :items, concurrency: 5 do
+foreach :process, items: fn data -> data.items end, concurrency: 5 do
   # Up to 5 items processed concurrently
+  step :work, fn data, item, _idx -> {:ok, data} end
 end
 ```
 
@@ -95,35 +98,19 @@ end
 
 ```elixir
 # Stop on first failure
-foreach :process, items: :items, on_error: :fail_fast do
-  step :work do
+foreach :process, items: fn data -> data.items end, on_error: :fail_fast do
+  step :work, fn data, item, _idx ->
     # If this fails, remaining items are skipped
+    {:ok, data}
   end
 end
 
 # Continue despite errors
-foreach :process, items: :items, on_error: :continue do
-  step :work do
+foreach :process, items: fn data -> data.items end, on_error: :continue do
+  step :work, fn data, item, _idx ->
     # Errors are collected, processing continues
+    {:ok, data}
   end
-end
-```
-
-### Collecting Results (`:collect_as`)
-
-Store each iteration's result in a list:
-
-```elixir
-foreach :transform, items: :raw_data, collect_as: :transformed do
-  step :transform do
-    item = current_item()
-    # Return value is collected
-    String.upcase(item.name)
-  end
-end
-
-step :use_results do
-  results = get_context(:transformed)  # List of transformed values
 end
 ```
 
@@ -133,22 +120,22 @@ end
 
 ```elixir
 workflow "send_notifications" do
-  step :fetch_users do
+  step :fetch_users, fn _input ->
     users = Users.all_active()
-    put_context(:users, users)
+    {:ok, %{users: users, sent_count: 0}}
   end
 
   # Send to 10 users at a time
-  foreach :notify_each, items: :users, concurrency: 10 do
-    step :send, retry: [max_attempts: 3] do
-      user = current_item()
+  foreach :notify_each, items: fn data -> data.users end, concurrency: 10 do
+    step :send, [retry: [max_attempts: 3]], fn data, user, _idx ->
       Notifications.send(user.id, "Weekly update")
-      increment_context(:sent_count)
+      {:ok, increment(data, :sent_count)}
     end
   end
 
-  step :report do
-    Logger.info("Sent #{get_context(:sent_count, 0)} notifications")
+  step :report, fn data ->
+    Logger.info("Sent #{data.sent_count} notifications")
+    {:ok, data}
   end
 end
 ```
@@ -157,72 +144,35 @@ end
 
 ```elixir
 workflow "import_records" do
-  step :load_data do
-    records = CSVParser.parse(input()["file_path"])
-    put_context(:records, records)
-    put_context(:errors, [])
+  step :load_data, fn input ->
+    records = CSVParser.parse(input["file_path"])
+    {:ok, %{records: records, errors: [], success_count: 0}}
   end
 
   foreach :import_each,
-    items: :records,
+    items: fn data -> data.records end,
     on_error: :continue do
 
-    step :import do
-      record = current_item()
-      index = current_index()
-
+    step :import, fn data, record, index ->
       case Database.insert(record) do
         {:ok, _} ->
-          increment_context(:success_count)
+          {:ok, increment(data, :success_count)}
         {:error, reason} ->
-          append_context(:errors, %{index: index, reason: reason})
+          {:ok, append(data, :errors, %{index: index, reason: reason})}
       end
     end
   end
 
-  step :summary do
-    success = get_context(:success_count, 0)
-    errors = get_context(:errors, [])
+  step :summary, fn data ->
+    Logger.info("Imported #{data.success_count} records, #{length(data.errors)} errors")
 
-    Logger.info("Imported #{success} records, #{length(errors)} errors")
-
-    if errors != [] do
-      put_context(:has_errors, true)
-    end
-  end
-end
-```
-
-### Dynamic Item Fetching with MFA
-
-```elixir
-defmodule MyApp.PaginatedProcessor do
-  use Durable
-  use Durable.Context
-
-  workflow "process_all_pages" do
-    step :init do
-      put_context(:page, 1)
-      put_context(:processed, [])
+    data = if data.errors != [] do
+      assign(data, :has_errors, true)
+    else
+      data
     end
 
-    # Fetch items dynamically using MFA
-    foreach :process_batch,
-      items: {__MODULE__, :fetch_page, []},
-      concurrency: 5 do
-
-      step :process do
-        item = current_item()
-        result = process_item(item)
-        append_context(:processed, result)
-      end
-    end
-  end
-
-  def fetch_page do
-    # Called at runtime to get items
-    page = Durable.Context.get_context(:page)
-    API.fetch_items(page: page, limit: 100)
+    {:ok, data}
   end
 end
 ```
@@ -230,27 +180,41 @@ end
 ### Multi-Step Processing per Item
 
 ```elixir
-foreach :process_documents, items: :documents do
-  step :validate do
-    doc = current_item()
-
+foreach :process_documents, items: fn data -> data.documents end do
+  step :validate, fn data, doc, _idx ->
     if valid?(doc) do
-      put_context(:current_valid, true)
+      {:ok, assign(data, :current_valid, true)}
     else
       raise "Invalid document: #{doc.id}"
     end
   end
 
-  step :transform do
-    doc = current_item()
+  step :transform, fn data, doc, _idx ->
     transformed = transform(doc)
-    put_context(:current_result, transformed)
+    {:ok, assign(data, :current_result, transformed)}
   end
 
-  step :save do
-    result = get_context(:current_result)
+  step :save, fn data, _doc, _idx ->
+    result = data.current_result
     Database.save(result)
-    append_context(:saved_ids, result.id)
+    {:ok, append(data, :saved_ids, result.id)}
+  end
+end
+```
+
+### Tracking Progress
+
+```elixir
+foreach :process_large_batch, items: fn data -> data.items end do
+  step :process, fn data, item, index ->
+    total = length(data.items)
+
+    if rem(index, 100) == 0 do
+      Logger.info("Progress: #{index}/#{total}")
+    end
+
+    process(item)
+    {:ok, data}
   end
 end
 ```
@@ -261,35 +225,18 @@ end
 
 ```elixir
 # External API with rate limits - low concurrency
-foreach :call_api, items: :requests, concurrency: 2 do
-  # ...
+foreach :call_api, items: fn data -> data.requests end, concurrency: 2 do
+  step :call, fn data, req, _idx -> {:ok, data} end
 end
 
 # CPU-bound local work - match CPU cores
-foreach :process, items: :data, concurrency: System.schedulers_online() do
-  # ...
+foreach :process, items: fn data -> data.data end, concurrency: System.schedulers_online() do
+  step :work, fn data, item, _idx -> {:ok, data} end
 end
 
 # Independent I/O operations - higher concurrency
-foreach :fetch, items: :urls, concurrency: 20 do
-  # ...
-end
-```
-
-### Track Progress for Long Lists
-
-```elixir
-foreach :process_large_batch, items: :items do
-  step :process do
-    index = current_index()
-    total = length(get_context(:items))
-
-    if rem(index, 100) == 0 do
-      Logger.info("Progress: #{index}/#{total}")
-    end
-
-    process(current_item())
-  end
+foreach :fetch, items: fn data -> data.urls end, concurrency: 20 do
+  step :download, fn data, url, _idx -> {:ok, data} end
 end
 ```
 
@@ -297,13 +244,11 @@ end
 
 ```elixir
 # Sending emails - some failures are acceptable
-foreach :send_emails, items: :recipients, on_error: :continue do
-  step :send do
-    recipient = current_item()
-
+foreach :send_emails, items: fn data -> data.recipients end, on_error: :continue do
+  step :send, fn data, recipient, _idx ->
     case Mailer.send(recipient) do
-      :ok -> increment_context(:sent)
-      {:error, reason} -> append_context(:failed, {recipient, reason})
+      :ok -> {:ok, increment(data, :sent)}
+      {:error, reason} -> {:ok, append(data, :failed, {recipient, reason})}
     end
   end
 end
@@ -312,19 +257,22 @@ end
 ### Combine with Parallel for Complex Pipelines
 
 ```elixir
-foreach :process_orders, items: :orders do
+foreach :process_orders, items: fn data -> data.orders end do
   # Each order has multiple independent tasks
   parallel do
-    step :update_inventory do
-      Inventory.reserve(current_item().items)
+    step :update_inventory, fn data, order, _idx ->
+      Inventory.reserve(order.items)
+      {:ok, data}
     end
 
-    step :notify_warehouse do
-      Warehouse.notify(current_item())
+    step :notify_warehouse, fn data, order, _idx ->
+      Warehouse.notify(order)
+      {:ok, data}
     end
 
-    step :send_confirmation do
-      Email.send_order_confirmation(current_item())
+    step :send_confirmation, fn data, order, _idx ->
+      Email.send_order_confirmation(order)
+      {:ok, data}
     end
   end
 end

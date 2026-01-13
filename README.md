@@ -7,7 +7,7 @@ A durable, resumable workflow engine for Elixir. Similar to Temporal/Inngest.
 
 ## Features
 
-- **Declarative DSL** - Clean macro-based workflow definitions
+- **Pipeline Model** - Data flows from step to step, simple and explicit
 - **Resumability** - Sleep, wait for events, wait for human input
 - **Branching** - Pattern-matched conditional flow control
 - **Parallel** - Run steps concurrently with merge strategies
@@ -51,37 +51,38 @@ children = [
 ```elixir
 defmodule MyApp.OrderWorkflow do
   use Durable
-  use Durable.Context
+  use Durable.Helpers
 
   workflow "process_order", timeout: hours(2) do
-    step :validate do
-      order = input().order
-      put_context(:order_id, order.id)
-      put_context(:items, order.items)
+    # First step receives workflow input
+    step :validate, fn order ->
+      {:ok, %{
+        order_id: order["id"],
+        items: order["items"],
+        customer_id: order["customer_id"]
+      }}
     end
 
-    step :calculate_total do
-      total =
-        get_context(:items)
-        |> Enum.map(& &1.price)
-        |> Enum.sum()
-
-      put_context(:total, total)
+    # Each step receives previous step's output
+    step :calculate_total, fn data ->
+      total = data.items |> Enum.map(& &1["price"]) |> Enum.sum()
+      {:ok, assign(data, :total, total)}
     end
 
-    step :charge_payment, retry: [max_attempts: 3, backoff: :exponential] do
-      {:ok, charge} = PaymentService.charge(get_context(:order_id), get_context(:total))
-      put_context(:charge_id, charge.id)
+    step :charge_payment, [retry: [max_attempts: 3, backoff: :exponential]], fn data ->
+      {:ok, charge} = PaymentService.charge(data.order_id, data.total)
+      {:ok, assign(data, :charge_id, charge.id)}
     end
 
-    step :send_confirmation do
-      EmailService.send_confirmation(get_context(:order_id))
+    step :send_confirmation, fn data ->
+      EmailService.send_confirmation(data.order_id)
+      {:ok, data}
     end
   end
 end
 
 # Start it
-{:ok, id} = Durable.start(MyApp.OrderWorkflow, %{order: order})
+{:ok, id} = Durable.start(MyApp.OrderWorkflow, %{"id" => "order_123", "items" => items})
 ```
 
 ## Examples
@@ -93,22 +94,31 @@ Wait for human approval with timeout fallback.
 ```elixir
 defmodule MyApp.ExpenseApproval do
   use Durable
-  use Durable.Context
+  use Durable.Helpers
   use Durable.Wait
 
   workflow "expense_approval" do
-    step :request_approval do
+    step :request_approval, fn data ->
       result = wait_for_approval("manager",
-        prompt: "Approve $#{input().amount} expense?",
+        prompt: "Approve $#{data["amount"]} expense?",
         timeout: days(3),
         timeout_value: :auto_rejected
       )
-      put_context(:decision, result)
+      {:ok, assign(data, :decision, result)}
     end
 
-    branch on: get_context(:decision) do
-      :approved -> step :process, do: Expenses.reimburse(input().employee_id, input().amount)
-      _ -> step :notify_rejection, do: Mailer.send_rejection(input().employee_id)
+    branch on: fn data -> data.decision end do
+      :approved ->
+        step :process, fn data ->
+          Expenses.reimburse(data["employee_id"], data["amount"])
+          {:ok, assign(data, :status, :reimbursed)}
+        end
+
+      _ ->
+        step :notify_rejection, fn data ->
+          Mailer.send_rejection(data["employee_id"])
+          {:ok, assign(data, :status, :rejected)}
+        end
     end
   end
 end
@@ -124,17 +134,30 @@ Fetch data concurrently, then combine.
 ```elixir
 defmodule MyApp.DashboardBuilder do
   use Durable
-  use Durable.Context
+  use Durable.Helpers
 
   workflow "build_dashboard" do
-    parallel do
-      step :user, do: put_context(:user, Users.get(input().user_id))
-      step :orders, do: put_context(:orders, Orders.recent(input().user_id))
-      step :notifications, do: put_context(:notifs, Notifications.unread(input().user_id))
+    step :init, fn input ->
+      {:ok, %{user_id: input["user_id"]}}
     end
 
-    step :render do
-      Dashboard.build(get_context(:user), get_context(:orders), get_context(:notifs))
+    parallel do
+      step :user, fn data ->
+        {:ok, assign(data, :user, Users.get(data.user_id))}
+      end
+
+      step :orders, fn data ->
+        {:ok, assign(data, :orders, Orders.recent(data.user_id))}
+      end
+
+      step :notifications, fn data ->
+        {:ok, assign(data, :notifs, Notifications.unread(data.user_id))}
+      end
+    end
+
+    step :render, fn data ->
+      dashboard = Dashboard.build(data.user, data.orders, data.notifs)
+      {:ok, assign(data, :dashboard, dashboard)}
     end
   end
 end
@@ -147,16 +170,23 @@ Process items with controlled concurrency.
 ```elixir
 defmodule MyApp.BulkEmailer do
   use Durable
-  use Durable.Context
+  use Durable.Helpers
 
   workflow "send_campaign" do
-    step :load do
-      put_context(:recipients, Subscribers.active(input().campaign_id))
+    step :load, fn input ->
+      recipients = Subscribers.active(input["campaign_id"])
+      {:ok, %{campaign_id: input["campaign_id"], recipients: recipients}}
     end
 
-    foreach :send_emails, items: :recipients, concurrency: 10, on_error: :continue do
-      step :send do
-        Mailer.send_campaign(current_item(), input().campaign_id)
+    foreach :send_emails,
+      items: fn data -> data.recipients end,
+      concurrency: 10,
+      on_error: :continue do
+
+      # Foreach steps receive (data, item, index)
+      step :send, fn data, recipient, _idx ->
+        Mailer.send_campaign(recipient, data.campaign_id)
+        {:ok, increment(data, :sent_count)}
       end
     end
   end
@@ -170,24 +200,34 @@ Book multiple services with automatic rollback on failure.
 ```elixir
 defmodule MyApp.TripBooking do
   use Durable
-  use Durable.Context
+  use Durable.Helpers
 
   workflow "book_trip" do
-    step :book_flight, compensate: :cancel_flight do
-      put_context(:flight, Flights.book(input().flight))
+    step :book_flight, [compensate: :cancel_flight], fn data ->
+      booking = Flights.book(data["flight"])
+      {:ok, assign(data, :flight, booking)}
     end
 
-    step :book_hotel, compensate: :cancel_hotel do
-      put_context(:hotel, Hotels.book(input().hotel))
+    step :book_hotel, [compensate: :cancel_hotel], fn data ->
+      booking = Hotels.book(data["hotel"])
+      {:ok, assign(data, :hotel, booking)}
     end
 
-    step :charge do
-      total = get_context(:flight).price + get_context(:hotel).price
-      Payments.charge(input().card, total)
+    step :charge, fn data ->
+      total = data.flight.price + data.hotel.price
+      Payments.charge(data["card"], total)
+      {:ok, assign(data, :charged, true)}
     end
 
-    compensate :cancel_flight, do: Flights.cancel(get_context(:flight).id)
-    compensate :cancel_hotel, do: Hotels.cancel(get_context(:hotel).id)
+    compensate :cancel_flight, fn data ->
+      Flights.cancel(data.flight.id)
+      {:ok, data}
+    end
+
+    compensate :cancel_hotel, fn data ->
+      Hotels.cancel(data.hotel.id)
+      {:ok, data}
+    end
   end
 end
 ```
@@ -199,19 +239,20 @@ Run daily at 9am.
 ```elixir
 defmodule MyApp.DailyReport do
   use Durable
+  use Durable.Helpers
   use Durable.Scheduler.DSL
-  use Durable.Context
 
   @schedule cron: "0 9 * * *", timezone: "America/New_York"
   workflow "daily_sales_report" do
-    step :generate do
+    step :generate, fn _input ->
       report = Reports.sales_summary(Date.utc_today())
-      put_context(:report, report)
+      {:ok, %{report: report}}
     end
 
-    step :distribute do
-      Mailer.send_report(get_context(:report), to: "team@company.com")
-      Slack.post_summary(get_context(:report), channel: "#sales")
+    step :distribute, fn data ->
+      Mailer.send_report(data.report, to: "team@company.com")
+      Slack.post_summary(data.report, channel: "#sales")
+      {:ok, data}
     end
   end
 end
@@ -227,32 +268,37 @@ Sleep, schedule for specific times, and wait for events.
 ```elixir
 defmodule MyApp.TrialReminder do
   use Durable
-  use Durable.Context
+  use Durable.Helpers
   use Durable.Wait
 
   workflow "trial_reminder" do
-    step :welcome do
-      Mailer.send_welcome(input().user_id)
+    step :welcome, fn data ->
+      Mailer.send_welcome(data["user_id"])
+      {:ok, %{user_id: data["user_id"], trial_started_at: data["trial_started_at"]}}
     end
 
-    step :wait_3_days do
+    step :wait_3_days, fn data ->
       sleep(days(3))
+      {:ok, data}
     end
 
-    step :check_in do
-      Mailer.send_tips(input().user_id)
+    step :check_in, fn data ->
+      Mailer.send_tips(data.user_id)
+      {:ok, data}
     end
 
-    step :wait_until_trial_ends do
-      trial_end = DateTime.add(input().trial_started_at, 14, :day)
+    step :wait_until_trial_ends, fn data ->
+      trial_end = DateTime.add(data.trial_started_at, 14, :day)
       schedule_at(trial_end)
+      {:ok, data}
     end
 
-    step :convert_or_remind do
-      if Subscriptions.active?(input().user_id) do
-        put_context(:converted, true)
+    step :convert_or_remind, fn data ->
+      if Subscriptions.active?(data.user_id) do
+        {:ok, assign(data, :converted, true)}
       else
-        Mailer.send_upgrade_reminder(input().user_id)
+        Mailer.send_upgrade_reminder(data.user_id)
+        {:ok, assign(data, :converted, false)}
       end
     end
   end
@@ -266,26 +312,35 @@ Wait for external webhook events.
 ```elixir
 defmodule MyApp.PaymentFlow do
   use Durable
-  use Durable.Context
+  use Durable.Helpers
   use Durable.Wait
 
   workflow "payment_flow" do
-    step :create_invoice do
-      invoice = Invoices.create(input().order_id, input().amount)
-      put_context(:invoice_id, invoice.id)
+    step :create_invoice, fn data ->
+      invoice = Invoices.create(data["order_id"], data["amount"])
+      {:ok, %{order_id: data["order_id"], invoice_id: invoice.id}}
     end
 
-    step :await_payment do
+    step :await_payment, fn data ->
       {event, _payload} = wait_for_any(["payment.success", "payment.failed"],
         timeout: days(7),
         timeout_value: {"payment.expired", nil}
       )
-      put_context(:result, event)
+      {:ok, assign(data, :result, event)}
     end
 
-    branch on: get_context(:result) do
-      "payment.success" -> step :fulfill, do: Orders.fulfill(input().order_id)
-      _ -> step :cancel, do: Orders.cancel(input().order_id)
+    branch on: fn data -> data.result end do
+      "payment.success" ->
+        step :fulfill, fn data ->
+          Orders.fulfill(data.order_id)
+          {:ok, assign(data, :status, :fulfilled)}
+        end
+
+      _ ->
+        step :cancel, fn data ->
+          Orders.cancel(data.order_id)
+          {:ok, assign(data, :status, :cancelled)}
+        end
     end
   end
 end
@@ -296,14 +351,17 @@ Durable.send_event(workflow_id, "payment.success", %{transaction_id: "txn_123"})
 
 ## Reference
 
-### Context
+### Helper Functions
 
 ```elixir
-input()                       # Initial workflow input
-get_context(:key)             # Get value
-get_context(:key, default)    # With default
-put_context(:key, value)      # Set value
-append_context(:list, item)   # Append to list
+use Durable.Helpers
+
+assign(data, :key, value)    # Set a value
+assign(data, %{a: 1, b: 2})  # Merge multiple values
+update(data, :key, default, fn old -> new end)
+append(data, :list, item)    # Append to list
+increment(data, :count)      # Increment by 1
+increment(data, :count, 5)   # Increment by 5
 ```
 
 ### Time Helpers

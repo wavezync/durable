@@ -97,7 +97,7 @@ defmodule Durable.DecisionTest do
   end
 
   describe "decision execution - continue" do
-    test "decision step with {:continue} proceeds to next step" do
+    test "decision step with {:ok, data} proceeds to next step" do
       {:ok, execution} = create_and_execute_workflow(ContinueTestWorkflow, %{})
 
       step_execs = get_step_executions(execution.id)
@@ -227,248 +227,252 @@ end
 # Define test workflow modules at top level so they can be looked up by Executor
 defmodule DecisionTypeTestWorkflow do
   use Durable
-  use Durable.Context
+  use Durable.Helpers
 
   workflow "decision_type_test" do
-    step :setup do
-      :ok
-    end
+    step(:setup, fn data ->
+      {:ok, data}
+    end)
 
-    decision :branch do
-      {:goto, :option_a}
-    end
+    decision(:branch, fn data ->
+      {:goto, :option_a, data}
+    end)
 
-    step :option_a do
-      :a
-    end
+    step(:option_a, fn data ->
+      {:ok, data}
+    end)
   end
 end
 
 defmodule RetryDecisionTestWorkflow do
   use Durable
+  use Durable.Helpers
 
   workflow "retry_decision" do
-    decision :risky_decision, retry: [max_attempts: 3] do
-      {:continue}
-    end
+    decision(:risky_decision, [retry: [max_attempts: 3]], fn data ->
+      {:ok, data}
+    end)
 
-    step :next do
-      :ok
-    end
+    step(:next, fn data ->
+      {:ok, data}
+    end)
   end
 end
 
 defmodule GotoTestWorkflow do
   use Durable
-  use Durable.Context
+  use Durable.Helpers
 
   workflow "goto_test" do
-    step :setup do
-      put_context(:amount, input()["amount"])
-    end
+    step(:setup, fn data ->
+      {:ok, assign(data, :amount, data["amount"])}
+    end)
 
-    decision :check_amount do
-      if get_context(:amount) > 1000 do
-        {:goto, :manager_approval}
+    decision(:check_amount, fn data ->
+      if data[:amount] > 1000 do
+        {:goto, :manager_approval, data}
       else
-        {:goto, :auto_approve}
+        {:goto, :auto_approve, data}
       end
-    end
+    end)
 
-    step :auto_approve do
-      put_context(:approved_by, "system")
-    end
+    step(:auto_approve, fn data ->
+      {:ok, assign(data, :approved_by, "system")}
+    end)
 
-    step :manager_approval do
-      put_context(:approved_by, "manager")
-    end
+    step(:manager_approval, fn data ->
+      {:ok, assign(data, :approved_by, "manager")}
+    end)
   end
 end
 
 defmodule MultiSkipTestWorkflow do
   use Durable
-  use Durable.Context
+  use Durable.Helpers
 
   workflow "multi_skip" do
-    step :step_one do
-      :ok
-    end
+    step(:step_one, fn data ->
+      {:ok, data}
+    end)
 
-    decision :decide do
-      {:goto, :step_four}
-    end
+    decision(:decide, fn data ->
+      {:goto, :step_four, data}
+    end)
 
-    step :step_two do
-      put_context(:step_two, true)
-    end
+    step(:step_two, fn data ->
+      {:ok, assign(data, :step_two, true)}
+    end)
 
-    step :step_three do
-      put_context(:step_three, true)
-    end
+    step(:step_three, fn data ->
+      {:ok, assign(data, :step_three, true)}
+    end)
 
-    step :step_four do
-      put_context(:reached, true)
-    end
+    step(:step_four, fn data ->
+      {:ok, assign(data, :reached, true)}
+    end)
   end
 end
 
 defmodule ContinueTestWorkflow do
   use Durable
-  use Durable.Context
+  use Durable.Helpers
 
   workflow "continue_test" do
-    step :first do
-      put_context(:first, true)
-    end
+    step(:first, fn data ->
+      {:ok, assign(data, :first, true)}
+    end)
 
-    decision :decide do
-      {:continue}
-    end
+    decision(:decide, fn data ->
+      {:ok, data}
+    end)
 
-    step :second do
-      put_context(:second, true)
-    end
+    step(:second, fn data ->
+      {:ok, assign(data, :second, true)}
+    end)
 
-    step :third do
-      put_context(:third, true)
-    end
+    step(:third, fn data ->
+      {:ok, assign(data, :third, true)}
+    end)
   end
 end
 
 defmodule PlainReturnTestWorkflow do
   use Durable
-  use Durable.Context
+  use Durable.Helpers
 
   workflow "plain_return" do
-    decision :decide do
-      "some value"
-    end
+    decision(:decide, fn data ->
+      {:ok, data}
+    end)
 
-    step :next do
-      put_context(:reached, true)
-    end
+    step(:next, fn data ->
+      {:ok, assign(data, :reached, true)}
+    end)
   end
 end
 
 defmodule InvalidTargetTestWorkflow do
   use Durable
-  use Durable.Context
+  use Durable.Helpers
 
   workflow "invalid_target" do
-    decision :decide do
-      {:goto, :nonexistent_step}
-    end
+    decision(:decide, fn data ->
+      {:goto, :nonexistent_step, data}
+    end)
 
-    step :real_step do
-      :ok
-    end
+    step(:real_step, fn data ->
+      {:ok, data}
+    end)
   end
 end
 
 defmodule BackwardJumpTestWorkflow do
   use Durable
-  use Durable.Context
+  use Durable.Helpers
 
   workflow "backward_jump" do
-    step :first do
-      :ok
-    end
+    step(:first, fn data ->
+      {:ok, data}
+    end)
 
-    step :second do
-      :ok
-    end
+    step(:second, fn data ->
+      {:ok, data}
+    end)
 
-    decision :decide do
-      {:goto, :first}
-    end
+    decision(:decide, fn data ->
+      {:goto, :first, data}
+    end)
 
-    step :third do
-      :ok
-    end
+    step(:third, fn data ->
+      {:ok, data}
+    end)
   end
 end
 
 defmodule SelfJumpTestWorkflow do
   use Durable
-  use Durable.Context
+  use Durable.Helpers
 
   workflow "self_jump" do
-    decision :decide do
-      {:goto, :decide}
-    end
+    decision(:decide, fn data ->
+      {:goto, :decide, data}
+    end)
 
-    step :next do
-      :ok
-    end
+    step(:next, fn data ->
+      {:ok, data}
+    end)
   end
 end
 
 defmodule DecisionWithContextTestWorkflow do
   use Durable
-  use Durable.Context
+  use Durable.Helpers
 
   workflow "decision_with_context" do
-    step :setup do
-      put_context(:value, 150)
-    end
+    step(:setup, fn data ->
+      {:ok,
+       data
+       |> assign(:value, 150)
+       |> assign(:threshold, data["threshold"])}
+    end)
 
-    decision :branch do
-      threshold = input()["threshold"]
+    decision(:branch, fn data ->
+      threshold = data[:threshold]
 
-      if get_context(:value) > threshold do
-        put_context(:branch_taken, "high")
-        {:goto, :high_path}
+      if data[:value] > threshold do
+        data = assign(data, :branch_taken, "high")
+        {:goto, :high_path, data}
       else
-        put_context(:branch_taken, "low")
-        {:goto, :low_path}
+        data = assign(data, :branch_taken, "low")
+        {:goto, :low_path, data}
       end
-    end
+    end)
 
-    step :low_path do
-      put_context(:path, "low")
-    end
+    step(:low_path, fn data ->
+      {:ok, assign(data, :path, "low")}
+    end)
 
-    step :high_path do
-      put_context(:path, "high")
-    end
+    step(:high_path, fn data ->
+      {:ok, assign(data, :path, "high")}
+    end)
   end
 end
 
 defmodule DecisionChainTestWorkflow do
   use Durable
-  use Durable.Context
+  use Durable.Helpers
 
   workflow "decision_chain" do
-    step :setup do
-      put_context(:level, input()["level"])
-    end
+    step(:setup, fn data ->
+      {:ok, assign(data, :level, data["level"])}
+    end)
 
-    decision :first_decision do
-      if get_context(:level) > 5 do
-        {:goto, :second_decision}
+    decision(:first_decision, fn data ->
+      if data[:level] > 5 do
+        {:goto, :second_decision, data}
       else
-        {:goto, :low_level}
+        {:goto, :low_level, data}
       end
-    end
+    end)
 
-    step :low_level do
-      put_context(:result, "low")
-    end
+    step(:low_level, fn data ->
+      {:ok, assign(data, :result, "low")}
+    end)
 
-    decision :second_decision do
-      if get_context(:level) > 10 do
-        {:goto, :very_high}
+    decision(:second_decision, fn data ->
+      if data[:level] > 10 do
+        {:goto, :very_high, data}
       else
-        {:goto, :medium}
+        {:goto, :medium, data}
       end
-    end
+    end)
 
-    step :medium do
-      put_context(:result, "medium")
-    end
+    step(:medium, fn data ->
+      {:ok, assign(data, :result, "medium")}
+    end)
 
-    step :very_high do
-      put_context(:result, "very_high")
-    end
+    step(:very_high, fn data ->
+      {:ok, assign(data, :result, "very_high")}
+    end)
   end
 end
