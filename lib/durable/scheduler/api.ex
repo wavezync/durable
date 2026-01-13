@@ -348,24 +348,26 @@ defmodule Durable.Scheduler.API do
   def get_due_schedules(config) do
     repo = config.repo
     now = DateTime.utc_now()
+    log_opts = [log: config.log_level]
 
     from(s in ScheduledWorkflow,
       where: s.enabled == true and s.next_run_at <= ^now,
       lock: "FOR UPDATE SKIP LOCKED"
     )
-    |> repo.all()
+    |> repo.all(log_opts)
   end
 
   @doc false
   def mark_run(schedule, config) do
     repo = config.repo
     now = DateTime.utc_now()
+    log_opts = [log: config.log_level]
 
     {:ok, next_run} = compute_next_run(schedule.cron_expression, schedule.timezone)
 
     schedule
     |> ScheduledWorkflow.run_changeset(now, next_run)
-    |> repo.update()
+    |> repo.update(log_opts)
   end
 
   # ============================================================================

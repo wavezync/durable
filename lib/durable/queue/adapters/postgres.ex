@@ -39,7 +39,7 @@ defmodule Durable.Queue.Adapters.Postgres do
     RETURNING id, workflow_module, workflow_name, queue, priority, input, context, scheduled_at, current_step;
     """
 
-    case SQL.query(repo, sql, [queue, limit, node_id]) do
+    case SQL.query(repo, sql, [queue, limit, node_id], log: config.log_level) do
       {:ok, %{rows: rows, columns: columns}} ->
         rows
         |> Enum.map(&parse_row(&1, columns))
@@ -54,15 +54,16 @@ defmodule Durable.Queue.Adapters.Postgres do
   @impl true
   def ack(%Config{} = config, job_id) when is_binary(job_id) do
     repo = config.repo
+    log_opts = [log: config.log_level]
 
-    case repo.get(WorkflowExecution, job_id) do
+    case repo.get(WorkflowExecution, job_id, log_opts) do
       nil ->
         {:error, :not_found}
 
       execution ->
         execution
         |> WorkflowExecution.unlock_changeset()
-        |> repo.update()
+        |> repo.update(log_opts)
 
         :ok
     end
@@ -71,8 +72,9 @@ defmodule Durable.Queue.Adapters.Postgres do
   @impl true
   def nack(%Config{} = config, job_id, reason) when is_binary(job_id) do
     repo = config.repo
+    log_opts = [log: config.log_level]
 
-    case repo.get(WorkflowExecution, job_id) do
+    case repo.get(WorkflowExecution, job_id, log_opts) do
       nil ->
         {:error, :not_found}
 
@@ -87,7 +89,7 @@ defmodule Durable.Queue.Adapters.Postgres do
           locked_by: nil,
           locked_at: nil
         )
-        |> repo.update()
+        |> repo.update(log_opts)
 
         :ok
     end
@@ -96,8 +98,9 @@ defmodule Durable.Queue.Adapters.Postgres do
   @impl true
   def reschedule(%Config{} = config, job_id, run_at) when is_binary(job_id) do
     repo = config.repo
+    log_opts = [log: config.log_level]
 
-    case repo.get(WorkflowExecution, job_id) do
+    case repo.get(WorkflowExecution, job_id, log_opts) do
       nil ->
         {:error, :not_found}
 
@@ -109,7 +112,7 @@ defmodule Durable.Queue.Adapters.Postgres do
           locked_by: nil,
           locked_at: nil
         )
-        |> repo.update()
+        |> repo.update(log_opts)
 
         :ok
     end
@@ -119,6 +122,7 @@ defmodule Durable.Queue.Adapters.Postgres do
   def recover_stale_locks(%Config{} = config, timeout_seconds) when timeout_seconds > 0 do
     repo = config.repo
     cutoff = DateTime.add(DateTime.utc_now(), -timeout_seconds, :second)
+    log_opts = [log: config.log_level]
 
     {count, _} =
       from(w in WorkflowExecution,
@@ -127,11 +131,14 @@ defmodule Durable.Queue.Adapters.Postgres do
         where: w.locked_at < ^cutoff
       )
       |> repo.update_all(
-        set: [
-          status: :pending,
-          locked_by: nil,
-          locked_at: nil
-        ]
+        [
+          set: [
+            status: :pending,
+            locked_by: nil,
+            locked_at: nil
+          ]
+        ],
+        log_opts
       )
 
     {:ok, count}
@@ -143,13 +150,14 @@ defmodule Durable.Queue.Adapters.Postgres do
   def heartbeat(%Config{} = config, job_id) when is_binary(job_id) do
     repo = config.repo
     now = DateTime.utc_now()
+    log_opts = [log: config.log_level]
 
     {count, _} =
       from(w in WorkflowExecution,
         where: w.id == ^job_id,
         where: w.status == :running
       )
-      |> repo.update_all(set: [locked_at: now])
+      |> repo.update_all([set: [locked_at: now]], log_opts)
 
     if count == 1 do
       :ok
@@ -161,27 +169,28 @@ defmodule Durable.Queue.Adapters.Postgres do
   @impl true
   def get_stats(%Config{} = config, queue) when is_binary(queue) do
     repo = config.repo
+    log_opts = [log: config.log_level]
     base_query = from(w in WorkflowExecution, where: w.queue == ^queue)
 
     pending =
       from(w in base_query, where: w.status == :pending)
-      |> repo.aggregate(:count)
+      |> repo.aggregate(:count, log_opts)
 
     running =
       from(w in base_query, where: w.status == :running)
-      |> repo.aggregate(:count)
+      |> repo.aggregate(:count, log_opts)
 
     completed =
       from(w in base_query, where: w.status == :completed)
-      |> repo.aggregate(:count)
+      |> repo.aggregate(:count, log_opts)
 
     failed =
       from(w in base_query, where: w.status == :failed)
-      |> repo.aggregate(:count)
+      |> repo.aggregate(:count, log_opts)
 
     waiting =
       from(w in base_query, where: w.status == :waiting)
-      |> repo.aggregate(:count)
+      |> repo.aggregate(:count, log_opts)
 
     scheduled =
       from(w in base_query,
@@ -189,7 +198,7 @@ defmodule Durable.Queue.Adapters.Postgres do
         where: not is_nil(w.scheduled_at),
         where: w.scheduled_at > ^DateTime.utc_now()
       )
-      |> repo.aggregate(:count)
+      |> repo.aggregate(:count, log_opts)
 
     %{
       queue: queue,

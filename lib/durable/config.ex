@@ -14,6 +14,7 @@ defmodule Durable.Config do
   * `:queue_enabled` - Enable/disable queue processing (default: `true`)
   * `:stale_lock_timeout` - Seconds before a lock is considered stale (default: `300`)
   * `:heartbeat_interval` - Milliseconds between worker heartbeats (default: `30_000`)
+  * `:log_level` - Log level for internal Durable queries, or `false` to disable (default: `false`)
 
   ## Examples
 
@@ -43,7 +44,8 @@ defmodule Durable.Config do
           stale_lock_timeout: pos_integer(),
           heartbeat_interval: pos_integer(),
           scheduled_modules: [module()],
-          scheduler_interval: pos_integer()
+          scheduler_interval: pos_integer(),
+          log_level: Logger.level() | false
         }
 
   defstruct [
@@ -55,7 +57,8 @@ defmodule Durable.Config do
     :stale_lock_timeout,
     :heartbeat_interval,
     :scheduled_modules,
-    :scheduler_interval
+    :scheduler_interval,
+    :log_level
   ]
 
   @schema [
@@ -103,6 +106,12 @@ defmodule Durable.Config do
       type: :pos_integer,
       default: 60_000,
       doc: "Milliseconds between scheduler polls for due schedules"
+    ],
+    log_level: [
+      type:
+        {:in, [false, :emergency, :alert, :critical, :error, :warning, :notice, :info, :debug]},
+      default: false,
+      doc: "Log level for internal Durable queries, or false to disable logging"
     ]
   ]
 
@@ -227,6 +236,16 @@ defmodule Durable.Config do
   @spec heartbeat_interval(atom()) :: pos_integer()
   def heartbeat_interval(name \\ Durable) do
     get(name).heartbeat_interval
+  end
+
+  @doc """
+  Gets the log level for internal Durable queries.
+
+  Returns `false` to disable logging, or a Logger level atom.
+  """
+  @spec log_level(atom()) :: Logger.level() | false
+  def log_level(name \\ Durable) do
+    get(name).log_level
   end
 
   @doc """

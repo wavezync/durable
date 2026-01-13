@@ -114,6 +114,7 @@ children = [
 - `:queue_enabled` - Enable queue processing (default: `true`)
 - `:stale_lock_timeout` - Seconds before lock is stale (default: `300`)
 - `:heartbeat_interval` - Worker heartbeat interval in ms (default: `30_000`)
+- `:log_level` - Log level for internal queries, or `false` to disable (default: `false`)
 
 ## Testing
 

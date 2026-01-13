@@ -95,6 +95,7 @@ defmodule Durable.Wait.TimeoutWorker do
 
   defp process_timed_out_inputs(config, now) do
     repo = config.repo
+    log_opts = [log: config.log_level]
 
     # Find pending inputs that have timed out
     query =
@@ -106,19 +107,22 @@ defmodule Durable.Wait.TimeoutWorker do
         preload: [:workflow]
       )
 
-    timed_out = repo.all(query)
+    timed_out = repo.all(query, log_opts)
 
     Enum.each(timed_out, fn pending_input ->
-      handle_input_timeout(repo, pending_input, config)
+      handle_input_timeout(pending_input, config)
     end)
   end
 
-  defp handle_input_timeout(repo, pending_input, config) do
+  defp handle_input_timeout(pending_input, config) do
+    repo = config.repo
+    log_opts = [log: config.log_level]
+
     # Mark as timed out
     {:ok, _} =
       pending_input
       |> PendingInput.timeout_changeset()
-      |> repo.update()
+      |> repo.update(log_opts)
 
     # Determine how to handle
     on_timeout = pending_input.on_timeout || :resume
@@ -153,6 +157,7 @@ defmodule Durable.Wait.TimeoutWorker do
 
   defp process_timed_out_events(config, now) do
     repo = config.repo
+    log_opts = [log: config.log_level]
 
     # Find pending events that have timed out (only single events, not in groups)
     query =
@@ -166,19 +171,22 @@ defmodule Durable.Wait.TimeoutWorker do
         preload: [:workflow]
       )
 
-    timed_out = repo.all(query)
+    timed_out = repo.all(query, log_opts)
 
     Enum.each(timed_out, fn pending_event ->
-      handle_event_timeout(repo, pending_event, config)
+      handle_event_timeout(pending_event, config)
     end)
   end
 
-  defp handle_event_timeout(repo, pending_event, config) do
+  defp handle_event_timeout(pending_event, config) do
+    repo = config.repo
+    log_opts = [log: config.log_level]
+
     # Mark as timed out
     {:ok, _} =
       pending_event
       |> PendingEvent.timeout_changeset()
-      |> repo.update()
+      |> repo.update(log_opts)
 
     # Resume workflow with timeout value
     timeout_value = deserialize_timeout_value(pending_event.timeout_value)
@@ -202,6 +210,7 @@ defmodule Durable.Wait.TimeoutWorker do
 
   defp process_timed_out_wait_groups(config, now) do
     repo = config.repo
+    log_opts = [log: config.log_level]
 
     # Find wait groups that have timed out
     query =
@@ -213,25 +222,28 @@ defmodule Durable.Wait.TimeoutWorker do
         preload: [:workflow]
       )
 
-    timed_out = repo.all(query)
+    timed_out = repo.all(query, log_opts)
 
     Enum.each(timed_out, fn wait_group ->
-      handle_wait_group_timeout(repo, wait_group, config)
+      handle_wait_group_timeout(wait_group, config)
     end)
   end
 
-  defp handle_wait_group_timeout(repo, wait_group, config) do
+  defp handle_wait_group_timeout(wait_group, config) do
+    repo = config.repo
+    log_opts = [log: config.log_level]
+
     # Mark wait group as timed out
     {:ok, _} =
       wait_group
       |> WaitGroup.timeout_changeset()
-      |> repo.update()
+      |> repo.update(log_opts)
 
     # Mark all related pending events as timed out
     from(p in PendingEvent,
       where: p.wait_group_id == ^wait_group.id and p.status == :pending
     )
-    |> repo.update_all(set: [status: :timeout, completed_at: DateTime.utc_now()])
+    |> repo.update_all([set: [status: :timeout, completed_at: DateTime.utc_now()]], log_opts)
 
     # Resume workflow with timeout value and partial results
     timeout_value = deserialize_timeout_value(wait_group.timeout_value)
