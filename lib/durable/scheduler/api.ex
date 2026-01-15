@@ -26,6 +26,7 @@ defmodule Durable.Scheduler.API do
   alias Crontab.CronExpression.Parser, as: CronParser
   alias Crontab.Scheduler
   alias Durable.Config
+  alias Durable.Repo
   alias Durable.Storage.Schemas.ScheduledWorkflow
 
   @type schedule_opts :: [
@@ -79,7 +80,7 @@ defmodule Durable.Scheduler.API do
           {:ok, ScheduledWorkflow.t()} | {:error, term()}
   def schedule(module, cron_expression, opts \\ []) do
     durable_name = Keyword.get(opts, :durable, Durable)
-    repo = Config.repo(durable_name)
+    config = Config.get(durable_name)
 
     with {:ok, workflow_name} <- resolve_workflow_name(module, opts),
          :ok <- validate_cron(cron_expression),
@@ -100,7 +101,7 @@ defmodule Durable.Scheduler.API do
 
       %ScheduledWorkflow{}
       |> ScheduledWorkflow.changeset(attrs)
-      |> repo.insert()
+      |> Repo.insert(config)
     end
   end
 
@@ -125,7 +126,7 @@ defmodule Durable.Scheduler.API do
   @spec list_schedules(keyword()) :: [ScheduledWorkflow.t()]
   def list_schedules(filters \\ []) do
     durable_name = Keyword.get(filters, :durable, Durable)
-    repo = Config.repo(durable_name)
+    config = Config.get(durable_name)
     limit = Keyword.get(filters, :limit, 100)
     offset = Keyword.get(filters, :offset, 0)
 
@@ -137,7 +138,7 @@ defmodule Durable.Scheduler.API do
       )
 
     query = apply_filters(query, filters)
-    repo.all(query)
+    Repo.all(config, query)
   end
 
   @doc """
@@ -153,9 +154,9 @@ defmodule Durable.Scheduler.API do
           {:ok, ScheduledWorkflow.t()} | {:error, :not_found}
   def get_schedule(name, opts \\ []) do
     durable_name = Keyword.get(opts, :durable, Durable)
-    repo = Config.repo(durable_name)
+    config = Config.get(durable_name)
 
-    case repo.get_by(ScheduledWorkflow, name: name) do
+    case Repo.get_by(config, ScheduledWorkflow, name: name) do
       nil -> {:error, :not_found}
       schedule -> {:ok, schedule}
     end
@@ -182,14 +183,14 @@ defmodule Durable.Scheduler.API do
           {:ok, ScheduledWorkflow.t()} | {:error, term()}
   def update_schedule(name, changes) do
     durable_name = Keyword.get(changes, :durable, Durable)
-    repo = Config.repo(durable_name)
+    config = Config.get(durable_name)
 
     with {:ok, schedule} <- get_schedule(name, durable: durable_name) do
       attrs = build_update_attrs(changes, schedule)
 
       schedule
       |> ScheduledWorkflow.update_changeset(attrs)
-      |> repo.update()
+      |> Repo.update(config)
     end
   end
 
@@ -204,11 +205,11 @@ defmodule Durable.Scheduler.API do
   @spec delete_schedule(String.t(), keyword()) :: :ok | {:error, :not_found}
   def delete_schedule(name, opts \\ []) do
     durable_name = Keyword.get(opts, :durable, Durable)
-    repo = Config.repo(durable_name)
+    config = Config.get(durable_name)
 
     query = from(s in ScheduledWorkflow, where: s.name == ^name)
 
-    case repo.delete_all(query) do
+    case Repo.delete_all(config, query) do
       {0, _} -> {:error, :not_found}
       {_, _} -> :ok
     end
@@ -226,14 +227,14 @@ defmodule Durable.Scheduler.API do
           {:ok, ScheduledWorkflow.t()} | {:error, term()}
   def enable_schedule(name, opts \\ []) do
     durable_name = Keyword.get(opts, :durable, Durable)
-    repo = Config.repo(durable_name)
+    config = Config.get(durable_name)
 
     with {:ok, schedule} <- get_schedule(name, durable: durable_name),
          {:ok, next_run} <- compute_next_run(schedule.cron_expression, schedule.timezone) do
       schedule
       |> ScheduledWorkflow.enable_changeset(true)
       |> Ecto.Changeset.put_change(:next_run_at, next_run)
-      |> repo.update()
+      |> Repo.update(config)
     end
   end
 
@@ -249,12 +250,12 @@ defmodule Durable.Scheduler.API do
           {:ok, ScheduledWorkflow.t()} | {:error, term()}
   def disable_schedule(name, opts \\ []) do
     durable_name = Keyword.get(opts, :durable, Durable)
-    repo = Config.repo(durable_name)
+    config = Config.get(durable_name)
 
     with {:ok, schedule} <- get_schedule(name, durable: durable_name) do
       schedule
       |> ScheduledWorkflow.enable_changeset(false)
-      |> repo.update()
+      |> Repo.update(config)
     end
   end
 
@@ -346,26 +347,26 @@ defmodule Durable.Scheduler.API do
 
   @doc false
   def get_due_schedules(config) do
-    repo = config.repo
     now = DateTime.utc_now()
 
-    from(s in ScheduledWorkflow,
-      where: s.enabled == true and s.next_run_at <= ^now,
-      lock: "FOR UPDATE SKIP LOCKED"
-    )
-    |> repo.all()
+    query =
+      from(s in ScheduledWorkflow,
+        where: s.enabled == true and s.next_run_at <= ^now,
+        lock: "FOR UPDATE SKIP LOCKED"
+      )
+
+    Repo.all(config, query)
   end
 
   @doc false
   def mark_run(schedule, config) do
-    repo = config.repo
     now = DateTime.utc_now()
 
     {:ok, next_run} = compute_next_run(schedule.cron_expression, schedule.timezone)
 
     schedule
     |> ScheduledWorkflow.run_changeset(now, next_run)
-    |> repo.update()
+    |> Repo.update(config)
   end
 
   # ============================================================================
@@ -527,17 +528,17 @@ defmodule Durable.Scheduler.API do
   defp register_schedules(_module, [], _durable_name), do: :ok
 
   defp register_schedules(module, schedules, durable_name) do
-    repo = Config.repo(durable_name)
+    config = Config.get(durable_name)
 
     Enum.reduce_while(schedules, :ok, fn schedule_def, :ok ->
-      case register_single_schedule(module, schedule_def, repo) do
+      case register_single_schedule(module, schedule_def, config) do
         {:ok, _} -> {:cont, :ok}
         {:error, _} = error -> {:halt, error}
       end
     end)
   end
 
-  defp register_single_schedule(module, schedule_def, repo) do
+  defp register_single_schedule(module, schedule_def, config) do
     workflow_name = schedule_def.workflow
     cron = schedule_def.cron
     timezone = schedule_def[:timezone] || "UTC"
@@ -557,16 +558,16 @@ defmodule Durable.Scheduler.API do
       }
 
       # Upsert: insert or update (preserving enabled status)
-      case repo.get_by(ScheduledWorkflow, name: name) do
+      case Repo.get_by(config, ScheduledWorkflow, name: name) do
         nil ->
           %ScheduledWorkflow{}
           |> ScheduledWorkflow.changeset(Map.put(attrs, :enabled, true))
-          |> repo.insert()
+          |> Repo.insert(config)
 
         existing ->
           existing
           |> ScheduledWorkflow.upsert_changeset(attrs)
-          |> repo.update()
+          |> Repo.update(config)
       end
     end
   end

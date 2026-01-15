@@ -17,6 +17,7 @@ defmodule Durable.Executor.CompensationRunner do
   alias Durable.Context
   alias Durable.Definition.Compensation
   alias Durable.Executor.Backoff
+  alias Durable.Repo
   alias Durable.Storage.Schemas.StepExecution
 
   require Logger
@@ -43,12 +44,10 @@ defmodule Durable.Executor.CompensationRunner do
          max_attempts,
          config
        ) do
-    repo = config.repo
-
     # Create step execution record for compensation
     {:ok, step_exec} =
       create_compensation_execution(
-        repo,
+        config,
         workflow_id,
         compensation,
         compensating_step,
@@ -56,7 +55,7 @@ defmodule Durable.Executor.CompensationRunner do
       )
 
     # Mark as running
-    {:ok, step_exec} = update_step_execution(repo, step_exec, :running)
+    {:ok, step_exec} = update_step_execution(config, step_exec, :running)
 
     # Start log capture for this compensation
     Durable.LogCapture.start_capture()
@@ -89,13 +88,13 @@ defmodule Durable.Executor.CompensationRunner do
 
     case result do
       {:ok, output} ->
-        {:ok, _} = complete_step_execution(repo, step_exec, output, logs, duration_ms)
+        {:ok, _} = complete_step_execution(config, step_exec, output, logs, duration_ms)
         {:ok, output}
 
       {:error, error} ->
         if attempt < max_attempts do
           # Mark this attempt as failed
-          {:ok, _} = fail_step_execution(repo, step_exec, error, logs, duration_ms)
+          {:ok, _} = fail_step_execution(config, step_exec, error, logs, duration_ms)
 
           # Calculate backoff and sleep
           retry_opts = get_retry_opts(compensation)
@@ -113,7 +112,7 @@ defmodule Durable.Executor.CompensationRunner do
           )
         else
           # All retries exhausted
-          {:ok, _} = fail_step_execution(repo, step_exec, error, logs, duration_ms)
+          {:ok, _} = fail_step_execution(config, step_exec, error, logs, duration_ms)
           {:error, error}
         end
     end
@@ -135,7 +134,7 @@ defmodule Durable.Executor.CompensationRunner do
     end
   end
 
-  defp create_compensation_execution(repo, workflow_id, compensation, compensating_step, attempt) do
+  defp create_compensation_execution(config, workflow_id, compensation, compensating_step, attempt) do
     attrs = %{
       workflow_id: workflow_id,
       step_name: "compensate_#{compensation.name}",
@@ -148,27 +147,27 @@ defmodule Durable.Executor.CompensationRunner do
 
     %StepExecution{}
     |> StepExecution.changeset(attrs)
-    |> repo.insert()
+    |> Repo.insert(config)
   end
 
-  defp update_step_execution(repo, step_exec, :running) do
+  defp update_step_execution(config, step_exec, :running) do
     step_exec
     |> StepExecution.start_changeset()
-    |> repo.update()
+    |> Repo.update(config)
   end
 
-  defp complete_step_execution(repo, step_exec, output, logs, duration_ms) do
+  defp complete_step_execution(config, step_exec, output, logs, duration_ms) do
     serializable_output = serialize_output(output)
 
     step_exec
     |> StepExecution.complete_changeset(serializable_output, logs, duration_ms)
-    |> repo.update()
+    |> Repo.update(config)
   end
 
-  defp fail_step_execution(repo, step_exec, error, logs, duration_ms) do
+  defp fail_step_execution(config, step_exec, error, logs, duration_ms) do
     step_exec
     |> StepExecution.fail_changeset(error, logs, duration_ms)
-    |> repo.update()
+    |> Repo.update(config)
   end
 
   defp serialize_output(output) when is_map(output), do: output

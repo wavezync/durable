@@ -14,6 +14,7 @@ defmodule Durable.Executor do
   alias Durable.Definition.Workflow
   alias Durable.Executor.CompensationRunner
   alias Durable.Executor.StepRunner
+  alias Durable.Repo
   alias Durable.Storage.Schemas.PendingEvent
   alias Durable.Storage.Schemas.PendingInput
   alias Durable.Storage.Schemas.StepExecution
@@ -44,10 +45,9 @@ defmodule Durable.Executor do
   def start_workflow(module, input, opts \\ []) do
     durable_name = Keyword.get(opts, :durable, Durable)
     config = Config.get(durable_name)
-    repo = config.repo
 
     with {:ok, workflow_def} <- get_workflow_definition(module, opts),
-         {:ok, execution} <- create_execution(repo, module, workflow_def, input, opts) do
+         {:ok, execution} <- create_execution(config, module, workflow_def, input, opts) do
       # For inline/synchronous execution (useful for testing)
       if Keyword.get(opts, :inline, false) do
         execute_workflow(execution.id, config)
@@ -64,9 +64,9 @@ defmodule Durable.Executor do
   @spec cancel_workflow(String.t(), String.t() | nil, keyword()) :: :ok | {:error, term()}
   def cancel_workflow(workflow_id, reason \\ nil, opts \\ []) do
     durable_name = Keyword.get(opts, :durable, Durable)
-    repo = Config.repo(durable_name)
+    config = Config.get(durable_name)
 
-    case repo.get(WorkflowExecution, workflow_id) do
+    case Repo.get(config, WorkflowExecution, workflow_id) do
       nil ->
         {:error, :not_found}
 
@@ -78,7 +78,7 @@ defmodule Durable.Executor do
           error: error,
           completed_at: DateTime.utc_now()
         })
-        |> repo.update()
+        |> Repo.update(config)
 
         :ok
 
@@ -95,11 +95,9 @@ defmodule Durable.Executor do
   @spec execute_workflow(String.t(), Config.t()) ::
           {:ok, map()} | {:waiting, map()} | {:error, term()}
   def execute_workflow(workflow_id, %Config{} = config) do
-    repo = config.repo
-
-    with {:ok, execution} <- load_execution(repo, workflow_id),
+    with {:ok, execution} <- load_execution(config, workflow_id),
          {:ok, workflow_def} <- get_workflow_definition_from_execution(execution),
-         {:ok, execution} <- mark_running(repo, execution) do
+         {:ok, execution} <- mark_running(config, execution) do
       # Set workflow ID for logging/observability
       Context.set_workflow_id(execution.id)
 
@@ -141,9 +139,8 @@ defmodule Durable.Executor do
   def resume_workflow(workflow_id, additional_context \\ %{}, opts \\ []) do
     durable_name = Keyword.get(opts, :durable, Durable)
     config = Config.get(durable_name)
-    repo = config.repo
 
-    with {:ok, execution} <- load_execution(repo, workflow_id),
+    with {:ok, execution} <- load_execution(config, workflow_id),
          true <- execution.status == :waiting || {:error, :not_waiting} do
       # Merge additional context
       new_context = Map.merge(execution.context || %{}, additional_context)
@@ -155,7 +152,7 @@ defmodule Durable.Executor do
         locked_by: nil,
         locked_at: nil
       )
-      |> repo.update()
+      |> Repo.update(config)
 
       # For inline/synchronous execution (useful for testing)
       if Keyword.get(opts, :inline, false) do
@@ -190,7 +187,7 @@ defmodule Durable.Executor do
       {:error, :module_not_found}
   end
 
-  defp create_execution(repo, module, %Workflow{} = workflow_def, input, opts) do
+  defp create_execution(config, module, %Workflow{} = workflow_def, input, opts) do
     attrs = %{
       workflow_module: Atom.to_string(module),
       workflow_name: workflow_def.name,
@@ -204,25 +201,23 @@ defmodule Durable.Executor do
 
     %WorkflowExecution{}
     |> WorkflowExecution.changeset(attrs)
-    |> repo.insert()
+    |> Repo.insert(config)
   end
 
-  defp load_execution(repo, workflow_id) do
-    case repo.get(WorkflowExecution, workflow_id) do
+  defp load_execution(config, workflow_id) do
+    case Repo.get(config, WorkflowExecution, workflow_id) do
       nil -> {:error, :not_found}
       execution -> {:ok, execution}
     end
   end
 
-  defp mark_running(repo, execution) do
+  defp mark_running(config, execution) do
     execution
     |> WorkflowExecution.status_changeset(:running, %{started_at: DateTime.utc_now()})
-    |> repo.update()
+    |> Repo.update(config)
   end
 
   defp execute_steps(steps, execution, config, initial_data) do
-    repo = config.repo
-
     # Get workflow definition for compensation lookup
     {:ok, workflow_def} = get_workflow_definition_from_execution(execution)
 
@@ -249,7 +244,7 @@ defmodule Durable.Executor do
            initial_data
          ) do
       {:ok, exec, final_data} ->
-        mark_completed(repo, exec, final_data)
+        mark_completed(config, exec, final_data)
 
       {:waiting, exec} ->
         {:waiting, exec}
@@ -311,15 +306,13 @@ defmodule Durable.Executor do
          config,
          data
        ) do
-    repo = config.repo
-
     # Update current step
-    {:ok, exec} = update_current_step(repo, execution, step.name)
+    {:ok, exec} = update_current_step(config, execution, step.name)
 
     case StepRunner.execute(step, data, exec.id, config) do
       {:ok, new_data} ->
         # Save data as context and continue to next step with new_data
-        {:ok, exec} = save_data_as_context(repo, exec, new_data)
+        {:ok, exec} = save_data_as_context(config, exec, new_data)
         execute_steps_recursive(remaining_steps, exec, step_index, workflow_def, config, new_data)
 
       {:decision, target_step, new_data} ->
@@ -337,8 +330,8 @@ defmodule Durable.Executor do
       {wait_type, opts}
       when wait_type in [:sleep, :wait_for_event, :wait_for_input, :wait_for_any, :wait_for_all] ->
         # Save current data before waiting
-        {:ok, exec} = save_data_as_context(repo, exec, data)
-        handle_wait_result(repo, exec, wait_type, opts)
+        {:ok, exec} = save_data_as_context(config, exec, data)
+        handle_wait_result(config, exec, wait_type, opts)
 
       {:error, error} ->
         handle_step_failure(exec, error, workflow_def, config)
@@ -355,8 +348,7 @@ defmodule Durable.Executor do
          workflow_def,
          config
        ) do
-    repo = config.repo
-    {:ok, exec} = save_data_as_context(repo, exec, data)
+    {:ok, exec} = save_data_as_context(config, exec, data)
 
     case find_jump_target(target_step, remaining_steps, step.name, step_index) do
       {:ok, target_steps} ->
@@ -372,20 +364,20 @@ defmodule Durable.Executor do
     end
   end
 
-  defp handle_wait_result(repo, exec, :sleep, opts),
-    do: {:waiting, handle_sleep(repo, exec, opts) |> elem(1)}
+  defp handle_wait_result(config, exec, :sleep, opts),
+    do: {:waiting, handle_sleep(config, exec, opts) |> elem(1)}
 
-  defp handle_wait_result(repo, exec, :wait_for_event, opts),
-    do: {:waiting, handle_wait_for_event(repo, exec, opts) |> elem(1)}
+  defp handle_wait_result(config, exec, :wait_for_event, opts),
+    do: {:waiting, handle_wait_for_event(config, exec, opts) |> elem(1)}
 
-  defp handle_wait_result(repo, exec, :wait_for_input, opts),
-    do: {:waiting, handle_wait_for_input(repo, exec, opts) |> elem(1)}
+  defp handle_wait_result(config, exec, :wait_for_input, opts),
+    do: {:waiting, handle_wait_for_input(config, exec, opts) |> elem(1)}
 
-  defp handle_wait_result(repo, exec, :wait_for_any, opts),
-    do: {:waiting, handle_wait_for_any(repo, exec, opts) |> elem(1)}
+  defp handle_wait_result(config, exec, :wait_for_any, opts),
+    do: {:waiting, handle_wait_for_any(config, exec, opts) |> elem(1)}
 
-  defp handle_wait_result(repo, exec, :wait_for_all, opts),
-    do: {:waiting, handle_wait_for_all(repo, exec, opts) |> elem(1)}
+  defp handle_wait_result(config, exec, :wait_for_all, opts),
+    do: {:waiting, handle_wait_for_all(config, exec, opts) |> elem(1)}
 
   defp execute_branch(
          branch_step,
@@ -396,8 +388,7 @@ defmodule Durable.Executor do
          config,
          data
        ) do
-    repo = config.repo
-    {:ok, exec} = update_current_step(repo, execution, branch_step.name)
+    {:ok, exec} = update_current_step(config, execution, branch_step.name)
 
     # Get branch configuration
     opts = branch_step.opts
@@ -435,7 +426,7 @@ defmodule Durable.Executor do
         matching_steps = find_matching_clause_steps(value, clauses)
 
         # Save data before executing branch steps
-        {:ok, exec} = save_data_as_context(repo, exec, data)
+        {:ok, exec} = save_data_as_context(config, exec, data)
 
         # Execute only the matching branch's steps
         case execute_branch_steps(
@@ -529,38 +520,37 @@ defmodule Durable.Executor do
          config,
          data
        ) do
-    repo = config.repo
-    {:ok, exec} = update_current_step(repo, execution, step.name)
+    {:ok, exec} = update_current_step(config, execution, step.name)
 
     case StepRunner.execute(step, data, exec.id, config) do
       {:ok, new_data} ->
-        {:ok, exec} = save_data_as_context(repo, exec, new_data)
+        {:ok, exec} = save_data_as_context(config, exec, new_data)
         execute_branch_steps_sequential(rest, exec, step_index, workflow_def, config, new_data)
 
       {:decision, target_step, new_data} ->
         # Decisions within branches - save and return for outer handler
-        {:ok, exec} = save_data_as_context(repo, exec, new_data)
+        {:ok, exec} = save_data_as_context(config, exec, new_data)
         {:decision, exec, target_step, new_data}
 
       {:sleep, opts} ->
-        {:ok, exec} = save_data_as_context(repo, exec, data)
-        {:waiting, handle_sleep(repo, exec, opts) |> elem(1)}
+        {:ok, exec} = save_data_as_context(config, exec, data)
+        {:waiting, handle_sleep(config, exec, opts) |> elem(1)}
 
       {:wait_for_event, opts} ->
-        {:ok, exec} = save_data_as_context(repo, exec, data)
-        {:waiting, handle_wait_for_event(repo, exec, opts) |> elem(1)}
+        {:ok, exec} = save_data_as_context(config, exec, data)
+        {:waiting, handle_wait_for_event(config, exec, opts) |> elem(1)}
 
       {:wait_for_input, opts} ->
-        {:ok, exec} = save_data_as_context(repo, exec, data)
-        {:waiting, handle_wait_for_input(repo, exec, opts) |> elem(1)}
+        {:ok, exec} = save_data_as_context(config, exec, data)
+        {:waiting, handle_wait_for_input(config, exec, opts) |> elem(1)}
 
       {:wait_for_any, opts} ->
-        {:ok, exec} = save_data_as_context(repo, exec, data)
-        {:waiting, handle_wait_for_any(repo, exec, opts) |> elem(1)}
+        {:ok, exec} = save_data_as_context(config, exec, data)
+        {:waiting, handle_wait_for_any(config, exec, opts) |> elem(1)}
 
       {:wait_for_all, opts} ->
-        {:ok, exec} = save_data_as_context(repo, exec, data)
-        {:waiting, handle_wait_for_all(repo, exec, opts) |> elem(1)}
+        {:ok, exec} = save_data_as_context(config, exec, data)
+        {:waiting, handle_wait_for_all(config, exec, opts) |> elem(1)}
 
       {:error, error} ->
         handle_step_failure(exec, error, workflow_def, config)
@@ -586,8 +576,7 @@ defmodule Durable.Executor do
          config,
          data
        ) do
-    repo = config.repo
-    {:ok, exec} = update_current_step(repo, execution, parallel_step.name)
+    {:ok, exec} = update_current_step(config, execution, parallel_step.name)
 
     # Get parallel configuration
     opts = parallel_step.opts
@@ -610,7 +599,7 @@ defmodule Durable.Executor do
       |> Enum.reject(&is_nil/1)
 
     # Save data before parallel execution
-    {:ok, exec} = save_data_as_context(repo, exec, data)
+    {:ok, exec} = save_data_as_context(config, exec, data)
 
     # DURABILITY: Check which parallel steps already completed (for resume)
     {completed_names, completed_data} =
@@ -625,7 +614,7 @@ defmodule Durable.Executor do
 
     # If all steps already completed, skip execution
     if incomplete_steps == [] do
-      {:ok, exec} = save_data_as_context(repo, exec, base_data_with_completed)
+      {:ok, exec} = save_data_as_context(config, exec, base_data_with_completed)
       after_parallel = skip_parallel_steps(remaining_steps, all_parallel_steps)
 
       execute_steps_recursive(
@@ -648,7 +637,7 @@ defmodule Durable.Executor do
            ) do
         {:ok, merged_data} ->
           # Save merged data and continue
-          {:ok, exec} = save_data_as_context(repo, exec, merged_data)
+          {:ok, exec} = save_data_as_context(config, exec, merged_data)
 
           # Skip past all parallel steps and continue
           after_parallel = skip_parallel_steps(remaining_steps, all_parallel_steps)
@@ -820,18 +809,17 @@ defmodule Durable.Executor do
 
   # Get completed parallel steps with their stored data for durability
   defp get_completed_parallel_steps_with_data(workflow_id, step_names, config) do
-    repo = config.repo
     step_name_strings = Enum.map(step_names, &Atom.to_string/1)
 
-    completed =
-      repo.all(
-        from(s in StepExecution,
-          where: s.workflow_id == ^workflow_id,
-          where: s.step_name in ^step_name_strings,
-          where: s.status == :completed,
-          select: {s.step_name, s.output}
-        )
+    query =
+      from(s in StepExecution,
+        where: s.workflow_id == ^workflow_id,
+        where: s.step_name in ^step_name_strings,
+        where: s.status == :completed,
+        select: {s.step_name, s.output}
       )
+
+    completed = Repo.all(config, query)
 
     names =
       Enum.map(completed, fn {name, _} ->
@@ -860,8 +848,7 @@ defmodule Durable.Executor do
          config,
          data
        ) do
-    repo = config.repo
-    {:ok, exec} = update_current_step(repo, execution, foreach_step.name)
+    {:ok, exec} = update_current_step(config, execution, foreach_step.name)
 
     # Get foreach configuration
     step_opts = foreach_step.opts
@@ -875,7 +862,7 @@ defmodule Durable.Executor do
     steps_to_execute = Enum.filter(remaining_steps, &(&1.name in foreach_step_names))
 
     # Save data before foreach execution
-    {:ok, exec} = save_data_as_context(repo, exec, data)
+    {:ok, exec} = save_data_as_context(config, exec, data)
 
     # Bundle options for child functions
     foreach_opts = %{
@@ -920,7 +907,7 @@ defmodule Durable.Executor do
          workflow_def,
          cfg
        ) do
-    {:ok, exec} = save_data_as_context(cfg.repo, exec, result_data)
+    {:ok, exec} = save_data_as_context(cfg, exec, result_data)
     after_foreach = skip_foreach_steps(remaining, all_foreach_steps)
     execute_steps_recursive(after_foreach, exec, idx, workflow_def, cfg, result_data)
   end
@@ -1144,20 +1131,20 @@ defmodule Durable.Executor do
     }
   end
 
-  defp update_current_step(repo, execution, step_name) do
+  defp update_current_step(config, execution, step_name) do
     execution
     |> Ecto.Changeset.change(current_step: Atom.to_string(step_name))
-    |> repo.update()
+    |> Repo.update(config)
   end
 
   # Saves data as the workflow context in DB (for persistence/resume)
-  defp save_data_as_context(repo, execution, data) do
+  defp save_data_as_context(config, execution, data) do
     execution
     |> Ecto.Changeset.change(context: data)
-    |> repo.update()
+    |> Repo.update(config)
   end
 
-  defp mark_completed(repo, execution, final_data) do
+  defp mark_completed(config, execution, final_data) do
     {:ok, execution} =
       execution
       |> WorkflowExecution.status_changeset(:completed, %{
@@ -1166,19 +1153,19 @@ defmodule Durable.Executor do
         current_step: nil
       })
       |> Ecto.Changeset.change(locked_by: nil, locked_at: nil)
-      |> repo.update()
+      |> Repo.update(config)
 
     {:ok, execution}
   end
 
-  defp mark_failed(repo, execution, error) do
+  defp mark_failed(config, execution, error) do
     execution
     |> WorkflowExecution.status_changeset(:failed, %{
       error: error,
       completed_at: DateTime.utc_now()
     })
     |> Ecto.Changeset.change(locked_by: nil, locked_at: nil)
-    |> repo.update()
+    |> Repo.update(config)
 
     {:error, error}
   end
@@ -1189,14 +1176,12 @@ defmodule Durable.Executor do
 
   # Handles step failure by running compensations if needed
   defp handle_step_failure(execution, error, workflow_def, config) do
-    repo = config.repo
-
     # Get the compensation stack from completed steps
     compensation_stack = build_compensation_stack(execution.id, workflow_def, config)
 
     if compensation_stack == [] do
       # No compensations to run - just mark as failed
-      mark_failed(repo, execution, error)
+      mark_failed(config, execution, error)
     else
       # Run compensations
       run_compensations(execution, error, compensation_stack, workflow_def, config)
@@ -1205,19 +1190,17 @@ defmodule Durable.Executor do
 
   # Builds the compensation stack from completed steps in reverse order
   defp build_compensation_stack(workflow_id, workflow_def, config) do
-    repo = config.repo
-
     # Get completed non-compensation steps
-    completed_steps =
-      repo.all(
-        from(s in StepExecution,
-          where: s.workflow_id == ^workflow_id,
-          where: s.status == :completed,
-          where: s.is_compensation == false,
-          order_by: [desc: s.completed_at],
-          select: s.step_name
-        )
+    query =
+      from(s in StepExecution,
+        where: s.workflow_id == ^workflow_id,
+        where: s.status == :completed,
+        where: s.is_compensation == false,
+        order_by: [desc: s.completed_at],
+        select: s.step_name
       )
+
+    completed_steps = Repo.all(config, query)
 
     # Map to steps that have compensations
     completed_steps
@@ -1242,13 +1225,11 @@ defmodule Durable.Executor do
 
   # Runs compensations in order and handles results
   defp run_compensations(execution, original_error, compensation_stack, _workflow_def, config) do
-    repo = config.repo
-
     # Mark workflow as compensating
     {:ok, exec} =
       execution
       |> WorkflowExecution.compensating_changeset()
-      |> repo.update()
+      |> Repo.update(config)
 
     # Run each compensation, collecting results
     results =
@@ -1271,7 +1252,7 @@ defmodule Durable.Executor do
         exec
         |> WorkflowExecution.compensation_failed_changeset(results, original_error)
         |> Ecto.Changeset.change(locked_by: nil, locked_at: nil)
-        |> repo.update()
+        |> Repo.update(config)
 
       {:error, original_error}
     else
@@ -1280,7 +1261,7 @@ defmodule Durable.Executor do
         exec
         |> WorkflowExecution.compensated_changeset(results)
         |> Ecto.Changeset.change(locked_by: nil, locked_at: nil, error: original_error)
-        |> repo.update()
+        |> Repo.update(config)
 
       {:error, original_error}
     end
@@ -1289,18 +1270,18 @@ defmodule Durable.Executor do
   defp format_compensation_result({:ok, _output}), do: %{status: "completed"}
   defp format_compensation_result({:error, error}), do: %{status: "failed", error: error}
 
-  defp handle_sleep(repo, execution, opts) do
+  defp handle_sleep(config, execution, opts) do
     wake_at = calculate_wake_time(opts)
 
     {:ok, execution} =
       execution
       |> Ecto.Changeset.change(status: :waiting, scheduled_at: wake_at)
-      |> repo.update()
+      |> Repo.update(config)
 
     {:waiting, execution}
   end
 
-  defp handle_wait_for_event(repo, execution, opts) do
+  defp handle_wait_for_event(config, execution, opts) do
     event_name = Keyword.fetch!(opts, :event_name)
     timeout_at = calculate_timeout_at(opts)
 
@@ -1317,17 +1298,17 @@ defmodule Durable.Executor do
     {:ok, _pending_event} =
       %PendingEvent{}
       |> PendingEvent.changeset(attrs)
-      |> repo.insert()
+      |> Repo.insert(config)
 
     {:ok, execution} =
       execution
       |> Ecto.Changeset.change(status: :waiting)
-      |> repo.update()
+      |> Repo.update(config)
 
     {:waiting, execution}
   end
 
-  defp handle_wait_for_input(repo, execution, opts) do
+  defp handle_wait_for_input(config, execution, opts) do
     input_name = Keyword.fetch!(opts, :input_name)
     timeout_at = calculate_timeout_at(opts)
 
@@ -1348,25 +1329,25 @@ defmodule Durable.Executor do
     {:ok, _pending_input} =
       %PendingInput{}
       |> PendingInput.changeset(attrs)
-      |> repo.insert()
+      |> Repo.insert(config)
 
     {:ok, execution} =
       execution
       |> Ecto.Changeset.change(status: :waiting)
-      |> repo.update()
+      |> Repo.update(config)
 
     {:waiting, execution}
   end
 
-  defp handle_wait_for_any(repo, execution, opts) do
-    handle_wait_group(repo, execution, opts, :any)
+  defp handle_wait_for_any(config, execution, opts) do
+    handle_wait_group(config, execution, opts, :any)
   end
 
-  defp handle_wait_for_all(repo, execution, opts) do
-    handle_wait_group(repo, execution, opts, :all)
+  defp handle_wait_for_all(config, execution, opts) do
+    handle_wait_group(config, execution, opts, :all)
   end
 
-  defp handle_wait_group(repo, execution, opts, wait_type) do
+  defp handle_wait_group(config, execution, opts, wait_type) do
     event_names = Keyword.fetch!(opts, :event_names)
     timeout_at = calculate_timeout_at(opts)
 
@@ -1383,7 +1364,7 @@ defmodule Durable.Executor do
     {:ok, wait_group} =
       %WaitGroup{}
       |> WaitGroup.changeset(group_attrs)
-      |> repo.insert()
+      |> Repo.insert(config)
 
     # Create pending event records for each event in the group
     Enum.each(event_names, fn event_name ->
@@ -1400,13 +1381,13 @@ defmodule Durable.Executor do
       {:ok, _} =
         %PendingEvent{}
         |> PendingEvent.changeset(event_attrs)
-        |> repo.insert()
+        |> Repo.insert(config)
     end)
 
     {:ok, execution} =
       execution
       |> Ecto.Changeset.change(status: :waiting)
-      |> repo.update()
+      |> Repo.update(config)
 
     {:waiting, execution}
   end

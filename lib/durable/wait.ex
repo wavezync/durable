@@ -41,6 +41,7 @@ defmodule Durable.Wait do
   """
 
   alias Durable.Config
+  alias Durable.Repo
   alias Durable.Storage.Schemas.{PendingEvent, PendingInput, WaitGroup, WorkflowExecution}
 
   import Ecto.Query
@@ -543,10 +544,10 @@ defmodule Durable.Wait do
   """
   @spec provide_input(String.t(), String.t(), map(), keyword()) :: :ok | {:error, term()}
   def provide_input(workflow_id, input_name, data, opts \\ []) do
-    repo = get_repo(opts)
+    config = get_config(opts)
 
-    with {:ok, pending} <- find_pending_input(repo, workflow_id, input_name),
-         {:ok, _} <- complete_pending_input(repo, pending, data),
+    with {:ok, pending} <- find_pending_input(config, workflow_id, input_name),
+         {:ok, _} <- complete_pending_input(config, pending, data),
          {:ok, _} <- Durable.Executor.resume_workflow(workflow_id, %{input_name => data}, opts) do
       :ok
     end
@@ -570,21 +571,21 @@ defmodule Durable.Wait do
   """
   @spec send_event(String.t(), String.t(), map(), keyword()) :: :ok | {:error, term()}
   def send_event(workflow_id, event_name, payload, opts \\ []) do
-    repo = get_repo(opts)
+    config = get_config(opts)
 
-    with {:ok, pending_event} <- find_pending_event(repo, workflow_id, event_name),
-         {:ok, _} <- receive_pending_event(repo, pending_event, payload),
-         {:ok, _} <- maybe_resume_workflow(repo, workflow_id, event_name, payload, opts) do
+    with {:ok, pending_event} <- find_pending_event(config, workflow_id, event_name),
+         {:ok, _} <- receive_pending_event(config, pending_event, payload),
+         {:ok, _} <- maybe_resume_workflow(config, workflow_id, event_name, payload, opts) do
       :ok
     end
   end
 
-  defp maybe_resume_workflow(repo, workflow_id, event_name, payload, opts) do
+  defp maybe_resume_workflow(config, workflow_id, event_name, payload, opts) do
     # Check if this is part of a wait group
-    case find_wait_group_for_event(repo, workflow_id, event_name) do
+    case find_wait_group_for_event(config, workflow_id, event_name) do
       {:ok, wait_group} ->
         # Update the wait group with the received event
-        handle_wait_group_event(repo, wait_group, event_name, payload, opts)
+        handle_wait_group_event(config, wait_group, event_name, payload, opts)
 
       {:error, :not_found} ->
         # Single event - resume immediately
@@ -593,11 +594,11 @@ defmodule Durable.Wait do
     end
   end
 
-  defp handle_wait_group_event(repo, wait_group, event_name, payload, opts) do
+  defp handle_wait_group_event(config, wait_group, event_name, payload, opts) do
     {:ok, updated_group} =
       wait_group
       |> WaitGroup.add_event_changeset(event_name, payload)
-      |> repo.update()
+      |> Repo.update(config)
 
     if updated_group.status == :completed do
       # All required events received - resume workflow
@@ -632,11 +633,11 @@ defmodule Durable.Wait do
   """
   @spec cancel_wait(String.t(), keyword()) :: :ok | {:error, term()}
   def cancel_wait(workflow_id, opts \\ []) do
-    repo = get_repo(opts)
+    config = get_config(opts)
     reason = Keyword.get(opts, :reason, "cancelled")
 
-    with {:ok, execution} <- get_waiting_execution(repo, workflow_id),
-         :ok <- cancel_pending_waits(repo, workflow_id),
+    with {:ok, execution} <- get_waiting_execution(config, workflow_id),
+         :ok <- cancel_pending_waits(config, workflow_id),
          {:ok, _} <-
            Durable.Executor.resume_workflow(
              workflow_id,
@@ -648,18 +649,18 @@ defmodule Durable.Wait do
     end
   end
 
-  defp cancel_pending_waits(repo, workflow_id) do
+  defp cancel_pending_waits(config, workflow_id) do
     # Cancel pending inputs
-    from(p in PendingInput, where: p.workflow_id == ^workflow_id and p.status == :pending)
-    |> repo.update_all(set: [status: :cancelled, completed_at: DateTime.utc_now()])
+    query = from(p in PendingInput, where: p.workflow_id == ^workflow_id and p.status == :pending)
+    Repo.update_all(config, query, set: [status: :cancelled, completed_at: DateTime.utc_now()])
 
     # Cancel pending events
-    from(p in PendingEvent, where: p.workflow_id == ^workflow_id and p.status == :pending)
-    |> repo.update_all(set: [status: :cancelled, completed_at: DateTime.utc_now()])
+    query = from(p in PendingEvent, where: p.workflow_id == ^workflow_id and p.status == :pending)
+    Repo.update_all(config, query, set: [status: :cancelled, completed_at: DateTime.utc_now()])
 
     # Cancel wait groups
-    from(w in WaitGroup, where: w.workflow_id == ^workflow_id and w.status == :pending)
-    |> repo.update_all(set: [status: :cancelled, completed_at: DateTime.utc_now()])
+    query = from(w in WaitGroup, where: w.workflow_id == ^workflow_id and w.status == :pending)
+    Repo.update_all(config, query, set: [status: :cancelled, completed_at: DateTime.utc_now()])
 
     :ok
   end
@@ -681,7 +682,7 @@ defmodule Durable.Wait do
   """
   @spec list_pending_inputs(keyword()) :: [map()]
   def list_pending_inputs(filters \\ []) do
-    repo = get_repo(filters)
+    config = get_config(filters)
     status = Keyword.get(filters, :status, :pending)
     limit = Keyword.get(filters, :limit, 50)
 
@@ -699,7 +700,7 @@ defmodule Durable.Wait do
         datetime -> from(p in query, where: p.timeout_at <= ^datetime)
       end
 
-    repo.all(query)
+    Repo.all(config, query)
     |> Enum.map(&pending_input_to_map/1)
   end
 
@@ -716,7 +717,7 @@ defmodule Durable.Wait do
   """
   @spec list_pending_events(keyword()) :: [map()]
   def list_pending_events(filters \\ []) do
-    repo = get_repo(filters)
+    config = get_config(filters)
     status = Keyword.get(filters, :status, :pending)
     limit = Keyword.get(filters, :limit, 50)
 
@@ -734,7 +735,7 @@ defmodule Durable.Wait do
         event_name -> from(p in query, where: p.event_name == ^event_name)
       end
 
-    repo.all(query)
+    Repo.all(config, query)
     |> Enum.map(&pending_event_to_map/1)
   end
 
@@ -742,12 +743,12 @@ defmodule Durable.Wait do
   # Private Helpers
   # ============================================================================
 
-  defp get_repo(opts) do
+  defp get_config(opts) do
     durable_name = Keyword.get(opts, :durable, Durable)
-    Config.repo(durable_name)
+    Config.get(durable_name)
   end
 
-  defp find_pending_input(repo, workflow_id, input_name) do
+  defp find_pending_input(config, workflow_id, input_name) do
     query =
       from(p in PendingInput,
         where:
@@ -756,13 +757,13 @@ defmodule Durable.Wait do
             p.status == :pending
       )
 
-    case repo.one(query) do
+    case Repo.one(config, query) do
       nil -> {:error, :not_found}
       pending -> {:ok, pending}
     end
   end
 
-  defp find_pending_event(repo, workflow_id, event_name) do
+  defp find_pending_event(config, workflow_id, event_name) do
     query =
       from(p in PendingEvent,
         where:
@@ -771,13 +772,13 @@ defmodule Durable.Wait do
             p.status == :pending
       )
 
-    case repo.one(query) do
+    case Repo.one(config, query) do
       nil -> {:error, :not_found}
       pending -> {:ok, pending}
     end
   end
 
-  defp find_wait_group_for_event(repo, workflow_id, event_name) do
+  defp find_wait_group_for_event(config, workflow_id, event_name) do
     query =
       from(w in WaitGroup,
         where:
@@ -786,26 +787,26 @@ defmodule Durable.Wait do
             w.status == :pending
       )
 
-    case repo.one(query) do
+    case Repo.one(config, query) do
       nil -> {:error, :not_found}
       wait_group -> {:ok, wait_group}
     end
   end
 
-  defp complete_pending_input(repo, pending, response) do
+  defp complete_pending_input(config, pending, response) do
     pending
     |> PendingInput.complete_changeset(response)
-    |> repo.update()
+    |> Repo.update(config)
   end
 
-  defp receive_pending_event(repo, pending_event, payload) do
+  defp receive_pending_event(config, pending_event, payload) do
     pending_event
     |> PendingEvent.receive_changeset(payload)
-    |> repo.update()
+    |> Repo.update(config)
   end
 
-  defp get_waiting_execution(repo, workflow_id) do
-    case repo.get(WorkflowExecution, workflow_id) do
+  defp get_waiting_execution(config, workflow_id) do
+    case Repo.get(config, WorkflowExecution, workflow_id) do
       nil -> {:error, :not_found}
       %{status: :waiting} = execution -> {:ok, execution}
       _ -> {:error, :not_waiting}

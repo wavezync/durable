@@ -6,6 +6,7 @@ defmodule Durable.Query do
   import Ecto.Query
 
   alias Durable.Config
+  alias Durable.Repo
   alias Durable.Storage.Schemas.{StepExecution, WorkflowExecution}
 
   @doc """
@@ -20,7 +21,7 @@ defmodule Durable.Query do
   """
   @spec get_execution(String.t(), keyword()) :: {:ok, map()} | {:error, :not_found}
   def get_execution(workflow_id, opts \\ []) do
-    repo = get_repo(opts)
+    config = get_config(opts)
     include_steps = Keyword.get(opts, :include_steps, false)
     include_logs = Keyword.get(opts, :include_logs, false)
 
@@ -33,7 +34,7 @@ defmodule Durable.Query do
         query
       end
 
-    case repo.one(query) do
+    case Repo.one(config, query) do
       nil ->
         {:error, :not_found}
 
@@ -59,7 +60,7 @@ defmodule Durable.Query do
   """
   @spec list_executions(keyword()) :: [map()]
   def list_executions(filters \\ []) do
-    repo = get_repo(filters)
+    config = get_config(filters)
     limit = Keyword.get(filters, :limit, 50)
     offset = Keyword.get(filters, :offset, 0)
 
@@ -72,7 +73,7 @@ defmodule Durable.Query do
 
     query = apply_filters(query, filters)
 
-    repo.all(query)
+    Repo.all(config, query)
     |> Enum.map(&execution_to_map(&1, false, false))
   end
 
@@ -81,10 +82,10 @@ defmodule Durable.Query do
   """
   @spec count_executions(keyword()) :: non_neg_integer()
   def count_executions(filters \\ []) do
-    repo = get_repo(filters)
+    config = get_config(filters)
     query = from(w in WorkflowExecution, select: count(w.id))
     query = apply_filters(query, filters)
-    repo.one(query)
+    Repo.one(config, query)
   end
 
   @doc """
@@ -92,7 +93,7 @@ defmodule Durable.Query do
   """
   @spec get_step_executions(String.t(), keyword()) :: [map()]
   def get_step_executions(workflow_id, opts \\ []) do
-    repo = get_repo(opts)
+    config = get_config(opts)
 
     query =
       from(s in StepExecution,
@@ -100,7 +101,7 @@ defmodule Durable.Query do
         order_by: [asc: s.inserted_at]
       )
 
-    repo.all(query)
+    Repo.all(config, query)
     |> Enum.map(&step_to_map/1)
   end
 
@@ -110,7 +111,7 @@ defmodule Durable.Query do
   @spec get_step_logs(String.t(), atom() | String.t(), keyword()) ::
           {:ok, [map()]} | {:error, :not_found}
   def get_step_logs(workflow_id, step_name, opts \\ []) do
-    repo = get_repo(opts)
+    config = get_config(opts)
 
     step_name_str =
       if is_atom(step_name), do: Atom.to_string(step_name), else: step_name
@@ -122,7 +123,7 @@ defmodule Durable.Query do
         limit: 1
       )
 
-    case repo.one(query) do
+    case Repo.one(config, query) do
       nil -> {:error, :not_found}
       step -> {:ok, step.logs || []}
     end
@@ -130,9 +131,9 @@ defmodule Durable.Query do
 
   # Private functions
 
-  defp get_repo(opts) do
+  defp get_config(opts) do
     durable_name = Keyword.get(opts, :durable, Durable)
-    Config.repo(durable_name)
+    Config.get(durable_name)
   end
 
   defp apply_filters(query, filters) do

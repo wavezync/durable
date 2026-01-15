@@ -12,6 +12,7 @@ defmodule Durable.Executor.StepRunner do
   alias Durable.Context
   alias Durable.Definition.Step
   alias Durable.Executor.Backoff
+  alias Durable.Repo
   alias Durable.Storage.Schemas.StepExecution
 
   require Logger
@@ -57,8 +58,6 @@ defmodule Durable.Executor.StepRunner do
   end
 
   defp execute_with_retry(step, data, workflow_id, attempt, max_attempts, config) do
-    repo = config.repo
-
     # Set current step for logging/observability
     Context.set_current_step(step.name)
 
@@ -67,8 +66,8 @@ defmodule Durable.Executor.StepRunner do
     Process.put(:durable_context, data)
 
     # Create step execution record
-    {:ok, step_exec} = create_step_execution(repo, workflow_id, step, attempt)
-    {:ok, step_exec} = update_step_execution(repo, step_exec, :running)
+    {:ok, step_exec} = create_step_execution(config, workflow_id, step, attempt)
+    {:ok, step_exec} = update_step_execution(config, step_exec, :running)
 
     # Start log capture for this step
     Durable.LogCapture.start_capture()
@@ -126,12 +125,10 @@ defmodule Durable.Executor.StepRunner do
          max_attempts,
          config
        ) do
-    repo = config.repo
-
     Context.set_current_step(step.name)
 
-    {:ok, step_exec} = create_step_execution(repo, workflow_id, step, attempt)
-    {:ok, step_exec} = update_step_execution(repo, step_exec, :running)
+    {:ok, step_exec} = create_step_execution(config, workflow_id, step, attempt)
+    {:ok, step_exec} = update_step_execution(config, step_exec, :running)
 
     Durable.LogCapture.start_capture()
 
@@ -183,8 +180,6 @@ defmodule Durable.Executor.StepRunner do
     %{step: step, step_exec: step_exec, logs: logs, duration_ms: duration_ms, config: config} =
       ctx
 
-    repo = config.repo
-
     # For decision steps returning {:ok, data}, record decision_type: "continue"
     if step.type == :decision do
       decision_output = %{
@@ -192,10 +187,10 @@ defmodule Durable.Executor.StepRunner do
         data: new_data
       }
 
-      {:ok, _} = complete_step_execution(repo, step_exec, decision_output, logs, duration_ms)
+      {:ok, _} = complete_step_execution(config, step_exec, decision_output, logs, duration_ms)
       {:ok, new_data}
     else
-      handle_step_success(repo, step, step_exec, new_data, logs, duration_ms)
+      handle_step_success(config, step, step_exec, new_data, logs, duration_ms)
     end
   end
 
@@ -203,7 +198,6 @@ defmodule Durable.Executor.StepRunner do
   defp handle_result({:goto, target, new_data}, ctx)
        when is_atom(target) and is_map(new_data) do
     %{step_exec: step_exec, logs: logs, duration_ms: duration_ms, config: config} = ctx
-    repo = config.repo
 
     decision_output = %{
       decision_type: "goto",
@@ -211,7 +205,7 @@ defmodule Durable.Executor.StepRunner do
       data: new_data
     }
 
-    {:ok, _} = complete_step_execution(repo, step_exec, decision_output, logs, duration_ms)
+    {:ok, _} = complete_step_execution(config, step_exec, decision_output, logs, duration_ms)
     {:decision, target, new_data}
   end
 
@@ -219,8 +213,7 @@ defmodule Durable.Executor.StepRunner do
   defp handle_result({:throw, {wait_type, opts}}, ctx)
        when wait_type in [:sleep, :wait_for_event, :wait_for_input, :wait_for_any, :wait_for_all] do
     %{step_exec: step_exec, config: config} = ctx
-    repo = config.repo
-    {:ok, _} = update_step_execution(repo, step_exec, :waiting)
+    {:ok, _} = update_step_execution(config, step_exec, :waiting)
     {wait_type, opts}
   end
 
@@ -237,10 +230,8 @@ defmodule Durable.Executor.StepRunner do
       config: config
     } = ctx
 
-    repo = config.repo
-
     if attempt < max_attempts do
-      {:ok, _} = fail_step_execution(repo, step_exec, error, logs, duration_ms)
+      {:ok, _} = fail_step_execution(config, step_exec, error, logs, duration_ms)
 
       retry_opts = get_retry_opts(step)
       backoff_strategy = Map.get(retry_opts, :backoff, :exponential)
@@ -248,7 +239,7 @@ defmodule Durable.Executor.StepRunner do
 
       execute_with_retry(step, data, step_exec.workflow_id, attempt + 1, max_attempts, config)
     else
-      {:ok, _} = fail_step_execution(repo, step_exec, error, logs, duration_ms)
+      {:ok, _} = fail_step_execution(config, step_exec, error, logs, duration_ms)
       {:error, error}
     end
   end
@@ -256,7 +247,6 @@ defmodule Durable.Executor.StepRunner do
   # Handle invalid return (not {:ok, map} or {:goto, ...})
   defp handle_result(other, ctx) do
     %{step_exec: step_exec, logs: logs, duration_ms: duration_ms, config: config} = ctx
-    repo = config.repo
 
     error = %{
       type: "invalid_step_return",
@@ -264,7 +254,7 @@ defmodule Durable.Executor.StepRunner do
         "Step must return {:ok, map} or {:goto, :step, map} or {:error, reason}, got: #{inspect(other)}"
     }
 
-    {:ok, _} = fail_step_execution(repo, step_exec, error, logs, duration_ms)
+    {:ok, _} = fail_step_execution(config, step_exec, error, logs, duration_ms)
     {:error, error}
   end
 
@@ -273,8 +263,7 @@ defmodule Durable.Executor.StepRunner do
     %{step: step, step_exec: step_exec, logs: logs, duration_ms: duration_ms, config: config} =
       ctx
 
-    repo = config.repo
-    handle_step_success(repo, step, step_exec, new_data, logs, duration_ms)
+    handle_step_success(config, step, step_exec, new_data, logs, duration_ms)
   end
 
   # Handle foreach errors
@@ -292,10 +281,8 @@ defmodule Durable.Executor.StepRunner do
       config: config
     } = ctx
 
-    repo = config.repo
-
     if attempt < max_attempts do
-      {:ok, _} = fail_step_execution(repo, step_exec, error, logs, duration_ms)
+      {:ok, _} = fail_step_execution(config, step_exec, error, logs, duration_ms)
 
       retry_opts = get_retry_opts(step)
       backoff_strategy = Map.get(retry_opts, :backoff, :exponential)
@@ -312,7 +299,7 @@ defmodule Durable.Executor.StepRunner do
         config
       )
     else
-      {:ok, _} = fail_step_execution(repo, step_exec, error, logs, duration_ms)
+      {:ok, _} = fail_step_execution(config, step_exec, error, logs, duration_ms)
       {:error, error}
     end
   end
@@ -321,32 +308,30 @@ defmodule Durable.Executor.StepRunner do
   defp handle_foreach_result({:throw, {wait_type, _opts}}, ctx)
        when wait_type in [:sleep, :wait_for_event, :wait_for_input, :wait_for_any, :wait_for_all] do
     %{step_exec: step_exec, logs: logs, duration_ms: duration_ms, config: config} = ctx
-    repo = config.repo
 
     error = %{
       type: "foreach_wait_not_supported",
       message: "#{wait_type} is not supported in foreach blocks"
     }
 
-    {:ok, _} = fail_step_execution(repo, step_exec, error, logs, duration_ms)
+    {:ok, _} = fail_step_execution(config, step_exec, error, logs, duration_ms)
     {:error, error}
   end
 
   # Handle invalid foreach return
   defp handle_foreach_result(other, ctx) do
     %{step_exec: step_exec, logs: logs, duration_ms: duration_ms, config: config} = ctx
-    repo = config.repo
 
     error = %{
       type: "invalid_step_return",
       message: "Foreach step must return {:ok, map} or {:error, reason}, got: #{inspect(other)}"
     }
 
-    {:ok, _} = fail_step_execution(repo, step_exec, error, logs, duration_ms)
+    {:ok, _} = fail_step_execution(config, step_exec, error, logs, duration_ms)
     {:error, error}
   end
 
-  defp handle_step_success(repo, step, step_exec, new_data, logs, duration_ms) do
+  defp handle_step_success(config, step, step_exec, new_data, logs, duration_ms) do
     stored_output =
       if step.opts[:parallel_id] do
         # Include data snapshot for parallel step resumption
@@ -358,7 +343,7 @@ defmodule Durable.Executor.StepRunner do
         new_data
       end
 
-    {:ok, _} = complete_step_execution(repo, step_exec, stored_output, logs, duration_ms)
+    {:ok, _} = complete_step_execution(config, step_exec, stored_output, logs, duration_ms)
     {:ok, new_data}
   end
 
@@ -378,7 +363,7 @@ defmodule Durable.Executor.StepRunner do
     end
   end
 
-  defp create_step_execution(repo, workflow_id, step, attempt) do
+  defp create_step_execution(config, workflow_id, step, attempt) do
     attrs = %{
       workflow_id: workflow_id,
       step_name: Atom.to_string(step.name),
@@ -389,33 +374,33 @@ defmodule Durable.Executor.StepRunner do
 
     %StepExecution{}
     |> StepExecution.changeset(attrs)
-    |> repo.insert()
+    |> Repo.insert(config)
   end
 
-  defp update_step_execution(repo, step_exec, :running) do
+  defp update_step_execution(config, step_exec, :running) do
     step_exec
     |> StepExecution.start_changeset()
-    |> repo.update()
+    |> Repo.update(config)
   end
 
-  defp update_step_execution(repo, step_exec, :waiting) do
+  defp update_step_execution(config, step_exec, :waiting) do
     step_exec
     |> Ecto.Changeset.change(status: :waiting)
-    |> repo.update()
+    |> Repo.update(config)
   end
 
-  defp complete_step_execution(repo, step_exec, output, logs, duration_ms) do
+  defp complete_step_execution(config, step_exec, output, logs, duration_ms) do
     serializable_output = serialize_output(output)
 
     step_exec
     |> StepExecution.complete_changeset(serializable_output, logs, duration_ms)
-    |> repo.update()
+    |> Repo.update(config)
   end
 
-  defp fail_step_execution(repo, step_exec, error, logs, duration_ms) do
+  defp fail_step_execution(config, step_exec, error, logs, duration_ms) do
     step_exec
     |> StepExecution.fail_changeset(error, logs, duration_ms)
-    |> repo.update()
+    |> Repo.update(config)
   end
 
   defp serialize_output(output) when is_map(output), do: output
