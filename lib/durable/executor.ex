@@ -192,7 +192,7 @@ defmodule Durable.Executor do
 
   defp create_execution(repo, module, %Workflow{} = workflow_def, input, opts) do
     attrs = %{
-      workflow_module: inspect(module),
+      workflow_module: Atom.to_string(module),
       workflow_name: workflow_def.name,
       status: :pending,
       queue: Keyword.get(opts, :queue, "default") |> to_string(),
