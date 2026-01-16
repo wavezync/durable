@@ -134,7 +134,13 @@ defmodule Durable.Executor.CompensationRunner do
     end
   end
 
-  defp create_compensation_execution(config, workflow_id, compensation, compensating_step, attempt) do
+  defp create_compensation_execution(
+         config,
+         workflow_id,
+         compensation,
+         compensating_step,
+         attempt
+       ) do
     attrs = %{
       workflow_id: workflow_id,
       step_name: "compensate_#{compensation.name}",
