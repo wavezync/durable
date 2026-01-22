@@ -60,28 +60,28 @@ defmodule MyApp.DocumentProcessor do
   use Durable.Helpers
 
   workflow "process_document" do
-    step :fetch, fn data ->
-      doc = DocumentStore.get(data["doc_id"])
+    step :fetch, fn ctx ->
+      doc = DocumentStore.get(ctx["doc_id"])
       {:ok, %{doc: doc}}
     end
 
     # AI classification with automatic retry
-    step :classify, [retry: [max_attempts: 3, backoff: :exponential]], fn data ->
-      content = data.doc.content
+    step :classify, [retry: [max_attempts: 3, backoff: :exponential]], fn ctx ->
+      content = ctx.doc.content
 
       doc_type = ReqLLM.generate_text!(
         "anthropic:claude-sonnet-4-20250514",
         "Classify this document as :invoice, :contract, or :other. Reply with only the atom.\n\n#{content}"
       ) |> String.trim() |> String.to_atom()
 
-      {:ok, assign(data, :doc_type, doc_type)}
+      {:ok, assign(ctx, :doc_type, doc_type)}
     end
 
     # Conditional branching - only ONE path executes
-    branch on: fn data -> data.doc_type end do
+    branch on: fn ctx -> ctx.doc_type end do
       :invoice ->
-        step :extract_invoice, [retry: [max_attempts: 3]], fn data ->
-          content = data.doc.content
+        step :extract_invoice, [retry: [max_attempts: 3]], fn ctx ->
+          content = ctx.doc.content
 
           {:ok, extracted} = ReqLLM.generate_object(
             "anthropic:claude-sonnet-4-20250514",
@@ -94,18 +94,18 @@ defmodule MyApp.DocumentProcessor do
             }
           )
 
-          {:ok, assign(data, :extracted, extracted)}
+          {:ok, assign(ctx, :extracted, extracted)}
         end
 
-        step :validate_invoice, fn data ->
-          extracted = data.extracted
+        step :validate_invoice, fn ctx ->
+          extracted = ctx.extracted
           calculated = Enum.sum(Enum.map(extracted.line_items, & &1.amount))
-          {:ok, assign(data, :valid, abs(calculated - extracted.total) < 0.01)}
+          {:ok, assign(ctx, :valid, abs(calculated - extracted.total) < 0.01)}
         end
 
       :contract ->
-        step :extract_contract, [retry: [max_attempts: 3]], fn data ->
-          content = data.doc.content
+        step :extract_contract, [retry: [max_attempts: 3]], fn ctx ->
+          content = ctx.doc.content
 
           {:ok, extracted} = ReqLLM.generate_object(
             "anthropic:claude-sonnet-4-20250514",
@@ -117,26 +117,26 @@ defmodule MyApp.DocumentProcessor do
             }
           )
 
-          {:ok, assign(data, :extracted, extracted)}
+          {:ok, assign(ctx, :extracted, extracted)}
         end
 
       _ ->
-        step :flag_for_review, fn data ->
-          {:ok, assign(data, :needs_review, true)}
+        step :flag_for_review, fn ctx ->
+          {:ok, assign(ctx, :needs_review, true)}
         end
     end
 
     # Runs after any branch completes
-    step :store, fn data ->
-      doc = data.doc
+    step :store, fn ctx ->
+      doc = ctx.doc
 
       DocumentStore.update(doc.id, %{
-        doc_type: data.doc_type,
-        extracted_data: Map.get(data, :extracted, %{}),
-        needs_review: Map.get(data, :needs_review, false)
+        doc_type: ctx.doc_type,
+        extracted_data: Map.get(ctx, :extracted, %{}),
+        needs_review: Map.get(ctx, :needs_review, false)
       })
 
-      {:ok, data}
+      {:ok, ctx}
     end
   end
 end
@@ -150,18 +150,18 @@ end
 ### Retries for API Calls
 
 ```elixir
-step :ai_call, [retry: [max_attempts: 3, backoff: :exponential]], fn data ->
-  result = ReqLLM.generate_text!("anthropic:claude-sonnet-4-20250514", data.prompt)
-  {:ok, assign(data, :result, result)}
+step :ai_call, [retry: [max_attempts: 3, backoff: :exponential]], fn ctx ->
+  result = ReqLLM.generate_text!("anthropic:claude-sonnet-4-20250514", ctx.prompt)
+  {:ok, assign(ctx, :result, result)}
 end
 ```
 
 ### Validate AI Outputs
 
 ```elixir
-step :extract, fn data ->
-  case ReqLLM.generate_object(model, data.prompt, schema: schema) do
-    {:ok, extracted} -> {:ok, assign(data, :data, extracted)}
+step :extract, fn ctx ->
+  case ReqLLM.generate_object(model, ctx.prompt, schema: schema) do
+    {:ok, extracted} -> {:ok, assign(ctx, :data, extracted)}
     {:error, _} -> raise "Invalid response"  # Triggers retry
   end
 end
@@ -172,12 +172,12 @@ end
 ```elixir
 use Durable.Wait
 
-step :review, fn data ->
-  if data.confidence < 0.8 do
+step :review, fn ctx ->
+  if ctx.confidence < 0.8 do
     result = wait_for_input("human_review", timeout: hours(24))
-    {:ok, assign(data, :human_verified, result)}
+    {:ok, assign(ctx, :human_verified, result)}
   else
-    {:ok, data}
+    {:ok, ctx}
   end
 end
 ```
@@ -185,13 +185,13 @@ end
 ### Branch on AI Classification
 
 ```elixir
-branch on: fn data -> data.category end do
+branch on: fn ctx -> ctx.category end do
   :billing ->
-    step :handle_billing, fn data -> {:ok, data} end
+    step :handle_billing, fn ctx -> {:ok, ctx} end
   :technical ->
-    step :handle_technical, fn data -> {:ok, data} end
+    step :handle_technical, fn ctx -> {:ok, ctx} end
   _ ->
-    step :handle_default, fn data -> {:ok, data} end
+    step :handle_default, fn ctx -> {:ok, ctx} end
 end
 ```
 

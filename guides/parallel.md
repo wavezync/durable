@@ -1,6 +1,6 @@
 # Parallel Execution
 
-Run multiple steps concurrently to speed up workflows.
+Run multiple steps concurrently and collect results as tagged tuples.
 
 ## Basic Usage
 
@@ -8,6 +8,7 @@ Run multiple steps concurrently to speed up workflows.
 defmodule MyApp.OnboardingWorkflow do
   use Durable
   use Durable.Helpers
+  use Durable.Context
 
   workflow "onboard_user" do
     step :create_user, fn data ->
@@ -19,92 +20,190 @@ defmodule MyApp.OnboardingWorkflow do
     parallel do
       step :send_welcome_email, fn data ->
         Mailer.send_welcome(data.user_id)
-        {:ok, assign(data, :email_sent, true)}
+        {:ok, %{email_sent: true}}
       end
 
       step :provision_workspace, fn data ->
         workspace = Workspaces.create(data.user_id)
-        {:ok, assign(data, :workspace_id, workspace.id)}
+        {:ok, %{workspace_id: workspace.id}}
       end
 
       step :setup_billing, fn data ->
         Billing.setup(data.user_id)
-        {:ok, assign(data, :billing_ready, true)}
+        {:ok, %{billing_ready: true}}
       end
     end
 
-    # Runs after ALL parallel steps complete
+    # Access results from parallel steps
     step :complete, fn data ->
-      Logger.info("User onboarded: #{data.user_id}")
-      {:ok, data}
+      results = data[:__results__]
+
+      case {results[:send_welcome_email], results[:provision_workspace]} do
+        {{:ok, _}, {:ok, _}} ->
+          {:ok, Map.put(data, :onboarded, true)}
+
+        _ ->
+          {:error, "Onboarding incomplete"}
+      end
     end
   end
 end
 ```
 
-## Options
+## Results Model
 
-### Merge Strategy (`:merge`)
-
-Controls how data changes from parallel steps are combined.
-
-| Strategy | Description |
-|----------|-------------|
-| `:deep_merge` | Deep merge all data (default) |
-| `:last_wins` | Last completed step's data wins on conflicts |
-| `:collect` | Collect into `%{step_name => data_changes}` |
+Parallel steps produce results stored in the `__results__` key with tagged tuples:
 
 ```elixir
-# Deep merge (default) - combines all nested maps
-parallel merge: :deep_merge do
-  step :a, fn data ->
-    {:ok, assign(data, :settings, %{notifications: true})}
-  end
-  step :b, fn data ->
-    {:ok, assign(data, :settings, %{theme: "dark"})}
-  end
-end
-# Result: %{settings: %{notifications: true, theme: "dark"}}
-
-# Collect - keeps results separate
-parallel merge: :collect do
-  step :fetch_orders, fn data ->
-    {:ok, assign(data, :count, Orders.count())}
-  end
-  step :fetch_users, fn data ->
-    {:ok, assign(data, :count, Users.count())}
-  end
-end
-# Result: %{parallel_results: %{fetch_orders: %{count: 10}, fetch_users: %{count: 5}}}
+# After parallel block completes, context contains:
+%{
+  ...original_context,
+  __results__: %{
+    step_name: {:ok, returned_data} | {:error, reason}
+  }
+}
 ```
 
-### Error Handling (`:on_error`)
+### Accessing Results
 
-Controls what happens when a parallel step fails.
-
-| Strategy | Description |
-|----------|-------------|
-| `:fail_fast` | Cancel other steps immediately (default) |
-| `:complete_all` | Wait for all steps, collect errors |
+Use `parallel_results/0`, `parallel_result/1`, and `parallel_ok?/1` helpers:
 
 ```elixir
-# Fail fast (default) - stop everything on first error
-parallel on_error: :fail_fast do
-  step :critical_task, fn data ->
-    # If this fails, other tasks are cancelled
-    {:ok, data}
+step :handle_results, fn ctx ->
+  # Get all results
+  results = parallel_results()  # => %{payment: {:ok, ...}, delivery: {:error, ...}}
+
+  # Get specific result
+  case parallel_result(:payment) do
+    {:ok, payment} -> # handle success
+    {:error, reason} -> # handle error
+  end
+
+  # Check if step succeeded
+  if parallel_ok?(:payment) do
+    # payment was successful
+  end
+
+  {:ok, ctx}
+end
+```
+
+Or access directly from the context:
+
+```elixir
+step :handle_results, fn ctx ->
+  case ctx[:__results__][:payment] do
+    {:ok, payment} -> {:ok, Map.put(ctx, :payment_id, payment.id)}
+    {:error, _} -> {:goto, :handle_payment_failure, ctx}
+  end
+end
+```
+
+## The `into:` Callback
+
+Use `into:` to transform results before passing to the next step:
+
+```elixir
+parallel into: fn ctx, results ->
+  # ctx = original context (unchanged by parallel steps)
+  # results = %{step_name => {:ok, data} | {:error, reason}}
+
+  case {results[:payment], results[:delivery]} do
+    {{:ok, payment}, {:ok, delivery}} ->
+      # Return transformed context
+      {:ok, Map.merge(ctx, %{
+        payment_id: payment.id,
+        delivery_status: delivery.status
+      })}
+
+    {{:ok, _}, {:error, :not_found}} ->
+      # Jump to another step
+      {:goto, :handle_backorder, ctx}
+
+    _ ->
+      # Fail the workflow
+      {:error, "Critical failure"}
+  end
+end do
+  step :payment, fn ctx -> {:ok, %{id: 123}} end
+  step :delivery, fn ctx -> {:error, :not_found} end
+end
+```
+
+### `into:` Return Values
+
+| Return | Effect |
+|--------|--------|
+| `{:ok, ctx}` | Continue to next step with new context |
+| `{:error, reason}` | Fail the workflow |
+| `{:goto, :step_name, ctx}` | Jump to the named step |
+
+When `into:` is provided, the `__results__` key is NOT added to the context - the `into:` callback controls what the next step receives.
+
+## The `returns:` Option
+
+Customize the key name for a step's result:
+
+```elixir
+parallel do
+  step :fetch_order, returns: :order do
+    fn ctx -> {:ok, %{items: [...]}} end
+  end
+
+  step :fetch_user, returns: :user do
+    fn ctx -> {:ok, %{name: "John"}} end
   end
 end
 
-# Complete all - continue despite errors
-parallel on_error: :complete_all do
-  step :send_sms, fn data ->
-    # Even if SMS fails...
-    {:ok, data}
+# Results:
+# %{__results__: %{order: {:ok, %{items: [...]}}, user: {:ok, %{name: "John"}}}}
+```
+
+This is useful when the step name is verbose but you want a simpler key in results.
+
+## Error Handling
+
+### `:on_error` Option
+
+| Strategy | Description |
+|----------|-------------|
+| `:fail_fast` | Stop on first error (default) |
+| `:complete_all` | Wait for all steps, collect all results |
+
+```elixir
+# Fail fast (default) - workflow fails on first error
+parallel on_error: :fail_fast do
+  step :critical_task, fn ctx ->
+    {:ok, ctx}
   end
-  step :send_email, fn data ->
-    # ...email still runs
-    {:ok, data}
+end
+
+# Complete all - continue despite errors, let next step handle
+parallel on_error: :complete_all do
+  step :send_sms, fn ctx ->
+    case SMS.send(ctx.user_id) do
+      :ok -> {:ok, %{sms_sent: true}}
+      {:error, e} -> {:error, e}  # Preserved in results
+    end
+  end
+
+  step :send_email, fn ctx ->
+    case Mailer.send(ctx.user_id) do
+      :ok -> {:ok, %{email_sent: true}}
+      {:error, e} -> {:error, e}  # Preserved in results
+    end
+  end
+end
+
+step :check_notifications, fn ctx ->
+  results = ctx[:__results__]
+  sms_ok = match?({:ok, _}, results[:send_sms])
+  email_ok = match?({:ok, _}, results[:send_email])
+
+  cond do
+    sms_ok and email_ok -> {:ok, Map.put(ctx, :all_sent, true)}
+    sms_ok or email_ok -> {:ok, Map.put(ctx, :partial_sent, true)}
+    true -> {:error, "All notifications failed"}
   end
 end
 ```
@@ -119,81 +218,109 @@ workflow "dashboard_data" do
     {:ok, %{user_id: input["user_id"]}}
   end
 
-  parallel do
-    step :fetch_orders, fn data ->
-      orders = Orders.recent(limit: 10)
-      {:ok, assign(data, :orders, orders)}
+  parallel on_error: :complete_all do
+    step :fetch_orders, fn ctx ->
+      case Orders.recent(limit: 10) do
+        {:ok, orders} -> {:ok, %{orders: orders}}
+        {:error, e} -> {:error, e}
+      end
     end
 
-    step :fetch_metrics, fn data ->
-      metrics = Analytics.daily_metrics()
-      {:ok, assign(data, :metrics, metrics)}
+    step :fetch_metrics, fn ctx ->
+      {:ok, %{metrics: Analytics.daily_metrics()}}
     end
 
-    step :fetch_notifications, fn data ->
-      notifications = Notifications.unread()
-      {:ok, assign(data, :notifications, notifications)}
+    step :fetch_notifications, fn ctx ->
+      {:ok, %{notifications: Notifications.unread()}}
     end
   end
 
-  step :build_dashboard, fn data ->
-    dashboard = %{
-      orders: data.orders,
-      metrics: data.metrics,
-      notifications: data.notifications
-    }
-    {:ok, assign(data, :dashboard, dashboard)}
+  step :build_dashboard, fn ctx ->
+    results = ctx[:__results__]
+
+    # Handle partial failures gracefully
+    orders = case results[:fetch_orders] do
+      {:ok, data} -> data.orders
+      {:error, _} -> []
+    end
+
+    metrics = case results[:fetch_metrics] do
+      {:ok, data} -> data.metrics
+      {:error, _} -> %{}
+    end
+
+    {:ok, %{
+      dashboard: %{orders: orders, metrics: metrics},
+      has_errors: Enum.any?(results, fn {_, r} -> match?({:error, _}, r) end)
+    }}
   end
 end
 ```
 
-### Independent Operations with Error Tolerance
+### Conditional Branching Based on Results
 
 ```elixir
-workflow "notify_all" do
-  step :prepare, fn data ->
-    {:ok, %{user_id: data["user_id"], message: data["message"]}}
+workflow "order_processing" do
+  step :validate, fn input ->
+    {:ok, %{order_id: input["order_id"]}}
   end
 
-  # All notifications run even if some fail
-  parallel on_error: :complete_all do
-    step :send_email, [retry: [max_attempts: 3]], fn data ->
-      Mailer.send(data.user_id, data.message)
-      {:ok, data}
+  parallel into: fn ctx, results ->
+    case {results[:check_inventory], results[:check_payment]} do
+      {{:ok, inv}, {:ok, pay}} when inv.available and pay.authorized ->
+        {:ok, Map.merge(ctx, %{inventory: inv, payment: pay, ready: true})}
+
+      {{:ok, _}, {:error, :card_declined}} ->
+        {:goto, :handle_payment_issue, ctx}
+
+      {{:error, :out_of_stock}, _} ->
+        {:goto, :handle_backorder, ctx}
+
+      _ ->
+        {:error, "Order validation failed"}
+    end
+  end do
+    step :check_inventory, fn ctx ->
+      case Inventory.check(ctx.order_id) do
+        {:ok, inv} -> {:ok, %{available: inv.quantity > 0, quantity: inv.quantity}}
+        {:error, e} -> {:error, e}
+      end
     end
 
-    step :send_sms, fn data ->
-      SMS.send(data.user_id, data.message)
-      {:ok, data}
-    end
-
-    step :send_push, fn data ->
-      Push.send(data.user_id, data.message)
-      {:ok, data}
+    step :check_payment, fn ctx ->
+      case Payment.authorize(ctx.order_id) do
+        {:ok, auth} -> {:ok, %{authorized: true, auth_code: auth.code}}
+        {:error, e} -> {:error, e}
+      end
     end
   end
 
-  step :log_results, fn data ->
-    Logger.info("Notifications sent for user #{data.user_id}")
-    {:ok, data}
+  step :fulfill_order, fn ctx ->
+    # Only reached if both checks passed
+    {:ok, Map.put(ctx, :fulfilled, true)}
+  end
+
+  step :handle_payment_issue, fn ctx ->
+    {:ok, Map.put(ctx, :needs_payment_retry, true)}
+  end
+
+  step :handle_backorder, fn ctx ->
+    {:ok, Map.put(ctx, :backordered, true)}
   end
 end
 ```
 
-### Combining with Retry
-
-Individual steps in a parallel block can have their own retry configuration:
+### With Retry on Individual Steps
 
 ```elixir
 parallel do
-  step :external_api_call, [retry: [max_attempts: 5, backoff: :exponential]], fn data ->
+  step :external_api_call, [retry: [max_attempts: 5, backoff: :exponential]], fn ctx ->
     result = ExternalAPI.fetch_data()
-    {:ok, assign(data, :external, result)}
+    {:ok, %{external: result}}
   end
 
-  step :quick_local_task, fn data ->
-    result = LocalDB.query()
-    {:ok, assign(data, :local, result)}
+  step :quick_local_task, fn ctx ->
+    {:ok, %{local: LocalDB.query()}}
   end
 end
 ```
@@ -201,67 +328,75 @@ end
 ## How It Works
 
 1. The parallel block starts all steps concurrently as separate tasks
-2. Each step runs independently with its own data snapshot
-3. When all steps complete, data is merged based on the merge strategy
-4. Execution continues to the next step after the parallel block
+2. Each step receives a copy of the current context (steps are isolated)
+3. When all steps complete, results are collected into `__results__` map
+4. If `into:` is provided, it transforms the results
+5. Execution continues to the next step
 
 ## Best Practices
 
 ### Keep Parallel Steps Independent
 
-Parallel steps shouldn't depend on each other's data changes:
+Parallel steps shouldn't depend on each other's data:
 
 ```elixir
 # Good - independent operations
 parallel do
-  step :a, fn data ->
-    {:ok, assign(data, :result_a, compute_a())}
-  end
-  step :b, fn data ->
-    {:ok, assign(data, :result_b, compute_b())}
-  end
+  step :a, fn ctx -> {:ok, %{result_a: compute_a()}} end
+  step :b, fn ctx -> {:ok, %{result_b: compute_b()}} end
 end
 
 # Bad - step b depends on step a's data
 parallel do
-  step :a, fn data ->
-    {:ok, assign(data, :value, 42)}
-  end
-  step :b, fn data ->
-    # This won't see :value from step a!
-    x = data[:value]  # Returns nil
-    {:ok, data}
+  step :a, fn ctx -> {:ok, Map.put(ctx, :value, 42)} end
+  step :b, fn ctx ->
+    # ctx doesn't have :value - steps are isolated!
+    x = ctx[:value]  # Returns nil
+    {:ok, ctx}
   end
 end
 ```
 
-### Use Appropriate Error Strategy
+### Use `into:` for Complex Result Handling
 
-- Use `:fail_fast` when all steps must succeed (transactions, critical paths)
-- Use `:complete_all` when steps are independent (notifications, logging)
-
-### Consider Step Granularity
-
-Group related work into single steps rather than many tiny parallel steps:
+When you need to:
+- Transform multiple results into a single value
+- Make branching decisions based on results
+- Fail early on certain combinations
 
 ```elixir
-# Good - logical grouping
-parallel do
-  step :process_images, fn data ->
-    Enum.each(data.images, &process_image/1)
-    {:ok, data}
+parallel into: fn ctx, results ->
+  # Clear logic for handling result combinations
+  case {results[:a], results[:b]} do
+    {{:ok, a}, {:ok, b}} -> {:ok, combine(ctx, a, b)}
+    {{:error, _}, _} -> {:goto, :handle_a_failure, ctx}
+    {_, {:error, _}} -> {:goto, :handle_b_failure, ctx}
   end
-  step :process_documents, fn data ->
-    Enum.each(data.documents, &process_doc/1)
-    {:ok, data}
-  end
+end do
+  step :a, fn ctx -> ... end
+  step :b, fn ctx -> ... end
+end
+```
+
+### Choose the Right Error Strategy
+
+- Use `:fail_fast` when all steps must succeed (transactions, critical paths)
+- Use `:complete_all` when steps are independent and you want to handle partial success
+
+### Return Focused Data from Steps
+
+Return only the data the step produces, not the entire context:
+
+```elixir
+# Good - return just the new data
+step :fetch_user, fn ctx ->
+  user = Users.get(ctx.user_id)
+  {:ok, %{name: user.name, email: user.email}}
 end
 
-# Less ideal - too many small parallel steps
-parallel do
-  step :image_1, fn data -> process_image(data.image_1); {:ok, data} end
-  step :image_2, fn data -> process_image(data.image_2); {:ok, data} end
-  step :image_3, fn data -> process_image(data.image_3); {:ok, data} end
-  # Use foreach for this pattern instead
+# Less ideal - returning modified context
+step :fetch_user, fn ctx ->
+  user = Users.get(ctx.user_id)
+  {:ok, Map.put(ctx, :user, user)}  # Works but adds unnecessary data
 end
 ```
