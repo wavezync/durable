@@ -281,9 +281,6 @@ defmodule Durable.Executor do
       :parallel ->
         execute_parallel(step, remaining_steps, execution, step_index, workflow_def, config, data)
 
-      :foreach ->
-        execute_foreach(step, remaining_steps, execution, step_index, workflow_def, config, data)
-
       _ ->
         execute_regular_step(
           step,
@@ -582,8 +579,8 @@ defmodule Durable.Executor do
     opts = parallel_step.opts
     parallel_step_names = opts[:steps] || []
     all_parallel_steps = opts[:all_steps] || []
-    merge_strategy = opts[:merge_strategy] || :deep_merge
     error_strategy = opts[:error_strategy] || :fail_fast
+    into_fn = opts[:into_fn]
 
     # Find actual step definitions for parallel steps
     steps_to_execute =
@@ -602,54 +599,37 @@ defmodule Durable.Executor do
     {:ok, exec} = save_data_as_context(config, exec, data)
 
     # DURABILITY: Check which parallel steps already completed (for resume)
-    {completed_names, completed_data} =
-      get_completed_parallel_steps_with_data(exec.id, parallel_step_names, config)
-
-    # Merge data from completed steps into base data
-    base_data_with_completed =
-      Enum.reduce(completed_data, data, &deep_merge(&2, &1))
+    completed_results = get_completed_parallel_step_results(exec.id, ordered_steps, config)
 
     # Filter to only incomplete steps
-    incomplete_steps = Enum.reject(ordered_steps, &(&1.name in completed_names))
+    completed_step_names = Map.keys(completed_results)
+    incomplete_steps = Enum.reject(ordered_steps, &(get_returns_key(&1) in completed_step_names))
 
-    # If all steps already completed, skip execution
+    # Bundle opts for handle_parallel_completion
+    completion_opts = %{
+      remaining_steps: remaining_steps,
+      all_parallel_steps: all_parallel_steps,
+      exec: exec,
+      step_index: step_index,
+      workflow_def: workflow_def,
+      config: config,
+      parallel_step_name: parallel_step.name
+    }
+
+    # If all steps already completed, use stored results
     if incomplete_steps == [] do
-      {:ok, exec} = save_data_as_context(config, exec, base_data_with_completed)
-      after_parallel = skip_parallel_steps(remaining_steps, all_parallel_steps)
-
-      execute_steps_recursive(
-        after_parallel,
-        exec,
-        step_index,
-        workflow_def,
-        config,
-        base_data_with_completed
-      )
+      handle_parallel_completion(completed_results, data, into_fn, completion_opts)
     else
+      # When into_fn is provided, always collect all results and let into_fn handle errors
+      # When into_fn is nil, use the error_strategy
+      effective_strategy = if into_fn, do: :complete_all, else: error_strategy
+
       # Execute only incomplete steps in parallel
-      case execute_parallel_steps(
-             incomplete_steps,
-             exec,
-             config,
-             base_data_with_completed,
-             merge_strategy,
-             error_strategy
-           ) do
-        {:ok, merged_data} ->
-          # Save merged data and continue
-          {:ok, exec} = save_data_as_context(config, exec, merged_data)
-
-          # Skip past all parallel steps and continue
-          after_parallel = skip_parallel_steps(remaining_steps, all_parallel_steps)
-
-          execute_steps_recursive(
-            after_parallel,
-            exec,
-            step_index,
-            workflow_def,
-            config,
-            merged_data
-          )
+      case execute_parallel_steps(incomplete_steps, exec, config, data, effective_strategy) do
+        {:ok, new_results} ->
+          # Merge new results with completed results
+          all_results = Map.merge(completed_results, new_results)
+          handle_parallel_completion(all_results, data, into_fn, completion_opts)
 
         {:error, error} ->
           handle_step_failure(exec, error, workflow_def, config)
@@ -657,14 +637,114 @@ defmodule Durable.Executor do
     end
   end
 
-  defp execute_parallel_steps(
-         steps,
-         execution,
-         config,
-         base_data,
-         merge_strategy,
-         error_strategy
-       ) do
+  # Handle completion of parallel block - apply into_fn or add __results__
+  # Uses opts map to reduce arity below credo's limit of 8
+  defp handle_parallel_completion(results, base_ctx, into_fn, opts) do
+    %{
+      remaining_steps: remaining_steps,
+      all_parallel_steps: all_parallel_steps,
+      exec: exec,
+      step_index: step_index,
+      workflow_def: workflow_def,
+      config: config,
+      parallel_step_name: parallel_step_name
+    } = opts
+
+    case apply_parallel_into(into_fn, base_ctx, results) do
+      {:ok, final_ctx} ->
+        {:ok, exec} = save_data_as_context(config, exec, final_ctx)
+        after_parallel = skip_parallel_steps(remaining_steps, all_parallel_steps)
+
+        execute_steps_recursive(
+          after_parallel,
+          exec,
+          step_index,
+          workflow_def,
+          config,
+          final_ctx
+        )
+
+      {:goto, target_step, goto_ctx} ->
+        {:ok, exec} = save_data_as_context(config, exec, goto_ctx)
+
+        case find_jump_target(target_step, remaining_steps, parallel_step_name, step_index) do
+          {:ok, target_steps} ->
+            execute_steps_recursive(
+              target_steps,
+              exec,
+              step_index,
+              workflow_def,
+              config,
+              goto_ctx
+            )
+
+          {:error, reason} ->
+            handle_step_failure(
+              exec,
+              %{type: "parallel_goto_error", message: reason},
+              workflow_def,
+              config
+            )
+        end
+
+      {:error, error} ->
+        handle_step_failure(exec, normalize_error(error), workflow_def, config)
+    end
+  end
+
+  # Apply into function or default to __results__
+  defp apply_parallel_into(nil, base_ctx, results) do
+    # No into function - add results to __results__ key
+    # Serialize tuples to lists for JSON storage
+    serialized_results = serialize_parallel_results(results)
+    {:ok, Map.put(base_ctx, :__results__, serialized_results)}
+  end
+
+  defp apply_parallel_into(into_fn, base_ctx, results) when is_function(into_fn, 2) do
+    into_fn.(base_ctx, results)
+  rescue
+    e ->
+      {:error,
+       %{
+         type: "parallel_into_error",
+         message: Exception.message(e),
+         stacktrace: Exception.format_stacktrace(__STACKTRACE__)
+       }}
+  end
+
+  # Serialize tagged tuples to lists for JSON storage
+  # {:ok, data} -> ["ok", data], {:error, reason} -> ["error", reason]
+  defp serialize_parallel_results(results) do
+    Map.new(results, fn {key, value} ->
+      serialized_key = if is_atom(key), do: Atom.to_string(key), else: key
+
+      serialized_value =
+        case value do
+          {:ok, data} -> ["ok", data]
+          {:error, reason} -> ["error", serialize_error_reason(reason)]
+          other -> other
+        end
+
+      {serialized_key, serialized_value}
+    end)
+  end
+
+  # Serialize error reasons that might contain atoms
+  defp serialize_error_reason(reason) when is_atom(reason), do: Atom.to_string(reason)
+  defp serialize_error_reason(reason) when is_map(reason), do: reason
+  defp serialize_error_reason(reason) when is_binary(reason), do: reason
+  defp serialize_error_reason(reason), do: inspect(reason)
+
+  # Normalize error to map format
+  defp normalize_error(error) when is_map(error), do: error
+  defp normalize_error(error) when is_binary(error), do: %{type: "error", message: error}
+
+  defp normalize_error(error) when is_atom(error),
+    do: %{type: "error", message: Atom.to_string(error)}
+
+  defp normalize_error(error), do: %{type: "error", message: inspect(error)}
+
+  defp execute_parallel_steps(steps, execution, config, base_data, error_strategy) do
     task_sup = Config.task_supervisor(config.name)
     task_opts = %{data: base_data, execution_id: execution.id, config: config}
 
@@ -676,52 +756,68 @@ defmodule Durable.Executor do
       end)
 
     results = await_parallel_tasks(tasks, error_strategy)
-    process_parallel_results(results, base_data, merge_strategy)
+    process_parallel_results(results, error_strategy)
   end
 
   defp run_parallel_step_task(step, task_opts) do
     %{data: data, execution_id: exec_id, config: config} = task_opts
 
+    # Get the returns key for this step
+    returns_key = get_returns_key(step)
+
     # Each parallel task gets a copy of the data and returns its result
     result = StepRunner.execute(step, data, exec_id, config)
-    handle_parallel_step_result(result, step.name)
+    handle_parallel_step_result(result, returns_key)
   end
 
-  defp handle_parallel_step_result({:ok, output_data}, step_name) do
-    {:ok, step_name, output_data}
+  # Get the returns key from step opts (default to original_name)
+  defp get_returns_key(%{opts: opts}) do
+    opts[:returns] || opts[:original_name]
   end
 
-  defp handle_parallel_step_result({:decision, _target, _data}, step_name) do
-    {:error, step_name,
-     %{
-       type: "parallel_decision_not_supported",
-       message: "decisions not supported in parallel blocks"
-     }}
+  # Now returns tagged tuples: {returns_key, {:ok, data}} or {returns_key, {:error, reason}}
+  defp handle_parallel_step_result({:ok, output_data}, returns_key) do
+    {:ok, returns_key, {:ok, output_data}}
   end
 
-  defp handle_parallel_step_result({:error, error}, step_name) do
-    {:error, step_name, error}
+  defp handle_parallel_step_result({:decision, _target, _data}, returns_key) do
+    {:ok, returns_key,
+     {:error,
+      %{
+        type: "parallel_decision_not_supported",
+        message: "decisions not supported in parallel blocks"
+      }}}
   end
 
-  defp handle_parallel_step_result({:sleep, _opts}, step_name) do
-    {:error, step_name,
-     %{type: "parallel_wait_not_supported", message: "sleep not supported in parallel blocks yet"}}
+  defp handle_parallel_step_result({:error, error}, returns_key) do
+    {:ok, returns_key, {:error, error}}
   end
 
-  defp handle_parallel_step_result({:wait_for_event, _opts}, step_name) do
-    {:error, step_name,
-     %{
-       type: "parallel_wait_not_supported",
-       message: "wait_for_event not supported in parallel blocks yet"
-     }}
+  defp handle_parallel_step_result({:sleep, _opts}, returns_key) do
+    {:ok, returns_key,
+     {:error,
+      %{
+        type: "parallel_wait_not_supported",
+        message: "sleep not supported in parallel blocks yet"
+      }}}
   end
 
-  defp handle_parallel_step_result({:wait_for_input, _opts}, step_name) do
-    {:error, step_name,
-     %{
-       type: "parallel_wait_not_supported",
-       message: "wait_for_input not supported in parallel blocks yet"
-     }}
+  defp handle_parallel_step_result({:wait_for_event, _opts}, returns_key) do
+    {:ok, returns_key,
+     {:error,
+      %{
+        type: "parallel_wait_not_supported",
+        message: "wait_for_event not supported in parallel blocks yet"
+      }}}
+  end
+
+  defp handle_parallel_step_result({:wait_for_input, _opts}, returns_key) do
+    {:ok, returns_key,
+     {:error,
+      %{
+        type: "parallel_wait_not_supported",
+        message: "wait_for_input not supported in parallel blocks yet"
+      }}}
   end
 
   defp await_parallel_tasks(tasks, :fail_fast), do: await_tasks_fail_fast(tasks)
@@ -742,64 +838,31 @@ defmodule Durable.Executor do
     Task.await_many(tasks, :infinity)
   end
 
-  defp process_parallel_results(results, base_context, merge_strategy) do
-    errors = Enum.filter(results, &match?({:error, _, _}, &1))
-    successes = Enum.filter(results, &match?({:ok, _, _}, &1))
-
-    if errors != [] do
-      # Any errors -> fail
-      error_details =
-        Enum.map(errors, fn {:error, step, err} ->
-          %{step: step, error: err}
-        end)
-
-      {:error,
-       %{
-         type: "parallel_error",
-         message: "One or more parallel steps failed",
-         errors: error_details
-       }}
-    else
-      # All succeeded -> merge data
-      step_data = Enum.map(successes, fn {:ok, step_name, data} -> {step_name, data} end)
-      merged = merge_parallel_data(step_data, base_context, merge_strategy)
-      {:ok, merged}
-    end
-  end
-
-  defp merge_parallel_data(step_data, base_data, :deep_merge) do
-    Enum.reduce(step_data, base_data, fn {_step_name, data}, acc ->
-      deep_merge(acc, data)
-    end)
-  end
-
-  defp merge_parallel_data(step_data, _base_data, :last_wins) do
-    case List.last(step_data) do
-      nil -> %{}
-      {_step_name, data} -> data
-    end
-  end
-
-  defp merge_parallel_data(step_data, base_data, :collect) do
-    collected =
-      Enum.into(step_data, %{}, fn {step_name, data} ->
-        # Extract only the changes from base_data
-        changes = Map.drop(data, Map.keys(base_data))
-        {Atom.to_string(step_name), changes}
+  # Process results: build results map with tagged tuples
+  defp process_parallel_results(results, error_strategy) do
+    # Build the results map
+    results_map =
+      Enum.reduce(results, %{}, fn {:ok, returns_key, tagged_result}, acc ->
+        Map.put(acc, returns_key, tagged_result)
       end)
 
-    Map.put(base_data, "__parallel_results__", collected)
-  end
+    # Check for errors based on strategy
+    errors =
+      Enum.filter(results_map, fn {_key, result} ->
+        match?({:error, _}, result)
+      end)
 
-  defp merge_parallel_data(step_data, base_data, _unknown) do
-    merge_parallel_data(step_data, base_data, :deep_merge)
-  end
+    case {error_strategy, errors} do
+      {:fail_fast, [_ | _]} ->
+        # Fail fast with first error
+        {_key, {:error, first_error}} = hd(errors)
+        {:error, first_error}
 
-  defp deep_merge(left, right) when is_map(left) and is_map(right) do
-    Map.merge(left, right, fn _k, l, r -> deep_merge(l, r) end)
+      _ ->
+        # complete_all or no errors: return results map
+        {:ok, results_map}
+    end
   end
-
-  defp deep_merge(_left, right), do: right
 
   defp skip_parallel_steps(remaining_steps, all_parallel_step_names) do
     Enum.reject(remaining_steps, fn step ->
@@ -807,9 +870,9 @@ defmodule Durable.Executor do
     end)
   end
 
-  # Get completed parallel steps with their stored data for durability
-  defp get_completed_parallel_steps_with_data(workflow_id, step_names, config) do
-    step_name_strings = Enum.map(step_names, &Atom.to_string/1)
+  # Get completed parallel step results for durability (with tagged tuples)
+  defp get_completed_parallel_step_results(workflow_id, steps, config) do
+    step_name_strings = Enum.map(steps, &Atom.to_string(&1.name))
 
     query =
       from(s in StepExecution,
@@ -821,263 +884,23 @@ defmodule Durable.Executor do
 
     completed = Repo.all(config, query)
 
-    names =
-      Enum.map(completed, fn {name, _} ->
-        String.to_existing_atom(name)
+    # Build a map from step name to step def for looking up returns key
+    step_map =
+      Enum.into(steps, %{}, fn step ->
+        {Atom.to_string(step.name), step}
       end)
 
-    data_list =
-      Enum.map(completed, fn {_, output} ->
-        # Extract data from stored output (parallel steps store it under "__context__")
-        (output || %{})["__context__"] || %{}
-      end)
+    Enum.reduce(completed, %{}, fn {step_name_str, output}, acc ->
+      case Map.get(step_map, step_name_str) do
+        nil ->
+          acc
 
-    {names, data_list}
-  end
-
-  # ============================================================================
-  # ForEach Execution
-  # ============================================================================
-
-  defp execute_foreach(
-         foreach_step,
-         remaining_steps,
-         execution,
-         step_index,
-         workflow_def,
-         config,
-         data
-       ) do
-    {:ok, exec} = update_current_step(config, execution, foreach_step.name)
-
-    # Get foreach configuration
-    step_opts = foreach_step.opts
-    foreach_step_names = step_opts[:steps] || []
-    all_foreach_steps = step_opts[:all_steps] || []
-    concurrency = step_opts[:concurrency] || 1
-
-    # Extract items using the body_fn (function that receives data)
-    # In the new DSL, body_fn contains the items extraction function
-    items = resolve_foreach_items(foreach_step.body_fn, data)
-    steps_to_execute = Enum.filter(remaining_steps, &(&1.name in foreach_step_names))
-
-    # Save data before foreach execution
-    {:ok, exec} = save_data_as_context(config, exec, data)
-
-    # Bundle options for child functions
-    foreach_opts = %{
-      data: data,
-      on_error: step_opts[:on_error] || :fail_fast,
-      collect_as: step_opts[:collect_as]
-    }
-
-    result = do_execute_foreach(items, steps_to_execute, exec, config, concurrency, foreach_opts)
-
-    handle_foreach_result(
-      result,
-      remaining_steps,
-      all_foreach_steps,
-      exec,
-      step_index,
-      workflow_def,
-      config
-    )
-  end
-
-  # Resolve items: can be a function that takes data, or legacy specs
-  defp resolve_foreach_items(items_fn, data) when is_function(items_fn, 1), do: items_fn.(data)
-  defp resolve_foreach_items({:context_key, key}, data), do: Map.get(data, key) || []
-  defp resolve_foreach_items({:mfa, {mod, fun, args}}, _data), do: apply(mod, fun, args)
-  defp resolve_foreach_items(_, _data), do: []
-
-  defp do_execute_foreach(items, steps, execution, config, 1, opts) do
-    execute_foreach_sequential(items, steps, execution, config, opts)
-  end
-
-  defp do_execute_foreach(items, steps, execution, config, concurrency, opts) do
-    execute_foreach_concurrent(items, steps, execution, config, concurrency, opts)
-  end
-
-  defp handle_foreach_result(
-         {:ok, result_data},
-         remaining,
-         all_foreach_steps,
-         exec,
-         idx,
-         workflow_def,
-         cfg
-       ) do
-    {:ok, exec} = save_data_as_context(cfg, exec, result_data)
-    after_foreach = skip_foreach_steps(remaining, all_foreach_steps)
-    execute_steps_recursive(after_foreach, exec, idx, workflow_def, cfg, result_data)
-  end
-
-  defp handle_foreach_result({:error, error}, _remaining, _all, exec, _idx, workflow_def, cfg) do
-    handle_step_failure(exec, error, workflow_def, cfg)
-  end
-
-  defp execute_foreach_sequential(items, steps, execution, config, opts) do
-    %{data: base_data, on_error: on_error, collect_as: collect_as} = opts
-    initial_acc = %{data: base_data, results: [], errors: []}
-
-    final_acc =
-      items
-      |> Enum.with_index()
-      |> Enum.reduce_while(initial_acc, fn {item, index}, acc ->
-        # Execute foreach steps with (data, item, index)
-        result = execute_foreach_item_steps(steps, acc.data, item, index, execution.id, config)
-        handle_foreach_item_result(result, index, acc, on_error, collect_as)
-      end)
-
-    finalize_foreach_result(final_acc, collect_as)
-  end
-
-  defp handle_foreach_item_result({:ok, item_data}, _index, acc, _on_error, collect_as) do
-    new_data = deep_merge(acc.data, item_data)
-    new_results = maybe_collect_result(acc.results, item_data, acc.data, collect_as)
-    {:cont, %{acc | data: new_data, results: new_results}}
-  end
-
-  defp handle_foreach_item_result({:error, error}, index, acc, :fail_fast, _collect_as) do
-    {:halt, %{acc | errors: [{index, error} | acc.errors]}}
-  end
-
-  defp handle_foreach_item_result({:error, error}, index, acc, :continue, _collect_as) do
-    {:cont, %{acc | errors: [{index, error} | acc.errors]}}
-  end
-
-  defp maybe_collect_result(results, _item_data, _base_data, nil), do: results
-
-  defp maybe_collect_result(results, item_data, base_data, _collect_as) do
-    results ++ [extract_item_result(item_data, base_data)]
-  end
-
-  defp finalize_foreach_result(%{errors: [], data: data, results: _results}, nil) do
-    {:ok, data}
-  end
-
-  defp finalize_foreach_result(%{errors: [], data: data, results: results}, collect_as) do
-    {:ok, Map.put(data, collect_as, results)}
-  end
-
-  defp finalize_foreach_result(%{errors: errors}, _collect_as) do
-    {:error,
-     %{
-       type: "foreach_error",
-       message: "One or more foreach items failed",
-       errors: format_foreach_errors(errors)
-     }}
-  end
-
-  defp execute_foreach_concurrent(items, steps, execution, config, concurrency, opts) do
-    %{data: base_data, on_error: on_error, collect_as: collect_as} = opts
-    task_sup = Config.task_supervisor(config.name)
-    task_opts = %{steps: steps, execution_id: execution.id, config: config}
-
-    items
-    |> Enum.with_index()
-    |> Enum.chunk_every(concurrency)
-    |> Enum.reduce_while({:ok, base_data, [], []}, fn chunk,
-                                                      {:ok, current_data, results, errors} ->
-      tasks = spawn_foreach_chunk_tasks(chunk, current_data, task_sup, task_opts)
-      task_results = Task.await_many(tasks, :infinity)
-
-      {new_data, new_results, new_errors} =
-        merge_chunk_results(task_results, current_data, results, errors, collect_as)
-
-      check_chunk_continue(on_error, new_data, new_results, new_errors)
-    end)
-    |> finalize_concurrent_foreach(collect_as)
-  end
-
-  defp spawn_foreach_chunk_tasks(chunk, current_data, task_sup, task_opts) do
-    Enum.map(chunk, fn {item, index} ->
-      Task.Supervisor.async(task_sup, fn ->
-        run_foreach_item_task(item, index, current_data, task_opts)
-      end)
-    end)
-  end
-
-  defp run_foreach_item_task(item, index, data, task_opts) do
-    %{steps: steps, execution_id: exec_id, config: config} = task_opts
-
-    result = execute_foreach_item_steps(steps, data, item, index, exec_id, config)
-
-    case result do
-      {:ok, item_data} -> {:ok, index, item_data}
-      {:error, error} -> {:error, index, error}
-    end
-  end
-
-  defp merge_chunk_results(task_results, data, results, errors, collect_as) do
-    Enum.reduce(task_results, {data, results, errors}, fn
-      {:ok, _index, item_data}, {d, r, e} ->
-        merged = deep_merge(d, item_data)
-        item_result = if collect_as, do: [extract_item_result(item_data, d)], else: []
-        {merged, r ++ item_result, e}
-
-      {:error, index, error}, {d, r, e} ->
-        {d, r, [{index, error} | e]}
-    end)
-  end
-
-  defp check_chunk_continue(:fail_fast, _data, _results, [_ | _] = errors) do
-    {:halt, {:error, errors}}
-  end
-
-  defp check_chunk_continue(_on_error, data, results, errors) do
-    {:cont, {:ok, data, results, errors}}
-  end
-
-  defp finalize_concurrent_foreach({:ok, data, _results, []}, nil), do: {:ok, data}
-
-  defp finalize_concurrent_foreach({:ok, data, results, []}, collect_as),
-    do: {:ok, Map.put(data, collect_as, results)}
-
-  defp finalize_concurrent_foreach({:ok, _data, _results, errors}, _collect_as) do
-    {:error,
-     %{
-       type: "foreach_error",
-       message: "One or more foreach items failed",
-       errors: format_foreach_errors(errors)
-     }}
-  end
-
-  defp finalize_concurrent_foreach({:error, errors}, _collect_as) do
-    {:error,
-     %{
-       type: "foreach_error",
-       message: "One or more foreach items failed",
-       errors: format_foreach_errors(errors)
-     }}
-  end
-
-  # Execute foreach item steps using StepRunner.execute_foreach which passes (data, item, index)
-  defp execute_foreach_item_steps(steps, data, item, index, workflow_id, config) do
-    Enum.reduce_while(steps, {:ok, data}, fn step, {:ok, current_data} ->
-      case StepRunner.execute_foreach(step, current_data, item, index, workflow_id, config) do
-        {:ok, new_data} ->
-          {:cont, {:ok, new_data}}
-
-        {:error, error} ->
-          {:halt, {:error, error}}
+        step ->
+          returns_key = get_returns_key(step)
+          # Extract result from stored output
+          result_data = (output || %{})["__result__"] || (output || %{})["__context__"] || %{}
+          Map.put(acc, returns_key, {:ok, result_data})
       end
-    end)
-  end
-
-  defp extract_item_result(item_context, base_context) do
-    Map.drop(item_context, Map.keys(base_context))
-  end
-
-  defp format_foreach_errors(errors) do
-    Enum.map(errors, fn {index, error} ->
-      %{index: index, error: error}
-    end)
-  end
-
-  defp skip_foreach_steps(remaining_steps, all_foreach_step_names) do
-    Enum.reject(remaining_steps, fn step ->
-      step.name in all_foreach_step_names
     end)
   end
 

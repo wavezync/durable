@@ -20,7 +20,7 @@ defmodule Durable.Definition do
     The `body_fn` field contains the step function that processes data.
     """
 
-    @type step_type :: :step | :decision | :branch | :parallel | :loop | :foreach | :switch
+    @type step_type :: :step | :decision | :branch | :parallel | :loop | :switch
 
     @type retry_opts :: %{
             optional(:max_attempts) => pos_integer(),
@@ -55,14 +55,9 @@ defmodule Durable.Definition do
     Executes the step with the given data.
 
     For pipeline model steps, calls `body_fn.(data)`.
-    For foreach steps, calls `body_fn.(data, item, index)`.
     """
     def execute(%__MODULE__{body_fn: body_fn}, data) when is_function(body_fn, 1) do
       body_fn.(data)
-    end
-
-    def execute(%__MODULE__{body_fn: body_fn}, data, item, index) when is_function(body_fn, 3) do
-      body_fn.(data, item, index)
     end
   end
 
