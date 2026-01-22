@@ -376,32 +376,55 @@ defmodule Durable.DSL.Step do
   @doc """
   Defines a parallel execution block.
 
-  All steps inside execute concurrently. Each step receives a copy of the data.
-  Results are merged according to the merge strategy.
+  All steps inside execute concurrently. Each step receives a copy of the context.
+  Results are collected into a `__results__` map with tagged tuples.
 
   ## Options
 
-  - `:merge` - Context merge strategy (default: `:deep_merge`)
-    - `:deep_merge` - Deep merge all step outputs
-    - `:last_wins` - Last step's output wins on conflicts
-    - `:collect` - Collect into `%{step_name => output}`
+  - `:into` - Optional callback to transform results (default: none)
+    - Receives `(ctx, results)` where results = `%{step_name => {:ok, data} | {:error, reason}}`
+    - Returns `{:ok, ctx}` | `{:error, reason}` | `{:goto, step, ctx}`
   - `:on_error` - Error handling (default: `:fail_fast`)
     - `:fail_fast` - Cancel siblings on first failure
-    - `:complete_all` - Wait for all, collect errors
+    - `:complete_all` - Wait for all, collect results
 
-  ## Examples
+  ## Behavior
 
-      parallel merge: :deep_merge do
-        step :send_email, fn data ->
-          EmailService.send(data.order_id)
-          {:ok, assign(data, :email_sent, true)}
+  Without `:into`, results go to `ctx.__results__` and the next step handles them:
+
+      parallel do
+        step :payment, fn ctx -> {:ok, %{id: 123}} end
+        step :delivery, fn ctx -> {:error, :not_found} end
+      end
+      # Next step receives:
+      # %{...ctx, __results__: %{payment: {:ok, %{id: 123}}, delivery: {:error, :not_found}}}
+
+  With `:into`, you control what the next step receives:
+
+      parallel into: fn ctx, results ->
+        case {results.payment, results.delivery} do
+          {{:ok, payment}, {:ok, _}} ->
+            {:ok, Map.put(ctx, :payment_id, payment.id)}
+          {{:ok, _}, {:error, :not_found}} ->
+            {:goto, :handle_backorder, ctx}
+          _ ->
+            {:error, "Critical failure"}
         end
+      end do
+        step :payment, fn ctx -> {:ok, %{id: 123}} end
+        step :delivery, fn ctx -> {:error, :not_found} end
+      end
 
-        step :update_inventory, fn data ->
-          InventoryService.decrement(data.items)
-          {:ok, assign(data, :inventory_updated, true)}
+  ## Step Options
+
+  - `:returns` - Key name for this step's result (default: step name)
+
+      parallel do
+        step :fetch_order, returns: :order do
+          fn ctx -> {:ok, %{items: [...]}} end
         end
       end
+      # Result: %{...ctx, __results__: %{order: {:ok, %{items: [...]}}}}
 
   """
   defmacro parallel(opts \\ [], do: block) do
@@ -410,8 +433,8 @@ defmodule Durable.DSL.Step do
     step_defs = extract_parallel_steps(block, parallel_id)
     step_names = Enum.map(step_defs, fn {name, _, _} -> name end)
 
-    merge_strategy = Keyword.get(opts, :merge, :deep_merge)
     error_strategy = Keyword.get(opts, :on_error, :fail_fast)
+    into_fn = Keyword.get(opts, :into)
 
     # Generate named functions for each parallel step
     step_registrations =
@@ -432,7 +455,30 @@ defmodule Durable.DSL.Step do
         end
       end)
 
+    # Generate named function for into callback if provided
+    {into_fn_ref, into_fn_def} =
+      if into_fn do
+        into_func_name = :"__parallel_into_#{parallel_id}__"
+
+        def_ast =
+          quote do
+            @doc false
+            def unquote(into_func_name)(ctx, results), do: unquote(into_fn).(ctx, results)
+          end
+
+        ref_ast =
+          quote do
+            &(__MODULE__.unquote(into_func_name) / 2)
+          end
+
+        {ref_ast, def_ast}
+      else
+        {nil, nil}
+      end
+
     quote do
+      unquote(into_fn_def)
+
       @durable_current_steps %Durable.Definition.Step{
         name: unquote(:"parallel_#{parallel_id}"),
         type: :parallel,
@@ -440,8 +486,8 @@ defmodule Durable.DSL.Step do
         opts: %{
           steps: unquote(step_names),
           all_steps: unquote(step_names),
-          merge_strategy: unquote(merge_strategy),
-          error_strategy: unquote(error_strategy)
+          error_strategy: unquote(error_strategy),
+          into_fn: unquote(into_fn_ref)
         }
       }
 
@@ -466,7 +512,8 @@ defmodule Durable.DSL.Step do
 
     step_opts = %{
       parallel_id: parallel_id,
-      original_name: name
+      original_name: name,
+      returns: name
     }
 
     [{qualified_name, body_fn, step_opts}]
@@ -480,12 +527,39 @@ defmodule Durable.DSL.Step do
        when is_atom(name) and is_list(opts) do
     qualified_name = :"parallel_#{parallel_id}__#{name}"
 
+    # Extract returns option, default to original name
+    returns_key = Keyword.get(opts, :returns, name)
+
     step_opts =
       opts
-      |> normalize_step_opts()
+      |> normalize_parallel_step_opts()
       |> Map.merge(%{
         parallel_id: parallel_id,
-        original_name: name
+        original_name: name,
+        returns: returns_key
+      })
+
+    [{qualified_name, body_fn, step_opts}]
+  end
+
+  # step :name, returns: :key do fn data -> ... end end
+  defp extract_parallel_step_call(
+         {:step, _meta, [name, opts, [do: {:fn, _, _} = body_fn]]},
+         parallel_id
+       )
+       when is_atom(name) and is_list(opts) do
+    qualified_name = :"parallel_#{parallel_id}__#{name}"
+
+    # Extract returns option, default to original name
+    returns_key = Keyword.get(opts, :returns, name)
+
+    step_opts =
+      opts
+      |> normalize_parallel_step_opts()
+      |> Map.merge(%{
+        parallel_id: parallel_id,
+        original_name: name,
+        returns: returns_key
       })
 
     [{qualified_name, body_fn, step_opts}]
@@ -493,154 +567,11 @@ defmodule Durable.DSL.Step do
 
   defp extract_parallel_step_call(_other, _parallel_id), do: []
 
-  # ============================================================================
-  # ForEach Macro
-  # ============================================================================
-
-  @doc """
-  Defines a foreach block that iterates over a collection.
-
-  The `:items` option takes a function that extracts items from the data.
-  Steps inside receive 3 arguments: `(data, item, index)`.
-
-  ## Options
-
-  - `:items` - Required. Function that extracts items from data.
-  - `:concurrency` - Items to process concurrently (default: 1)
-  - `:on_error` - Error handling (default: `:fail_fast`)
-  - `:collect_as` - Context key to store results
-
-  ## Examples
-
-      foreach :process_items,
-        items: fn data -> data.items end do
-
-        step :process_item, fn data, item, idx ->
-          processed = %{name: item["name"], position: idx}
-          {:ok, append(data, :processed_items, processed)}
-        end
-      end
-
-  """
-  defmacro foreach(name, opts, do: block) when is_atom(name) do
-    foreach_id = :erlang.unique_integer([:positive])
-
-    items_fn =
-      Keyword.get(opts, :items) ||
-        raise ArgumentError, "foreach requires :items option with a function"
-
-    # Validate items is a function
-    case items_fn do
-      {:fn, _, _} ->
-        :ok
-
-      other ->
-        raise ArgumentError,
-              "foreach :items must be a function, got: #{inspect(other)}"
-    end
-
-    concurrency = Keyword.get(opts, :concurrency, 1)
-    on_error = Keyword.get(opts, :on_error, :fail_fast)
-    collect_as = Keyword.get(opts, :collect_as)
-
-    step_defs = extract_foreach_steps(block, foreach_id, name)
-    step_names = Enum.map(step_defs, fn {step_name, _, _} -> step_name end)
-
-    # Generate named functions for each foreach step (3-arity: data, item, index)
-    step_registrations =
-      Enum.map(step_defs, fn {qualified_name, body_fn, step_opts} ->
-        func_name = :"__step_body_#{qualified_name}__"
-
-        quote do
-          @doc false
-          def unquote(func_name)(data, item, index), do: unquote(body_fn).(data, item, index)
-
-          @durable_current_steps %Durable.Definition.Step{
-            name: unquote(qualified_name),
-            type: :step,
-            module: __MODULE__,
-            body_fn: &(__MODULE__.unquote(func_name) / 3),
-            opts: unquote(Macro.escape(step_opts))
-          }
-        end
-      end)
-
-    # Generate named function for items extractor
-    items_func_name = :"__foreach_items_#{name}__"
-
-    quote do
-      # Named function for items extraction
-      @doc false
-      def unquote(items_func_name)(data), do: unquote(items_fn).(data)
-
-      @durable_current_steps %Durable.Definition.Step{
-        name: unquote(:"foreach_#{name}"),
-        type: :foreach,
-        module: __MODULE__,
-        body_fn: &(__MODULE__.unquote(items_func_name) / 1),
-        opts: %{
-          foreach_id: unquote(foreach_id),
-          foreach_name: unquote(name),
-          concurrency: unquote(concurrency),
-          on_error: unquote(on_error),
-          collect_as: unquote(collect_as),
-          steps: unquote(step_names),
-          all_steps: unquote(step_names)
-        }
-      }
-
-      unquote_splicing(step_registrations)
-    end
+  # Normalize parallel step options (includes :returns)
+  defp normalize_parallel_step_opts(opts) do
+    opts
+    |> Keyword.take([:retry, :timeout, :compensate, :queue, :returns])
+    |> Enum.into(%{})
+    |> normalize_retry_opts()
   end
-
-  defp extract_foreach_steps(body, foreach_id, foreach_name) do
-    case body do
-      {:__block__, _, statements} ->
-        Enum.flat_map(statements, &extract_foreach_step_call(&1, foreach_id, foreach_name))
-
-      statement ->
-        extract_foreach_step_call(statement, foreach_id, foreach_name)
-    end
-  end
-
-  # step :name, fn data, item, idx -> ... end
-  defp extract_foreach_step_call(
-         {:step, _meta, [name, {:fn, _, _} = body_fn]},
-         foreach_id,
-         foreach_name
-       )
-       when is_atom(name) do
-    qualified_name = :"foreach_#{foreach_name}__#{name}"
-
-    step_opts = %{
-      foreach_id: foreach_id,
-      foreach_name: foreach_name,
-      original_name: name
-    }
-
-    [{qualified_name, body_fn, step_opts}]
-  end
-
-  # step :name, [opts], fn data, item, idx -> ... end
-  defp extract_foreach_step_call(
-         {:step, _meta, [name, opts, {:fn, _, _} = body_fn]},
-         foreach_id,
-         foreach_name
-       )
-       when is_atom(name) and is_list(opts) do
-    qualified_name = :"foreach_#{foreach_name}__#{name}"
-
-    step_opts =
-      opts
-      |> normalize_step_opts()
-      |> Map.merge(%{
-        foreach_id: foreach_id,
-        foreach_name: foreach_name,
-        original_name: name
-      })
-
-    [{qualified_name, body_fn, step_opts}]
-  end
-
-  defp extract_foreach_step_call(_other, _foreach_id, _foreach_name), do: []
 end

@@ -45,18 +45,6 @@ defmodule Durable.Executor.StepRunner do
     execute_with_retry(step, data, workflow_id, 1, max_attempts, config)
   end
 
-  @doc """
-  Executes a foreach step with item and index.
-
-  Foreach steps receive 3 arguments: (data, item, index).
-  """
-  @spec execute_foreach(Step.t(), map(), any(), non_neg_integer(), String.t(), Config.t()) ::
-          result()
-  def execute_foreach(%Step{} = step, data, item, index, workflow_id, %Config{} = config) do
-    max_attempts = get_max_attempts(step)
-    execute_foreach_with_retry(step, data, item, index, workflow_id, 1, max_attempts, config)
-  end
-
   defp execute_with_retry(step, data, workflow_id, attempt, max_attempts, config) do
     # Set current step for logging/observability
     Context.set_current_step(step.name)
@@ -115,66 +103,6 @@ defmodule Durable.Executor.StepRunner do
     handle_result(result, result_ctx)
   end
 
-  defp execute_foreach_with_retry(
-         step,
-         data,
-         item,
-         index,
-         workflow_id,
-         attempt,
-         max_attempts,
-         config
-       ) do
-    Context.set_current_step(step.name)
-
-    {:ok, step_exec} = create_step_execution(config, workflow_id, step, attempt)
-    {:ok, step_exec} = update_step_execution(config, step_exec, :running)
-
-    Durable.LogCapture.start_capture()
-
-    start_time = System.monotonic_time(:millisecond)
-
-    result =
-      try do
-        Step.execute(step, data, item, index)
-      rescue
-        e ->
-          {:error,
-           %{
-             type: inspect(e.__struct__),
-             message: Exception.message(e),
-             stacktrace: Exception.format_stacktrace(__STACKTRACE__)
-           }}
-      catch
-        :throw, value ->
-          {:throw, value}
-
-        kind, reason ->
-          {:error, %{type: "#{kind}", message: inspect(reason)}}
-      end
-
-    end_time = System.monotonic_time(:millisecond)
-    duration_ms = end_time - start_time
-
-    logs = Durable.LogCapture.stop_capture()
-
-    # Bundle context into a map to reduce arity
-    foreach_ctx = %{
-      step: step,
-      step_exec: step_exec,
-      data: data,
-      item: item,
-      index: index,
-      logs: logs,
-      duration_ms: duration_ms,
-      attempt: attempt,
-      max_attempts: max_attempts,
-      config: config
-    }
-
-    handle_foreach_result(result, foreach_ctx)
-  end
-
   # Handle step result from pipeline model
   defp handle_result({:ok, new_data}, ctx) when is_map(new_data) do
     %{step: step, step_exec: step_exec, logs: logs, duration_ms: duration_ms, config: config} =
@@ -230,8 +158,11 @@ defmodule Durable.Executor.StepRunner do
       config: config
     } = ctx
 
+    # Normalize error to map format for database storage
+    normalized_error = normalize_error_for_storage(error)
+
     if attempt < max_attempts do
-      {:ok, _} = fail_step_execution(config, step_exec, error, logs, duration_ms)
+      {:ok, _} = fail_step_execution(config, step_exec, normalized_error, logs, duration_ms)
 
       retry_opts = get_retry_opts(step)
       backoff_strategy = Map.get(retry_opts, :backoff, :exponential)
@@ -239,7 +170,7 @@ defmodule Durable.Executor.StepRunner do
 
       execute_with_retry(step, data, step_exec.workflow_id, attempt + 1, max_attempts, config)
     else
-      {:ok, _} = fail_step_execution(config, step_exec, error, logs, duration_ms)
+      {:ok, _} = fail_step_execution(config, step_exec, normalized_error, logs, duration_ms)
       {:error, error}
     end
   end
@@ -258,86 +189,15 @@ defmodule Durable.Executor.StepRunner do
     {:error, error}
   end
 
-  # Handle foreach step success
-  defp handle_foreach_result({:ok, new_data}, ctx) when is_map(new_data) do
-    %{step: step, step_exec: step_exec, logs: logs, duration_ms: duration_ms, config: config} =
-      ctx
-
-    handle_step_success(config, step, step_exec, new_data, logs, duration_ms)
-  end
-
-  # Handle foreach errors
-  defp handle_foreach_result({:error, error}, ctx) do
-    %{
-      step: step,
-      step_exec: step_exec,
-      data: data,
-      item: item,
-      index: index,
-      logs: logs,
-      duration_ms: duration_ms,
-      attempt: attempt,
-      max_attempts: max_attempts,
-      config: config
-    } = ctx
-
-    if attempt < max_attempts do
-      {:ok, _} = fail_step_execution(config, step_exec, error, logs, duration_ms)
-
-      retry_opts = get_retry_opts(step)
-      backoff_strategy = Map.get(retry_opts, :backoff, :exponential)
-      Backoff.sleep(backoff_strategy, attempt, retry_opts)
-
-      execute_foreach_with_retry(
-        step,
-        data,
-        item,
-        index,
-        step_exec.workflow_id,
-        attempt + 1,
-        max_attempts,
-        config
-      )
-    else
-      {:ok, _} = fail_step_execution(config, step_exec, error, logs, duration_ms)
-      {:error, error}
-    end
-  end
-
-  # Handle foreach wait primitives
-  defp handle_foreach_result({:throw, {wait_type, _opts}}, ctx)
-       when wait_type in [:sleep, :wait_for_event, :wait_for_input, :wait_for_any, :wait_for_all] do
-    %{step_exec: step_exec, logs: logs, duration_ms: duration_ms, config: config} = ctx
-
-    error = %{
-      type: "foreach_wait_not_supported",
-      message: "#{wait_type} is not supported in foreach blocks"
-    }
-
-    {:ok, _} = fail_step_execution(config, step_exec, error, logs, duration_ms)
-    {:error, error}
-  end
-
-  # Handle invalid foreach return
-  defp handle_foreach_result(other, ctx) do
-    %{step_exec: step_exec, logs: logs, duration_ms: duration_ms, config: config} = ctx
-
-    error = %{
-      type: "invalid_step_return",
-      message: "Foreach step must return {:ok, map} or {:error, reason}, got: #{inspect(other)}"
-    }
-
-    {:ok, _} = fail_step_execution(config, step_exec, error, logs, duration_ms)
-    {:error, error}
-  end
-
   defp handle_step_success(config, step, step_exec, new_data, logs, duration_ms) do
     stored_output =
       if step.opts[:parallel_id] do
-        # Include data snapshot for parallel step resumption
+        # Include result snapshot for parallel step resumption
+        # Store the raw result data for the new results-based model
         %{
           "__output__" => new_data,
-          "__context__" => new_data
+          "__context__" => new_data,
+          "__result__" => new_data
         }
       else
         new_data
@@ -411,4 +271,16 @@ defmodule Durable.Executor.StepRunner do
   defp serialize_output(output) when is_tuple(output), do: %{value: Tuple.to_list(output)}
   defp serialize_output(nil), do: nil
   defp serialize_output(output), do: %{value: inspect(output)}
+
+  # Normalize error to map format for database storage
+  # The error field in StepExecution expects a map
+  defp normalize_error_for_storage(error) when is_map(error), do: error
+
+  defp normalize_error_for_storage(error) when is_binary(error),
+    do: %{type: "error", message: error}
+
+  defp normalize_error_for_storage(error) when is_atom(error),
+    do: %{type: "error", message: Atom.to_string(error)}
+
+  defp normalize_error_for_storage(error), do: %{type: "error", message: inspect(error)}
 end

@@ -7,11 +7,10 @@ A durable, resumable workflow engine for Elixir. Similar to Temporal/Inngest.
 
 ## Features
 
-- **Pipeline Model** - Data flows from step to step, simple and explicit
+- **Pipeline Model** - Context flows from step to step, simple and explicit
 - **Resumability** - Sleep, wait for events, wait for human input
 - **Branching** - Pattern-matched conditional flow control
-- **Parallel** - Run steps concurrently with merge strategies
-- **ForEach** - Process collections with configurable concurrency
+- **Parallel** - Run steps concurrently with result collection
 - **Compensations** - Saga pattern with automatic rollback
 - **Cron Scheduling** - Recurring workflows with cron expressions
 - **Reliability** - Automatic retries with exponential/linear/constant backoff
@@ -55,28 +54,28 @@ defmodule MyApp.OrderWorkflow do
 
   workflow "process_order", timeout: hours(2) do
     # First step receives workflow input
-    step :validate, fn order ->
+    step :validate, fn input ->
       {:ok, %{
-        order_id: order["id"],
-        items: order["items"],
-        customer_id: order["customer_id"]
+        order_id: input["id"],
+        items: input["items"],
+        customer_id: input["customer_id"]
       }}
     end
 
-    # Each step receives previous step's output
-    step :calculate_total, fn data ->
-      total = data.items |> Enum.map(& &1["price"]) |> Enum.sum()
-      {:ok, assign(data, :total, total)}
+    # Each step receives previous step's output as context
+    step :calculate_total, fn ctx ->
+      total = ctx.items |> Enum.map(& &1["price"]) |> Enum.sum()
+      {:ok, assign(ctx, :total, total)}
     end
 
-    step :charge_payment, [retry: [max_attempts: 3, backoff: :exponential]], fn data ->
-      {:ok, charge} = PaymentService.charge(data.order_id, data.total)
-      {:ok, assign(data, :charge_id, charge.id)}
+    step :charge_payment, [retry: [max_attempts: 3, backoff: :exponential]], fn ctx ->
+      {:ok, charge} = PaymentService.charge(ctx.order_id, ctx.total)
+      {:ok, assign(ctx, :charge_id, charge.id)}
     end
 
-    step :send_confirmation, fn data ->
-      EmailService.send_confirmation(data.order_id)
-      {:ok, data}
+    step :send_confirmation, fn ctx ->
+      EmailService.send_confirmation(ctx.order_id)
+      {:ok, ctx}
     end
   end
 end
@@ -98,26 +97,26 @@ defmodule MyApp.ExpenseApproval do
   use Durable.Wait
 
   workflow "expense_approval" do
-    step :request_approval, fn data ->
+    step :request_approval, fn ctx ->
       result = wait_for_approval("manager",
-        prompt: "Approve $#{data["amount"]} expense?",
+        prompt: "Approve $#{ctx["amount"]} expense?",
         timeout: days(3),
         timeout_value: :auto_rejected
       )
-      {:ok, assign(data, :decision, result)}
+      {:ok, assign(ctx, :decision, result)}
     end
 
-    branch on: fn data -> data.decision end do
+    branch on: fn ctx -> ctx.decision end do
       :approved ->
-        step :process, fn data ->
-          Expenses.reimburse(data["employee_id"], data["amount"])
-          {:ok, assign(data, :status, :reimbursed)}
+        step :process, fn ctx ->
+          Expenses.reimburse(ctx["employee_id"], ctx["amount"])
+          {:ok, assign(ctx, :status, :reimbursed)}
         end
 
       _ ->
-        step :notify_rejection, fn data ->
-          Mailer.send_rejection(data["employee_id"])
-          {:ok, assign(data, :status, :rejected)}
+        step :notify_rejection, fn ctx ->
+          Mailer.send_rejection(ctx["employee_id"])
+          {:ok, assign(ctx, :status, :rejected)}
         end
     end
   end
@@ -129,7 +128,7 @@ Durable.provide_input(workflow_id, "manager", :approved)
 
 ### Parallel Data Fetch
 
-Fetch data concurrently, then combine.
+Fetch data concurrently, then combine results.
 
 ```elixir
 defmodule MyApp.DashboardBuilder do
@@ -141,23 +140,79 @@ defmodule MyApp.DashboardBuilder do
       {:ok, %{user_id: input["user_id"]}}
     end
 
+    # Parallel steps produce results in __results__ map
     parallel do
-      step :user, fn data ->
-        {:ok, assign(data, :user, Users.get(data.user_id))}
+      step :user, fn ctx ->
+        {:ok, %{user: Users.get(ctx.user_id)}}
       end
 
-      step :orders, fn data ->
-        {:ok, assign(data, :orders, Orders.recent(data.user_id))}
+      step :orders, fn ctx ->
+        {:ok, %{orders: Orders.recent(ctx.user_id)}}
       end
 
-      step :notifications, fn data ->
-        {:ok, assign(data, :notifs, Notifications.unread(data.user_id))}
+      step :notifications, fn ctx ->
+        {:ok, %{notifs: Notifications.unread(ctx.user_id)}}
       end
     end
 
-    step :render, fn data ->
-      dashboard = Dashboard.build(data.user, data.orders, data.notifs)
-      {:ok, assign(data, :dashboard, dashboard)}
+    # Access results from __results__ map
+    step :render, fn ctx ->
+      results = ctx[:__results__]
+
+      # Results are tagged tuples: ["ok", data] or ["error", reason]
+      user = case results["user"] do
+        ["ok", data] -> data.user
+        _ -> nil
+      end
+
+      orders = case results["orders"] do
+        ["ok", data] -> data.orders
+        _ -> []
+      end
+
+      notifs = case results["notifications"] do
+        ["ok", data] -> data.notifs
+        _ -> []
+      end
+
+      dashboard = Dashboard.build(user, orders, notifs)
+      {:ok, assign(ctx, :dashboard, dashboard)}
+    end
+  end
+end
+
+# Or use into: to transform results directly
+defmodule MyApp.DashboardBuilderWithInto do
+  use Durable
+  use Durable.Helpers
+
+  workflow "build_dashboard_v2" do
+    step :init, fn input ->
+      {:ok, %{user_id: input["user_id"]}}
+    end
+
+    parallel into: fn ctx, results ->
+      # results contains tuples: %{user: {:ok, data}, orders: {:ok, data}, ...}
+      case {results[:user], results[:orders], results[:notifications]} do
+        {{:ok, user_data}, {:ok, orders_data}, {:ok, notifs_data}} ->
+          {:ok, Map.merge(ctx, %{
+            user: user_data.user,
+            orders: orders_data.orders,
+            notifs: notifs_data.notifs
+          })}
+
+        _ ->
+          {:error, "Failed to fetch dashboard data"}
+      end
+    end do
+      step :user, fn ctx -> {:ok, %{user: Users.get(ctx.user_id)}} end
+      step :orders, fn ctx -> {:ok, %{orders: Orders.recent(ctx.user_id)}} end
+      step :notifications, fn ctx -> {:ok, %{notifs: Notifications.unread(ctx.user_id)}} end
+    end
+
+    step :render, fn ctx ->
+      dashboard = Dashboard.build(ctx.user, ctx.orders, ctx.notifs)
+      {:ok, assign(ctx, :dashboard, dashboard)}
     end
   end
 end
@@ -165,7 +220,7 @@ end
 
 ### Batch Processing
 
-Process items with controlled concurrency.
+Process items with controlled concurrency using `Task.async_stream`.
 
 ```elixir
 defmodule MyApp.BulkEmailer do
@@ -178,16 +233,27 @@ defmodule MyApp.BulkEmailer do
       {:ok, %{campaign_id: input["campaign_id"], recipients: recipients}}
     end
 
-    foreach :send_emails,
-      items: fn data -> data.recipients end,
-      concurrency: 10,
-      on_error: :continue do
+    step :send_emails, fn ctx ->
+      results =
+        ctx.recipients
+        |> Task.async_stream(
+          fn recipient ->
+            case Mailer.send_campaign(recipient, ctx.campaign_id) do
+              :ok -> {:ok, recipient}
+              {:error, reason} -> {:error, {recipient, reason}}
+            end
+          end,
+          max_concurrency: 10,
+          timeout: :infinity
+        )
+        |> Enum.map(fn {:ok, r} -> r end)
 
-      # Foreach steps receive (data, item, index)
-      step :send, fn data, recipient, _idx ->
-        Mailer.send_campaign(recipient, data.campaign_id)
-        {:ok, increment(data, :sent_count)}
-      end
+      sent = for {:ok, _} <- results, do: 1
+      failed = for {:error, _} <- results, do: 1
+
+      {:ok, ctx
+      |> assign(:sent_count, length(sent))
+      |> assign(:failed_count, length(failed))}
     end
   end
 end
@@ -203,30 +269,30 @@ defmodule MyApp.TripBooking do
   use Durable.Helpers
 
   workflow "book_trip" do
-    step :book_flight, [compensate: :cancel_flight], fn data ->
-      booking = Flights.book(data["flight"])
-      {:ok, assign(data, :flight, booking)}
+    step :book_flight, [compensate: :cancel_flight], fn ctx ->
+      booking = Flights.book(ctx["flight"])
+      {:ok, assign(ctx, :flight, booking)}
     end
 
-    step :book_hotel, [compensate: :cancel_hotel], fn data ->
-      booking = Hotels.book(data["hotel"])
-      {:ok, assign(data, :hotel, booking)}
+    step :book_hotel, [compensate: :cancel_hotel], fn ctx ->
+      booking = Hotels.book(ctx["hotel"])
+      {:ok, assign(ctx, :hotel, booking)}
     end
 
-    step :charge, fn data ->
-      total = data.flight.price + data.hotel.price
-      Payments.charge(data["card"], total)
-      {:ok, assign(data, :charged, true)}
+    step :charge, fn ctx ->
+      total = ctx.flight.price + ctx.hotel.price
+      Payments.charge(ctx["card"], total)
+      {:ok, assign(ctx, :charged, true)}
     end
 
-    compensate :cancel_flight, fn data ->
-      Flights.cancel(data.flight.id)
-      {:ok, data}
+    compensate :cancel_flight, fn ctx ->
+      Flights.cancel(ctx.flight.id)
+      {:ok, ctx}
     end
 
-    compensate :cancel_hotel, fn data ->
-      Hotels.cancel(data.hotel.id)
-      {:ok, data}
+    compensate :cancel_hotel, fn ctx ->
+      Hotels.cancel(ctx.hotel.id)
+      {:ok, ctx}
     end
   end
 end
@@ -249,10 +315,10 @@ defmodule MyApp.DailyReport do
       {:ok, %{report: report}}
     end
 
-    step :distribute, fn data ->
-      Mailer.send_report(data.report, to: "team@company.com")
-      Slack.post_summary(data.report, channel: "#sales")
-      {:ok, data}
+    step :distribute, fn ctx ->
+      Mailer.send_report(ctx.report, to: "team@company.com")
+      Slack.post_summary(ctx.report, channel: "#sales")
+      {:ok, ctx}
     end
   end
 end
@@ -272,33 +338,33 @@ defmodule MyApp.TrialReminder do
   use Durable.Wait
 
   workflow "trial_reminder" do
-    step :welcome, fn data ->
-      Mailer.send_welcome(data["user_id"])
-      {:ok, %{user_id: data["user_id"], trial_started_at: data["trial_started_at"]}}
+    step :welcome, fn ctx ->
+      Mailer.send_welcome(ctx["user_id"])
+      {:ok, %{user_id: ctx["user_id"], trial_started_at: ctx["trial_started_at"]}}
     end
 
-    step :wait_3_days, fn data ->
+    step :wait_3_days, fn ctx ->
       sleep(days(3))
-      {:ok, data}
+      {:ok, ctx}
     end
 
-    step :check_in, fn data ->
-      Mailer.send_tips(data.user_id)
-      {:ok, data}
+    step :check_in, fn ctx ->
+      Mailer.send_tips(ctx.user_id)
+      {:ok, ctx}
     end
 
-    step :wait_until_trial_ends, fn data ->
-      trial_end = DateTime.add(data.trial_started_at, 14, :day)
+    step :wait_until_trial_ends, fn ctx ->
+      trial_end = DateTime.add(ctx.trial_started_at, 14, :day)
       schedule_at(trial_end)
-      {:ok, data}
+      {:ok, ctx}
     end
 
-    step :convert_or_remind, fn data ->
-      if Subscriptions.active?(data.user_id) do
-        {:ok, assign(data, :converted, true)}
+    step :convert_or_remind, fn ctx ->
+      if Subscriptions.active?(ctx.user_id) do
+        {:ok, assign(ctx, :converted, true)}
       else
-        Mailer.send_upgrade_reminder(data.user_id)
-        {:ok, assign(data, :converted, false)}
+        Mailer.send_upgrade_reminder(ctx.user_id)
+        {:ok, assign(ctx, :converted, false)}
       end
     end
   end
@@ -316,30 +382,30 @@ defmodule MyApp.PaymentFlow do
   use Durable.Wait
 
   workflow "payment_flow" do
-    step :create_invoice, fn data ->
-      invoice = Invoices.create(data["order_id"], data["amount"])
-      {:ok, %{order_id: data["order_id"], invoice_id: invoice.id}}
+    step :create_invoice, fn ctx ->
+      invoice = Invoices.create(ctx["order_id"], ctx["amount"])
+      {:ok, %{order_id: ctx["order_id"], invoice_id: invoice.id}}
     end
 
-    step :await_payment, fn data ->
+    step :await_payment, fn ctx ->
       {event, _payload} = wait_for_any(["payment.success", "payment.failed"],
         timeout: days(7),
         timeout_value: {"payment.expired", nil}
       )
-      {:ok, assign(data, :result, event)}
+      {:ok, assign(ctx, :result, event)}
     end
 
-    branch on: fn data -> data.result end do
+    branch on: fn ctx -> ctx.result end do
       "payment.success" ->
-        step :fulfill, fn data ->
-          Orders.fulfill(data.order_id)
-          {:ok, assign(data, :status, :fulfilled)}
+        step :fulfill, fn ctx ->
+          Orders.fulfill(ctx.order_id)
+          {:ok, assign(ctx, :status, :fulfilled)}
         end
 
       _ ->
-        step :cancel, fn data ->
-          Orders.cancel(data.order_id)
-          {:ok, assign(data, :status, :cancelled)}
+        step :cancel, fn ctx ->
+          Orders.cancel(ctx.order_id)
+          {:ok, assign(ctx, :status, :cancelled)}
         end
     end
   end
@@ -356,12 +422,12 @@ Durable.send_event(workflow_id, "payment.success", %{transaction_id: "txn_123"})
 ```elixir
 use Durable.Helpers
 
-assign(data, :key, value)    # Set a value
-assign(data, %{a: 1, b: 2})  # Merge multiple values
-update(data, :key, default, fn old -> new end)
-append(data, :list, item)    # Append to list
-increment(data, :count)      # Increment by 1
-increment(data, :count, 5)   # Increment by 5
+assign(ctx, :key, value)    # Set a value
+assign(ctx, %{a: 1, b: 2})  # Merge multiple values
+update(ctx, :key, default, fn old -> new end)
+append(ctx, :list, item)    # Append to list
+increment(ctx, :count)      # Increment by 1
+increment(ctx, :count, 5)   # Increment by 5
 ```
 
 ### Time Helpers
@@ -389,7 +455,6 @@ Durable.provide_input(id, "input_name", data)
 
 - [Branching](guides/branching.md) - Conditional flow control
 - [Parallel](guides/parallel.md) - Concurrent execution
-- [ForEach](guides/foreach.md) - Collection processing
 - [Compensations](guides/compensations.md) - Saga pattern
 - [Waiting](guides/waiting.md) - Sleep, events, human input
 

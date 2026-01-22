@@ -16,7 +16,7 @@ defmodule Durable.IntegrationTest do
 
   # ============================================================================
   # Scenario 1: E-Commerce Order Processing
-  # Features: Branch -> ForEach -> Parallel (sequential)
+  # Features: Branch -> Batch Processing -> Parallel (sequential)
   # ============================================================================
 
   describe "Scenario 1: E-Commerce Order Processing" do
@@ -40,7 +40,7 @@ defmodule Durable.IntegrationTest do
       # Digital branch should NOT have executed
       refute Map.has_key?(execution.context, "download_url")
 
-      # ForEach should have processed all items
+      # Batch processing should have processed all items
       assert execution.context["items_processed"] == ["Widget", "Gadget"]
 
       # Final parallel tasks should have executed
@@ -68,7 +68,7 @@ defmodule Durable.IntegrationTest do
       # Physical branch should NOT have executed
       refute Map.has_key?(execution.context, "shipping_label")
 
-      # ForEach should have processed item
+      # Batch processing should have processed item
       assert execution.context["items_processed"] == ["E-Book"]
       assert execution.context["completed"] == true
     end
@@ -87,7 +87,7 @@ defmodule Durable.IntegrationTest do
       # Verify steps executed - use qualified name patterns for generated step names
       assert "validate_order" in step_names
       assert Enum.any?(step_names, &String.contains?(&1, "__process_digital"))
-      assert Enum.any?(step_names, &String.contains?(&1, "__process_item"))
+      assert "process_items" in step_names
       assert Enum.any?(step_names, &String.contains?(&1, "__send_confirmation"))
       assert Enum.any?(step_names, &String.contains?(&1, "__update_analytics"))
       assert "complete" in step_names
@@ -96,7 +96,7 @@ defmodule Durable.IntegrationTest do
 
   # ============================================================================
   # Scenario 2: Document Approval Workflow
-  # Features: Decision (with goto) -> Parallel -> Branch -> ForEach
+  # Features: Decision (with goto) -> Parallel -> Branch -> Batch Processing
   # ============================================================================
 
   describe "Scenario 2: Document Approval Workflow" do
@@ -137,7 +137,7 @@ defmodule Durable.IntegrationTest do
       # Approved branch should have run
       assert execution.context["approval_processed"] == "approved"
 
-      # ForEach should have processed all items
+      # Batch processing should have processed all items
       assert execution.context["items_updated"] == ["doc1", "doc2", "doc3"]
 
       # Rejection should NOT have run
@@ -165,7 +165,7 @@ defmodule Durable.IntegrationTest do
       assert execution.context["approval_processed"] == "rejected"
       assert execution.context["rejection_notified"] == true
 
-      # Approved forEach should NOT run items
+      # Approved batch should NOT process items
       refute Map.has_key?(execution.context, "items_updated")
 
       assert execution.context["finalized"] == true
@@ -192,7 +192,7 @@ defmodule Durable.IntegrationTest do
 
   # ============================================================================
   # Scenario 3: Batch Data Migration
-  # Features: ForEach -> Decision -> Parallel -> Branch
+  # Features: Batch Processing -> Decision -> Parallel -> Branch
   # ============================================================================
 
   describe "Scenario 3: Batch Data Migration" do
@@ -209,7 +209,7 @@ defmodule Durable.IntegrationTest do
 
       assert execution.status == :completed
 
-      # All batches processed via foreach
+      # All batches processed
       assert execution.context["migrated_ids"] == ["batch1", "batch2", "batch3"]
 
       # Parallel reporting tasks completed
@@ -402,7 +402,7 @@ end
 defmodule OrderProcessingWorkflow do
   @moduledoc """
   Scenario 1: E-Commerce Order Processing
-  Features: Branch -> ForEach -> Parallel (sequential, not nested)
+  Features: Branch -> Batch Processing -> Parallel (sequential, not nested)
   """
   use Durable
   use Durable.Helpers
@@ -441,16 +441,25 @@ defmodule OrderProcessingWorkflow do
         end)
     end
 
-    # ForEach to process line items (sequential)
-    foreach :process_items, items: fn data -> data.line_items end do
-      step(:process_item, fn data, item, _idx ->
-        current_list = data[:items_processed] || []
-        {:ok, assign(data, :items_processed, current_list ++ [item["name"]])}
-      end)
-    end
+    # Batch processing using Enum.map (replaces foreach)
+    step(:process_items, fn data ->
+      items_processed = Enum.map(data.line_items, fn item -> item["name"] end)
+      {:ok, assign(data, :items_processed, items_processed)}
+    end)
 
     # Parallel notification tasks
-    parallel do
+    # Use into: to merge results back into context for backward compatibility
+    parallel into: fn ctx, results ->
+               merged =
+                 Enum.reduce(results, ctx, fn {_key, result}, acc ->
+                   case result do
+                     {:ok, data} -> Map.merge(acc, data)
+                     _ -> acc
+                   end
+                 end)
+
+               {:ok, merged}
+             end do
       step(:send_confirmation, fn data ->
         {:ok, assign(data, :email_sent, true)}
       end)
@@ -469,7 +478,7 @@ end
 defmodule DocumentApprovalWorkflow do
   @moduledoc """
   Scenario 2: Document Approval with Decision routing
-  Features: Decision (goto) -> Parallel -> Branch -> ForEach (sequential)
+  Features: Decision (goto) -> Parallel -> Branch -> Batch Processing (sequential)
   """
   use Durable
   use Durable.Helpers
@@ -497,7 +506,18 @@ defmodule DocumentApprovalWorkflow do
     end)
 
     # Parallel notification (only runs for high-value)
-    parallel do
+    # Use into: to merge results back into context
+    parallel into: fn ctx, results ->
+               merged =
+                 Enum.reduce(results, ctx, fn {_key, result}, acc ->
+                   case result do
+                     {:ok, data} -> Map.merge(acc, data)
+                     _ -> acc
+                   end
+                 end)
+
+               {:ok, merged}
+             end do
       step(:notify_approvers, fn data ->
         {:ok, assign(data, :notified, true)}
       end)
@@ -532,17 +552,15 @@ defmodule DocumentApprovalWorkflow do
         end)
     end
 
-    # ForEach to update items (only runs for both, but only updates if approved)
-    foreach :update_items, items: fn data -> data.affected_items end do
-      step(:update_item, fn data, item, _idx ->
-        if data[:approval_processed] == "approved" do
-          current_list = data[:items_updated] || []
-          {:ok, assign(data, :items_updated, current_list ++ [item])}
-        else
-          {:ok, data}
-        end
-      end)
-    end
+    # Batch processing to update items (only updates if approved)
+    step(:update_items, fn data ->
+      if data[:approval_processed] == "approved" do
+        items_updated = Enum.map(data.affected_items, fn item -> item end)
+        {:ok, assign(data, :items_updated, items_updated)}
+      else
+        {:ok, data}
+      end
+    end)
 
     step(:finalize, fn data ->
       {:ok, assign(data, :finalized, true)}
@@ -553,7 +571,7 @@ end
 defmodule BatchMigrationWorkflow do
   @moduledoc """
   Scenario 3: Batch Data Migration
-  Features: ForEach -> Decision -> Parallel -> Branch (sequential)
+  Features: Batch Processing -> Decision -> Parallel -> Branch (sequential)
   """
   use Durable
   use Durable.Helpers
@@ -569,13 +587,11 @@ defmodule BatchMigrationWorkflow do
       {:ok, data}
     end)
 
-    # ForEach to process batches (sequential)
-    foreach :process_batches, items: fn data -> data.batches end do
-      step(:migrate_batch, fn data, batch, _idx ->
-        current_ids = data[:migrated_ids] || []
-        {:ok, assign(data, :migrated_ids, current_ids ++ [batch["id"]])}
-      end)
-    end
+    # Batch processing using Enum.map (replaces foreach)
+    step(:process_batches, fn data ->
+      migrated_ids = Enum.map(data.batches, fn batch -> batch["id"] end)
+      {:ok, assign(data, :migrated_ids, migrated_ids)}
+    end)
 
     # Decision based on migration results
     # If empty, jump to finalize (skipping parallel and mark_success)
@@ -590,7 +606,18 @@ defmodule BatchMigrationWorkflow do
     end)
 
     # Parallel reporting (only runs if we have batches)
-    parallel do
+    # Use into: to merge results back into context
+    parallel into: fn ctx, results ->
+               merged =
+                 Enum.reduce(results, ctx, fn {_key, result}, acc ->
+                   case result do
+                     {:ok, data} -> Map.merge(acc, data)
+                     _ -> acc
+                   end
+                 end)
+
+               {:ok, merged}
+             end do
       step(:generate_report, fn data ->
         {:ok, assign(data, :report_generated, true)}
       end)

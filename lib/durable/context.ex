@@ -47,8 +47,6 @@ defmodule Durable.Context do
   @input_key :durable_input
   @workflow_id_key :durable_workflow_id
   @step_key :durable_current_step
-  @foreach_item_key :durable_foreach_item
-  @foreach_index_key :durable_foreach_index
 
   @doc """
   Injects context management functions into the calling module.
@@ -71,8 +69,9 @@ defmodule Durable.Context do
           current_step: 0,
           append_context: 2,
           increment_context: 2,
-          current_item: 0,
-          current_index: 0
+          parallel_results: 0,
+          parallel_result: 1,
+          parallel_ok?: 1
         ]
     end
   end
@@ -287,39 +286,66 @@ defmodule Durable.Context do
   end
 
   @doc """
-  Returns the current item being processed in a foreach block.
+  Returns the full parallel results map from context.
+
+  The results map contains tagged tuples: `%{step_name => {:ok, data} | {:error, reason}}`
 
   ## Examples
 
-      foreach :items, items: :items do
-        step :process do
-          item = current_item()
-          # process the item
-        end
+      parallel do
+        step :payment, fn ctx -> {:ok, %{id: 123}} end
+        step :delivery, fn ctx -> {:error, :not_found} end
+      end
+
+      step :handle, fn ctx ->
+        results = parallel_results()
+        # => %{payment: {:ok, %{id: 123}}, delivery: {:error, :not_found}}
       end
 
   """
-  @spec current_item() :: any()
-  def current_item do
-    Process.get(@foreach_item_key)
+  @spec parallel_results() :: map()
+  def parallel_results do
+    get_context(:__results__, %{})
   end
 
   @doc """
-  Returns the current index in a foreach block.
+  Returns a specific parallel step's result by name.
 
   ## Examples
 
-      foreach :items, items: :items do
-        step :process do
-          idx = current_index()
-          # use the index
+      step :handle, fn ctx ->
+        case parallel_result(:payment) do
+          {:ok, payment} -> # handle success
+          {:error, reason} -> # handle error
         end
       end
 
   """
-  @spec current_index() :: non_neg_integer() | nil
-  def current_index do
-    Process.get(@foreach_index_key)
+  @spec parallel_result(atom()) :: {:ok, any()} | {:error, any()} | nil
+  def parallel_result(step_name) when is_atom(step_name) do
+    parallel_results() |> Map.get(step_name)
+  end
+
+  @doc """
+  Checks if a parallel step succeeded.
+
+  ## Examples
+
+      step :handle, fn ctx ->
+        if parallel_ok?(:payment) do
+          # payment succeeded
+        else
+          # payment failed
+        end
+      end
+
+  """
+  @spec parallel_ok?(atom()) :: boolean()
+  def parallel_ok?(step_name) when is_atom(step_name) do
+    case parallel_result(step_name) do
+      {:ok, _} -> true
+      _ -> false
+    end
   end
 
   # Internal functions for executor use
@@ -369,27 +395,11 @@ defmodule Durable.Context do
   end
 
   @doc false
-  def set_foreach_item(item, index) do
-    Process.put(@foreach_item_key, item)
-    Process.put(@foreach_index_key, index)
-    :ok
-  end
-
-  @doc false
-  def clear_foreach_item do
-    Process.delete(@foreach_item_key)
-    Process.delete(@foreach_index_key)
-    :ok
-  end
-
-  @doc false
   def cleanup do
     Process.delete(@context_key)
     Process.delete(@input_key)
     Process.delete(@workflow_id_key)
     Process.delete(@step_key)
-    Process.delete(@foreach_item_key)
-    Process.delete(@foreach_index_key)
     # Log capture keys (cleanup in case of crashes)
     Process.delete(:durable_logs)
     Process.delete(:durable_original_group_leader)
