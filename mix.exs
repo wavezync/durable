@@ -77,7 +77,6 @@ defmodule Durable.MixProject do
         "guides/ai_workflows.md",
         "guides/branching.md",
         "guides/compensations.md",
-        "guides/foreach.md",
         "guides/parallel.md",
         "guides/waiting.md"
       ]
