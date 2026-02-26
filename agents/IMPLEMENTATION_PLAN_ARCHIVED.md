@@ -1,5 +1,13 @@
 # DurableWorkflow Implementation Plan
 
+> **⚠️ ARCHIVED (2026-01-23):** This document is no longer maintained.
+> See `WORKPLAN.md` for current status and `arch.md` for technical reference.
+>
+> Key changes since this document was written:
+> - ForEach primitive was **removed** (use `Enum.map` instead)
+> - Parallel execution uses new results model (`__results__`, `into:`, `returns:`)
+> - Loop primitive was **never implemented** (use step retries or `Enum` functions)
+
 ## Executive Summary
 
 This document outlines the complete implementation plan for **Durable**, a durable, resumable workflow engine for Elixir.

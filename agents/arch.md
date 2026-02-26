@@ -183,58 +183,66 @@ end
 
 Note: The `branch` macro is preferred for new workflows as it's more readable and allows multiple steps per branch.
 
-### Loops
-
-```elixir
-loop :retry_until_success, 
-  while: fn ctx -> !ctx.success && ctx.current_retry < ctx.max_retries end do
-  
-  step :attempt_api_call do
-    case ExternalAPI.call() do
-      {:ok, result} -> put_context(:success, true)
-      {:error, _} -> update_context(:current_retry, & &1 + 1)
-    end
-  end
-  
-  step :backoff do
-    unless context().success do
-      delay = :math.pow(2, context().current_retry) |> round()
-      sleep_for(seconds: delay)
-    end
-  end
-end
-```
-
 ### Parallel Execution
+
+Execute multiple steps concurrently. Results are stored in a structured format.
 
 ```elixir
 parallel do
   step :send_welcome_email do
-    EmailService.send_welcome(state().user.email)
+    EmailService.send_welcome(get_context(:user).email)
   end
-  
+
   step :provision_workspace do
-    WorkspaceService.create(state().user.id)
+    WorkspaceService.create(get_context(:user_id))
   end
-  
+
   step :create_stripe_customer do
-    StripeService.create_customer(state().user)
+    StripeService.create_customer(get_context(:user))
+  end
+end
+
+# Results automatically stored as:
+# context.__results__ = %{
+#   send_welcome_email: {:ok, email_result},
+#   provision_workspace: {:ok, workspace_result},
+#   create_stripe_customer: {:ok, stripe_result}
+# }
+
+# Access results in subsequent steps:
+step :finalize do
+  results = parallel_results()  # Get all results
+  email = parallel_result(:send_welcome_email)  # Get specific result
+
+  if parallel_ok?(:provision_workspace) do
+    # All good
   end
 end
 ```
 
-### ForEach
+**Custom result handling with `into:`:**
 
 ```elixir
-foreach :process_items, items: fn -> context().items end do |item|
-  step :process_item do
-    result = ItemProcessor.process(item)
-    append_context(:results, result)
-  end
+parallel into: fn ctx, results ->
+  # Custom merge function receives context and results map
+  successful = Enum.filter(results, fn {_k, v} -> match?({:ok, _}, v) end)
+  put_context(:successful_count, length(successful))
+end do
+  step :task_a do ... end
+  step :task_b do ... end
 end
 ```
 
+**Options:**
+- `into:` - Custom function to merge results into context
+- `returns:` - Specify which step's result to return (`:first_completed`, `:all`, or step name)
+- Error handling: Failures are captured in results, workflow continues
+
+See `guides/parallel.md` for comprehensive documentation.
+
 ### Workflow Orchestration
+
+> **Note:** Not yet implemented. This is a planned feature.
 
 Call child workflows from parent steps to compose larger workflows:
 
@@ -267,32 +275,44 @@ workflow "order_pipeline" do
 end
 ```
 
-**Options:**
+**Planned Options:**
 - `call_workflow/3` - Start child and wait for result
 - `start_workflow/3` - Fire-and-forget
 - Parent-child relationships tracked via `parent_workflow_id`
 
 ### Switch/Case
 
+> **Note:** Not yet implemented. Use the `branch` macro instead for conditional execution.
+
 ```elixir
+# PLANNED - NOT IMPLEMENTED
 switch :route_by_category, on: fn -> context().category end do
   case_match "billing" do
     step :assign_to_billing do
       TicketService.assign(input().ticket, team: :billing)
     end
   end
-  
+
   case_match "technical" do
     step :assign_to_engineering do
       TicketService.assign(input().ticket, team: :engineering)
     end
   end
-  
+
   default do
     step :assign_to_general_support do
       TicketService.assign(input().ticket, team: :general)
     end
   end
+end
+```
+
+**Current Alternative:** Use the `branch` macro with pattern matching:
+```elixir
+branch on: get_context(:category) do
+  "billing" -> step :assign_billing do ... end
+  "technical" -> step :assign_engineering do ... end
+  _ -> step :assign_general do ... end
 end
 ```
 
@@ -339,6 +359,11 @@ current_step()
 init_accumulator(:events, [])
 append_context(:events, new_event)
 increment_context(:counter, 1)
+
+# Parallel Results (after parallel block)
+parallel_results()              # Get all parallel results as map
+parallel_result(:step_name)     # Get specific step result
+parallel_ok?(:step_name)        # Check if step succeeded
 ```
 
 ---
@@ -1209,13 +1234,15 @@ Benefits:
 ### Phase 3: Advanced Features
 - [x] Wait primitives (sleep, wait_for_event, wait_for_input)
 - [x] Decision steps (legacy `decision` + `{:goto}`)
-- [x] Branch macro (new intuitive conditional flow)
-- [ ] Loops and iterations
-- [ ] Parallel execution
+- [x] Branch macro (intuitive conditional flow)
+- [x] Parallel execution (with results model)
+- [x] Compensation/saga
+- [x] Cron scheduling
+- [~] ForEach - **REMOVED** (use `Enum.map` instead)
+- [~] Loops - **Skipped** (use step retries or `Enum` functions)
 - [ ] Workflow orchestration (call child workflows)
+- [ ] Switch/case macro
 - [ ] Pipe-based API (functional workflow composition)
-- [ ] Compensation/saga
-- [ ] Cron scheduling
 
 ### Phase 4: Scalability
 - [ ] Redis queue adapter
@@ -1224,6 +1251,8 @@ Benefits:
 - [ ] Horizontal scaling support
 
 ### Phase 5: Developer Experience
+- [x] Module documentation (@moduledoc, @doc)
+- [x] 5 documentation guides
 - [ ] CLI tools
 - [ ] Mix tasks
 - [ ] Testing helpers
