@@ -284,6 +284,24 @@ defmodule Durable do
     Durable.Wait.send_event(workflow_id, event_name, payload)
   end
 
+  @doc """
+  Lists child workflow executions for a parent workflow.
+
+  ## Options
+
+  - `:status` - Filter by status
+
+  ## Examples
+
+      children = Durable.list_children(parent_workflow_id)
+      running_children = Durable.list_children(parent_workflow_id, status: :running)
+
+  """
+  @spec list_children(String.t(), keyword()) :: [map()]
+  def list_children(parent_workflow_id, opts \\ []) do
+    Durable.Query.list_child_executions(parent_workflow_id, opts)
+  end
+
   # Scheduling API
 
   @doc """

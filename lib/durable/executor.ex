@@ -80,6 +80,9 @@ defmodule Durable.Executor do
         })
         |> Repo.update(config)
 
+        # Cascade cancel to child workflows
+        cancel_child_workflows(config, workflow_id)
+
         :ok
 
       _execution ->
@@ -308,9 +311,18 @@ defmodule Durable.Executor do
 
     case StepRunner.execute(step, data, exec.id, config) do
       {:ok, new_data} ->
-        # Save data as context and continue to next step with new_data
+        # Save data as context and continue to next step
+        # save_data_as_context merges orchestration keys from process dict
         {:ok, exec} = save_data_as_context(config, exec, new_data)
-        execute_steps_recursive(remaining_steps, exec, step_index, workflow_def, config, new_data)
+        # Pass the DB-persisted context forward (includes orchestration keys)
+        execute_steps_recursive(
+          remaining_steps,
+          exec,
+          step_index,
+          workflow_def,
+          config,
+          exec.context
+        )
 
       {:decision, target_step, new_data} ->
         handle_decision_result(
@@ -329,6 +341,10 @@ defmodule Durable.Executor do
         # Save current data before waiting
         {:ok, exec} = save_data_as_context(config, exec, data)
         handle_wait_result(config, exec, wait_type, opts)
+
+      {:call_workflow, opts} ->
+        {:ok, exec} = save_data_as_context(config, exec, data)
+        handle_call_workflow(config, exec, opts)
 
       {:error, error} ->
         handle_step_failure(exec, error, workflow_def, config)
@@ -375,6 +391,41 @@ defmodule Durable.Executor do
 
   defp handle_wait_result(config, exec, :wait_for_all, opts),
     do: {:waiting, handle_wait_for_all(config, exec, opts) |> elem(1)}
+
+  defp handle_wait_result(config, exec, :call_workflow, opts),
+    do: handle_call_workflow(config, exec, opts)
+
+  # ============================================================================
+  # Workflow Orchestration (call_workflow)
+  # ============================================================================
+
+  defp handle_call_workflow(config, execution, opts) do
+    child_id = Keyword.fetch!(opts, :child_id)
+    event_name = Durable.Orchestration.child_event_name(child_id)
+    timeout_at = calculate_timeout_at(opts)
+
+    # Create pending event to wait for child completion
+    attrs = %{
+      workflow_id: execution.id,
+      event_name: event_name,
+      step_name: execution.current_step,
+      timeout_at: timeout_at,
+      timeout_value: serialize_timeout_value(Keyword.get(opts, :timeout_value, :child_timeout)),
+      wait_type: :single
+    }
+
+    {:ok, _} =
+      %PendingEvent{}
+      |> PendingEvent.changeset(attrs)
+      |> Repo.insert(config)
+
+    {:ok, execution} =
+      execution
+      |> Ecto.Changeset.change(status: :waiting)
+      |> Repo.update(config)
+
+    {:waiting, execution}
+  end
 
   defp execute_branch(
          branch_step,
@@ -522,7 +573,15 @@ defmodule Durable.Executor do
     case StepRunner.execute(step, data, exec.id, config) do
       {:ok, new_data} ->
         {:ok, exec} = save_data_as_context(config, exec, new_data)
-        execute_branch_steps_sequential(rest, exec, step_index, workflow_def, config, new_data)
+
+        execute_branch_steps_sequential(
+          rest,
+          exec,
+          step_index,
+          workflow_def,
+          config,
+          exec.context
+        )
 
       {:decision, target_step, new_data} ->
         # Decisions within branches - save and return for outer handler
@@ -548,6 +607,10 @@ defmodule Durable.Executor do
       {:wait_for_all, opts} ->
         {:ok, exec} = save_data_as_context(config, exec, data)
         {:waiting, handle_wait_for_all(config, exec, opts) |> elem(1)}
+
+      {:call_workflow, opts} ->
+        {:ok, exec} = save_data_as_context(config, exec, data)
+        handle_call_workflow(config, exec, opts)
 
       {:error, error} ->
         handle_step_failure(exec, error, workflow_def, config)
@@ -820,6 +883,15 @@ defmodule Durable.Executor do
       }}}
   end
 
+  defp handle_parallel_step_result({:call_workflow, _opts}, returns_key) do
+    {:ok, returns_key,
+     {:error,
+      %{
+        type: "parallel_call_workflow_not_supported",
+        message: "call_workflow not supported in parallel blocks"
+      }}}
+  end
+
   defp await_parallel_tasks(tasks, :fail_fast), do: await_tasks_fail_fast(tasks)
   defp await_parallel_tasks(tasks, :complete_all), do: await_tasks_complete_all(tasks)
   defp await_parallel_tasks(tasks, _), do: await_tasks_complete_all(tasks)
@@ -961,11 +1033,41 @@ defmodule Durable.Executor do
   end
 
   # Saves data as the workflow context in DB (for persistence/resume)
+  # Also merges orchestration keys from process dict to ensure child workflow
+  # references are persisted through DB round-trips
   defp save_data_as_context(config, execution, data) do
+    merged = merge_orchestration_context(data)
+
     execution
-    |> Ecto.Changeset.change(context: data)
+    |> Ecto.Changeset.change(context: merged)
     |> Repo.update(config)
   end
+
+  # Merge orchestration keys (__child:*, __fire_forget:*, __child_done:*) from
+  # process dict into the data to persist. These keys are set by
+  # Durable.Orchestration.call_workflow/start_workflow via put_context.
+  defp merge_orchestration_context(data) do
+    process_ctx = Process.get(:durable_context, %{})
+
+    orchestration_keys =
+      process_ctx
+      |> Enum.filter(fn {key, _} -> orchestration_key?(key) end)
+      |> Map.new()
+
+    Map.merge(data, orchestration_keys)
+  end
+
+  defp orchestration_key?(key) when is_atom(key) do
+    orchestration_key?(Atom.to_string(key))
+  end
+
+  defp orchestration_key?(key) when is_binary(key) do
+    String.starts_with?(key, "__child:") or
+      String.starts_with?(key, "__fire_forget:") or
+      String.starts_with?(key, "__child_done:")
+  end
+
+  defp orchestration_key?(_), do: false
 
   defp mark_completed(config, execution, final_data) do
     {:ok, execution} =
@@ -978,19 +1080,103 @@ defmodule Durable.Executor do
       |> Ecto.Changeset.change(locked_by: nil, locked_at: nil)
       |> Repo.update(config)
 
+    maybe_notify_parent(config, execution, :completed, final_data)
+
     {:ok, execution}
   end
 
   defp mark_failed(config, execution, error) do
-    execution
-    |> WorkflowExecution.status_changeset(:failed, %{
-      error: error,
-      completed_at: DateTime.utc_now()
-    })
-    |> Ecto.Changeset.change(locked_by: nil, locked_at: nil)
-    |> Repo.update(config)
+    {:ok, execution} =
+      execution
+      |> WorkflowExecution.status_changeset(:failed, %{
+        error: error,
+        completed_at: DateTime.utc_now()
+      })
+      |> Ecto.Changeset.change(locked_by: nil, locked_at: nil)
+      |> Repo.update(config)
+
+    maybe_notify_parent(config, execution, :failed, error)
 
     {:error, error}
+  end
+
+  # ============================================================================
+  # Parent Notification (Orchestration)
+  # ============================================================================
+
+  defp maybe_notify_parent(_config, %{parent_workflow_id: nil}, _status, _data), do: :ok
+
+  defp maybe_notify_parent(config, execution, status, data) do
+    event_name = Durable.Orchestration.child_event_name(execution.id)
+    payload = Durable.Orchestration.build_result_payload(status, data)
+
+    # Find and fulfill the pending event on the parent workflow
+    query =
+      from(p in PendingEvent,
+        where:
+          p.workflow_id == ^execution.parent_workflow_id and
+            p.event_name == ^event_name and
+            p.status == :pending
+      )
+
+    case Repo.one(config, query) do
+      nil ->
+        # Parent not waiting (fire-and-forget case, or already timed out)
+        :ok
+
+      pending_event ->
+        # Fulfill the pending event
+        {:ok, _} =
+          pending_event
+          |> PendingEvent.receive_changeset(payload)
+          |> Repo.update(config)
+
+        # Find the child ref from parent's context to store result under the right key
+        parent = Repo.get(config, WorkflowExecution, execution.parent_workflow_id)
+        result_context = build_parent_result_context(parent, execution.id, payload)
+
+        # Resume the parent workflow
+        resume_workflow(execution.parent_workflow_id, result_context)
+    end
+  end
+
+  # Build context update for parent with child result stored under the right key
+  defp build_parent_result_context(parent, child_id, payload) do
+    parent_context = parent.context || %{}
+
+    # Find which ref this child belongs to by looking for __child:ref = child_id
+    ref =
+      Enum.find_value(parent_context, fn
+        {"__child:" <> ref_str, ^child_id} -> ref_str
+        _ -> nil
+      end)
+
+    if ref do
+      %{
+        "__child_done:#{ref}" => payload,
+        Durable.Orchestration.child_event_name(child_id) => payload
+      }
+    else
+      %{Durable.Orchestration.child_event_name(child_id) => payload}
+    end
+  end
+
+  # ============================================================================
+  # Cascade Cancellation (Orchestration)
+  # ============================================================================
+
+  defp cancel_child_workflows(config, parent_id) do
+    query =
+      from(w in WorkflowExecution,
+        where: w.parent_workflow_id == ^parent_id,
+        where: w.status in [:pending, :running, :waiting]
+      )
+
+    children = Repo.all(config, query)
+
+    Enum.each(children, fn child ->
+      cancel_workflow(child.id, "parent_cancelled", durable: config.name)
+    end)
   end
 
   # ============================================================================
