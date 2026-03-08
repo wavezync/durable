@@ -14,6 +14,7 @@ A durable, resumable workflow engine for Elixir. Similar to Temporal/Inngest.
 - **Compensations** - Saga pattern with automatic rollback
 - **Cron Scheduling** - Recurring workflows with cron expressions
 - **Reliability** - Automatic retries with exponential/linear/constant backoff
+- **Orchestration** - Parent/child workflow composition
 - **Persistence** - PostgreSQL-backed execution state
 
 ## Installation
@@ -439,6 +440,38 @@ hours(2)      # 7_200_000 ms
 days(7)       # 604_800_000 ms
 ```
 
+### Orchestration
+
+```elixir
+use Durable.Orchestration
+
+# Synchronous: call child and wait for result
+case call_workflow(MyApp.PaymentWorkflow, %{"amount" => 100}, timeout: hours(1)) do
+  {:ok, result} -> {:ok, assign(data, :payment, result)}
+  {:error, reason} -> {:error, reason}
+end
+
+# Fire-and-forget: start child and continue
+{:ok, child_id} = start_workflow(MyApp.EmailWorkflow, %{"to" => email}, ref: :welcome)
+
+# call_workflow also works inside parallel blocks (executed inline)
+parallel do
+  step :payment, fn data ->
+    case call_workflow(MyApp.PaymentWorkflow, %{"amount" => data.total}, ref: :pay) do
+      {:ok, result} -> {:ok, assign(data, :payment, result)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  step :shipping, fn data ->
+    case call_workflow(MyApp.ShippingWorkflow, %{"id" => data.order_id}, ref: :ship) do
+      {:ok, result} -> {:ok, assign(data, :shipping, result)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+end
+```
+
 ### API
 
 ```elixir
@@ -449,6 +482,7 @@ Durable.list_executions(workflow: Module, status: :running)
 Durable.cancel(id, "reason")
 Durable.send_event(id, "event", payload)
 Durable.provide_input(id, "input_name", data)
+Durable.list_children(parent_id)
 ```
 
 ## Guides
@@ -457,10 +491,10 @@ Durable.provide_input(id, "input_name", data)
 - [Parallel](guides/parallel.md) - Concurrent execution
 - [Compensations](guides/compensations.md) - Saga pattern
 - [Waiting](guides/waiting.md) - Sleep, events, human input
+- [Orchestration](guides/orchestration.md) - Parent/child workflow composition
 
 ## Coming Soon
 
-- Workflow orchestration (parent/child workflows)
 - Phoenix LiveView dashboard
 
 ## License

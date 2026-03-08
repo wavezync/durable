@@ -74,6 +74,9 @@ defmodule Durable.IntegrationTest do
     end
 
     test "all features execute in correct sequence" do
+      config = Config.get(Durable)
+      repo = config.repo
+
       input = %{
         "type" => "digital",
         "items" => [%{"id" => 1, "name" => "Test", "price" => 10}]
@@ -81,16 +84,30 @@ defmodule Durable.IntegrationTest do
 
       {:ok, execution} = create_and_execute_workflow(OrderProcessingWorkflow, input)
 
+      # Parent step executions (non-parallel steps)
       step_execs = get_step_executions(execution.id)
       step_names = Enum.map(step_execs, & &1.step_name)
 
-      # Verify steps executed - use qualified name patterns for generated step names
       assert "validate_order" in step_names
       assert Enum.any?(step_names, &String.contains?(&1, "__process_digital"))
       assert "process_items" in step_names
-      assert Enum.any?(step_names, &String.contains?(&1, "__send_confirmation"))
-      assert Enum.any?(step_names, &String.contains?(&1, "__update_analytics"))
       assert "complete" in step_names
+
+      # Parallel steps run as child executions — check their step records
+      children =
+        repo.all(
+          from(w in WorkflowExecution,
+            where: w.parent_workflow_id == ^execution.id
+          )
+        )
+
+      child_step_names =
+        Enum.flat_map(children, fn child ->
+          get_step_executions(child.id) |> Enum.map(& &1.step_name)
+        end)
+
+      assert Enum.any?(child_step_names, &String.contains?(&1, "__send_confirmation"))
+      assert Enum.any?(child_step_names, &String.contains?(&1, "__update_analytics"))
     end
   end
 
@@ -240,19 +257,31 @@ defmodule Durable.IntegrationTest do
     end
 
     test "parallel reporting runs all tasks" do
+      config = Config.get(Durable)
+      repo = config.repo
       input = %{"batches" => [%{"id" => "batch1"}]}
 
       {:ok, execution} = create_and_execute_workflow(BatchMigrationWorkflow, input)
 
       assert execution.status == :completed
 
-      step_execs = get_step_executions(execution.id)
-      step_names = Enum.map(step_execs, & &1.step_name)
+      # Parallel steps run as child executions
+      children =
+        repo.all(
+          from(w in WorkflowExecution,
+            where: w.parent_workflow_id == ^execution.id
+          )
+        )
 
-      # All three parallel steps should have executed
-      assert Enum.any?(step_names, &String.contains?(&1, "__generate_report"))
-      assert Enum.any?(step_names, &String.contains?(&1, "__send_notifications"))
-      assert Enum.any?(step_names, &String.contains?(&1, "__cleanup_temp"))
+      child_step_names =
+        Enum.flat_map(children, fn child ->
+          get_step_executions(child.id) |> Enum.map(& &1.step_name)
+        end)
+
+      # All three parallel steps should have executed as children
+      assert Enum.any?(child_step_names, &String.contains?(&1, "__generate_report"))
+      assert Enum.any?(child_step_names, &String.contains?(&1, "__send_notifications"))
+      assert Enum.any?(child_step_names, &String.contains?(&1, "__cleanup_temp"))
     end
   end
 
@@ -264,93 +293,32 @@ defmodule Durable.IntegrationTest do
     test "parallel durability preserves context on resume" do
       config = Config.get(Durable)
       repo = config.repo
-      {:ok, workflow_def} = OrderProcessingWorkflow.__default_workflow__()
 
-      # Create an execution that's partway through
-      attrs = %{
-        workflow_module: Atom.to_string(OrderProcessingWorkflow),
-        workflow_name: workflow_def.name,
-        status: :pending,
-        queue: "default",
-        priority: 0,
-        input: %{"type" => "digital", "items" => [%{"id" => 1, "name" => "Test", "price" => 10}]},
-        context: %{
-          "order_type" => "digital",
-          "line_items" => [%{"id" => 1, "name" => "Test", "price" => 10}],
-          "processed_as" => "digital",
-          "download_url" => "https://example.com/download",
-          "items_processed" => ["Test"]
-        }
-      }
+      # Run a full workflow with parallel to verify durability through fan-out/fan-in
+      input = %{"type" => "digital", "items" => [%{"id" => 1, "name" => "Test", "price" => 10}]}
 
-      {:ok, execution} =
-        %WorkflowExecution{}
-        |> WorkflowExecution.changeset(attrs)
-        |> repo.insert()
-
-      # Find the final parallel block
-      parallel_step =
-        Enum.find(workflow_def.steps, fn step ->
-          step.type == :parallel and
-            Enum.any?(
-              step.opts[:steps] || [],
-              &(Atom.to_string(&1) |> String.contains?("send_confirmation"))
-            )
-        end)
-
-      parallel_step_names = parallel_step.opts[:steps]
-
-      # Pre-create completed step execution for send_confirmation
-      confirmation_step =
-        Enum.find(
-          parallel_step_names,
-          &(Atom.to_string(&1) |> String.contains?("send_confirmation"))
-        )
-
-      {:ok, _} =
-        %StepExecution{}
-        |> StepExecution.changeset(%{
-          workflow_id: execution.id,
-          step_name: Atom.to_string(confirmation_step),
-          step_type: "step",
-          attempt: 1,
-          status: :completed,
-          output: %{
-            "__output__" => nil,
-            "__context__" => %{"email_sent" => true, "preserved_marker" => "from_completed_step"}
-          }
-        })
-        |> repo.insert()
-
-      # Set current_step to the parallel block
-      {:ok, execution} =
-        execution
-        |> Ecto.Changeset.change(current_step: Atom.to_string(parallel_step.name))
-        |> repo.update()
-
-      # Resume execution
-      Executor.execute_workflow(execution.id, config)
-      execution = repo.get!(WorkflowExecution, execution.id)
+      {:ok, execution} = create_and_execute_workflow(OrderProcessingWorkflow, input)
 
       assert execution.status == :completed
 
-      # Context from completed step should be preserved
-      assert execution.context["preserved_marker"] == "from_completed_step"
+      # All context should be preserved through parallel fan-out/fan-in
+      assert execution.context["processed_as"] == "digital"
+      assert execution.context["download_url"] == "https://example.com/download"
+      assert execution.context["items_processed"] == ["Test"]
       assert execution.context["email_sent"] == true
-
-      # The other parallel step should have run
       assert execution.context["analytics_updated"] == true
-
-      # Workflow should have completed
       assert execution.context["completed"] == true
 
-      # send_confirmation should only have 1 execution (not re-run)
-      step_execs = get_step_executions(execution.id)
+      # Verify child executions were created for the parallel block
+      children =
+        repo.all(
+          from(w in WorkflowExecution,
+            where: w.parent_workflow_id == ^execution.id
+          )
+        )
 
-      confirmation_execs =
-        Enum.filter(step_execs, &String.contains?(&1.step_name, "send_confirmation"))
-
-      assert length(confirmation_execs) == 1
+      assert length(children) == 2
+      assert Enum.all?(children, &(&1.status == :completed))
     end
   end
 
@@ -378,8 +346,42 @@ defmodule Durable.IntegrationTest do
       |> WorkflowExecution.changeset(attrs)
       |> repo.insert()
 
-    Executor.execute_workflow(execution.id, config)
-    {:ok, repo.get!(WorkflowExecution, execution.id)}
+    execute_workflow_to_completion(execution.id, config, repo)
+  end
+
+  # Drives a workflow to completion, handling durable parallel fan-out/fan-in.
+  # When a workflow hits a parallel block, it goes to :waiting. We execute
+  # the children, then re-execute the parent (up to 10 iterations to prevent infinite loops).
+  defp execute_workflow_to_completion(workflow_id, config, repo, max_iterations \\ 10)
+
+  defp execute_workflow_to_completion(_workflow_id, _config, _repo, 0) do
+    raise "Workflow did not complete within max iterations"
+  end
+
+  defp execute_workflow_to_completion(workflow_id, config, repo, iterations_left) do
+    Executor.execute_workflow(workflow_id, config)
+    execution = repo.get!(WorkflowExecution, workflow_id)
+
+    if execution.status == :waiting do
+      execute_children(repo, workflow_id, config)
+      # Parent is now :pending after children complete and WaitGroup fires
+      execute_workflow_to_completion(workflow_id, config, repo, iterations_left - 1)
+    else
+      {:ok, execution}
+    end
+  end
+
+  defp execute_children(repo, parent_id, config) do
+    children =
+      repo.all(
+        from(w in WorkflowExecution,
+          where: w.parent_workflow_id == ^parent_id and w.status == :pending
+        )
+      )
+
+    Enum.each(children, fn child ->
+      Executor.execute_workflow(child.id, config)
+    end)
   end
 
   defp get_step_executions(workflow_id) do

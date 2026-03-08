@@ -129,6 +129,35 @@ defmodule Durable.Query do
     end
   end
 
+  @doc """
+  Lists child workflow executions for a parent workflow.
+
+  ## Options
+
+  - `:status` - Filter by status
+  - `:durable` - The Durable instance name (default: Durable)
+
+  """
+  @spec list_child_executions(String.t(), keyword()) :: [map()]
+  def list_child_executions(parent_workflow_id, opts \\ []) do
+    config = get_config(opts)
+
+    query =
+      from(w in WorkflowExecution,
+        where: w.parent_workflow_id == ^parent_workflow_id,
+        order_by: [asc: w.inserted_at]
+      )
+
+    query =
+      case Keyword.get(opts, :status) do
+        nil -> query
+        status -> from(w in query, where: w.status == ^status)
+      end
+
+    Repo.all(config, query)
+    |> Enum.map(&execution_to_map(&1, false, false))
+  end
+
   # Private functions
 
   defp get_config(opts) do

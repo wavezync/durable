@@ -80,6 +80,9 @@ defmodule Durable.Executor do
         })
         |> Repo.update(config)
 
+        # Cascade cancel to child workflows
+        cancel_child_workflows(config, workflow_id)
+
         :ok
 
       _execution ->
@@ -101,21 +104,32 @@ defmodule Durable.Executor do
       # Set workflow ID for logging/observability
       Context.set_workflow_id(execution.id)
 
-      # Pipeline model: start with workflow input or restored context
-      initial_data =
-        if execution.context && execution.context != %{} do
-          atomize_keys(execution.context)
-        else
-          execution.input
-        end
+      # Check if this is a single-step parallel child execution
+      parallel_step_flag =
+        Map.get(execution.context, "__parallel_step") ||
+          Map.get(execution.context, :__parallel_step)
 
-      # Execute steps with pipeline data flow
-      result = execute_steps(workflow_def.steps, execution, config, initial_data)
+      if parallel_step_flag do
+        result = execute_parallel_step(execution, workflow_def, config)
+        Context.cleanup()
+        result
+      else
+        # Pipeline model: start with workflow input or restored context
+        initial_data =
+          if execution.context && execution.context != %{} do
+            atomize_keys(execution.context)
+          else
+            execution.input
+          end
 
-      # Cleanup
-      Context.cleanup()
+        # Execute steps with pipeline data flow
+        result = execute_steps(workflow_def.steps, execution, config, initial_data)
 
-      result
+        # Cleanup
+        Context.cleanup()
+
+        result
+      end
     end
   end
 
@@ -308,9 +322,18 @@ defmodule Durable.Executor do
 
     case StepRunner.execute(step, data, exec.id, config) do
       {:ok, new_data} ->
-        # Save data as context and continue to next step with new_data
+        # Save data as context and continue to next step
+        # save_data_as_context merges orchestration keys from process dict
         {:ok, exec} = save_data_as_context(config, exec, new_data)
-        execute_steps_recursive(remaining_steps, exec, step_index, workflow_def, config, new_data)
+        # Pass the DB-persisted context forward (includes orchestration keys)
+        execute_steps_recursive(
+          remaining_steps,
+          exec,
+          step_index,
+          workflow_def,
+          config,
+          exec.context
+        )
 
       {:decision, target_step, new_data} ->
         handle_decision_result(
@@ -329,6 +352,10 @@ defmodule Durable.Executor do
         # Save current data before waiting
         {:ok, exec} = save_data_as_context(config, exec, data)
         handle_wait_result(config, exec, wait_type, opts)
+
+      {:call_workflow, opts} ->
+        {:ok, exec} = save_data_as_context(config, exec, data)
+        handle_call_workflow(config, exec, opts)
 
       {:error, error} ->
         handle_step_failure(exec, error, workflow_def, config)
@@ -375,6 +402,41 @@ defmodule Durable.Executor do
 
   defp handle_wait_result(config, exec, :wait_for_all, opts),
     do: {:waiting, handle_wait_for_all(config, exec, opts) |> elem(1)}
+
+  defp handle_wait_result(config, exec, :call_workflow, opts),
+    do: handle_call_workflow(config, exec, opts)
+
+  # ============================================================================
+  # Workflow Orchestration (call_workflow)
+  # ============================================================================
+
+  defp handle_call_workflow(config, execution, opts) do
+    child_id = Keyword.fetch!(opts, :child_id)
+    event_name = Durable.Orchestration.child_event_name(child_id)
+    timeout_at = calculate_timeout_at(opts)
+
+    # Create pending event to wait for child completion
+    attrs = %{
+      workflow_id: execution.id,
+      event_name: event_name,
+      step_name: execution.current_step,
+      timeout_at: timeout_at,
+      timeout_value: serialize_timeout_value(Keyword.get(opts, :timeout_value, :child_timeout)),
+      wait_type: :single
+    }
+
+    {:ok, _} =
+      %PendingEvent{}
+      |> PendingEvent.changeset(attrs)
+      |> Repo.insert(config)
+
+    {:ok, execution} =
+      execution
+      |> Ecto.Changeset.change(status: :waiting)
+      |> Repo.update(config)
+
+    {:waiting, execution}
+  end
 
   defp execute_branch(
          branch_step,
@@ -522,7 +584,15 @@ defmodule Durable.Executor do
     case StepRunner.execute(step, data, exec.id, config) do
       {:ok, new_data} ->
         {:ok, exec} = save_data_as_context(config, exec, new_data)
-        execute_branch_steps_sequential(rest, exec, step_index, workflow_def, config, new_data)
+
+        execute_branch_steps_sequential(
+          rest,
+          exec,
+          step_index,
+          workflow_def,
+          config,
+          exec.context
+        )
 
       {:decision, target_step, new_data} ->
         # Decisions within branches - save and return for outer handler
@@ -548,6 +618,10 @@ defmodule Durable.Executor do
       {:wait_for_all, opts} ->
         {:ok, exec} = save_data_as_context(config, exec, data)
         {:waiting, handle_wait_for_all(config, exec, opts) |> elem(1)}
+
+      {:call_workflow, opts} ->
+        {:ok, exec} = save_data_as_context(config, exec, data)
+        handle_call_workflow(config, exec, opts)
 
       {:error, error} ->
         handle_step_failure(exec, error, workflow_def, config)
@@ -583,58 +657,248 @@ defmodule Durable.Executor do
     into_fn = opts[:into_fn]
 
     # Find actual step definitions for parallel steps
-    steps_to_execute =
-      Enum.filter(remaining_steps, fn step ->
-        step.name in parallel_step_names
-      end)
-
-    # Order steps according to step_names
-    ordered_steps =
-      Enum.map(parallel_step_names, fn name ->
-        Enum.find(steps_to_execute, fn s -> s.name == name end)
-      end)
-      |> Enum.reject(&is_nil/1)
+    ordered_steps = find_ordered_steps(remaining_steps, parallel_step_names)
 
     # Save data before parallel execution
     {:ok, exec} = save_data_as_context(config, exec, data)
 
-    # DURABILITY: Check which parallel steps already completed (for resume)
-    completed_results = get_completed_parallel_step_results(exec.id, ordered_steps, config)
+    # Check if we're resuming after fan-in (all children completed)
+    # Context may have atom or string keys depending on whether it came from
+    # a changeset (atom) or from DB deserialization (string)
+    has_children =
+      Map.get(exec.context, "__parallel_children") ||
+        Map.get(exec.context, :__parallel_children)
 
-    # Filter to only incomplete steps
-    completed_step_names = Map.keys(completed_results)
-    incomplete_steps = Enum.reject(ordered_steps, &(get_returns_key(&1) in completed_step_names))
+    if has_children do
+      collect_parallel_results(exec, data, into_fn, error_strategy, %{
+        remaining_steps: remaining_steps,
+        all_parallel_steps: all_parallel_steps,
+        step_index: step_index,
+        workflow_def: workflow_def,
+        config: config,
+        parallel_step_name: parallel_step.name
+      })
+    else
+      # Fan-out: create child executions + WaitGroup
+      fan_out_parallel(exec, ordered_steps, data, config, error_strategy)
+    end
+  end
 
-    # Bundle opts for handle_parallel_completion
-    completion_opts = %{
+  # Fan-out: create child workflow executions for each parallel step and wait
+  defp fan_out_parallel(exec, ordered_steps, data, config, error_strategy) do
+    parent_queue = exec.queue || "default"
+
+    # Create child executions for each parallel step
+    children_meta =
+      Enum.map(ordered_steps, fn step ->
+        returns_key = get_returns_key(step)
+        child_queue = step.opts[:queue] || parent_queue
+
+        {:ok, child} = create_parallel_child(exec, step, data, child_queue, config)
+        {child.id, Atom.to_string(step.name), returns_key}
+      end)
+
+    # Build event names and children metadata map
+    event_names = Enum.map(children_meta, fn {id, _, _} -> "__parallel_done:#{id}" end)
+
+    children_map =
+      Map.new(children_meta, fn {id, step_name, returns_key} ->
+        returns_str = if is_atom(returns_key), do: Atom.to_string(returns_key), else: returns_key
+        {id, %{"step_name" => step_name, "returns_key" => returns_str}}
+      end)
+
+    # Create WaitGroup + PendingEvents for all children
+    {:ok, wait_group} =
+      %WaitGroup{}
+      |> WaitGroup.changeset(%{
+        workflow_id: exec.id,
+        step_name: exec.current_step,
+        wait_type: :all,
+        event_names: event_names
+      })
+      |> Repo.insert(config)
+
+    Enum.each(event_names, fn event_name ->
+      {:ok, _} =
+        %PendingEvent{}
+        |> PendingEvent.changeset(%{
+          workflow_id: exec.id,
+          event_name: event_name,
+          step_name: exec.current_step,
+          wait_group_id: wait_group.id,
+          wait_type: :all
+        })
+        |> Repo.insert(config)
+    end)
+
+    # Store parallel metadata in parent context for resume
+    parallel_context = %{
+      "__parallel_children" => children_map,
+      "__parallel_wait_group_id" => wait_group.id,
+      "__parallel_error_strategy" => Atom.to_string(error_strategy)
+    }
+
+    {:ok, exec} =
+      exec
+      |> Ecto.Changeset.change(
+        context: Map.merge(exec.context || %{}, parallel_context),
+        status: :waiting
+      )
+      |> Repo.update(config)
+
+    {:waiting, exec}
+  end
+
+  # Create a child workflow execution for a single parallel step
+  defp create_parallel_child(parent_exec, step, data, queue, config) do
+    attrs = %{
+      workflow_module: parent_exec.workflow_module,
+      workflow_name: parent_exec.workflow_name,
+      status: :pending,
+      queue: to_string(queue),
+      priority: 0,
+      input: data,
+      context: %{"__parallel_step" => Atom.to_string(step.name)},
+      parent_workflow_id: parent_exec.id,
+      current_step: Atom.to_string(step.name)
+    }
+
+    %WorkflowExecution{}
+    |> WorkflowExecution.changeset(attrs)
+    |> Repo.insert(config)
+  end
+
+  # Execute a single parallel step (called when a child execution is picked up)
+  defp execute_parallel_step(execution, workflow_def, config) do
+    step_name_str =
+      Map.get(execution.context, "__parallel_step") ||
+        Map.get(execution.context, :__parallel_step)
+
+    step_name = String.to_existing_atom(step_name_str)
+
+    step_def = Enum.find(workflow_def.steps, &(&1.name == step_name))
+
+    if is_nil(step_def) do
+      mark_failed(config, execution, %{
+        type: "parallel_step_not_found",
+        message: "Step #{step_name} not found in workflow"
+      })
+    else
+      # Use parent's input as the pipeline data (stored in child's input)
+      data = atomize_keys(execution.input)
+
+      case StepRunner.execute(step_def, data, execution.id, config) do
+        {:ok, output_data} ->
+          mark_completed(config, execution, output_data)
+
+        {:error, error} ->
+          mark_failed(config, execution, normalize_error(error))
+
+        {wait_type, wait_opts}
+        when wait_type in [:sleep, :wait_for_event, :wait_for_input, :wait_for_any, :wait_for_all] ->
+          {:ok, exec} = save_data_as_context(config, execution, data)
+          handle_wait_result(config, exec, wait_type, wait_opts)
+
+        {:call_workflow, call_opts} ->
+          {:ok, exec} = save_data_as_context(config, execution, data)
+          handle_call_workflow(config, exec, call_opts)
+
+        {:decision, _target, _data} ->
+          mark_failed(config, execution, %{
+            type: "parallel_decision_not_supported",
+            message: "decisions not supported in parallel blocks"
+          })
+      end
+    end
+  end
+
+  # Collect results from completed child executions (called when parent resumes)
+  defp collect_parallel_results(exec, _base_data, into_fn, _error_strategy, opts) do
+    %{
       remaining_steps: remaining_steps,
       all_parallel_steps: all_parallel_steps,
-      exec: exec,
       step_index: step_index,
       workflow_def: workflow_def,
       config: config,
-      parallel_step_name: parallel_step.name
-    }
+      parallel_step_name: parallel_step_name
+    } = opts
 
-    # If all steps already completed, use stored results
-    if incomplete_steps == [] do
-      handle_parallel_completion(completed_results, data, into_fn, completion_opts)
+    children_map =
+      Map.get(exec.context, "__parallel_children") ||
+        Map.get(exec.context, :__parallel_children)
+
+    error_strategy_str =
+      Map.get(exec.context, "__parallel_error_strategy") ||
+        Map.get(exec.context, :__parallel_error_strategy) ||
+        "fail_fast"
+
+    error_strategy = String.to_existing_atom(error_strategy_str)
+    # When into_fn is provided, always collect all results
+    effective_strategy = if into_fn, do: :complete_all, else: error_strategy
+
+    # Load all child executions and build results
+    results = build_results_from_children(children_map, config)
+
+    # Clean parallel metadata from context before continuing
+    # Drop both string and atom keys since context may have either
+    clean_ctx =
+      exec.context
+      |> Map.drop([
+        "__parallel_children",
+        "__parallel_wait_group_id",
+        "__parallel_error_strategy",
+        :__parallel_children,
+        :__parallel_wait_group_id,
+        :__parallel_error_strategy
+      ])
+      |> atomize_keys()
+
+    # Check for fail_fast
+    errors = Enum.filter(results, fn {_key, result} -> match?({:error, _}, result) end)
+
+    if effective_strategy == :fail_fast && errors != [] do
+      {_key, {:error, first_error}} = hd(errors)
+      handle_step_failure(exec, normalize_error(first_error), workflow_def, config)
     else
-      # When into_fn is provided, always collect all results and let into_fn handle errors
-      # When into_fn is nil, use the error_strategy
-      effective_strategy = if into_fn, do: :complete_all, else: error_strategy
-
-      # Execute only incomplete steps in parallel
-      case execute_parallel_steps(incomplete_steps, exec, config, data, effective_strategy) do
-        {:ok, new_results} ->
-          # Merge new results with completed results
-          all_results = Map.merge(completed_results, new_results)
-          handle_parallel_completion(all_results, data, into_fn, completion_opts)
-
-        {:error, error} ->
-          handle_step_failure(exec, error, workflow_def, config)
-      end
+      handle_parallel_completion(results, clean_ctx, into_fn, %{
+        remaining_steps: remaining_steps,
+        all_parallel_steps: all_parallel_steps,
+        exec: exec,
+        step_index: step_index,
+        workflow_def: workflow_def,
+        config: config,
+        parallel_step_name: parallel_step_name
+      })
     end
+  end
+
+  # Build results map from child workflow executions
+  defp build_results_from_children(children_map, config) do
+    Map.new(children_map, fn {child_id, meta} ->
+      returns_key = String.to_atom(meta["returns_key"])
+
+      case Repo.get(config, WorkflowExecution, child_id) do
+        %{status: :completed, context: ctx} ->
+          {returns_key, {:ok, ctx}}
+
+        %{status: status, error: error}
+        when status in [:failed, :cancelled, :compensation_failed] ->
+          {returns_key, {:error, error || %{type: "child_failed", message: "#{status}"}}}
+
+        _ ->
+          {returns_key, {:error, %{type: "child_incomplete", message: "child not finished"}}}
+      end
+    end)
+  end
+
+  defp find_ordered_steps(remaining_steps, step_names) do
+    steps_to_execute =
+      Enum.filter(remaining_steps, fn step -> step.name in step_names end)
+
+    Enum.map(step_names, fn name ->
+      Enum.find(steps_to_execute, fn s -> s.name == name end)
+    end)
+    |> Enum.reject(&is_nil/1)
   end
 
   # Handle completion of parallel block - apply into_fn or add __results__
@@ -744,163 +1008,14 @@ defmodule Durable.Executor do
 
   defp normalize_error(error), do: %{type: "error", message: inspect(error)}
 
-  defp execute_parallel_steps(steps, execution, config, base_data, error_strategy) do
-    task_sup = Config.task_supervisor(config.name)
-    task_opts = %{data: base_data, execution_id: execution.id, config: config}
-
-    tasks =
-      Enum.map(steps, fn step ->
-        Task.Supervisor.async(task_sup, fn ->
-          run_parallel_step_task(step, task_opts)
-        end)
-      end)
-
-    results = await_parallel_tasks(tasks, error_strategy)
-    process_parallel_results(results, error_strategy)
-  end
-
-  defp run_parallel_step_task(step, task_opts) do
-    %{data: data, execution_id: exec_id, config: config} = task_opts
-
-    # Get the returns key for this step
-    returns_key = get_returns_key(step)
-
-    # Each parallel task gets a copy of the data and returns its result
-    result = StepRunner.execute(step, data, exec_id, config)
-    handle_parallel_step_result(result, returns_key)
-  end
-
   # Get the returns key from step opts (default to original_name)
   defp get_returns_key(%{opts: opts}) do
     opts[:returns] || opts[:original_name]
   end
 
-  # Now returns tagged tuples: {returns_key, {:ok, data}} or {returns_key, {:error, reason}}
-  defp handle_parallel_step_result({:ok, output_data}, returns_key) do
-    {:ok, returns_key, {:ok, output_data}}
-  end
-
-  defp handle_parallel_step_result({:decision, _target, _data}, returns_key) do
-    {:ok, returns_key,
-     {:error,
-      %{
-        type: "parallel_decision_not_supported",
-        message: "decisions not supported in parallel blocks"
-      }}}
-  end
-
-  defp handle_parallel_step_result({:error, error}, returns_key) do
-    {:ok, returns_key, {:error, error}}
-  end
-
-  defp handle_parallel_step_result({:sleep, _opts}, returns_key) do
-    {:ok, returns_key,
-     {:error,
-      %{
-        type: "parallel_wait_not_supported",
-        message: "sleep not supported in parallel blocks yet"
-      }}}
-  end
-
-  defp handle_parallel_step_result({:wait_for_event, _opts}, returns_key) do
-    {:ok, returns_key,
-     {:error,
-      %{
-        type: "parallel_wait_not_supported",
-        message: "wait_for_event not supported in parallel blocks yet"
-      }}}
-  end
-
-  defp handle_parallel_step_result({:wait_for_input, _opts}, returns_key) do
-    {:ok, returns_key,
-     {:error,
-      %{
-        type: "parallel_wait_not_supported",
-        message: "wait_for_input not supported in parallel blocks yet"
-      }}}
-  end
-
-  defp await_parallel_tasks(tasks, :fail_fast), do: await_tasks_fail_fast(tasks)
-  defp await_parallel_tasks(tasks, :complete_all), do: await_tasks_complete_all(tasks)
-  defp await_parallel_tasks(tasks, _), do: await_tasks_complete_all(tasks)
-
-  defp await_tasks_fail_fast(tasks) do
-    # Await all - in a real fail_fast we'd cancel on first error
-    # For now, just await all and return results
-    Enum.map(tasks, fn task ->
-      case Task.await(task, :infinity) do
-        result -> result
-      end
-    end)
-  end
-
-  defp await_tasks_complete_all(tasks) do
-    Task.await_many(tasks, :infinity)
-  end
-
-  # Process results: build results map with tagged tuples
-  defp process_parallel_results(results, error_strategy) do
-    # Build the results map
-    results_map =
-      Enum.reduce(results, %{}, fn {:ok, returns_key, tagged_result}, acc ->
-        Map.put(acc, returns_key, tagged_result)
-      end)
-
-    # Check for errors based on strategy
-    errors =
-      Enum.filter(results_map, fn {_key, result} ->
-        match?({:error, _}, result)
-      end)
-
-    case {error_strategy, errors} do
-      {:fail_fast, [_ | _]} ->
-        # Fail fast with first error
-        {_key, {:error, first_error}} = hd(errors)
-        {:error, first_error}
-
-      _ ->
-        # complete_all or no errors: return results map
-        {:ok, results_map}
-    end
-  end
-
   defp skip_parallel_steps(remaining_steps, all_parallel_step_names) do
     Enum.reject(remaining_steps, fn step ->
       step.name in all_parallel_step_names
-    end)
-  end
-
-  # Get completed parallel step results for durability (with tagged tuples)
-  defp get_completed_parallel_step_results(workflow_id, steps, config) do
-    step_name_strings = Enum.map(steps, &Atom.to_string(&1.name))
-
-    query =
-      from(s in StepExecution,
-        where: s.workflow_id == ^workflow_id,
-        where: s.step_name in ^step_name_strings,
-        where: s.status == :completed,
-        select: {s.step_name, s.output}
-      )
-
-    completed = Repo.all(config, query)
-
-    # Build a map from step name to step def for looking up returns key
-    step_map =
-      Enum.into(steps, %{}, fn step ->
-        {Atom.to_string(step.name), step}
-      end)
-
-    Enum.reduce(completed, %{}, fn {step_name_str, output}, acc ->
-      case Map.get(step_map, step_name_str) do
-        nil ->
-          acc
-
-        step ->
-          returns_key = get_returns_key(step)
-          # Extract result from stored output
-          result_data = (output || %{})["__result__"] || (output || %{})["__context__"] || %{}
-          Map.put(acc, returns_key, {:ok, result_data})
-      end
     end)
   end
 
@@ -961,11 +1076,41 @@ defmodule Durable.Executor do
   end
 
   # Saves data as the workflow context in DB (for persistence/resume)
+  # Also merges orchestration keys from process dict to ensure child workflow
+  # references are persisted through DB round-trips
   defp save_data_as_context(config, execution, data) do
+    merged = merge_orchestration_context(data)
+
     execution
-    |> Ecto.Changeset.change(context: data)
+    |> Ecto.Changeset.change(context: merged)
     |> Repo.update(config)
   end
+
+  # Merge orchestration keys (__child:*, __fire_forget:*, __child_done:*) from
+  # process dict into the data to persist. These keys are set by
+  # Durable.Orchestration.call_workflow/start_workflow via put_context.
+  defp merge_orchestration_context(data) do
+    process_ctx = Process.get(:durable_context, %{})
+
+    orchestration_keys =
+      process_ctx
+      |> Enum.filter(fn {key, _} -> orchestration_key?(key) end)
+      |> Map.new()
+
+    Map.merge(data, orchestration_keys)
+  end
+
+  defp orchestration_key?(key) when is_atom(key) do
+    orchestration_key?(Atom.to_string(key))
+  end
+
+  defp orchestration_key?(key) when is_binary(key) do
+    String.starts_with?(key, "__child:") or
+      String.starts_with?(key, "__fire_forget:") or
+      String.starts_with?(key, "__child_done:")
+  end
+
+  defp orchestration_key?(_), do: false
 
   defp mark_completed(config, execution, final_data) do
     {:ok, execution} =
@@ -978,19 +1123,159 @@ defmodule Durable.Executor do
       |> Ecto.Changeset.change(locked_by: nil, locked_at: nil)
       |> Repo.update(config)
 
+    maybe_notify_parent(config, execution, :completed, final_data)
+
     {:ok, execution}
   end
 
   defp mark_failed(config, execution, error) do
-    execution
-    |> WorkflowExecution.status_changeset(:failed, %{
-      error: error,
-      completed_at: DateTime.utc_now()
-    })
-    |> Ecto.Changeset.change(locked_by: nil, locked_at: nil)
-    |> Repo.update(config)
+    {:ok, execution} =
+      execution
+      |> WorkflowExecution.status_changeset(:failed, %{
+        error: error,
+        completed_at: DateTime.utc_now()
+      })
+      |> Ecto.Changeset.change(locked_by: nil, locked_at: nil)
+      |> Repo.update(config)
+
+    maybe_notify_parent(config, execution, :failed, error)
 
     {:error, error}
+  end
+
+  # ============================================================================
+  # Parent Notification (Orchestration)
+  # ============================================================================
+
+  defp maybe_notify_parent(_config, %{parent_workflow_id: nil}, _status, _data), do: :ok
+
+  defp maybe_notify_parent(config, execution, status, data) do
+    # Check for parallel child notification first (uses __parallel_done: events)
+    parallel_event_name = "__parallel_done:#{execution.id}"
+
+    parallel_pending =
+      Repo.one(
+        config,
+        from(p in PendingEvent,
+          where:
+            p.workflow_id == ^execution.parent_workflow_id and
+              p.event_name == ^parallel_event_name and
+              p.status == :pending
+        )
+      )
+
+    if parallel_pending do
+      notify_parallel_parent(config, execution, parallel_pending, status, data)
+    else
+      notify_orchestration_parent(config, execution, status, data)
+    end
+  end
+
+  # Notify parent via WaitGroup (parallel child completion)
+  defp notify_parallel_parent(config, execution, pending_event, status, data) do
+    payload = Durable.Orchestration.build_result_payload(status, data)
+
+    # Fulfill the pending event
+    {:ok, _} =
+      pending_event
+      |> PendingEvent.receive_changeset(payload)
+      |> Repo.update(config)
+
+    # Update the WaitGroup and resume parent if all children are done
+    maybe_complete_wait_group(config, pending_event, payload, execution.parent_workflow_id)
+
+    :ok
+  end
+
+  defp maybe_complete_wait_group(_config, %{wait_group_id: nil}, _payload, _parent_id), do: :ok
+
+  defp maybe_complete_wait_group(config, pending_event, payload, parent_id) do
+    wait_group = Repo.get(config, WaitGroup, pending_event.wait_group_id)
+
+    if wait_group && wait_group.status == :pending do
+      {:ok, updated_group} =
+        wait_group
+        |> WaitGroup.add_event_changeset(pending_event.event_name, payload)
+        |> Repo.update(config)
+
+      if updated_group.status == :completed do
+        resume_workflow(parent_id)
+      end
+    end
+  end
+
+  # Notify parent via orchestration (call_workflow child completion)
+  defp notify_orchestration_parent(config, execution, status, data) do
+    event_name = Durable.Orchestration.child_event_name(execution.id)
+    payload = Durable.Orchestration.build_result_payload(status, data)
+
+    # Find and fulfill the pending event on the parent workflow
+    query =
+      from(p in PendingEvent,
+        where:
+          p.workflow_id == ^execution.parent_workflow_id and
+            p.event_name == ^event_name and
+            p.status == :pending
+      )
+
+    case Repo.one(config, query) do
+      nil ->
+        # Parent not waiting (fire-and-forget case, or already timed out)
+        :ok
+
+      pending_event ->
+        # Fulfill the pending event
+        {:ok, _} =
+          pending_event
+          |> PendingEvent.receive_changeset(payload)
+          |> Repo.update(config)
+
+        # Find the child ref from parent's context to store result under the right key
+        parent = Repo.get(config, WorkflowExecution, execution.parent_workflow_id)
+        result_context = build_parent_result_context(parent, execution.id, payload)
+
+        # Resume the parent workflow
+        resume_workflow(execution.parent_workflow_id, result_context)
+    end
+  end
+
+  # Build context update for parent with child result stored under the right key
+  defp build_parent_result_context(parent, child_id, payload) do
+    parent_context = parent.context || %{}
+
+    # Find which ref this child belongs to by looking for __child:ref = child_id
+    ref =
+      Enum.find_value(parent_context, fn
+        {"__child:" <> ref_str, ^child_id} -> ref_str
+        _ -> nil
+      end)
+
+    if ref do
+      %{
+        "__child_done:#{ref}" => payload,
+        Durable.Orchestration.child_event_name(child_id) => payload
+      }
+    else
+      %{Durable.Orchestration.child_event_name(child_id) => payload}
+    end
+  end
+
+  # ============================================================================
+  # Cascade Cancellation (Orchestration)
+  # ============================================================================
+
+  defp cancel_child_workflows(config, parent_id) do
+    query =
+      from(w in WorkflowExecution,
+        where: w.parent_workflow_id == ^parent_id,
+        where: w.status in [:pending, :running, :waiting]
+      )
+
+    children = Repo.all(config, query)
+
+    Enum.each(children, fn child ->
+      cancel_workflow(child.id, "parent_cancelled", durable: config.name)
+    end)
   end
 
   # ============================================================================

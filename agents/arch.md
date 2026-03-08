@@ -35,13 +35,13 @@
 │                           │                                 │
 │  ┌─────────────┐  ┌──────────────┐  ┌─────────────────┐   │
 │  │   Queue     │  │   Message    │  │   Scheduler     │   │
-│  │   Manager   │  │   Bus        │  │   (Cron)        │   │
+│  │   Manager   │  │   Bus  [P]   │  │   (Cron)        │   │
 │  └─────────────┘  └──────────────┘  └─────────────────┘   │
 │         │                 │                                 │
 │  ┌─────────────┐  ┌──────────────┐  ┌─────────────────┐   │
-│  │  Postgres/  │  │   PubSub/    │  │   Graph         │   │
-│  │  Redis/     │  │   Redis/     │  │   Generator     │   │
-│  │  RabbitMQ   │  │   pg_notify  │  │   + Layout      │   │
+│  │  Postgres   │  │   (planned)  │  │   Graph     [P] │   │
+│  │             │  │              │  │   Generator     │   │
+│  │             │  │              │  │   + Layout      │   │
 │  └─────────────┘  └──────────────┘  └─────────────────┘   │
 │                                                             │
 │  ┌──────────────────────────────────────────────────────┐  │
@@ -64,7 +64,7 @@
 defmodule OrderWorkflow do
   use Durable
   use Durable.Context  # context(), get_context(), put_context()
-  use Durable.Wait     # wait_for_input(), sleep_for(), wait_for_event()
+  use Durable.Wait     # wait_for_input(), sleep(), wait_for_event()
   
   workflow "process_order", timeout: hours(2), max_retries: 3 do
     
@@ -183,116 +183,156 @@ end
 
 Note: The `branch` macro is preferred for new workflows as it's more readable and allows multiple steps per branch.
 
-### Loops
-
-```elixir
-loop :retry_until_success, 
-  while: fn ctx -> !ctx.success && ctx.current_retry < ctx.max_retries end do
-  
-  step :attempt_api_call do
-    case ExternalAPI.call() do
-      {:ok, result} -> put_context(:success, true)
-      {:error, _} -> update_context(:current_retry, & &1 + 1)
-    end
-  end
-  
-  step :backoff do
-    unless context().success do
-      delay = :math.pow(2, context().current_retry) |> round()
-      sleep_for(seconds: delay)
-    end
-  end
-end
-```
-
 ### Parallel Execution
+
+Execute multiple steps concurrently. Results are stored in a structured format.
 
 ```elixir
 parallel do
   step :send_welcome_email do
-    EmailService.send_welcome(state().user.email)
+    EmailService.send_welcome(get_context(:user).email)
   end
-  
+
   step :provision_workspace do
-    WorkspaceService.create(state().user.id)
+    WorkspaceService.create(get_context(:user_id))
   end
-  
+
   step :create_stripe_customer do
-    StripeService.create_customer(state().user)
+    StripeService.create_customer(get_context(:user))
+  end
+end
+
+# Results automatically stored as:
+# context.__results__ = %{
+#   send_welcome_email: {:ok, email_result},
+#   provision_workspace: {:ok, workspace_result},
+#   create_stripe_customer: {:ok, stripe_result}
+# }
+
+# Access results in subsequent steps:
+step :finalize do
+  results = parallel_results()  # Get all results
+  email = parallel_result(:send_welcome_email)  # Get specific result
+
+  if parallel_ok?(:provision_workspace) do
+    # All good
   end
 end
 ```
 
-### ForEach
+**Custom result handling with `into:`:**
 
 ```elixir
-foreach :process_items, items: fn -> context().items end do |item|
-  step :process_item do
-    result = ItemProcessor.process(item)
-    append_context(:results, result)
-  end
+parallel into: fn ctx, results ->
+  # Custom merge function receives context and results map
+  successful = Enum.filter(results, fn {_k, v} -> match?({:ok, _}, v) end)
+  put_context(:successful_count, length(successful))
+end do
+  step :task_a do ... end
+  step :task_b do ... end
 end
 ```
+
+**Options:**
+- `into:` - Custom function to merge results into context
+- `returns:` - Specify which step's result to return (`:first_completed`, `:all`, or step name)
+- Error handling: Failures are captured in results, workflow continues
+
+See `guides/parallel.md` for comprehensive documentation.
 
 ### Workflow Orchestration
 
-Call child workflows from parent steps to compose larger workflows:
+Call child workflows from parent steps to compose larger workflows.
+Requires `use Durable.Orchestration`.
 
 ```elixir
-workflow "order_pipeline" do
-  step :validate do
-    put_context(:order, input()["order"])
-  end
+defmodule OrderPipeline do
+  use Durable
+  use Durable.Context
+  use Durable.Orchestration
 
-  # Call child workflow and wait for result
-  step :process_payment do
-    {:ok, result} = call_workflow(MyApp.PaymentWorkflow, %{
-      order_id: get_context(:order).id,
-      amount: get_context(:order).total
-    })
-    put_context(:payment, result)
-  end
+  workflow "order_pipeline" do
+    step :validate do
+      put_context(:order, input()["order"])
+    end
 
-  # Fire-and-forget (don't wait for completion)
-  step :send_notifications do
-    start_workflow(MyApp.NotificationWorkflow, %{
-      user_id: get_context(:order).user_id,
-      event: :order_completed
-    })
-  end
+    # Call child workflow and wait for result
+    step :process_payment do
+      {:ok, result} = call_workflow(MyApp.PaymentWorkflow, %{
+        order_id: get_context(:order).id,
+        amount: get_context(:order).total
+      })
+      put_context(:payment, result)
+    end
 
-  step :finalize do
-    OrderService.complete(get_context(:order).id)
+    # Fire-and-forget (don't wait for completion)
+    step :send_notifications do
+      start_workflow(MyApp.NotificationWorkflow, %{
+        user_id: get_context(:order).user_id,
+        event: :order_completed
+      })
+    end
+
+    # Call workflows in parallel
+    parallel do
+      step :sync_crm do
+        call_workflow(MyApp.CRMSyncWorkflow, %{order: get_context(:order)})
+      end
+
+      step :generate_invoice do
+        call_workflow(MyApp.InvoiceWorkflow, %{order: get_context(:order)})
+      end
+    end
+
+    step :finalize do
+      OrderService.complete(get_context(:order).id)
+    end
   end
 end
 ```
 
 **Options:**
-- `call_workflow/3` - Start child and wait for result
-- `start_workflow/3` - Fire-and-forget
+- `call_workflow/2,3` - Start child and wait for result
+- `start_workflow/2,3` - Fire-and-forget
 - Parent-child relationships tracked via `parent_workflow_id`
+- `Durable.list_children/2` - List child workflows
+- Cascade cancellation: cancelling parent cancels active children
+
+See `guides/orchestration.md` for comprehensive documentation.
 
 ### Switch/Case
 
+> **Note:** Not yet implemented. Use the `branch` macro instead for conditional execution.
+
 ```elixir
+# PLANNED - NOT IMPLEMENTED
 switch :route_by_category, on: fn -> context().category end do
   case_match "billing" do
     step :assign_to_billing do
       TicketService.assign(input().ticket, team: :billing)
     end
   end
-  
+
   case_match "technical" do
     step :assign_to_engineering do
       TicketService.assign(input().ticket, team: :engineering)
     end
   end
-  
+
   default do
     step :assign_to_general_support do
       TicketService.assign(input().ticket, team: :general)
     end
   end
+end
+```
+
+**Current Alternative:** Use the `branch` macro with pattern matching:
+```elixir
+branch on: get_context(:category) do
+  "billing" -> step :assign_billing do ... end
+  "technical" -> step :assign_engineering do ... end
+  _ -> step :assign_general do ... end
 end
 ```
 
@@ -336,9 +376,13 @@ workflow_id()
 current_step()
 
 # Accumulators
-init_accumulator(:events, [])
 append_context(:events, new_event)
 increment_context(:counter, 1)
+
+# Parallel Results (after parallel block)
+parallel_results()              # Get all parallel results as map
+parallel_result(:step_name)     # Get specific step result
+parallel_ok?(:step_name)        # Check if step succeeded
 ```
 
 ---
@@ -348,14 +392,14 @@ increment_context(:counter, 1)
 ### Sleep
 
 ```elixir
-# Sleep for duration
-sleep_for(seconds: 30)
-sleep_for(minutes: 5)
-sleep_for(hours: 24)
-sleep_for(days: 7)
+# Sleep for duration (using time helpers from Durable.DSL.TimeHelpers)
+sleep(seconds(30))
+sleep(minutes(5))
+sleep(hours(24))
+sleep(days(7))
 
 # Sleep until specific time
-sleep_until(~U[2025-12-25 00:00:00Z])
+schedule_at(~U[2025-12-25 00:00:00Z])
 ```
 
 ### Wait for Events
@@ -428,30 +472,13 @@ Every step automatically captures:
 ### Implementation
 
 ```elixir
-# Custom Logger backend
-defmodule Durable.LoggerBackend do
-  @behaviour :gen_event
-  
-  def handle_event({level, _gl, {Logger, msg, ts, metadata}}, state) do
-    case Process.get(:workflow_context) do
-      %{workflow_id: wf_id, step: step, attempt: attempt} ->
-        log_entry = %{
-          timestamp: format_timestamp(ts),
-          level: level,
-          message: IO.iodata_to_binary(msg),
-          metadata: Map.new(metadata),
-          workflow_id: wf_id,
-          step: step,
-          attempt: attempt
-        }
-        
-        store_log(log_entry)
-    end
-  end
+# Logger handler (Erlang :logger handler, not gen_event backend)
+defmodule Durable.LogCapture.Handler do
+  # Captures Logger calls per-step using process dictionary context
 end
 
 # IO capture via group leader
-defmodule Durable.IOCapture do
+defmodule Durable.LogCapture.IOServer do
   # Intercepts IO.puts/IO.inspect and stores as logs
 end
 ```
@@ -460,25 +487,10 @@ end
 
 ```elixir
 # Get logs for specific step
-{:ok, logs} = Durable.get_step_logs(workflow_id, step: :charge_payment)
+{:ok, logs} = Durable.Query.get_step_logs(workflow_id, :charge_payment)
 
-# Get all logs for workflow
-{:ok, all_logs} = Durable.get_execution_logs(workflow_id)
-
-# Real-time log streaming
-Durable.stream_logs(workflow_id)
-
-# Logs stored in database
-execution.steps
-# => [
-#   %StepExecution{
-#     step: :charge_payment,
-#     logs: [
-#       %{timestamp: ~U[...], level: :info, message: "Attempting payment"},
-#       %{timestamp: ~U[...], level: :error, message: "Payment failed"}
-#     ]
-#   }
-# ]
+# Logs stored in step_executions table as JSONB
+# Each step execution record contains its captured logs
 ```
 
 ---
@@ -560,34 +572,29 @@ end
 
 ### Built-in Adapters
 
-1. **PostgreSQL** (default) - Advisory locks + polling
-2. **Redis** - Sorted sets with priorities
-3. **RabbitMQ** - Priority queues
-4. **Kafka** - Topic-based
-5. **NATS** - JetStream
+1. **PostgreSQL** (default) - `Durable.Queue.Adapters.Postgres` — `FOR UPDATE SKIP LOCKED` + polling
+
+> **Planned — not yet implemented:**
+> 2. **Redis** - Sorted sets with priorities
+> 3. **RabbitMQ** - Priority queues
+> 4. **Kafka** - Topic-based
+> 5. **NATS** - JetStream
 
 ### Configuration
 
+Durable is configured via the supervision tree, not application config:
+
 ```elixir
-# config/config.exs
-config :durable_workflow,
-  # Default: PostgreSQL
-  queue_adapter: Durable.Queue.PostgresAdapter,
-  queue_adapter_opts: [repo: MyApp.Repo],
-  
-  # Or Redis
-  # queue_adapter: Durable.Queue.RedisAdapter,
-  # queue_adapter_opts: [host: "localhost", port: 6379],
-  
-  # Or RabbitMQ
-  # queue_adapter: Durable.Queue.RabbitMQAdapter,
-  # queue_adapter_opts: [url: "amqp://guest:guest@localhost"],
-  
-  queues: %{
-    default: [concurrency: 10],
-    high_priority: [concurrency: 20],
-    background: [concurrency: 5]
-  }
+children = [
+  MyApp.Repo,
+  {Durable,
+    repo: MyApp.Repo,
+    queues: %{
+      default: [concurrency: 10],
+      high_priority: [concurrency: 20],
+      background: [concurrency: 5]
+    }}
+]
 ```
 
 ### Usage
@@ -602,11 +609,10 @@ config :durable_workflow,
   scheduled_at: DateTime.add(DateTime.utc_now(), 3600, :second)
 )
 
-# Queue operations
-Durable.Queue.pause(:low_priority)
-Durable.Queue.resume(:low_priority)
-Durable.Queue.get_stats(:default)
-# => %{running: 7, pending: 23, concurrency: 10}
+# Queue operations (via Durable.Queue.Manager)
+Durable.Queue.Manager.pause(Durable, :low_priority)
+Durable.Queue.Manager.resume(Durable, :low_priority)
+Durable.Queue.Manager.stats(Durable, :default)
 ```
 
 ---
@@ -618,57 +624,61 @@ Durable.Queue.get_stats(:default)
 ```elixir
 defmodule ReportWorkflow do
   use Durable
-  use Durable.Cron
-  
+  use Durable.Scheduler.DSL
+
   # Daily report at 9 AM
-  @cron "0 9 * * *"
-  @cron_queue :reports
-  @cron_input %{type: :daily}
-  @cron_timezone "America/New_York"
+  @schedule cron: "0 9 * * *", queue: :reports, input: %{type: :daily}, timezone: "America/New_York"
   workflow "daily_report" do
     step :generate_report do
       ReportService.generate(input().type)
     end
   end
-  
+
   # Every hour
-  @cron "0 * * * *"
+  @schedule cron: "0 * * * *"
   workflow "hourly_sync" do
     step :sync_data do
       DataService.sync()
     end
   end
-  
+
   # Every 15 minutes
-  @cron "*/15 * * * *"
+  @schedule cron: "*/15 * * * *"
   workflow "health_check" do
     step :check_services do
       HealthCheckService.check_all()
     end
   end
 end
-
-# Auto-register on app start
-MyApp.ReportWorkflow.schedule_all_crons()
 ```
 
 ### Manual Scheduling (Alternative)
 
 ```elixir
-Durable.Scheduler.schedule(
-  "daily_report",
+Durable.schedule(
   ReportWorkflow,
-  "generate_report",
-  "0 9 * * *",
+  "daily_report",
+  cron: "0 9 * * *",
   input: %{type: :daily},
   queue: :reports,
   timezone: "America/New_York"
 )
+
+# CRUD API
+Durable.list_schedules(Durable)
+Durable.get_schedule(Durable, schedule_id)
+Durable.update_schedule(Durable, attrs)
+Durable.delete_schedule(Durable, schedule_id)
+Durable.enable_schedule(Durable, schedule_id)
+Durable.disable_schedule(Durable, schedule_id)
+Durable.trigger_schedule(Durable, schedule_id)
 ```
 
 ---
 
 ## Message Bus (Pluggable)
+
+> **Planned — not yet implemented.** The designs below are kept as future reference.
 
 ### Message Bus Behavior
 
@@ -725,6 +735,8 @@ Durable.Events.publish_workflow_event(workflow_id, :custom_event, %{data: "..."}
 ---
 
 ## Graph Visualization
+
+> **Planned — not yet implemented.** The designs below are kept as future reference.
 
 ### Graph Generation
 
@@ -890,6 +902,26 @@ create table(:scheduled_workflows) do
   add :next_run_at, :utc_datetime_usec
   timestamps()
 end
+
+# pending_events (wait_for_event / wait_for_any / wait_for_all)
+create table(:pending_events) do
+  add :workflow_execution_id, references(:workflow_executions)
+  add :event_name, :string
+  add :status, :string  # pending, received, expired
+  add :payload, :map
+  add :timeout_at, :utc_datetime_usec
+  timestamps()
+end
+
+# wait_groups (wait_for_all / wait_for_any coordination)
+create table(:wait_groups) do
+  add :workflow_execution_id, references(:workflow_executions)
+  add :step_name, :string
+  add :strategy, :string  # all, any
+  add :status, :string    # pending, completed, expired
+  add :timeout_at, :utc_datetime_usec
+  timestamps()
+end
 ```
 
 ---
@@ -924,33 +956,17 @@ end
 {:ok, execution} = Durable.get_execution(workflow_id, include_logs: true)
 
 # List executions
-executions = Durable.list_executions(
+executions = Durable.Query.list_executions(
   workflow: OrderWorkflow,
   status: :running,
   limit: 50
 )
 
-# Query with filters
-executions = Durable.Query.find_executions(
-  workflow: OrderWorkflow,
-  current_step: :charge_payment,
-  status: :running,
-  time_range: [from: ~U[2025-01-01 00:00:00Z], to: DateTime.utc_now()]
-)
+# Get step logs
+{:ok, logs} = Durable.Query.get_step_logs(workflow_id, :charge_payment)
 
-# Get metrics
-metrics = Durable.get_metrics(
-  OrderWorkflow,
-  period: :last_24_hours
-)
-# => %{
-#   total_executions: 1234,
-#   successful: 1180,
-#   failed: 54,
-#   success_rate: 0.956,
-#   avg_duration_ms: 2340,
-#   p95_duration_ms: 4500
-# }
+# List child workflows
+children = Durable.list_children(Durable, parent_workflow_id)
 ```
 
 ### Controlling Workflows
@@ -1209,13 +1225,15 @@ Benefits:
 ### Phase 3: Advanced Features
 - [x] Wait primitives (sleep, wait_for_event, wait_for_input)
 - [x] Decision steps (legacy `decision` + `{:goto}`)
-- [x] Branch macro (new intuitive conditional flow)
-- [ ] Loops and iterations
-- [ ] Parallel execution
-- [ ] Workflow orchestration (call child workflows)
+- [x] Branch macro (intuitive conditional flow)
+- [x] Parallel execution (with results model)
+- [x] Compensation/saga
+- [x] Cron scheduling
+- [~] ForEach - **REMOVED** (use `Enum.map` instead)
+- [~] Loops - **Skipped** (use step retries or `Enum` functions)
+- [x] Workflow orchestration (call child workflows)
+- [ ] Switch/case macro
 - [ ] Pipe-based API (functional workflow composition)
-- [ ] Compensation/saga
-- [ ] Cron scheduling
 
 ### Phase 4: Scalability
 - [ ] Redis queue adapter
@@ -1224,6 +1242,8 @@ Benefits:
 - [ ] Horizontal scaling support
 
 ### Phase 5: Developer Experience
+- [x] Module documentation (@moduledoc, @doc)
+- [x] 6 documentation guides
 - [ ] CLI tools
 - [ ] Mix tasks
 - [ ] Testing helpers
@@ -1285,35 +1305,28 @@ end
 
 ## Configuration Reference
 
+Durable is configured via the supervision tree (not application config):
+
 ```elixir
-# config/config.exs
-config :durable_workflow,
-  # Queue adapter
-  queue_adapter: Durable.Queue.PostgresAdapter,
-  queue_adapter_opts: [repo: MyApp.Repo],
-  
-  # Queues
-  queues: %{
-    default: [concurrency: 10],
-    high_priority: [concurrency: 20],
-    background: [concurrency: 5]
-  },
-  
-  # Message bus
-  message_bus: Durable.MessageBus.PostgresAdapter,
-  message_bus_opts: [repo: MyApp.Repo],
-  
-  # Scheduler
-  scheduler: [
-    enabled: true,
-    timezone: "America/New_York"
-  ],
-  
-  # Retention
-  retention: [
-    completed: [days: 30],
-    failed: [days: 90]
-  ]
+children = [
+  MyApp.Repo,
+  {Durable,
+    # Required
+    repo: MyApp.Repo,
+
+    # Optional
+    name: Durable,                    # Instance name (default: Durable)
+    prefix: "durable",               # PostgreSQL schema (default: "durable")
+    queue_enabled: true,             # Enable queue processing (default: true)
+    queues: %{
+      default: [concurrency: 10, poll_interval: 1_000],
+      high_priority: [concurrency: 20],
+      background: [concurrency: 5]
+    },
+    stale_lock_timeout: 300,         # Seconds before lock is stale (default: 300)
+    heartbeat_interval: 30_000       # Worker heartbeat interval ms (default: 30_000)
+  }
+]
 ```
 
 ---

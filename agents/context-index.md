@@ -8,6 +8,31 @@ This index provides quick access to archived development discussions and impleme
 |-------|--------------|----------|--------|
 | [Wait Primitives Complete](./conversations/wait-primitives-complete/) | 2026-01-03 | 1 | Completed |
 
+---
+
+## 2026-01-23: ForEach Removal & Parallel Refactor
+
+**Key Changes:**
+- Removed `foreach` primitive entirely
+- Simplified parallel execution with new results model (`__results__`, `into:`, `returns:`)
+- Updated `guides/parallel.md` with comprehensive documentation
+- Consolidated planning docs: archived `IMPLEMENTATION_PLAN.md`
+
+**Files Changed:**
+- `lib/durable/dsl/step.ex` - Removed foreach macro
+- `lib/durable/executor.ex` - Removed foreach execution
+- `test/durable/foreach_test.exs` - Deleted
+- `guides/foreach.md` - Deleted
+- `agents/WORKPLAN.md` - Updated status, test counts, added changelog
+- `agents/arch.md` - Removed outdated sections, updated parallel docs
+- `agents/IMPLEMENTATION_PLAN.md` → `agents/IMPLEMENTATION_PLAN_ARCHIVED.md`
+
+**Decision Rationale:** Users should use `Enum.map` or `Task.async_stream` for batch
+processing. This simplifies the DSL while providing equivalent functionality through
+idiomatic Elixir patterns.
+
+---
+
 ## Completed Topics
 
 | Topic | Completed | Description |
@@ -91,15 +116,16 @@ Covers fixing CI failures after the parallel jobs feature. Key outcomes:
 
 ```
 agents/
-├── conversations/           # Archived discussion topics
+├── conversations/                      # Archived discussion topics
 │   └── {topic-slug}/
-│       ├── README.md        # Topic overview
-│       ├── sessions/        # Individual session records
+│       ├── README.md                   # Topic overview
+│       ├── sessions/                   # Individual session records
 │       └── implementation-plan.md
-├── context-index.md         # This file
-├── .archived-topics.json    # Machine-readable metadata
-├── arch.md                  # Architecture notes
-└── WORKPLAN.md              # Work planning
+├── context-index.md                    # This file
+├── .archived-topics.json               # Machine-readable metadata
+├── arch.md                             # Architecture & technical reference
+├── WORKPLAN.md                         # Current status & work planning
+└── IMPLEMENTATION_PLAN_ARCHIVED.md     # Historical (no longer maintained)
 ```
 
 ---

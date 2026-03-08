@@ -26,6 +26,7 @@ defmodule Durable.Executor.StepRunner do
           | {:wait_for_input, keyword()}
           | {:wait_for_any, keyword()}
           | {:wait_for_all, keyword()}
+          | {:call_workflow, keyword()}
 
   @doc """
   Executes a step with retry logic.
@@ -139,7 +140,14 @@ defmodule Durable.Executor.StepRunner do
 
   # Handle wait primitives (throws)
   defp handle_result({:throw, {wait_type, opts}}, ctx)
-       when wait_type in [:sleep, :wait_for_event, :wait_for_input, :wait_for_any, :wait_for_all] do
+       when wait_type in [
+              :sleep,
+              :wait_for_event,
+              :wait_for_input,
+              :wait_for_any,
+              :wait_for_all,
+              :call_workflow
+            ] do
     %{step_exec: step_exec, config: config} = ctx
     {:ok, _} = update_step_execution(config, step_exec, :waiting)
     {wait_type, opts}
