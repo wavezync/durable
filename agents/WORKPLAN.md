@@ -1,6 +1,6 @@
 # Durable Workflow Engine - Work Plan
 
-**Last Updated:** 2026-02-27
+**Last Updated:** 2026-03-08
 **Overall Progress:** ~75% Complete
 **Reference:** See `arch.md` for technical architecture
 
@@ -10,10 +10,10 @@
 
 | Metric | Value |
 |--------|-------|
-| Source Modules | 40 |
-| Passing Tests | ~268 |
+| Source Modules | 42 |
+| Passing Tests | ~291 |
 | Documentation Guides | 6 |
-| Lines of Code | ~8,500 |
+| Lines of Code | ~11,000 |
 
 ---
 
@@ -25,7 +25,7 @@
 | 1 | Core MVP | Complete | 100% |
 | 2 | Observability | Partial | 40% |
 | 3 | Advanced Features | Mostly Complete | 90% |
-| 4 | Scalability | Not Started | 0% |
+| 4 | Scalability | Partial | ~5% |
 | 5 | Developer Experience | Partial | 35% |
 
 ---
@@ -88,7 +88,7 @@
 
 ## Phase 3: Advanced Features [90%]
 
-### 3.1-3.3 Wait Primitives [COMPLETE - 46 tests]
+### 3.1-3.3 Wait Primitives [COMPLETE - 52 tests]
 
 | Feature | Status |
 |---------|--------|
@@ -105,7 +105,7 @@
 | Timeout handling | Complete |
 | Context preservation | Complete |
 
-### 3.4 Conditional Branching [COMPLETE - 10 tests]
+### 3.4 Conditional Branching [COMPLETE - 19 tests]
 
 | Feature | Status |
 |---------|--------|
@@ -119,7 +119,7 @@
 
 Intentionally skipped - use step-level retries or Elixir's `Enum` functions instead.
 
-### 3.6 Parallel Execution [COMPLETE - 13 tests]
+### 3.6 Parallel Execution [COMPLETE - 20 tests]
 
 | Feature | Status |
 |---------|--------|
@@ -143,7 +143,7 @@ through idiomatic Elixir.
 
 Low priority - `branch` macro covers most cases.
 
-### 3.9 Compensation/Saga [COMPLETE - 6 tests]
+### 3.9 Compensation/Saga [COMPLETE - 10 tests]
 
 | Feature | Status |
 |---------|--------|
@@ -152,7 +152,7 @@ Low priority - `branch` macro covers most cases.
 | Reverse-order execution | Complete |
 | CompensationRunner | Complete |
 
-### 3.10 Cron Scheduling [COMPLETE - 45 tests]
+### 3.10 Cron Scheduling [COMPLETE - 49 tests]
 
 | Feature | Status |
 |---------|--------|
@@ -172,6 +172,7 @@ Low priority - `branch` macro covers most cases.
 |---------|--------|
 | `call_workflow/3` (synchronous) | Complete |
 | `start_workflow/3` (fire-and-forget) | Complete |
+| `call_workflow` in `parallel` blocks (inline execution) | Complete |
 | Idempotent resume | Complete |
 | Cascade cancellation | Complete |
 | Parent notification on child complete/fail | Complete |
@@ -189,11 +190,11 @@ See `guides/orchestration.md` for comprehensive documentation.
 
 ---
 
-## Phase 4: Scalability [0%]
+## Phase 4: Scalability [~5%]
 
 | Feature | Priority | Complexity |
 |---------|----------|------------|
-| Queue Adapter Behaviour | Complete | - |
+| Queue Adapter Behaviour | **Complete** | - |
 | Redis Queue Adapter | Medium | Medium |
 | RabbitMQ Queue Adapter | Low | Medium |
 | Message Bus Behaviour | Medium | Low |
@@ -217,7 +218,7 @@ Note: Multi-node scheduling already works via `FOR UPDATE SKIP LOCKED`.
 | Module docs (@moduledoc) | Complete |
 | Function docs (@doc) | Complete |
 | Typespecs (@spec) | Complete |
-| 7 Documentation Guides | Complete |
+| 6 Documentation Guides | Complete |
 
 ### Remaining
 
@@ -267,28 +268,36 @@ Note: Multi-node scheduling already works via `FOR UPDATE SKIP LOCKED`.
 
 | Test File | Tests | Area |
 |-----------|-------|------|
-| scheduler_test.exs | 45 | Cron scheduling |
-| wait_test.exs | 46 | Wait primitives |
-| decision_test.exs | 13 | Decision steps |
-| parallel_test.exs | 13 | Parallel execution |
+| wait_test.exs | 52 | Wait primitives |
+| scheduler_test.exs | 49 | Cron scheduling |
+| parallel_test.exs | 20 | Parallel execution |
+| branch_test.exs | 19 | Branch macro |
+| postgres_test.exs | 16 | Queue adapter |
+| decision_test.exs | 14 | Decision steps |
 | log_capture_test.exs | 13 | Log/IO capture |
-| integration_test.exs | 11 | End-to-end flows |
-| branch_test.exs | 10 | Branch macro |
-| durable_test.exs | 8 | Core API |
-| compensation_test.exs | 6 | Saga pattern |
-| Other | ~36 | Queue, handlers, etc. |
 | orchestration_test.exs | 12 | Workflow orchestration |
-| **Total** | **~268** | |
+| integration_test.exs | 11 | End-to-end flows |
+| validation_test.exs | 10 | Input validation |
+| context_test.exs | 10 | Context management |
+| compensation_test.exs | 10 | Saga pattern |
+| durable_test.exs | 10 | Core API |
+| handler_test.exs | 8 | Log handler |
+| io_server_test.exs | 7 | IO capture |
+| resume_edge_cases_test.exs | 5 | Resume edge cases |
+| log_capture/integration_test.exs | 5 | Log capture integration |
+| Other | ~20 | Misc |
+| **Total** | **~291** | |
 
 ---
 
 ## Known Limitations
 
 1. Wait primitives not supported in parallel blocks
-2. No backward jumps in decision steps (forward-only by design)
-3. Context is single-level atomized (top-level keys only)
-4. No workflow versioning
-5. No foreach/loop DSL primitives (use Elixir's `Enum` functions)
+2. Child workflows with waits (`sleep`, `wait_for_event`) not supported in parallel blocks
+3. No backward jumps in decision steps (forward-only by design)
+4. Context is single-level atomized (top-level keys only)
+5. No workflow versioning
+6. No foreach/loop DSL primitives (use Elixir's `Enum` functions)
 
 ---
 
@@ -298,20 +307,24 @@ Note: Multi-node scheduling already works via `FOR UPDATE SKIP LOCKED`.
 2. **Graph Visualization** - Understanding complex workflows
 3. **Testing Helpers** - `Durable.TestCase` for easier workflow testing
 
-The existing ~268 tests provide good confidence in implemented features. Suitable for internal use; additional documentation needed before public release.
+The existing ~291 tests provide good confidence in implemented features. Suitable for internal use; additional documentation needed before public release.
 
 ---
 
 ## Changelog
 
 ### 2026-02-27
+- Added `call_workflow` support inside `parallel` blocks (inline synchronous execution)
+- Child workflows in parallel execute synchronously with process state save/restore
+- 3 new tests for parallel call_workflow (total: ~291)
+- Updated guides/orchestration.md, guides/parallel.md, and README.md
 - Added workflow orchestration: `call_workflow/3` (synchronous) and `start_workflow/3` (fire-and-forget)
 - Added `Durable.Orchestration` module with `use Durable.Orchestration` macro
 - Added cascade cancellation (cancelling parent cancels active children)
 - Added parent notification on child completion/failure
 - Added `Durable.list_children/2` API
 - Added `guides/orchestration.md` documentation
-- 12 new tests for orchestration (total: ~268)
+- 12 new tests for orchestration
 
 ### 2026-01-23
 - Removed `foreach` primitive (use `Enum.map` or `Task.async_stream` instead)

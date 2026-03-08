@@ -83,16 +83,13 @@ defmodule Durable.Orchestration do
     context = Process.get(:durable_context, %{})
 
     cond do
-      # Resume case: result already in context
       Map.has_key?(context, result_key) ->
         parse_child_result(Map.get(context, result_key))
 
-      # Resume case: child exists but no result yet
       Map.has_key?(context, child_key) ->
         child_id = Map.get(context, child_key)
         handle_existing_child(child_id, opts)
 
-      # First execution: create child and throw to wait
       true ->
         create_and_wait(module, input, parent_id, child_key, opts)
     end
@@ -136,7 +133,7 @@ defmodule Durable.Orchestration do
   end
 
   # ============================================================================
-  # Internal helpers
+  # Helpers
   # ============================================================================
 
   defp create_and_wait(module, input, parent_id, child_key, opts) do

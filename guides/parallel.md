@@ -325,6 +325,32 @@ parallel do
 end
 ```
 
+## Calling Child Workflows in Parallel
+
+You can use `call_workflow` inside parallel steps. Child workflows execute **inline (synchronously)** within the parallel task — no suspend/resume needed.
+
+```elixir
+parallel on_error: :complete_all do
+  step :payment, fn data ->
+    case call_workflow(MyApp.PaymentWorkflow, %{"amount" => data.total}, ref: :payment) do
+      {:ok, result} -> {:ok, assign(data, :payment, result)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  step :shipping, fn data ->
+    case call_workflow(MyApp.ShippingWorkflow, %{"order" => data.order_id}, ref: :shipping) do
+      {:ok, result} -> {:ok, assign(data, :shipping, result)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+end
+```
+
+**Note:** Child workflows that use waits (`sleep`, `wait_for_event`, etc.) are not supported inside parallel blocks — they will return an error. Only synchronously-completing children work here.
+
+See the [Orchestration Guide](orchestration.md) for more details on `call_workflow`.
+
 ## How It Works
 
 1. The parallel block starts all steps concurrently as separate tasks

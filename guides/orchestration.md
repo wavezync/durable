@@ -297,10 +297,48 @@ workflow "resilient_order" do
 end
 ```
 
+## `call_workflow` Inside `parallel` Blocks
+
+`call_workflow` works inside `parallel` blocks. Child workflows are executed **inline (synchronously)** within the parallel task, so the result is available immediately — no suspend/resume cycle.
+
+```elixir
+workflow "enrich_order" do
+  step :init, fn input ->
+    {:ok, %{order_id: input["order_id"]}}
+  end
+
+  parallel on_error: :complete_all do
+    step :enrich_customer, fn data ->
+      case call_workflow(MyApp.CustomerLookup, %{"id" => data.order_id}, ref: :customer) do
+        {:ok, result} -> {:ok, assign(data, :customer, result)}
+        {:error, reason} -> {:error, reason}
+      end
+    end
+
+    step :enrich_inventory, fn data ->
+      case call_workflow(MyApp.InventoryCheck, %{"id" => data.order_id}, ref: :inventory) do
+        {:ok, result} -> {:ok, assign(data, :inventory, result)}
+        {:error, reason} -> {:error, reason}
+      end
+    end
+  end
+
+  step :process, fn data ->
+    results = data[:__results__]
+    # Handle results from parallel call_workflow steps...
+    {:ok, data}
+  end
+end
+```
+
+**How it works:** When `call_workflow` detects it's inside a parallel block, it creates the child execution and runs it synchronously via `Executor.execute_workflow` instead of throwing to suspend. The parent's process state is saved beforehand and restored after the child completes.
+
+**Limitation:** Child workflows that use waits (`sleep`, `wait_for_event`, etc.) are not supported inside parallel blocks — they will return an error since the inline execution cannot suspend.
+
 ## Limitations
 
-- `call_workflow` is not supported inside `parallel` blocks (use `start_workflow` instead)
-- Child workflows run in the queue system — they're not executed inline by default
+- Child workflows with waits (`sleep`, `wait_for_event`) cannot be used inside `parallel` blocks
+- Child workflows run in the queue system — they're not executed inline by default (except in parallel blocks)
 - The `:timeout` option requires the timeout checker to be running (same as `wait_for_event`)
 
 ## Best Practices

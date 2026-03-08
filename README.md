@@ -453,6 +453,23 @@ end
 
 # Fire-and-forget: start child and continue
 {:ok, child_id} = start_workflow(MyApp.EmailWorkflow, %{"to" => email}, ref: :welcome)
+
+# call_workflow also works inside parallel blocks (executed inline)
+parallel do
+  step :payment, fn data ->
+    case call_workflow(MyApp.PaymentWorkflow, %{"amount" => data.total}, ref: :pay) do
+      {:ok, result} -> {:ok, assign(data, :payment, result)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  step :shipping, fn data ->
+    case call_workflow(MyApp.ShippingWorkflow, %{"id" => data.order_id}, ref: :ship) do
+      {:ok, result} -> {:ok, assign(data, :shipping, result)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+end
 ```
 
 ### API

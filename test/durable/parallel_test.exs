@@ -3,7 +3,7 @@ defmodule Durable.ParallelTest do
 
   alias Durable.Config
   alias Durable.Executor
-  alias Durable.Storage.Schemas.{StepExecution, WorkflowExecution}
+  alias Durable.Storage.Schemas.{PendingEvent, WaitGroup, WorkflowExecution}
 
   import Ecto.Query
 
@@ -54,39 +54,109 @@ defmodule Durable.ParallelTest do
     end
   end
 
-  describe "parallel execution - results model" do
-    test "parallel steps produce results in __results__ map" do
-      {:ok, execution} =
-        create_and_execute_workflow(SimpleParallelTestWorkflow, %{})
+  describe "parallel execution - durable fan-out" do
+    test "parent goes to :waiting and creates child executions" do
+      config = Config.get(Durable)
+      repo = config.repo
 
-      assert execution.status == :completed
+      {:ok, parent} = create_and_execute_workflow(SimpleParallelTestWorkflow, %{})
 
-      # Results should be in __results__ map with tagged tuples
-      results = execution.context["__results__"]
+      # Parent should be waiting (not completed)
+      assert parent.status == :waiting
+
+      # Should have created child executions
+      children = get_child_executions(repo, parent.id)
+      assert length(children) == 2
+      assert Enum.all?(children, &(&1.status == :pending))
+
+      # Each child should have __parallel_step in context
+      Enum.each(children, fn child ->
+        assert child.context["__parallel_step"] != nil
+        assert child.parent_workflow_id == parent.id
+      end)
+
+      # Parent should have parallel metadata
+      assert parent.context["__parallel_children"] != nil
+      assert parent.context["__parallel_wait_group_id"] != nil
+    end
+
+    test "executing children and resuming parent produces completed workflow" do
+      config = Config.get(Durable)
+      repo = config.repo
+
+      {:ok, parent} = create_and_execute_workflow(SimpleParallelTestWorkflow, %{})
+      assert parent.status == :waiting
+
+      # Execute all children
+      execute_children(repo, parent.id, config)
+
+      # Parent should be resumed (status: :pending after all children done)
+      parent = repo.get!(WorkflowExecution, parent.id)
+      assert parent.status == :pending
+
+      # Execute parent to continue
+      Executor.execute_workflow(parent.id, config)
+      parent = repo.get!(WorkflowExecution, parent.id)
+
+      assert parent.status == :completed
+
+      # Results should be in __results__ map
+      results = parent.context["__results__"]
       assert is_map(results)
-      assert results["task_a"] == ["ok", %{"from_task_a" => true, "initialized" => true}]
-      assert results["task_b"] == ["ok", %{"from_task_b" => true, "initialized" => true}]
+      assert ["ok", %{"from_task_a" => true, "initialized" => true}] = results["task_a"]
+      assert ["ok", %{"from_task_b" => true, "initialized" => true}] = results["task_b"]
     end
 
+    test "WaitGroup and PendingEvents are created for parallel children" do
+      config = Config.get(Durable)
+      repo = config.repo
+
+      {:ok, parent} = create_and_execute_workflow(SimpleParallelTestWorkflow, %{})
+
+      # Should have a WaitGroup
+      wait_groups = repo.all(from(w in WaitGroup, where: w.workflow_id == ^parent.id))
+      assert length(wait_groups) == 1
+      assert hd(wait_groups).wait_type == :all
+      assert length(hd(wait_groups).event_names) == 2
+
+      # Should have PendingEvents
+      events = repo.all(from(p in PendingEvent, where: p.workflow_id == ^parent.id))
+      assert length(events) == 2
+      assert Enum.all?(events, &(&1.status == :pending))
+    end
+  end
+
+  describe "parallel execution - results model" do
     test "next step can access __results__ from context" do
-      {:ok, execution} =
-        create_and_execute_workflow(ResultsAccessWorkflow, %{})
+      config = Config.get(Durable)
+      repo = config.repo
 
-      assert execution.status == :completed
+      {:ok, parent} = create_and_execute_workflow(ResultsAccessWorkflow, %{})
+      execute_children(repo, parent.id, config)
 
-      # The final step should have processed the results
-      assert execution.context["processed_task_a"] == true
-      assert execution.context["processed_task_b"] == true
+      parent = repo.get!(WorkflowExecution, parent.id)
+      Executor.execute_workflow(parent.id, config)
+      parent = repo.get!(WorkflowExecution, parent.id)
+
+      assert parent.status == :completed
+      assert parent.context["processed_task_a"] == true
+      assert parent.context["processed_task_b"] == true
     end
 
-    test "error results are preserved as {:error, reason} in results map" do
-      {:ok, execution} =
-        create_and_execute_workflow(ErrorPreservingParallelWorkflow, %{})
+    test "error results are preserved in results map" do
+      config = Config.get(Durable)
+      repo = config.repo
 
-      assert execution.status == :completed
+      {:ok, parent} = create_and_execute_workflow(ErrorPreservingParallelWorkflow, %{})
+      execute_children(repo, parent.id, config)
 
-      # Check that error is preserved in results
-      results = execution.context["__results__"]
+      parent = repo.get!(WorkflowExecution, parent.id)
+      Executor.execute_workflow(parent.id, config)
+      parent = repo.get!(WorkflowExecution, parent.id)
+
+      assert parent.status == :completed
+
+      results = parent.context["__results__"]
       assert results["good_task"] == ["ok", %{"good" => true}]
       assert match?(["error", _], results["bad_task"])
     end
@@ -94,51 +164,71 @@ defmodule Durable.ParallelTest do
 
   describe "parallel execution - into: callback" do
     test "into: callback transforms results and returns {:ok, ctx}" do
-      {:ok, execution} =
-        create_and_execute_workflow(IntoOkWorkflow, %{})
+      config = Config.get(Durable)
+      repo = config.repo
 
-      assert execution.status == :completed
+      {:ok, parent} = create_and_execute_workflow(IntoOkWorkflow, %{})
+      execute_children(repo, parent.id, config)
 
-      # The into callback should have transformed the results
-      assert execution.context["payment_id"] == 123
-      assert execution.context["delivery_status"] == "confirmed"
-      # __results__ should NOT be in context when into: is used
-      refute Map.has_key?(execution.context, "__results__")
+      parent = repo.get!(WorkflowExecution, parent.id)
+      Executor.execute_workflow(parent.id, config)
+      parent = repo.get!(WorkflowExecution, parent.id)
+
+      assert parent.status == :completed
+      assert parent.context["payment_id"] == 123
+      assert parent.context["delivery_status"] == "confirmed"
+      refute Map.has_key?(parent.context, "__results__")
     end
 
     test "into: callback returning {:error, reason} fails workflow" do
-      {:ok, execution} =
-        create_and_execute_workflow(IntoErrorWorkflow, %{})
+      config = Config.get(Durable)
+      repo = config.repo
 
-      assert execution.status == :failed
-      assert execution.error["message"] == "Payment and delivery both failed"
+      {:ok, parent} = create_and_execute_workflow(IntoErrorWorkflow, %{})
+      execute_children(repo, parent.id, config)
+
+      parent = repo.get!(WorkflowExecution, parent.id)
+      Executor.execute_workflow(parent.id, config)
+      parent = repo.get!(WorkflowExecution, parent.id)
+
+      assert parent.status == :failed
+      assert parent.error["message"] == "Payment and delivery both failed"
     end
 
     test "into: callback returning {:goto, step, ctx} jumps to step" do
-      {:ok, execution} =
-        create_and_execute_workflow(IntoGotoWorkflow, %{})
+      config = Config.get(Durable)
+      repo = config.repo
 
-      assert execution.status == :completed
+      {:ok, parent} = create_and_execute_workflow(IntoGotoWorkflow, %{})
+      execute_children(repo, parent.id, config)
 
-      # Should have skipped to handle_backorder step
-      assert execution.context["backorder_handled"] == true
-      # Should NOT have executed the normal_flow step
-      refute Map.has_key?(execution.context, "normal_flow_executed")
+      parent = repo.get!(WorkflowExecution, parent.id)
+      Executor.execute_workflow(parent.id, config)
+      parent = repo.get!(WorkflowExecution, parent.id)
+
+      assert parent.status == :completed
+      assert parent.context["backorder_handled"] == true
+      refute Map.has_key?(parent.context, "normal_flow_executed")
     end
   end
 
   describe "parallel execution - returns: option" do
     test "returns: option changes result key name" do
-      {:ok, execution} =
-        create_and_execute_workflow(ReturnsKeyWorkflow, %{})
+      config = Config.get(Durable)
+      repo = config.repo
 
-      assert execution.status == :completed
+      {:ok, parent} = create_and_execute_workflow(ReturnsKeyWorkflow, %{})
+      execute_children(repo, parent.id, config)
 
-      results = execution.context["__results__"]
-      # Should use custom key names from returns:
+      parent = repo.get!(WorkflowExecution, parent.id)
+      Executor.execute_workflow(parent.id, config)
+      parent = repo.get!(WorkflowExecution, parent.id)
+
+      assert parent.status == :completed
+
+      results = parent.context["__results__"]
       assert Map.has_key?(results, "order_data")
       assert Map.has_key?(results, "user_data")
-      # Should NOT have the original step names
       refute Map.has_key?(results, "fetch_order")
       refute Map.has_key?(results, "fetch_user")
     end
@@ -146,48 +236,121 @@ defmodule Durable.ParallelTest do
 
   describe "parallel execution - error handling" do
     test "fail_fast stops on first error by default" do
-      {:ok, execution} =
-        create_and_execute_workflow(FailFastParallelWorkflow, %{})
+      config = Config.get(Durable)
+      repo = config.repo
 
-      assert execution.status == :failed
-      # Error should be from the failing step
-      assert execution.error["type"] == "test_error"
+      {:ok, parent} = create_and_execute_workflow(FailFastParallelWorkflow, %{})
+      execute_children(repo, parent.id, config)
+
+      parent = repo.get!(WorkflowExecution, parent.id)
+      Executor.execute_workflow(parent.id, config)
+      parent = repo.get!(WorkflowExecution, parent.id)
+
+      assert parent.status == :failed
+      assert parent.error["type"] == "test_error"
     end
 
     test "complete_all collects all results including errors" do
-      {:ok, execution} =
-        create_and_execute_workflow(CompleteAllWithResultsWorkflow, %{})
+      config = Config.get(Durable)
+      repo = config.repo
 
-      assert execution.status == :completed
+      {:ok, parent} = create_and_execute_workflow(CompleteAllWithResultsWorkflow, %{})
+      execute_children(repo, parent.id, config)
 
-      # All results should be collected, including errors
-      results = execution.context["__results__"]
+      parent = repo.get!(WorkflowExecution, parent.id)
+      Executor.execute_workflow(parent.id, config)
+      parent = repo.get!(WorkflowExecution, parent.id)
+
+      assert parent.status == :completed
+
+      results = parent.context["__results__"]
       assert results["good_task"] == ["ok", %{"good" => true}]
       assert match?(["error", _], results["bad_task"])
     end
   end
 
-  describe "parallel execution - concurrency" do
-    test "steps execute concurrently" do
-      {:ok, execution} =
-        create_and_execute_workflow(TimingParallelWorkflow, %{})
+  describe "parallel execution - distributed" do
+    test "children can be executed on separate workers" do
+      config = Config.get(Durable)
+      repo = config.repo
 
-      assert execution.status == :completed
+      {:ok, parent} = create_and_execute_workflow(SimpleParallelTestWorkflow, %{})
+      assert parent.status == :waiting
 
-      # Both steps should complete
-      results = execution.context["__results__"]
-      assert match?(["ok", _], results["slow_a"])
-      assert match?(["ok", _], results["slow_b"])
+      children = get_child_executions(repo, parent.id)
+
+      # Execute children one at a time (simulating different workers)
+      Enum.each(children, fn child ->
+        Executor.execute_workflow(child.id, config)
+        child = repo.get!(WorkflowExecution, child.id)
+        assert child.status == :completed
+      end)
+
+      # Parent should be resumed
+      parent = repo.get!(WorkflowExecution, parent.id)
+      assert parent.status == :pending
+
+      Executor.execute_workflow(parent.id, config)
+      parent = repo.get!(WorkflowExecution, parent.id)
+      assert parent.status == :completed
     end
 
+    test "children can target different queues" do
+      config = Config.get(Durable)
+      repo = config.repo
+
+      {:ok, parent} = create_and_execute_workflow(QueueRoutingWorkflow, %{})
+      assert parent.status == :waiting
+
+      children =
+        repo.all(
+          from(w in WorkflowExecution,
+            where: w.parent_workflow_id == ^parent.id,
+            order_by: [asc: :inserted_at]
+          )
+        )
+
+      queues = Enum.map(children, & &1.queue) |> Enum.sort()
+      assert "default" in queues
+      assert "gpu" in queues
+    end
+  end
+
+  describe "parallel with single step" do
+    test "parallel block with single step works correctly" do
+      config = Config.get(Durable)
+      repo = config.repo
+
+      {:ok, parent} = create_and_execute_workflow(SingleStepParallelWorkflow, %{})
+      execute_children(repo, parent.id, config)
+
+      parent = repo.get!(WorkflowExecution, parent.id)
+      Executor.execute_workflow(parent.id, config)
+      parent = repo.get!(WorkflowExecution, parent.id)
+
+      assert parent.status == :completed
+
+      results = parent.context["__results__"]
+      assert results["only_task"] == ["ok", %{"from_only_task" => true, "initialized" => true}]
+    end
+  end
+
+  describe "parallel with many steps" do
     test "10+ parallel steps execute successfully" do
-      {:ok, execution} =
-        create_and_execute_workflow(ManyParallelStepsWorkflow, %{})
+      config = Config.get(Durable)
+      repo = config.repo
 
-      assert execution.status == :completed
+      {:ok, parent} = create_and_execute_workflow(ManyParallelStepsWorkflow, %{})
+      execute_children(repo, parent.id, config)
 
-      results = execution.context["__results__"]
-      # All 15 steps should have results
+      parent = repo.get!(WorkflowExecution, parent.id)
+      Executor.execute_workflow(parent.id, config)
+      parent = repo.get!(WorkflowExecution, parent.id)
+
+      assert parent.status == :completed
+
+      results = parent.context["__results__"]
+
       for i <- 1..15 do
         key = "step_#{i}"
         assert Map.has_key?(results, key), "Missing result for #{key}"
@@ -195,87 +358,24 @@ defmodule Durable.ParallelTest do
     end
   end
 
-  describe "parallel with single step" do
-    test "parallel block with single step works correctly" do
-      {:ok, execution} =
-        create_and_execute_workflow(SingleStepParallelWorkflow, %{})
-
-      assert execution.status == :completed
-
-      results = execution.context["__results__"]
-      assert results["only_task"] == ["ok", %{"from_only_task" => true, "initialized" => true}]
-    end
-  end
-
-  describe "parallel resume behavior (durability)" do
-    test "completed parallel steps are not re-executed on resume" do
+  describe "parallel cascade cancellation" do
+    test "cancelling parent cancels pending parallel children" do
       config = Config.get(Durable)
       repo = config.repo
-      {:ok, workflow_def} = ResumableParallelWorkflow.__default_workflow__()
 
-      # Create workflow execution manually
-      attrs = %{
-        workflow_module: Atom.to_string(ResumableParallelWorkflow),
-        workflow_name: workflow_def.name,
-        status: :pending,
-        queue: "default",
-        priority: 0,
-        input: %{},
-        context: %{"initialized" => true}
-      }
+      {:ok, parent} = create_and_execute_workflow(SimpleParallelTestWorkflow, %{})
+      assert parent.status == :waiting
 
-      {:ok, execution} =
-        %WorkflowExecution{}
-        |> WorkflowExecution.changeset(attrs)
-        |> repo.insert()
+      children = get_child_executions(repo, parent.id)
+      assert length(children) == 2
+      assert Enum.all?(children, &(&1.status == :pending))
 
-      # Find the parallel step to get its name
-      parallel_step = Enum.find(workflow_def.steps, &(&1.type == :parallel))
-      parallel_step_names = parallel_step.opts[:steps]
+      # Cancel parent
+      :ok = Executor.cancel_workflow(parent.id, "test_cancel")
 
-      # Manually create a completed step execution for one of the parallel steps
-      # This simulates a partial execution (task_a completed, task_b did not)
-      task_a_name =
-        Enum.find(parallel_step_names, &(Atom.to_string(&1) |> String.contains?("task_a")))
-
-      {:ok, _step_exec} =
-        %StepExecution{}
-        |> StepExecution.changeset(%{
-          workflow_id: execution.id,
-          step_name: Atom.to_string(task_a_name),
-          step_type: "step",
-          attempt: 1,
-          status: :completed,
-          # Store result for durability
-          output: %{
-            "__output__" => nil,
-            "__context__" => %{"from_task_a" => "original_value", "task_a_runs" => 1},
-            "__result__" => %{"from_task_a" => "original_value", "task_a_runs" => 1}
-          }
-        })
-        |> repo.insert()
-
-      # Set current_step to the parallel step (simulating a resume point)
-      {:ok, execution} =
-        execution
-        |> Ecto.Changeset.change(current_step: Atom.to_string(parallel_step.name))
-        |> repo.update()
-
-      # Now execute/resume the workflow
-      Executor.execute_workflow(execution.id, config)
-      execution = repo.get!(WorkflowExecution, execution.id)
-
-      assert execution.status == :completed
-
-      # Check results - task_a should have stored result, task_b should have new result
-      results = execution.context["__results__"]
-      assert match?(["ok", %{"from_task_a" => "original_value"}], results["task_a"])
-      assert match?(["ok", %{"from_task_b" => true}], results["task_b"])
-
-      # Check step executions - task_a should only have 1 execution (the pre-existing one)
-      step_execs = get_step_executions(execution.id)
-      task_a_execs = Enum.filter(step_execs, &String.contains?(&1.step_name, "task_a"))
-      assert length(task_a_execs) == 1
+      # Children should be cancelled
+      children = get_child_executions(repo, parent.id)
+      assert Enum.all?(children, &(&1.status == :cancelled))
     end
   end
 
@@ -304,16 +404,21 @@ defmodule Durable.ParallelTest do
     {:ok, repo.get!(WorkflowExecution, execution.id)}
   end
 
-  defp get_step_executions(workflow_id) do
-    config = Config.get(Durable)
-    repo = config.repo
-
+  defp get_child_executions(repo, parent_id) do
     repo.all(
-      from(s in StepExecution,
-        where: s.workflow_id == ^workflow_id,
-        order_by: [asc: s.inserted_at]
+      from(w in WorkflowExecution,
+        where: w.parent_workflow_id == ^parent_id,
+        order_by: [asc: :inserted_at]
       )
     )
+  end
+
+  defp execute_children(repo, parent_id, config) do
+    children = get_child_executions(repo, parent_id)
+
+    Enum.each(children, fn child ->
+      Executor.execute_workflow(child.id, config)
+    end)
   end
 end
 
@@ -424,8 +529,8 @@ defmodule IntoOkWorkflow do
                  {{:ok, payment}, {:ok, delivery}} ->
                    new_ctx =
                      ctx
-                     |> Map.put(:payment_id, payment.id)
-                     |> Map.put(:delivery_status, delivery.status)
+                     |> Map.put(:payment_id, payment["id"])
+                     |> Map.put(:delivery_status, delivery["status"])
 
                    {:ok, new_ctx}
 
@@ -558,7 +663,6 @@ defmodule FailFastParallelWorkflow do
 
     parallel on_error: :fail_fast do
       step(:good_task, fn data ->
-        Process.sleep(50)
         {:ok, assign(data, :good, true)}
       end)
 
@@ -593,33 +697,6 @@ defmodule CompleteAllWithResultsWorkflow do
     end
 
     step(:final, fn data ->
-      {:ok, data}
-    end)
-  end
-end
-
-defmodule TimingParallelWorkflow do
-  use Durable
-  use Durable.Helpers
-
-  workflow "timing_parallel" do
-    step(:setup, fn data ->
-      {:ok, data}
-    end)
-
-    parallel do
-      step(:slow_a, fn data ->
-        Process.sleep(50)
-        {:ok, assign(data, :a_done, true)}
-      end)
-
-      step(:slow_b, fn data ->
-        Process.sleep(50)
-        {:ok, assign(data, :b_done, true)}
-      end)
-    end
-
-    step(:done, fn data ->
       {:ok, data}
     end)
   end
@@ -679,25 +756,22 @@ defmodule ManyParallelStepsWorkflow do
   end
 end
 
-defmodule ResumableParallelWorkflow do
+defmodule QueueRoutingWorkflow do
   use Durable
   use Durable.Helpers
 
-  workflow "resumable_parallel" do
+  workflow "queue_routing" do
     step(:setup, fn data ->
       {:ok, assign(data, :initialized, true)}
     end)
 
     parallel do
-      step(:task_a, fn data ->
-        # This will be tracked to verify it doesn't re-run
-        current_runs = data[:task_a_runs] || 0
-        data = assign(data, :task_a_runs, current_runs + 1)
-        {:ok, assign(data, :from_task_a, true)}
+      step(:gpu_task, [queue: "gpu"], fn data ->
+        {:ok, assign(data, :gpu_done, true)}
       end)
 
-      step(:task_b, fn data ->
-        {:ok, assign(data, :from_task_b, true)}
+      step(:default_task, fn data ->
+        {:ok, assign(data, :default_done, true)}
       end)
     end
 
