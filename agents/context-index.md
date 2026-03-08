@@ -121,10 +121,20 @@ agents/
 │       ├── README.md                   # Topic overview
 │       ├── sessions/                   # Individual session records
 │       └── implementation-plan.md
+├── milestones/                         # Per-feature planning documents
+│   ├── _TEMPLATE.md                    # Milestone template
+│   ├── M01-graph-visualization.md
+│   ├── M02-developer-tooling.md
+│   ├── M03-testing-framework.md
+│   ├── M04-documentation-release.md
+│   ├── M05-message-bus.md
+│   ├── M06-phoenix-dashboard.md
+│   └── M07-scalability-adapters.md
 ├── context-index.md                    # This file
 ├── .archived-topics.json               # Machine-readable metadata
 ├── arch.md                             # Architecture & technical reference
-├── WORKPLAN.md                         # Current status & work planning
+├── ROADMAP.md                          # Current status & milestone index
+├── WORKPLAN_ARCHIVED.md                # Historical (replaced by ROADMAP.md + milestones/)
 └── IMPLEMENTATION_PLAN_ARCHIVED.md     # Historical (no longer maintained)
 ```
 
