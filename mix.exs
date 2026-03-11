@@ -80,6 +80,15 @@ defmodule Durable.MixProject do
         "guides/orchestration.md",
         "guides/parallel.md",
         "guides/waiting.md"
+      ],
+      groups_for_modules: [
+        "Mix Tasks": [
+          Mix.Tasks.Durable.Status,
+          Mix.Tasks.Durable.List,
+          Mix.Tasks.Durable.Run,
+          Mix.Tasks.Durable.Cancel,
+          Mix.Tasks.Durable.Cleanup
+        ]
       ]
     ]
   end

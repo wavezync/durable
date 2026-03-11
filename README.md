@@ -485,6 +485,35 @@ Durable.provide_input(id, "input_name", data)
 Durable.list_children(parent_id)
 ```
 
+## Mix Tasks
+
+Durable includes mix tasks for managing workflows from the command line.
+
+```bash
+# Show queue status and workflow summary
+mix durable.status
+
+# List workflow executions (with filters)
+mix durable.list                                         # all executions
+mix durable.list --status running                        # filter by status
+mix durable.list --workflow MyApp.OrderWorkflow           # filter by workflow
+mix durable.list --limit 20 --format json                # limit results, JSON output
+
+# Start a workflow
+mix durable.run MyApp.OrderWorkflow                      # no input
+mix durable.run MyApp.OrderWorkflow --input '{"id": 123}' # with JSON input
+mix durable.run MyApp.OrderWorkflow --queue high_priority  # specific queue
+
+# Cancel a workflow
+mix durable.cancel <execution_id>
+mix durable.cancel <execution_id> --reason "no longer needed"
+
+# Clean up old executions
+mix durable.cleanup --older-than 30d                     # completed/failed older than 30 days
+mix durable.cleanup --older-than 7d --status completed   # only completed, older than 7 days
+mix durable.cleanup --older-than 24h --dry-run           # preview what would be deleted
+```
+
 ## Guides
 
 - [Branching](guides/branching.md) - Conditional flow control
