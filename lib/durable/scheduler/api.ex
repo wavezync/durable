@@ -89,7 +89,7 @@ defmodule Durable.Scheduler.API do
 
       attrs = %{
         name: schedule_name,
-        workflow_module: inspect(module),
+        workflow_module: Atom.to_string(module),
         workflow_name: workflow_name,
         cron_expression: cron_expression,
         timezone: Keyword.get(opts, :timezone, "UTC"),
@@ -461,7 +461,7 @@ defmodule Durable.Scheduler.API do
         from(s in q, where: s.enabled == ^enabled)
 
       {:workflow_module, module}, q when is_atom(module) ->
-        module_str = inspect(module)
+        module_str = Atom.to_string(module)
         from(s in q, where: s.workflow_module == ^module_str)
 
       {:queue, queue}, q ->
@@ -548,7 +548,7 @@ defmodule Durable.Scheduler.API do
          {:ok, next_run} <- compute_next_run(cron, timezone) do
       attrs = %{
         name: name,
-        workflow_module: inspect(module),
+        workflow_module: Atom.to_string(module),
         workflow_name: workflow_name,
         cron_expression: cron,
         timezone: timezone,

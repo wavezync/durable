@@ -168,7 +168,7 @@ defmodule Durable.Query do
   defp apply_filters(query, filters) do
     Enum.reduce(filters, query, fn
       {:workflow, module}, q when is_atom(module) ->
-        module_str = inspect(module)
+        module_str = Atom.to_string(module)
         from(w in q, where: w.workflow_module == ^module_str)
 
       {:workflow_name, name}, q ->
