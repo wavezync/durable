@@ -14,7 +14,8 @@ defmodule Durable.Migration.Migrator do
   # When adding new migrations, append them to this list.
   @migrations [
     Durable.Migration.Migrations.V20260103000000InitialSchema,
-    Durable.Migration.Migrations.V20260104000000AddWaitPrimitives
+    Durable.Migration.Migrations.V20260104000000AddWaitPrimitives,
+    Durable.Migration.Migrations.V20260413000000AddSchedulerResilience
   ]
 
   @doc """

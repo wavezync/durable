@@ -26,7 +26,11 @@ defmodule Durable.Scheduler do
 
   require Logger
 
+  alias Crontab.CronExpression.Parser, as: CronParser
+  alias Crontab.Scheduler, as: CronScheduler
+  alias Durable.Repo
   alias Durable.Scheduler.API
+  alias Durable.Storage.Schemas.ScheduledWorkflow
 
   @default_interval 60_000
 
@@ -179,7 +183,64 @@ defmodule Durable.Scheduler do
         start_workflow(schedule, mod, config)
 
       {:error, reason} ->
-        Logger.error("Failed to load module for schedule #{schedule.name}: #{inspect(reason)}")
+        # Bug L-1: instead of just logging and re-firing on every poll cycle,
+        # record the failure on the schedule row, advance next_run_at past
+        # the current trigger so we don't loop hot, and auto-disable after
+        # too many consecutive failures.
+        record_failure(
+          schedule,
+          config,
+          "Failed to load module #{schedule.workflow_module}: #{inspect(reason)}"
+        )
+    end
+  end
+
+  defp record_failure(schedule, config, message) do
+    # Compute the next run time so we don't immediately re-fire on the next
+    # poll. If the cron parse itself fails, just defer 5 minutes.
+    next_run_at = compute_next_run(schedule)
+
+    changeset =
+      ScheduledWorkflow.failure_changeset(schedule, message,
+        next_run_at: next_run_at,
+        auto_disable_after: 5
+      )
+
+    case Repo.update(changeset, config) do
+      {:ok, updated} ->
+        if updated.auto_disabled_at do
+          Logger.error(
+            "[Durable.Scheduler] Auto-disabled #{schedule.name} after " <>
+              "#{updated.consecutive_failures} consecutive failures: #{message}"
+          )
+        else
+          Logger.warning(
+            "[Durable.Scheduler] Schedule #{schedule.name} failure " <>
+              "(#{updated.consecutive_failures}): #{message}"
+          )
+        end
+
+      {:error, cs} ->
+        Logger.error(
+          "[Durable.Scheduler] Failed to record failure for #{schedule.name}: " <>
+            inspect(cs.errors)
+        )
+    end
+  end
+
+  defp compute_next_run(schedule) do
+    case CronParser.parse(schedule.cron_expression) do
+      {:ok, cron} ->
+        case CronScheduler.get_next_run_date(cron, DateTime.utc_now() |> DateTime.to_naive()) do
+          {:ok, naive} ->
+            DateTime.from_naive!(naive, "Etc/UTC")
+
+          _ ->
+            DateTime.add(DateTime.utc_now(), 300, :second)
+        end
+
+      _ ->
+        DateTime.add(DateTime.utc_now(), 300, :second)
     end
   end
 

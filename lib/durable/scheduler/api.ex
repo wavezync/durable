@@ -315,6 +315,12 @@ defmodule Durable.Scheduler.API do
   def register(module, opts \\ []) do
     durable_name = Keyword.get(opts, :durable, Durable)
 
+    # Modules are lazy-loaded in dev; `function_exported?/3` returns false
+    # for an existing-but-not-yet-loaded module, which would silently skip
+    # registration at scheduler boot. Force the load first so the export
+    # check is meaningful.
+    _ = Code.ensure_loaded(module)
+
     if function_exported?(module, :__schedules__, 0) do
       schedules = module.__schedules__()
       register_schedules(module, schedules, durable_name)
