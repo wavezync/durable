@@ -21,7 +21,7 @@ if System.get_env("PHX_SERVER") do
 end
 
 config :phoenix_demo, PhoenixDemoWeb.Endpoint,
-  http: [port: String.to_integer(System.get_env("PORT", "4000"))]
+  http: [port: String.to_integer(System.get_env("PORT", "4005"))]
 
 if config_env() == :prod do
   database_url =
