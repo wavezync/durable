@@ -14,6 +14,7 @@ defmodule Durable.Executor do
   alias Durable.Definition.Workflow
   alias Durable.Executor.CompensationRunner
   alias Durable.Executor.StepRunner
+  alias Durable.PubSub, as: DurablePubSub
   alias Durable.Repo
   alias Durable.Storage.Schemas.PendingEvent
   alias Durable.Storage.Schemas.PendingInput
@@ -48,6 +49,8 @@ defmodule Durable.Executor do
 
     with {:ok, workflow_def} <- get_workflow_definition(module, opts),
          {:ok, execution} <- create_execution(config, module, workflow_def, input, opts) do
+      DurablePubSub.broadcast_workflow(config, :workflow_started, workflow_event(execution))
+
       # For inline/synchronous execution (useful for testing)
       if Keyword.get(opts, :inline, false) do
         execute_workflow(execution.id, config)
@@ -73,12 +76,15 @@ defmodule Durable.Executor do
       execution when execution.status in [:pending, :running, :waiting] ->
         error = if reason, do: %{type: "cancelled", message: reason}, else: %{type: "cancelled"}
 
-        execution
-        |> WorkflowExecution.status_changeset(:cancelled, %{
-          error: error,
-          completed_at: DateTime.utc_now()
-        })
-        |> Repo.update(config)
+        {:ok, cancelled} =
+          execution
+          |> WorkflowExecution.status_changeset(:cancelled, %{
+            error: error,
+            completed_at: DateTime.utc_now()
+          })
+          |> Repo.update(config)
+
+        DurablePubSub.broadcast_workflow(config, :workflow_cancelled, workflow_event(cancelled))
 
         # Cascade cancel to child workflows
         cancel_child_workflows(config, workflow_id)
@@ -153,11 +159,14 @@ defmodule Durable.Executor do
   def resume_workflow(workflow_id, additional_context \\ %{}, opts \\ []) do
     durable_name = Keyword.get(opts, :durable, Durable)
     config = Config.get(durable_name)
+    # Sanitize at the API boundary — callers (provide_input, send_event,
+    # timeout workers) supply maps that can carry arbitrary user terms.
+    safe_additional = sanitize_for_json(additional_context)
 
     with {:ok, execution} <- load_execution(config, workflow_id),
          true <- execution.status == :waiting || {:error, :not_waiting} do
       # Merge additional context
-      new_context = Map.merge(execution.context || %{}, additional_context)
+      new_context = Map.merge(execution.context || %{}, safe_additional)
 
       execution
       |> Ecto.Changeset.change(
@@ -226,9 +235,16 @@ defmodule Durable.Executor do
   end
 
   defp mark_running(config, execution) do
-    execution
-    |> WorkflowExecution.status_changeset(:running, %{started_at: DateTime.utc_now()})
-    |> Repo.update(config)
+    case execution
+         |> WorkflowExecution.status_changeset(:running, %{started_at: DateTime.utc_now()})
+         |> Repo.update(config) do
+      {:ok, running} = ok ->
+        DurablePubSub.broadcast_workflow(config, :workflow_resumed, workflow_event(running))
+        ok
+
+      other ->
+        other
+    end
   end
 
   defp execute_steps(steps, execution, config, initial_data) do
@@ -376,7 +392,17 @@ defmodule Durable.Executor do
 
     case find_jump_target(target_step, remaining_steps, step.name, step_index) do
       {:ok, target_steps} ->
-        execute_steps_recursive(target_steps, exec, step_index, workflow_def, config, data)
+        # Use the merged exec.context (prior put_context writes + goto data),
+        # not the goto's raw data — otherwise put_context writes from prior
+        # steps would silently vanish across the goto boundary.
+        execute_steps_recursive(
+          target_steps,
+          exec,
+          step_index,
+          workflow_def,
+          config,
+          exec.context
+        )
 
       {:error, reason} ->
         handle_step_failure(
@@ -751,6 +777,12 @@ defmodule Durable.Executor do
 
   # Create a child workflow execution for a single parallel step
   defp create_parallel_child(parent_exec, step, data, queue, config) do
+    # Inherit the parent's accumulated context so prior put_context/2 calls
+    # are visible to the child step via get_context/1. This is a snapshot at
+    # spawn time — concurrent siblings still can't see each other's writes,
+    # which is intentional (avoids races across parallel branches).
+    parent_context = parent_exec.context || %{}
+
     attrs = %{
       workflow_module: parent_exec.workflow_module,
       workflow_name: parent_exec.workflow_name,
@@ -758,7 +790,7 @@ defmodule Durable.Executor do
       queue: to_string(queue),
       priority: 0,
       input: data,
-      context: %{"__parallel_step" => Atom.to_string(step.name)},
+      context: Map.put(parent_context, "__parallel_step", Atom.to_string(step.name)),
       parent_workflow_id: parent_exec.id,
       current_step: Atom.to_string(step.name)
     }
@@ -784,8 +816,21 @@ defmodule Durable.Executor do
         message: "Step #{step_name} not found in workflow"
       })
     else
-      # Use parent's input as the pipeline data (stored in child's input)
-      data = atomize_keys(execution.input)
+      # Merge the inherited parent context into the pipeline data so that
+      # get_context/1 inside the step body resolves keys set by prior
+      # put_context/2 calls in the parent's non-parallel steps.
+      #
+      # StepRunner will Process.put(:durable_context, data) before running
+      # the body, which is why we need these keys to live inside `data`.
+      # The __parallel_step marker is internal plumbing — strip it from
+      # what the user sees.
+      inherited =
+        execution.context
+        |> Map.drop(["__parallel_step", :__parallel_step])
+        |> atomize_keys()
+
+      input = atomize_keys(execution.input)
+      data = Map.merge(inherited, input)
 
       case StepRunner.execute(step_def, data, execution.id, config) do
         {:ok, output_data} ->
@@ -965,6 +1010,11 @@ defmodule Durable.Executor do
   end
 
   defp apply_parallel_into(into_fn, base_ctx, results) when is_function(into_fn, 2) do
+    # User callbacks get raw {:ok, value} / {:error, reason} tuples so they
+    # can pattern-match cleanly — this is the intended ergonomic API.
+    # Any tuples that leak into the callback's return are sanitized at the
+    # save boundary (save_data_as_context -> sanitize_for_json), so storage
+    # can't crash regardless of what shape the user returns.
     into_fn.(base_ctx, results)
   rescue
     e ->
@@ -1079,69 +1129,144 @@ defmodule Durable.Executor do
   # Also merges orchestration keys from process dict to ensure child workflow
   # references are persisted through DB round-trips
   defp save_data_as_context(config, execution, data) do
-    merged = merge_orchestration_context(data)
+    # Persist the step's cumulative context — everything the user wrote via
+    # put_context/2 during the step body PLUS everything they returned from
+    # the step. Step return wins on key collision because the return value
+    # is the step's explicit contract.
+    #
+    # Rationale: Context is cumulative. Before this change, put_context/2
+    # writes were silently dropped unless the user also returned those keys,
+    # which made the put_context API a footgun (see bug report C-1,
+    # 2026-04-13-follow-up-audit.md).
+    process_ctx = Process.get(:durable_context, %{})
+
+    # Merge preserving key shapes: step return wins over prior writes on
+    # collision. We deliberately don't atomize keys here — users may return
+    # maps with mixed atom/string keys (e.g., via Helpers.assign/3 layered
+    # on top of string-keyed DB-round-tripped input) and atomize_keys/1
+    # deduplicates non-deterministically via Map.new, which corrupted
+    # values in the branch DSL path.
+    merged =
+      process_ctx
+      |> Map.merge(data)
+      |> sanitize_for_json()
 
     execution
     |> Ecto.Changeset.change(context: merged)
     |> Repo.update(config)
   end
 
-  # Merge orchestration keys (__child:*, __fire_forget:*, __child_done:*) from
-  # process dict into the data to persist. These keys are set by
-  # Durable.Orchestration.call_workflow/start_workflow via put_context.
-  defp merge_orchestration_context(data) do
-    process_ctx = Process.get(:durable_context, %{})
-
-    orchestration_keys =
-      process_ctx
-      |> Enum.filter(fn {key, _} -> orchestration_key?(key) end)
-      |> Map.new()
-
-    Map.merge(data, orchestration_keys)
-  end
-
-  defp orchestration_key?(key) when is_atom(key) do
-    orchestration_key?(Atom.to_string(key))
-  end
-
-  defp orchestration_key?(key) when is_binary(key) do
-    String.starts_with?(key, "__child:") or
-      String.starts_with?(key, "__fire_forget:") or
-      String.starts_with?(key, "__child_done:")
-  end
-
-  defp orchestration_key?(_), do: false
-
   defp mark_completed(config, execution, final_data) do
+    # Sanitize before persisting — the final step may return data containing
+    # raw tuples (e.g., child executions in a parallel block complete with
+    # {:ok, value} that gets unwrapped but sometimes leaks through).
+    safe_final = sanitize_for_json(final_data)
+
     {:ok, execution} =
       execution
       |> WorkflowExecution.status_changeset(:completed, %{
-        context: final_data,
+        context: safe_final,
         completed_at: DateTime.utc_now(),
         current_step: nil
       })
       |> Ecto.Changeset.change(locked_by: nil, locked_at: nil)
       |> Repo.update(config)
 
-    maybe_notify_parent(config, execution, :completed, final_data)
+    DurablePubSub.broadcast_workflow(config, :workflow_completed, workflow_event(execution))
+
+    maybe_notify_parent(config, execution, :completed, safe_final)
 
     {:ok, execution}
   end
 
   defp mark_failed(config, execution, error) do
-    {:ok, execution} =
-      execution
-      |> WorkflowExecution.status_changeset(:failed, %{
-        error: error,
-        completed_at: DateTime.utc_now()
-      })
-      |> Ecto.Changeset.change(locked_by: nil, locked_at: nil)
-      |> Repo.update(config)
+    # Sanitize the error before persisting — a step crash may hand us a map
+    # containing tuples, PIDs, or functions (via stacktrace, raw values, etc).
+    # Postgres JSONB can't store those, so we recursively replace unencodable
+    # leaves with their inspect/1 string. If save STILL fails we fall back to
+    # a minimal diagnostic error so the workflow is never left as a zombie.
+    safe_error = sanitize_for_json(error)
 
-    maybe_notify_parent(config, execution, :failed, error)
+    result =
+      try do
+        execution
+        |> WorkflowExecution.status_changeset(:failed, %{
+          error: safe_error,
+          completed_at: DateTime.utc_now()
+        })
+        |> Ecto.Changeset.change(locked_by: nil, locked_at: nil)
+        |> Repo.update(config)
+      rescue
+        e ->
+          fallback = %{
+            type: "unrecorded_error",
+            message:
+              "Workflow failed, but original error could not be persisted: #{Exception.message(e)}",
+            original_error_inspect: inspect(error, limit: :infinity)
+          }
 
-    {:error, error}
+          execution
+          |> WorkflowExecution.status_changeset(:failed, %{
+            error: fallback,
+            completed_at: DateTime.utc_now()
+          })
+          |> Ecto.Changeset.change(locked_by: nil, locked_at: nil)
+          |> Repo.update(config)
+      end
+
+    case result do
+      {:ok, execution} ->
+        DurablePubSub.broadcast_workflow(config, :workflow_failed, workflow_event(execution))
+        maybe_notify_parent(config, execution, :failed, safe_error)
+        {:error, safe_error}
+
+      {:error, changeset} ->
+        # Last resort — we can't even save the fallback. Log and move on so
+        # the worker doesn't crash.
+        require Logger
+
+        Logger.error(
+          "[Durable] Failed to mark workflow #{execution.id} as failed: #{inspect(changeset)}"
+        )
+
+        {:error, safe_error}
+    end
   end
+
+  # Recursively convert a term into something Jason can encode. Tuples become
+  # lists, non-Date/DateTime atoms pass through, and anything else exotic
+  # (PIDs, ports, functions, refs) is replaced by its inspect/1 form.
+  @doc false
+  @spec sanitize_for_json(term()) :: term()
+  def sanitize_for_json(%module{} = struct)
+      when module in [Date, DateTime, NaiveDateTime, Time, Decimal],
+      do: struct
+
+  def sanitize_for_json(%_{} = struct),
+    do: sanitize_for_json(Map.from_struct(struct))
+
+  def sanitize_for_json(map) when is_map(map) do
+    Map.new(map, fn {k, v} -> {sanitize_json_key(k), sanitize_for_json(v)} end)
+  end
+
+  def sanitize_for_json(list) when is_list(list) do
+    Enum.map(list, &sanitize_for_json/1)
+  end
+
+  def sanitize_for_json(tuple) when is_tuple(tuple) do
+    tuple |> Tuple.to_list() |> Enum.map(&sanitize_for_json/1)
+  end
+
+  def sanitize_for_json(term)
+      when is_binary(term) or is_number(term) or is_boolean(term) or is_nil(term),
+      do: term
+
+  def sanitize_for_json(term) when is_atom(term), do: term
+
+  def sanitize_for_json(term), do: inspect(term)
+
+  defp sanitize_json_key(k) when is_atom(k) or is_binary(k), do: k
+  defp sanitize_json_key(k), do: inspect(k)
 
   # ============================================================================
   # Parent Notification (Orchestration)
@@ -1220,22 +1345,74 @@ defmodule Durable.Executor do
 
     case Repo.one(config, query) do
       nil ->
-        # Parent not waiting (fire-and-forget case, or already timed out)
+        # Parent not waiting (fire-and-forget case, or already timed out).
+        # Log this as an orphan completion — useful when investigating why
+        # a parent never received its child's result.
+        if execution.parent_workflow_id do
+          Logger.warning(
+            "[Durable] child completion arrived for non-waiting parent — " <>
+              "child=#{execution.id} parent=#{execution.parent_workflow_id} " <>
+              "event=#{event_name} status=#{status}"
+          )
+        end
+
         :ok
 
       pending_event ->
-        # Fulfill the pending event
-        {:ok, _} =
-          pending_event
-          |> PendingEvent.receive_changeset(payload)
-          |> Repo.update(config)
-
-        # Find the child ref from parent's context to store result under the right key
+        # Atomic: fulfill the pending event AND transition the parent back
+        # to :pending in a single transaction. Before this change a crash
+        # between the two updates left the event :received but the parent
+        # stuck in :waiting (Bug M-3).
         parent = Repo.get(config, WorkflowExecution, execution.parent_workflow_id)
         result_context = build_parent_result_context(parent, execution.id, payload)
+        atomic_fulfill_event_and_resume_parent(config, pending_event, parent, result_context)
+    end
+  end
 
-        # Resume the parent workflow
-        resume_workflow(execution.parent_workflow_id, result_context)
+  defp atomic_fulfill_event_and_resume_parent(config, pending_event, parent, result_context) do
+    safe_context = sanitize_for_json(result_context)
+
+    multi =
+      Ecto.Multi.new()
+      |> Ecto.Multi.update(
+        :event,
+        PendingEvent.receive_changeset(pending_event, pending_event.payload || %{})
+      )
+      |> Ecto.Multi.run(:parent, fn repo, _changes ->
+        case repo.get(WorkflowExecution, parent.id) do
+          nil ->
+            {:error, :parent_not_found}
+
+          %WorkflowExecution{status: :waiting} = exec ->
+            new_context = Map.merge(exec.context || %{}, safe_context)
+
+            exec
+            |> Ecto.Changeset.change(
+              context: new_context,
+              status: :pending,
+              locked_by: nil,
+              locked_at: nil
+            )
+            |> repo.update()
+
+          %WorkflowExecution{status: status} ->
+            # Parent already moved on (cancelled, completed, etc.). Tolerate;
+            # the event is still marked :received via the Multi above.
+            {:ok, %{status: status, no_op: true}}
+        end
+      end)
+
+    case Repo.transaction(config, multi) do
+      {:ok, _} ->
+        :ok
+
+      {:error, stage, reason, _} ->
+        Logger.error(
+          "[Durable] failed to atomically fulfill child event + resume parent: " <>
+            "stage=#{stage} reason=#{inspect(reason)} parent=#{parent.id}"
+        )
+
+        {:error, reason}
     end
   end
 
@@ -1434,7 +1611,7 @@ defmodule Durable.Executor do
       on_timeout: Keyword.get(opts, :on_timeout, :resume)
     }
 
-    {:ok, _pending_input} =
+    {:ok, pending_input} =
       %PendingInput{}
       |> PendingInput.changeset(attrs)
       |> Repo.insert(config)
@@ -1443,6 +1620,9 @@ defmodule Durable.Executor do
       execution
       |> Ecto.Changeset.change(status: :waiting)
       |> Repo.update(config)
+
+    DurablePubSub.broadcast_workflow(config, :workflow_waiting, workflow_event(execution))
+    DurablePubSub.broadcast_input(config, :input_requested, pending_input_event(pending_input))
 
     {:waiting, execution}
   end
@@ -1535,11 +1715,52 @@ defmodule Durable.Executor do
     end
   end
 
+  # Serialize a user-supplied timeout_value for JSONB storage in PendingInput /
+  # PendingEvent / WaitGroup rows. Users naturally pass idiomatic Elixir shapes
+  # like `{:error, :timeout}` or `%{nested: {:tuple}}`; sanitize_for_json/1
+  # normalizes tuples to lists and exotic terms (PIDs, functions, refs) to
+  # their inspect/1 form so Postgrex never crashes on encode.
   defp serialize_timeout_value(nil), do: nil
-  defp serialize_timeout_value(value) when is_map(value), do: value
+
+  defp serialize_timeout_value(value) when is_map(value),
+    do: sanitize_for_json(value)
 
   defp serialize_timeout_value(value) when is_atom(value),
     do: %{"__atom__" => Atom.to_string(value)}
 
-  defp serialize_timeout_value(value), do: %{"__value__" => value}
+  defp serialize_timeout_value(value),
+    do: %{"__value__" => sanitize_for_json(value)}
+
+  # ============================================================================
+  # PubSub event builders
+  # ============================================================================
+
+  defp workflow_event(%WorkflowExecution{} = execution) do
+    %{
+      id: execution.id,
+      workflow_module: execution.workflow_module,
+      workflow_name: execution.workflow_name,
+      status: execution.status,
+      queue: execution.queue,
+      current_step: execution.current_step,
+      started_at: execution.started_at,
+      completed_at: execution.completed_at,
+      inserted_at: execution.inserted_at,
+      updated_at: execution.updated_at
+    }
+  end
+
+  defp pending_input_event(%PendingInput{} = pending) do
+    %{
+      id: pending.id,
+      workflow_id: pending.workflow_id,
+      input_name: pending.input_name,
+      step_name: pending.step_name,
+      input_type: pending.input_type,
+      status: pending.status,
+      prompt: pending.prompt,
+      timeout_at: pending.timeout_at,
+      inserted_at: pending.inserted_at
+    }
+  end
 end

@@ -9,8 +9,9 @@ defmodule Durable.Wait.TimeoutWorker do
 
   use GenServer
 
+  alias Durable.Executor
   alias Durable.Repo
-  alias Durable.Storage.Schemas.{PendingEvent, PendingInput, WaitGroup}
+  alias Durable.Storage.Schemas.{PendingEvent, PendingInput, WaitGroup, WorkflowExecution}
 
   import Ecto.Query
 
@@ -113,18 +114,10 @@ defmodule Durable.Wait.TimeoutWorker do
   end
 
   defp handle_input_timeout(config, pending_input) do
-    # Mark as timed out
-    {:ok, _} =
-      pending_input
-      |> PendingInput.timeout_changeset()
-      |> Repo.update(config)
-
-    # Determine how to handle
     on_timeout = pending_input.on_timeout || :resume
 
     case on_timeout do
       :resume ->
-        # Resume workflow with timeout value
         timeout_value = deserialize_timeout_value(pending_input.timeout_value)
 
         resume_data = %{
@@ -132,22 +125,53 @@ defmodule Durable.Wait.TimeoutWorker do
           :__timeout__ => true
         }
 
-        Durable.Executor.resume_workflow(
-          pending_input.workflow_id,
-          resume_data,
-          durable: config.name
-        )
+        # Atomic: mark the input :timeout AND transition the workflow back
+        # to :pending in a single transaction. Before this change, a crash
+        # between the two updates left the input as :timeout but the workflow
+        # stuck in :waiting forever (Bug M-2).
+        result =
+          atomic_resume_after_timeout(
+            config,
+            PendingInput.timeout_changeset(pending_input),
+            pending_input.workflow_id,
+            resume_data
+          )
+
+        case result do
+          {:ok, _} ->
+            Logger.info(
+              "Timeout handled for pending input #{pending_input.input_name} " <>
+                "in workflow #{pending_input.workflow_id} (resume)"
+            )
+
+          {:error, stage, reason, _changes} ->
+            Logger.error(
+              "Failed input timeout transaction for #{pending_input.workflow_id}: " <>
+                "#{stage} → #{inspect(reason)}"
+            )
+        end
 
       :fail ->
-        # Cancel the workflow with timeout error
-        reason = "Timeout waiting for input: #{pending_input.input_name}"
-        Durable.Executor.cancel_workflow(pending_input.workflow_id, reason, durable: config.name)
-    end
+        # Mark input :timeout then cancel — same Multi pattern.
+        case atomic_cancel_after_timeout(
+               config,
+               PendingInput.timeout_changeset(pending_input),
+               pending_input.workflow_id,
+               "Timeout waiting for input: #{pending_input.input_name}"
+             ) do
+          {:ok, _} ->
+            Logger.info(
+              "Timeout handled for pending input #{pending_input.input_name} " <>
+                "in workflow #{pending_input.workflow_id} (fail)"
+            )
 
-    Logger.info(
-      "Timeout handled for pending input #{pending_input.input_name} " <>
-        "in workflow #{pending_input.workflow_id} (#{on_timeout})"
-    )
+          {:error, stage, reason, _changes} ->
+            Logger.error(
+              "Failed input timeout transaction for #{pending_input.workflow_id}: " <>
+                "#{stage} → #{inspect(reason)}"
+            )
+        end
+    end
   end
 
   defp process_timed_out_events(config, now) do
@@ -171,13 +195,6 @@ defmodule Durable.Wait.TimeoutWorker do
   end
 
   defp handle_event_timeout(config, pending_event) do
-    # Mark as timed out
-    {:ok, _} =
-      pending_event
-      |> PendingEvent.timeout_changeset()
-      |> Repo.update(config)
-
-    # Resume workflow with timeout value
     timeout_value = deserialize_timeout_value(pending_event.timeout_value)
 
     resume_data = %{
@@ -185,16 +202,87 @@ defmodule Durable.Wait.TimeoutWorker do
       :__timeout__ => true
     }
 
-    Durable.Executor.resume_workflow(
-      pending_event.workflow_id,
-      resume_data,
-      durable: config.name
-    )
+    case atomic_resume_after_timeout(
+           config,
+           PendingEvent.timeout_changeset(pending_event),
+           pending_event.workflow_id,
+           resume_data
+         ) do
+      {:ok, _} ->
+        Logger.info(
+          "Timeout handled for pending event #{pending_event.event_name} " <>
+            "in workflow #{pending_event.workflow_id}"
+        )
 
-    Logger.info(
-      "Timeout handled for pending event #{pending_event.event_name} " <>
-        "in workflow #{pending_event.workflow_id}"
-    )
+      {:error, stage, reason, _changes} ->
+        Logger.error(
+          "Failed event timeout transaction for #{pending_event.workflow_id}: " <>
+            "#{stage} → #{inspect(reason)}"
+        )
+    end
+  end
+
+  # Atomically: persist the pending row's :timeout transition AND flip the
+  # owning workflow back to :pending with the timeout payload merged into
+  # context. If either step fails the entire transaction rolls back, so the
+  # workflow can never end up "input/event marked timeout but workflow still
+  # stuck in :waiting".
+  defp atomic_resume_after_timeout(config, pending_changeset, workflow_id, resume_data) do
+    safe_resume = Executor.sanitize_for_json(resume_data)
+
+    multi =
+      Ecto.Multi.new()
+      |> Ecto.Multi.update(:pending, pending_changeset)
+      |> Ecto.Multi.run(:workflow, fn repo, _changes ->
+        case repo.get(WorkflowExecution, workflow_id) do
+          nil ->
+            {:error, :workflow_not_found}
+
+          %WorkflowExecution{status: :waiting} = exec ->
+            new_context = Map.merge(exec.context || %{}, safe_resume)
+
+            exec
+            |> Ecto.Changeset.change(
+              context: new_context,
+              status: :pending,
+              locked_by: nil,
+              locked_at: nil
+            )
+            |> repo.update()
+
+          %WorkflowExecution{status: status} ->
+            # The workflow already moved on (e.g. someone provided input
+            # before the timeout sweep ran). Tolerate this — the pending
+            # row is still marked :timeout via the Multi above, which is
+            # the right outcome.
+            {:ok, %{status: status, no_op: true}}
+        end
+      end)
+
+    Repo.transaction(config, multi)
+  end
+
+  defp atomic_cancel_after_timeout(config, pending_changeset, workflow_id, reason) do
+    multi =
+      Ecto.Multi.new()
+      |> Ecto.Multi.update(:pending, pending_changeset)
+      |> Ecto.Multi.run(:workflow, fn repo, _changes ->
+        case repo.get(WorkflowExecution, workflow_id) do
+          nil ->
+            {:error, :workflow_not_found}
+
+          %WorkflowExecution{} = exec ->
+            exec
+            |> WorkflowExecution.status_changeset(:cancelled, %{
+              error: %{"type" => "timeout", "message" => reason},
+              completed_at: DateTime.utc_now()
+            })
+            |> Ecto.Changeset.change(locked_by: nil, locked_at: nil)
+            |> repo.update()
+        end
+      end)
+
+    Repo.transaction(config, multi)
   end
 
   defp process_timed_out_wait_groups(config, now) do
@@ -216,52 +304,97 @@ defmodule Durable.Wait.TimeoutWorker do
   end
 
   defp handle_wait_group_timeout(config, wait_group) do
-    # Mark wait group as timed out
-    {:ok, _} =
-      wait_group
-      |> WaitGroup.timeout_changeset()
-      |> Repo.update(config)
+    resume_data = build_wait_group_resume_data(wait_group)
 
-    # Mark all related pending events as timed out
-    query =
-      from(p in PendingEvent,
-        where: p.wait_group_id == ^wait_group.id and p.status == :pending
-      )
+    case atomic_resume_after_wait_group_timeout(config, wait_group, resume_data) do
+      {:ok, _} ->
+        log_wait_group_timeout_success(wait_group)
 
-    Repo.update_all(config, query, set: [status: :timeout, completed_at: DateTime.utc_now()])
+      {:error, stage, reason, _} ->
+        Logger.error(
+          "Failed wait_group timeout transaction for #{wait_group.workflow_id}: " <>
+            "#{stage} → #{inspect(reason)}"
+        )
+    end
+  end
 
-    # Resume workflow with timeout value and partial results
+  # Builds the resume context for a timed-out wait group.
+  #
+  # Bug M-4: include per-event status in the resume payload so user code
+  # can distinguish events that were :received from events that :timed_out.
+  defp build_wait_group_resume_data(wait_group) do
     timeout_value = deserialize_timeout_value(wait_group.timeout_value)
+    received = wait_group.received_events || %{}
 
-    resume_data =
+    per_event_status =
+      Map.new(wait_group.event_names || [], fn name ->
+        case Map.get(received, name) do
+          nil -> {name, %{"status" => "timeout", "value" => nil}}
+          payload -> {name, %{"status" => "received", "value" => payload}}
+        end
+      end)
+
+    fallback_result =
       case wait_group.wait_type do
-        :any ->
-          # For wait_for_any, return {:timeout, nil} or timeout_value
-          %{
-            :__wait_group_result__ => timeout_value || {:timeout, nil},
-            :__timeout__ => true
-          }
-
-        :all ->
-          # For wait_for_all, return {:timeout, partial_results}
-          partial = wait_group.received_events || %{}
-
-          %{
-            :__wait_group_result__ => timeout_value || {:timeout, partial},
-            :__timeout__ => true
-          }
+        :any -> {:timeout, nil}
+        :all -> {:timeout, received}
       end
 
-    Durable.Executor.resume_workflow(
-      wait_group.workflow_id,
-      resume_data,
-      durable: config.name
-    )
+    %{
+      :__wait_group_result__ => timeout_value || fallback_result,
+      :__wait_group_status__ => per_event_status,
+      :__timeout__ => true
+    }
+  end
+
+  defp log_wait_group_timeout_success(wait_group) do
+    received_count = map_size(wait_group.received_events || %{})
+    expected_count = length(wait_group.event_names || [])
 
     Logger.info(
       "Timeout handled for wait group #{wait_group.id} " <>
-        "(#{wait_group.wait_type}) in workflow #{wait_group.workflow_id}"
+        "(#{wait_group.wait_type}) in workflow #{wait_group.workflow_id} — " <>
+        "received #{received_count} of #{expected_count} events"
     )
+  end
+
+  defp atomic_resume_after_wait_group_timeout(config, wait_group, resume_data) do
+    safe_resume = Executor.sanitize_for_json(resume_data)
+    now = DateTime.utc_now()
+
+    multi =
+      Ecto.Multi.new()
+      |> Ecto.Multi.update(:wait_group, WaitGroup.timeout_changeset(wait_group))
+      |> Ecto.Multi.update_all(
+        :pending_events,
+        from(p in PendingEvent,
+          where: p.wait_group_id == ^wait_group.id and p.status == :pending
+        ),
+        set: [status: :timeout, completed_at: now]
+      )
+      |> Ecto.Multi.run(:workflow, fn repo, _changes ->
+        case repo.get(WorkflowExecution, wait_group.workflow_id) do
+          nil ->
+            {:error, :workflow_not_found}
+
+          %WorkflowExecution{status: :waiting} = exec ->
+            new_context = Map.merge(exec.context || %{}, safe_resume)
+
+            exec
+            |> Ecto.Changeset.change(
+              context: new_context,
+              status: :pending,
+              locked_by: nil,
+              locked_at: nil
+            )
+            |> repo.update()
+
+          %WorkflowExecution{status: status} ->
+            {:ok, %{status: status, no_op: true}}
+        end
+      end)
+
+    Repo.transaction(config, multi)
   end
 
   defp deserialize_timeout_value(nil), do: nil

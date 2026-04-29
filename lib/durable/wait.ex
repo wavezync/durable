@@ -41,6 +41,7 @@ defmodule Durable.Wait do
   """
 
   alias Durable.Config
+  alias Durable.PubSub, as: DurablePubSub
   alias Durable.Repo
   alias Durable.Storage.Schemas.{PendingEvent, PendingInput, WaitGroup, WorkflowExecution}
 
@@ -134,6 +135,29 @@ defmodule Durable.Wait do
 
   - `:timeout` - Timeout in milliseconds (optional)
   - `:timeout_value` - Value to return on timeout (optional)
+
+  ## Resumption semantics
+
+  `wait_for_event/2` is a **resumption barrier**, not a pause inside the
+  step body. When the event arrives, the step body re-executes from the
+  top — it doesn't "continue" from the line where the wait was called.
+  On re-execution, the wait finds the event data in the restored context
+  and returns immediately without re-suspending.
+
+  This means any side effects BEFORE `wait_for_event/2` run each time the
+  step is invoked (once on suspend, again on resume). Make them idempotent
+  or move them into a separate prior step:
+
+      # 🚫 not idempotent — sends two emails
+      step :wait_for_approval, fn data ->
+        Mailer.send_approval_request(data)      # runs on both passes
+        result = wait_for_event("approved")
+        {:ok, assign(data, :approved, result)}
+      end
+
+      # ✅ side effect lives in its own step
+      step :request_approval, fn data -> Mailer.send_approval_request(data); {:ok, data} end
+      step :await_approval,   fn data -> {:ok, assign(data, :approved, wait_for_event("approved"))} end
 
   ## Examples
 
@@ -545,10 +569,16 @@ defmodule Durable.Wait do
   @spec provide_input(String.t(), String.t(), map(), keyword()) :: :ok | {:error, term()}
   def provide_input(workflow_id, input_name, data, opts \\ []) do
     config = get_config(opts)
+    # Sanitize at the API boundary so any tuples / PIDs / functions that
+    # leak in from controllers, LiveViews, or external callers can't crash
+    # JSONB persistence in PendingInput.response or workflow.context.
+    safe_data = Durable.Executor.sanitize_for_json(data)
 
     with {:ok, pending} <- find_pending_input(config, workflow_id, input_name),
-         {:ok, _} <- complete_pending_input(config, pending, data),
-         {:ok, _} <- Durable.Executor.resume_workflow(workflow_id, %{input_name => data}, opts) do
+         {:ok, completed} <- complete_pending_input(config, pending, safe_data),
+         {:ok, _} <-
+           Durable.Executor.resume_workflow(workflow_id, %{input_name => safe_data}, opts) do
+      DurablePubSub.broadcast_input(config, :input_provided, pending_input_to_map(completed))
       :ok
     end
   end
@@ -572,10 +602,12 @@ defmodule Durable.Wait do
   @spec send_event(String.t(), String.t(), map(), keyword()) :: :ok | {:error, term()}
   def send_event(workflow_id, event_name, payload, opts \\ []) do
     config = get_config(opts)
+    # Sanitize at the API boundary — same rationale as provide_input/4.
+    safe_payload = Durable.Executor.sanitize_for_json(payload)
 
     with {:ok, pending_event} <- find_pending_event(config, workflow_id, event_name),
-         {:ok, _} <- receive_pending_event(config, pending_event, payload),
-         {:ok, _} <- maybe_resume_workflow(config, workflow_id, event_name, payload, opts) do
+         {:ok, _} <- receive_pending_event(config, pending_event, safe_payload),
+         {:ok, _} <- maybe_resume_workflow(config, workflow_id, event_name, safe_payload, opts) do
       :ok
     end
   end
@@ -794,14 +826,40 @@ defmodule Durable.Wait do
   end
 
   defp complete_pending_input(config, pending, response) do
+    # PendingInput.response is typed `:map`. Non-map responses (a single
+    # string from wait_for_choice/wait_for_text, an approval atom, etc.)
+    # would silently fail Ecto's cast and short-circuit the resume flow,
+    # leaving the workflow stuck in :waiting until timeout.
+    #
+    # The workflow's downstream context still receives the unwrapped value
+    # via Executor.resume_workflow, so this wrapping is purely for the
+    # audit/display field on PendingInput.
+    storable_response =
+      if is_map(response) do
+        response
+      else
+        %{"value" => response}
+      end
+
     pending
-    |> PendingInput.complete_changeset(response)
+    |> PendingInput.complete_changeset(storable_response)
     |> Repo.update(config)
   end
 
   defp receive_pending_event(config, pending_event, payload) do
+    # PendingEvent.payload is typed `:map`. Same wrap pattern as
+    # complete_pending_input/3 — non-map payloads (e.g. an event sent with
+    # just a string identifier) get stored under `"value"` so the cast
+    # always succeeds and the workflow resume isn't blocked.
+    storable_payload =
+      if is_map(payload) do
+        payload
+      else
+        %{"value" => payload}
+      end
+
     pending_event
-    |> PendingEvent.receive_changeset(payload)
+    |> PendingEvent.receive_changeset(storable_payload)
     |> Repo.update(config)
   end
 

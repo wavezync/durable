@@ -7,6 +7,14 @@ defmodule Durable.DSL.Step do
   Data flows from step to step. Each step receives the previous step's output
   and returns `{:ok, data}` or `{:error, reason}`.
 
+  ## Future work — `each/foreach` isolation (L-5)
+
+  If/when this DSL gains an iteration primitive (e.g. `each/3` to run a step
+  once per item in a list), design with **context isolation per iteration**.
+  Parallel-style shared context across concurrent iterations creates races on
+  `put_context/2` writes; isolated contexts avoid that class of bug. See
+  `docs/bug-reports/2026-04-13-follow-up-audit.md`.
+
   ## Usage
 
       workflow "process_order" do
@@ -134,7 +142,18 @@ defmodule Durable.DSL.Step do
   end
 
   defp build_decision(name, opts, body_fn) do
-    normalized_opts = normalize_step_opts(opts)
+    # Walk the body AST for `{:goto, atom, _}` patterns so the dashboard
+    # can render the conditional branches in the workflow graph. Best-
+    # effort: `:goto` calls with computed atoms (`{:goto, var, _}`) are
+    # not detected and operators can supply an explicit `branches:`
+    # opt to override.
+    branches = extract_goto_targets(body_fn)
+
+    normalized_opts =
+      opts
+      |> normalize_step_opts()
+      |> Map.put(:branches, branches)
+
     func_name = :"__decision_body_#{name}__"
 
     quote do
@@ -149,6 +168,28 @@ defmodule Durable.DSL.Step do
         opts: unquote(Macro.escape(normalized_opts))
       }
     end
+  end
+
+  # Recognises `{:goto, :atom, _}` *tuple literals* anywhere inside the
+  # body AST (decision body shapes are typically `cond do … end` /
+  # `case do … end`). 3-tuples render in AST as
+  # `{:{}, meta, [:goto, target_atom, _]}`. 2-tuples (rare:
+  # `{:goto, :atom}`) render as `{:goto, target_atom}` directly. Returns
+  # unique target atoms in source order.
+  defp extract_goto_targets(body_ast) do
+    {_, found} =
+      Macro.prewalk(body_ast, [], fn
+        {:{}, _meta, [:goto, target | _]} = node, acc when is_atom(target) ->
+          {node, [target | acc]}
+
+        {:goto, target} = node, acc when is_atom(target) ->
+          {node, [target | acc]}
+
+        other, acc ->
+          {other, acc}
+      end)
+
+    found |> Enum.reverse() |> Enum.uniq()
   end
 
   @doc """

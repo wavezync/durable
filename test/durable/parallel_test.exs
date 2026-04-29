@@ -269,6 +269,91 @@ defmodule Durable.ParallelTest do
     end
   end
 
+  describe "parallel execution - context inheritance (Bug #1 regression)" do
+    test "parallel children can read context set by earlier non-parallel steps" do
+      config = Config.get(Durable)
+      repo = config.repo
+
+      {:ok, parent} = create_and_execute_workflow(ParallelContextInheritWorkflow, %{})
+      assert parent.status == :waiting
+
+      # Each child should have inherited the parent's accumulated context
+      children = get_child_executions(repo, parent.id)
+
+      Enum.each(children, fn child ->
+        # The shared key was put_context'd in :seed before the parallel block.
+        # It must now live in the child's context (in addition to __parallel_step).
+        assert child.context["shared_key"] == "hello",
+               "Child #{child.id} did not inherit shared_key; got: #{inspect(child.context)}"
+
+        assert child.context["shared_count"] == 42
+        # Internal marker is still there for the executor's use
+        assert child.context["__parallel_step"] != nil
+      end)
+
+      # Execute children — they use get_context to read the inherited values
+      execute_children(repo, parent.id, config)
+
+      # Finalize parent
+      parent = repo.get!(WorkflowExecution, parent.id)
+      Executor.execute_workflow(parent.id, config)
+      parent = repo.get!(WorkflowExecution, parent.id)
+
+      assert parent.status == :completed
+
+      # Both readers saw the inherited values
+      results = parent.context["__results__"]
+      assert results["reader_a"] == ["ok", %{"saw" => "hello", "count" => 42}]
+      assert results["reader_b"] == ["ok", %{"saw" => "hello"}]
+    end
+
+    test "parallel children don't see each other's put_context writes (intentional isolation)" do
+      # Siblings run concurrently; allowing them to share mutations would race.
+      # This test documents the current boundary: inherited context is a
+      # snapshot taken at spawn time.
+      config = Config.get(Durable)
+      repo = config.repo
+
+      {:ok, parent} = create_and_execute_workflow(ParallelIsolationWorkflow, %{})
+      execute_children(repo, parent.id, config)
+
+      parent = repo.get!(WorkflowExecution, parent.id)
+      Executor.execute_workflow(parent.id, config)
+      parent = repo.get!(WorkflowExecution, parent.id)
+
+      assert parent.status == :completed
+      results = parent.context["__results__"]
+      # writer_step put_context(:sibling_wrote, true), but peer_step can't see it
+      assert results["peer_step"] == ["ok", %{"saw_sibling" => nil}]
+    end
+  end
+
+  describe "parallel execution - into: callback safety (Bug #2 regression)" do
+    test "raw tuples returned by into: callback are sanitized before persisting" do
+      config = Config.get(Durable)
+      repo = config.repo
+
+      {:ok, parent} = create_and_execute_workflow(IntoPassthroughWorkflow, %{})
+      execute_children(repo, parent.id, config)
+
+      parent = repo.get!(WorkflowExecution, parent.id)
+      Executor.execute_workflow(parent.id, config)
+      parent = repo.get!(WorkflowExecution, parent.id)
+
+      # Before the fix, this would crash with Protocol.UndefinedError because
+      # the user's callback returned a map containing raw {:ok, _} tuples
+      # from `results` and Jason can't encode tuples to JSONB. After the
+      # fix, save_data_as_context runs sanitize_for_json on everything it
+      # persists — tuples become lists automatically.
+      assert parent.status == :completed
+      pass_through = parent.context["pass_through"]
+      assert is_map(pass_through)
+      # Tuples have been converted to lists
+      assert match?(["ok", _], pass_through["task_x"])
+      assert match?(["ok", _], pass_through["task_y"])
+    end
+  end
+
   describe "parallel execution - distributed" do
     test "children can be executed on separate workers" do
       config = Config.get(Durable)
@@ -778,5 +863,86 @@ defmodule QueueRoutingWorkflow do
     step(:final, fn data ->
       {:ok, assign(data, :completed, true)}
     end)
+  end
+end
+
+# ===========================================================================
+# Test fixtures for Bug #1 regression — parallel context inheritance
+# ===========================================================================
+
+defmodule ParallelContextInheritWorkflow do
+  use Durable
+  use Durable.Helpers
+  use Durable.Context
+
+  workflow "parallel_context_inherit" do
+    step(:seed, fn _data ->
+      # Context values flow to downstream steps via the step's return map.
+      # This is the standard Durable pipeline pattern.
+      {:ok, %{shared_key: "hello", shared_count: 42, seeded: true}}
+    end)
+
+    parallel into: fn _ctx, results -> {:ok, %{__results__: results}} end do
+      step(:reader_a, fn _data ->
+        # Before the fix, these would return nil because parallel children
+        # did not inherit the parent's accumulated context.
+        {:ok, %{saw: get_context(:shared_key), count: get_context(:shared_count)}}
+      end)
+
+      step(:reader_b, fn _data ->
+        {:ok, %{saw: get_context(:shared_key, "missing")}}
+      end)
+    end
+  end
+end
+
+defmodule ParallelIsolationWorkflow do
+  use Durable
+  use Durable.Helpers
+  use Durable.Context
+
+  workflow "parallel_isolation" do
+    step(:setup, fn _data ->
+      {:ok, %{}}
+    end)
+
+    parallel into: fn _ctx, results -> {:ok, %{__results__: results}} end do
+      step(:writer_step, fn _data ->
+        # Writes made inside one parallel sibling must NOT be visible to another.
+        put_context(:sibling_wrote, true)
+        {:ok, %{wrote: true}}
+      end)
+
+      step(:peer_step, fn _data ->
+        # Give the writer a head start — this is still not enough for
+        # cross-sibling reads to work because parallel siblings are isolated.
+        Process.sleep(5)
+        {:ok, %{saw_sibling: get_context(:sibling_wrote)}}
+      end)
+    end
+  end
+end
+
+# ===========================================================================
+# Test fixture for Bug #2 regression — into: callback pre-serialization
+# ===========================================================================
+
+defmodule IntoPassthroughWorkflow do
+  use Durable
+  use Durable.Helpers
+  use Durable.Context
+
+  workflow "into_passthrough" do
+    step(:setup, fn _data ->
+      {:ok, %{}}
+    end)
+
+    # The user's into: callback passes the `results` map through untouched.
+    # Before the fix, `results` contained raw {:ok, _} tuples and storage
+    # crashed. After the fix, results are pre-serialized to lists.
+    parallel into: fn _ctx, results -> {:ok, %{pass_through: results}} end do
+      step(:task_x, fn _data -> {:ok, %{x: 1}} end)
+      step(:task_y, fn _data -> {:ok, %{y: 2}} end)
+    end
   end
 end

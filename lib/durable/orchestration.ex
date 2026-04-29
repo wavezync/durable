@@ -65,6 +65,20 @@ defmodule Durable.Orchestration do
   - `:queue` - Queue for the child workflow (default: "default")
   - `:durable` - Durable instance name (default: Durable)
 
+  ## What the parent sees on success
+
+  The `result` returned on success is the child workflow's **entire final
+  context**, not just its explicit outputs. This includes every
+  `put_context/2` key the child set, plus the final step's return value.
+
+  If you need to expose only specific outputs, return a clean shape from the
+  child's final step or pick only the keys you need in the parent:
+
+      case call_workflow(MyApp.PaymentWorkflow, %{"amount" => 100}) do
+        {:ok, %{"payment_id" => id}} -> {:ok, assign(data, :payment_id, id)}
+        {:error, reason} -> {:error, reason}
+      end
+
   ## Examples
 
       case call_workflow(MyApp.PaymentWorkflow, %{"amount" => 100}, timeout: hours(1)) do
@@ -128,8 +142,31 @@ defmodule Durable.Orchestration do
       # Create child and continue (no throw)
       {:ok, child_id} = create_child_execution(module, input, parent_id, opts)
       Context.put_context(fire_key, child_id)
+      record_call_child(child_id, :fire, ref)
       {:ok, child_id}
     end
+  end
+
+  # Records a step → child mapping in the parent's context so the dashboard
+  # can attach a drill-in chevron to the calling step. Mirrors the
+  # `__parallel_children` pattern used by parallel steps in
+  # `lib/durable/executor.ex`.
+  defp record_call_child(child_id, kind, ref) do
+    step_name = Context.current_step()
+
+    meta = %{
+      "step_name" => step_name && Atom.to_string(step_name),
+      "kind" => Atom.to_string(kind),
+      "ref" => to_string(ref)
+    }
+
+    children =
+      Context.get_context(:__call_children, %{}) ||
+        Context.get_context("__call_children", %{}) ||
+        %{}
+
+    Context.put_context(:__call_children, Map.put(children, child_id, meta))
+    :ok
   end
 
   # ============================================================================
@@ -139,6 +176,7 @@ defmodule Durable.Orchestration do
   defp create_and_wait(module, input, parent_id, child_key, opts) do
     {:ok, child_id} = create_child_execution(module, input, parent_id, opts)
     Context.put_context(child_key, child_id)
+    record_call_child(child_id, :call, Keyword.get(opts, :ref, module_to_ref(module)))
 
     throw(
       {:call_workflow,

@@ -137,6 +137,35 @@ defmodule Durable.WaitTest do
     end
   end
 
+  describe "wait_for_event/2 timeout_value sanitization (Bug C-2 regression)" do
+    test "accepts a tagged tuple as timeout_value without crashing JSONB insert" do
+      # Before the fix, `timeout_value: {:error, :timeout}` crashed at PendingEvent
+      # insertion because Postgrex/Jason can't encode raw tuples.
+      {:ok, execution} = create_and_execute_workflow(TupleTimeoutValueWorkflow, %{})
+
+      assert execution.status == :waiting
+
+      pending = get_pending_event(Durable.Config.get(Durable).repo, execution.id, "evt")
+      assert pending != nil
+      # Sanitized: tuple becomes a list
+      assert pending.timeout_value == %{"__value__" => ["error", "timeout"]}
+    end
+
+    test "accepts a deeply nested map with tuples as timeout_value" do
+      {:ok, execution} = create_and_execute_workflow(NestedTupleTimeoutValueWorkflow, %{})
+
+      assert execution.status == :waiting
+
+      pending = get_pending_event(Durable.Config.get(Durable).repo, execution.id, "evt")
+      assert pending != nil
+      # The map path also goes through sanitize_for_json now.
+      timeout_value = pending.timeout_value
+      assert is_map(timeout_value)
+      # Nested tuple flattened to a list inside the map
+      assert get_in(timeout_value, ["nested", "tag"]) == ["err", "boom"]
+    end
+  end
+
   describe "wait_for_any/2" do
     test "creates WaitGroup with wait_type :any" do
       config = Config.get(Durable)
@@ -427,6 +456,39 @@ defmodule Durable.WaitTest do
       result = Wait.provide_input(fake_uuid, "unknown", %{})
       assert result == {:error, :not_found}
     end
+
+    test "accepts a plain string response (single_choice / text / approval)" do
+      # Regression: dashboard's SingleChoiceForm submits just the raw choice
+      # string (e.g. "morning"). PendingInput.response is typed :map, so
+      # without the wrap the cast silently fails and the workflow never
+      # resumes. This test locks in that non-map responses are accepted.
+      config = Config.get(Durable)
+      repo = config.repo
+
+      {:ok, execution} = create_and_execute_workflow(InputWaitTestWorkflow, %{})
+
+      assert :ok = Wait.provide_input(execution.id, "manager_approval", "approved")
+
+      pending = get_pending_input(repo, execution.id, "manager_approval")
+      assert pending.status == :completed
+      assert pending.response == %{"value" => "approved"}
+    end
+
+    test "accepts an atom response (e.g. :approved)" do
+      config = Config.get(Durable)
+      repo = config.repo
+
+      {:ok, execution} = create_and_execute_workflow(InputWaitTestWorkflow, %{})
+
+      assert :ok = Wait.provide_input(execution.id, "manager_approval", :approved)
+
+      pending = get_pending_input(repo, execution.id, "manager_approval")
+      assert pending.status == :completed
+      # sanitize_for_json leaves atoms alone; complete_pending_input wraps
+      # them under "value" because the column type is :map. JSONB then
+      # stores the atom as its string form.
+      assert pending.response == %{"value" => "approved"}
+    end
   end
 
   describe "send_event/4" do
@@ -441,6 +503,21 @@ defmodule Durable.WaitTest do
       pending = get_pending_event(repo, execution.id, "payment_confirmed")
       assert pending.status == :received
       assert pending.payload == %{"amount" => 50}
+    end
+
+    test "accepts a plain string payload" do
+      # Same wrap pattern as provide_input/4: send_event("foo", "bar")
+      # should succeed and store %{"value" => "bar"} in payload.
+      config = Config.get(Durable)
+      repo = config.repo
+
+      {:ok, execution} = create_and_execute_workflow(EventWaitTestWorkflow, %{})
+
+      assert :ok = Wait.send_event(execution.id, "payment_confirmed", "done")
+
+      pending = get_pending_event(repo, execution.id, "payment_confirmed")
+      assert pending.status == :received
+      assert pending.payload == %{"value" => "done"}
     end
 
     test "updates WaitGroup for grouped events" do
@@ -1233,6 +1310,42 @@ defmodule UnicodeEventWorkflow do
   workflow "unicode_event" do
     step(:wait_step, fn data ->
       result = wait_for_event("событие_イベント")
+      {:ok, assign(data, :result, result)}
+    end)
+  end
+end
+
+# ============================================================================
+# Bug C-2 regression fixtures — timeout_value with raw tuples / nested terms
+# ============================================================================
+
+defmodule TupleTimeoutValueWorkflow do
+  use Durable
+  use Durable.Helpers
+  use Durable.Wait
+
+  workflow "tuple_timeout" do
+    step(:wait_step, fn data ->
+      # Idiomatic Elixir tuple — would crash JSONB insert before fix.
+      result = wait_for_event("evt", timeout: hours(1), timeout_value: {:error, :timeout})
+      {:ok, assign(data, :result, result)}
+    end)
+  end
+end
+
+defmodule NestedTupleTimeoutValueWorkflow do
+  use Durable
+  use Durable.Helpers
+  use Durable.Wait
+
+  workflow "nested_tuple_timeout" do
+    step(:wait_step, fn data ->
+      result =
+        wait_for_event("evt",
+          timeout: hours(1),
+          timeout_value: %{"nested" => %{"tag" => {:err, :boom}}}
+        )
+
       {:ok, assign(data, :result, result)}
     end)
   end

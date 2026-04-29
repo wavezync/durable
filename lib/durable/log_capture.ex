@@ -35,6 +35,13 @@ defmodule Durable.LogCapture do
 
   alias Durable.LogCapture.IOServer
 
+  require Logger
+
+  # Process-dict flag: track whether we've already emitted the M-6
+  # "metadata stringified" warning during the current step. Cleared in
+  # start_capture/0.
+  @warn_flag :durable_log_capture_warned
+
   @logs_key :durable_logs
   @original_gl_key :durable_original_group_leader
   @io_server_key :durable_io_capture_pid
@@ -54,6 +61,9 @@ defmodule Durable.LogCapture do
     if Keyword.get(config, :enabled, true) do
       # Initialize log buffer
       Process.put(@logs_key, [])
+      # Reset the per-step "warned about non-JSON metadata" flag so the
+      # warning fires at most once per step (Bug M-6).
+      Process.delete(@warn_flag)
 
       # Start IO capture if enabled
       if Keyword.get(config, :io_capture, true) do
@@ -266,7 +276,32 @@ defmodule Durable.LogCapture do
   defp serialize_value(v) when is_number(v), do: v
   defp serialize_value(v) when is_boolean(v), do: v
   defp serialize_value(nil), do: nil
-  defp serialize_value(v), do: inspect(v)
+
+  defp serialize_value(v) do
+    # Bug M-6: surface (once per step) when log metadata has been silently
+    # stringified — devs often don't realize they passed a non-JSON-safe
+    # value and end up debugging an `inspect/1` blob instead of structured
+    # data. Rate-limited via a process-dict flag.
+    warn_once_about_unsafe_metadata(v)
+    inspect(v)
+  end
+
+  defp warn_once_about_unsafe_metadata(v) do
+    case Process.get(@warn_flag) do
+      true ->
+        :ok
+
+      _ ->
+        Process.put(@warn_flag, true)
+
+        Logger.warning(
+          "[Durable.LogCapture] non-JSON-safe metadata value stringified " <>
+            "to inspect/1 form: #{inspect(v, limit: 80)}. To preserve " <>
+            "structured data, only pass binaries, atoms, numbers, booleans, " <>
+            "or nil in Logger metadata."
+        )
+    end
+  end
 
   defp format_logs_for_storage(logs) do
     # Convert string keys to atoms for consistency with schema

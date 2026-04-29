@@ -81,22 +81,33 @@ defmodule Durable.Queue.StaleJobRecovery do
   defp do_recovery(%Config{} = config) do
     adapter = Adapter.default_adapter()
 
-    case adapter.recover_stale_locks(config, config.stale_lock_timeout) do
-      {:ok, 0} ->
-        {:ok, 0}
+    stale_result = adapter.recover_stale_locks(config, config.stale_lock_timeout)
+    log_recovery(:stale, stale_result, config.name)
 
-      {:ok, count} ->
-        Logger.info("Recovered #{count} stale job(s) for #{inspect(config.name)}")
-        emit_telemetry(count, config.name)
-        {:ok, count}
-
-      {:error, reason} = error ->
-        Logger.error(
-          "Failed to recover stale locks for #{inspect(config.name)}: #{inspect(reason)}"
-        )
-
-        error
+    # Zombie recovery is an optional adapter capability. Skip if not implemented.
+    if function_exported?(adapter, :recover_zombie_workflows, 2) do
+      zombie_result = adapter.recover_zombie_workflows(config, config.stale_lock_timeout)
+      log_recovery(:zombie, zombie_result, config.name)
     end
+
+    # Preserve the return shape expected by `recover_now/1` callers.
+    stale_result
+  end
+
+  defp log_recovery(_kind, {:ok, 0}, _name), do: :ok
+
+  defp log_recovery(:stale, {:ok, count}, name) do
+    Logger.info("Recovered #{count} stale job(s) for #{inspect(name)}")
+    emit_telemetry(count, name)
+  end
+
+  defp log_recovery(:zombie, {:ok, count}, name) do
+    Logger.warning("Marked #{count} zombie workflow(s) as failed for #{inspect(name)}")
+    emit_zombie_telemetry(count, name)
+  end
+
+  defp log_recovery(kind, {:error, reason}, name) do
+    Logger.error("Failed #{kind} recovery for #{inspect(name)}: #{inspect(reason)}")
   end
 
   defp schedule_recovery(interval) do
@@ -110,6 +121,14 @@ defmodule Durable.Queue.StaleJobRecovery do
   defp emit_telemetry(count, durable_name) do
     :telemetry.execute(
       [:durable, :queue, :stale_recovered],
+      %{count: count},
+      %{durable: durable_name}
+    )
+  end
+
+  defp emit_zombie_telemetry(count, durable_name) do
+    :telemetry.execute(
+      [:durable, :queue, :zombie_recovered],
       %{count: count},
       %{durable: durable_name}
     )

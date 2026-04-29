@@ -158,6 +158,70 @@ defmodule Durable.Query do
     |> Enum.map(&execution_to_map(&1, false, false))
   end
 
+  @doc """
+  Returns workflow execution counts grouped by status.
+
+  Returns a map like `%{pending: 5, running: 3, completed: 100, ...}`.
+
+  ## Options
+
+  - `:durable` - The Durable instance name (default: Durable)
+
+  """
+  @spec dashboard_counts(keyword()) :: %{atom() => non_neg_integer()}
+  def dashboard_counts(opts \\ []) do
+    config = get_config(opts)
+
+    query =
+      from(w in WorkflowExecution,
+        group_by: w.status,
+        select: {w.status, count(w.id)}
+      )
+
+    Repo.all(config, query)
+    |> Map.new()
+  end
+
+  @doc """
+  Lists workflow executions with total count for pagination.
+
+  Returns `{executions, total_count}`.
+
+  Accepts the same filters as `list_executions/1`.
+  """
+  @spec list_executions_with_total(keyword()) :: {[map()], non_neg_integer()}
+  def list_executions_with_total(filters \\ []) do
+    config = get_config(filters)
+    limit = Keyword.get(filters, :limit, 50)
+    offset = Keyword.get(filters, :offset, 0)
+
+    base_query =
+      from(w in WorkflowExecution,
+        order_by: [desc: w.inserted_at]
+      )
+
+    base_query = apply_filters(base_query, filters)
+
+    list_query = from(w in base_query, limit: ^limit, offset: ^offset)
+
+    # The count query mustn't inherit `order_by` — Postgres rejects ORDER BY
+    # against a column that isn't in GROUP BY when the SELECT is an aggregate
+    # (`SELECT count(id) FROM ... ORDER BY inserted_at` raises 42803). Strip
+    # it from the base query before adding the aggregate.
+    total_query =
+      base_query
+      |> exclude(:order_by)
+      |> select([w], count(w.id))
+
+    workflows =
+      Repo.all(config, list_query)
+      |> Enum.map(&execution_to_map(&1, false, false))
+
+    total = Repo.one(config, total_query)
+
+    {workflows, total}
+  end
+
   # Private functions
 
   defp get_config(opts) do

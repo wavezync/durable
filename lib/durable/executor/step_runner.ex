@@ -12,6 +12,7 @@ defmodule Durable.Executor.StepRunner do
   alias Durable.Context
   alias Durable.Definition.Step
   alias Durable.Executor.Backoff
+  alias Durable.PubSub, as: DurablePubSub
   alias Durable.Repo
   alias Durable.Storage.Schemas.StepExecution
 
@@ -50,9 +51,13 @@ defmodule Durable.Executor.StepRunner do
     # Set current step for logging/observability
     Context.set_current_step(step.name)
 
-    # Set current data in process dictionary for wait functions to access
-    # This is needed because wait_for_event etc. check the context for resumed data
-    Process.put(:durable_context, data)
+    # Set current data in process dictionary for wait functions to access.
+    # On retry attempts (attempt > 1) we MERGE rather than overwrite so that
+    # put_context/2 writes from the prior failed attempt remain visible to
+    # the user step body — matching the cumulative-context contract that
+    # save_data_as_context/3 enforces between sequential steps.
+    prior_ctx = if attempt > 1, do: Process.get(:durable_context, %{}), else: %{}
+    Process.put(:durable_context, Map.merge(prior_ctx, data))
 
     # Create step execution record
     {:ok, step_exec} = create_step_execution(config, workflow_id, step, attempt)
@@ -246,39 +251,93 @@ defmodule Durable.Executor.StepRunner do
   end
 
   defp update_step_execution(config, step_exec, :running) do
-    step_exec
-    |> StepExecution.start_changeset()
-    |> Repo.update(config)
+    case step_exec
+         |> StepExecution.start_changeset()
+         |> Repo.update(config) do
+      {:ok, updated} = ok ->
+        DurablePubSub.broadcast_step(config, :step_started, step_event(updated))
+        ok
+
+      other ->
+        other
+    end
   end
 
   defp update_step_execution(config, step_exec, :waiting) do
-    step_exec
-    |> Ecto.Changeset.change(status: :waiting)
-    |> Repo.update(config)
+    case step_exec
+         |> Ecto.Changeset.change(status: :waiting)
+         |> Repo.update(config) do
+      {:ok, updated} = ok ->
+        DurablePubSub.broadcast_step(config, :step_waiting, step_event(updated))
+        ok
+
+      other ->
+        other
+    end
   end
 
   defp complete_step_execution(config, step_exec, output, logs, duration_ms) do
     serializable_output = serialize_output(output)
 
-    step_exec
-    |> StepExecution.complete_changeset(serializable_output, logs, duration_ms)
-    |> Repo.update(config)
+    case step_exec
+         |> StepExecution.complete_changeset(serializable_output, logs, duration_ms)
+         |> Repo.update(config) do
+      {:ok, updated} = ok ->
+        DurablePubSub.broadcast_step(config, :step_completed, step_event(updated))
+        ok
+
+      other ->
+        other
+    end
   end
 
   defp fail_step_execution(config, step_exec, error, logs, duration_ms) do
-    step_exec
-    |> StepExecution.fail_changeset(error, logs, duration_ms)
-    |> Repo.update(config)
+    # Sanitize the error map — exception payloads frequently carry tuples
+    # (e.g., FunctionClauseError args), PIDs, refs, and functions in the
+    # stacktrace area, none of which can survive a JSONB write. Mirror the
+    # defense applied to workflow-level mark_failed in lib/durable/executor.ex.
+    safe_error = Durable.Executor.sanitize_for_json(error)
+
+    case step_exec
+         |> StepExecution.fail_changeset(safe_error, logs, duration_ms)
+         |> Repo.update(config) do
+      {:ok, updated} = ok ->
+        DurablePubSub.broadcast_step(config, :step_failed, step_event(updated))
+        ok
+
+      other ->
+        other
+    end
   end
 
-  defp serialize_output(output) when is_map(output), do: output
-  defp serialize_output(output) when is_list(output), do: %{value: output}
-  defp serialize_output(output) when is_binary(output), do: %{value: output}
-  defp serialize_output(output) when is_number(output), do: %{value: output}
-  defp serialize_output(output) when is_atom(output), do: %{value: Atom.to_string(output)}
-  defp serialize_output(output) when is_tuple(output), do: %{value: Tuple.to_list(output)}
+  defp step_event(%StepExecution{} = step_exec) do
+    %{
+      id: step_exec.id,
+      workflow_id: step_exec.workflow_id,
+      step_name: step_exec.step_name,
+      step_type: step_exec.step_type,
+      status: step_exec.status,
+      attempt: step_exec.attempt,
+      duration_ms: step_exec.duration_ms,
+      started_at: step_exec.started_at,
+      completed_at: step_exec.completed_at
+    }
+  end
+
+  # Convert an arbitrary step output into a JSONB-safe map. The schema field
+  # is `:map`, so non-map outputs are wrapped under a `:value` key. Recursive
+  # sanitization handles deeply-nested tuples / PIDs / refs / functions —
+  # the previous shallow implementation only flattened top-level shapes and
+  # let nested tuples crash JSONB encoding.
   defp serialize_output(nil), do: nil
-  defp serialize_output(output), do: %{value: inspect(output)}
+
+  defp serialize_output(output) when is_map(output) do
+    Durable.Executor.sanitize_for_json(output)
+  end
+
+  defp serialize_output(output) do
+    %{value: Durable.Executor.sanitize_for_json(output)}
+  end
 
   # Normalize error to map format for database storage
   # The error field in StepExecution expects a map

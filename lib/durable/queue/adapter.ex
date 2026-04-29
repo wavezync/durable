@@ -105,6 +105,25 @@ defmodule Durable.Queue.Adapter do
   @callback heartbeat(config :: Config.t(), job_id :: job_id()) :: :ok | {:error, term()}
 
   @doc """
+  Recovers "zombie" workflows — executions stuck in `:waiting` status with
+  no pending inputs or events that could ever unblock them.
+
+  This typically happens when a step crashes during a state transition and
+  the executor can't record a clean error (e.g. due to a secondary error
+  while serializing). The workflow remains in `:waiting` indefinitely even
+  though nothing is actually waiting on it.
+
+  Zombies older than the timeout are marked `:failed` with a diagnostic
+  error. Returns the count of workflows recovered.
+
+  This callback is optional so third-party adapters don't break on upgrade.
+  """
+  @callback recover_zombie_workflows(config :: Config.t(), timeout_seconds :: pos_integer()) ::
+              {:ok, non_neg_integer()} | {:error, term()}
+
+  @optional_callbacks recover_zombie_workflows: 2
+
+  @doc """
   Returns the default adapter module.
   """
   @spec default_adapter() :: module()

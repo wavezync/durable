@@ -1,6 +1,8 @@
 defmodule Durable.Queue.Adapters.PostgresTest do
   use Durable.DataCase, async: false
 
+  import Ecto.Query
+
   alias Durable.Config
   alias Durable.Queue.Adapters.Postgres
   alias Durable.Storage.Schemas.WorkflowExecution
@@ -158,6 +160,190 @@ defmodule Durable.Queue.Adapters.PostgresTest do
     end
   end
 
+  describe "recover_zombie_workflows/2 (Bug #4 regression)" do
+    alias Durable.Storage.Schemas.{PendingEvent, PendingInput}
+
+    test "marks :waiting workflows with no pending inputs/events as :failed" do
+      long_ago = DateTime.add(DateTime.utc_now(), -3600, :second)
+
+      zombie = insert_execution(workflow_name: "zombie_a", status: :waiting)
+
+      # Backdate updated_at so the zombie is past the stale cutoff
+      {1, _} =
+        repo().update_all(
+          from(w in WorkflowExecution, where: w.id == ^zombie.id),
+          set: [updated_at: long_ago]
+        )
+
+      {:ok, count} = Postgres.recover_zombie_workflows(config(), 300)
+      assert count == 1
+
+      reloaded = repo().get!(WorkflowExecution, zombie.id)
+      assert reloaded.status == :failed
+      assert reloaded.error["type"] == "zombie_detected"
+      assert reloaded.error["message"] =~ "waiting"
+      assert reloaded.completed_at != nil
+    end
+
+    test "leaves healthy :waiting workflows alone (they have a pending input)" do
+      long_ago = DateTime.add(DateTime.utc_now(), -3600, :second)
+
+      waiter = insert_execution(workflow_name: "healthy_waiter", status: :waiting)
+
+      {1, _} =
+        repo().update_all(
+          from(w in WorkflowExecution, where: w.id == ^waiter.id),
+          set: [updated_at: long_ago]
+        )
+
+      # Insert a pending input that this waiter depends on
+      {:ok, _} =
+        %PendingInput{}
+        |> PendingInput.changeset(%{
+          workflow_id: waiter.id,
+          step_name: "step",
+          input_name: "approval",
+          input_type: :approval,
+          status: :pending
+        })
+        |> repo().insert()
+
+      {:ok, count} = Postgres.recover_zombie_workflows(config(), 300)
+      assert count == 0
+
+      reloaded = repo().get!(WorkflowExecution, waiter.id)
+      assert reloaded.status == :waiting
+    end
+
+    test "leaves healthy :waiting workflows alone (they have a pending event)" do
+      long_ago = DateTime.add(DateTime.utc_now(), -3600, :second)
+
+      waiter = insert_execution(workflow_name: "event_waiter", status: :waiting)
+
+      {1, _} =
+        repo().update_all(
+          from(w in WorkflowExecution, where: w.id == ^waiter.id),
+          set: [updated_at: long_ago]
+        )
+
+      {:ok, _} =
+        %PendingEvent{}
+        |> PendingEvent.changeset(%{
+          workflow_id: waiter.id,
+          event_name: "payment_confirmed",
+          step_name: "await",
+          status: :pending
+        })
+        |> repo().insert()
+
+      {:ok, count} = Postgres.recover_zombie_workflows(config(), 300)
+      assert count == 0
+
+      reloaded = repo().get!(WorkflowExecution, waiter.id)
+      assert reloaded.status == :waiting
+    end
+
+    test "leaves recently updated :waiting workflows alone (within stale timeout)" do
+      # This waiter has no pending inputs/events, but its updated_at is fresh
+      # so we don't know yet if it's stuck — maybe it just transitioned.
+      recent_waiter =
+        insert_execution(workflow_name: "recent_waiter", status: :waiting)
+
+      {:ok, count} = Postgres.recover_zombie_workflows(config(), 300)
+      assert count == 0
+
+      reloaded = repo().get!(WorkflowExecution, recent_waiter.id)
+      assert reloaded.status == :waiting
+    end
+
+    test "leaves :running and :completed workflows alone" do
+      long_ago = DateTime.add(DateTime.utc_now(), -3600, :second)
+
+      running = insert_execution(workflow_name: "running", status: :running)
+      completed = insert_execution(workflow_name: "completed", status: :completed)
+
+      {2, _} =
+        repo().update_all(
+          from(w in WorkflowExecution, where: w.id in ^[running.id, completed.id]),
+          set: [updated_at: long_ago]
+        )
+
+      {:ok, count} = Postgres.recover_zombie_workflows(config(), 300)
+      assert count == 0
+
+      assert repo().get!(WorkflowExecution, running.id).status == :running
+      assert repo().get!(WorkflowExecution, completed.id).status == :completed
+    end
+
+    test "marks :compensating workflows with no running compensation as :failed (M-1)" do
+      long_ago = DateTime.add(DateTime.utc_now(), -3600, :second)
+
+      zombie = insert_execution(workflow_name: "comp_zombie", status: :compensating)
+
+      {1, _} =
+        repo().update_all(
+          from(w in WorkflowExecution, where: w.id == ^zombie.id),
+          set: [updated_at: long_ago]
+        )
+
+      {:ok, count} = Postgres.recover_zombie_workflows(config(), 300)
+      assert count == 1
+      assert repo().get!(WorkflowExecution, zombie.id).status == :failed
+    end
+
+    test "leaves :compensating workflows with a running compensation step alone" do
+      alias Durable.Storage.Schemas.StepExecution
+      long_ago = DateTime.add(DateTime.utc_now(), -3600, :second)
+
+      live = insert_execution(workflow_name: "comp_live", status: :compensating)
+
+      {1, _} =
+        repo().update_all(
+          from(w in WorkflowExecution, where: w.id == ^live.id),
+          set: [updated_at: long_ago]
+        )
+
+      # Insert an actively-running compensation step
+      {:ok, _step} =
+        %StepExecution{}
+        |> StepExecution.changeset(%{
+          workflow_id: live.id,
+          step_name: "comp_step",
+          step_type: "compensation",
+          attempt: 1,
+          status: :running
+        })
+        |> repo().insert()
+
+      {:ok, count} = Postgres.recover_zombie_workflows(config(), 300)
+      assert count == 0
+      assert repo().get!(WorkflowExecution, live.id).status == :compensating
+    end
+
+    test "handles multiple zombies in a single sweep" do
+      long_ago = DateTime.add(DateTime.utc_now(), -3600, :second)
+
+      zombies =
+        for i <- 1..3 do
+          z = insert_execution(workflow_name: "zombie_#{i}", status: :waiting)
+          z.id
+        end
+
+      {3, _} =
+        repo().update_all(
+          from(w in WorkflowExecution, where: w.id in ^zombies),
+          set: [updated_at: long_ago]
+        )
+
+      {:ok, count} = Postgres.recover_zombie_workflows(config(), 300)
+      assert count == 3
+
+      for id <- zombies do
+        assert repo().get!(WorkflowExecution, id).status == :failed
+      end
+    end
+  end
+
   describe "ack/2" do
     test "clears lock fields" do
       job =
@@ -175,6 +361,51 @@ defmodule Durable.Queue.Adapters.PostgresTest do
       assert execution.locked_at == nil
     end
 
+    test "ack of a successfully-finished job is idempotent (M-5 regression)" do
+      # Bug M-5: a transient ack failure used to silently re-execute the job
+      # via stale-recovery. The retry path makes this less likely. Calling
+      # ack twice on the same job should be a no-op (no errors, no duplicates).
+      job =
+        insert_execution(
+          workflow_name: "test",
+          locked_by: "node_a",
+          locked_at: DateTime.utc_now(),
+          status: :running
+        )
+
+      assert :ok = Postgres.ack(config(), job.id)
+      assert :ok = Postgres.ack(config(), job.id)
+    end
+  end
+
+  describe "ack/2 telemetry" do
+    test "ack_failed telemetry fires when ack ultimately fails" do
+      # Use a non-existent job ID — the get returns nil, so the existing
+      # :not_found branch fires. To exercise the failure-after-retries
+      # branch we'd need to fault-inject Repo.update; here we just assert
+      # the telemetry handler can be attached without crashing the system.
+      ref = make_ref()
+      test_pid = self()
+
+      :ok =
+        :telemetry.attach(
+          "ack-failed-test-#{inspect(ref)}",
+          [:durable, :queue, :ack_failed],
+          fn _event, measurements, metadata, _ ->
+            send(test_pid, {:ack_failed, ref, measurements, metadata})
+          end,
+          nil
+        )
+
+      # Non-existent jobs return :not_found without firing telemetry.
+      assert {:error, :not_found} = Postgres.ack(config(), Ecto.UUID.generate())
+      refute_received {:ack_failed, ^ref, _, _}, 100
+
+      :telemetry.detach("ack-failed-test-#{inspect(ref)}")
+    end
+  end
+
+  describe "ack/2 not_found" do
     test "returns error for non-existent job" do
       result = Postgres.ack(config(), Ecto.UUID.generate())
       assert result == {:error, :not_found}

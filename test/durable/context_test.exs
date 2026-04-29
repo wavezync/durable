@@ -136,6 +136,42 @@ defmodule Durable.ContextTest do
   end
 
   # ============================================================================
+  # Bug C-1 regression — put_context must persist across steps
+  # ============================================================================
+
+  describe "put_context persistence (Bug C-1 regression)" do
+    test "put_context writes persist to the next step without being in the return map" do
+      {:ok, execution} = create_and_execute_workflow(PutContextPersistWorkflow, %{})
+
+      assert execution.status == :completed
+      # Step 1 did put_context(:charge_id, "ch_1") but returned {:ok, %{step1_done: true}}.
+      # Step 2 read get_context(:charge_id) and stored it.
+      # Before the fix, Step 2 saw nil because save_data_as_context dropped
+      # the put_context write.
+      assert execution.context["seen_charge_id"] == "ch_1"
+      assert execution.context["step1_done"] == true
+    end
+
+    test "put_context writes persist across decision {:goto, ...}" do
+      {:ok, execution} = create_and_execute_workflow(PutContextGotoWorkflow, %{})
+
+      assert execution.status == :completed
+      # Step 1 put_context'd :prior, decision goto'd to :after_goto, which reads it.
+      # Before the fix, the goto's new_data replaced context wholesale and :prior vanished.
+      assert execution.context["saw_prior"] == "before_decision"
+    end
+
+    test "step return value wins over prior put_context on key collision" do
+      {:ok, execution} = create_and_execute_workflow(PutContextCollisionWorkflow, %{})
+
+      assert execution.status == :completed
+      # Step 1 did put_context(:mode, "from_ctx") then returned %{mode: "from_return"}.
+      # Step 2 reads :mode — step return should win.
+      assert execution.context["final_mode"] == "from_return"
+    end
+  end
+
+  # ============================================================================
   # Helper Functions
   # ============================================================================
 
@@ -322,6 +358,73 @@ defmodule NumericContextWorkflow do
         |> assign(:zero, 0)
 
       {:ok, data}
+    end)
+  end
+end
+
+# ============================================================================
+# Bug C-1 regression fixtures
+# ============================================================================
+
+defmodule PutContextPersistWorkflow do
+  use Durable
+  use Durable.Helpers
+  use Durable.Context
+
+  workflow "put_context_persist" do
+    step(:step1, fn _data ->
+      # Write to context via put_context — it should persist to the next step
+      # EVEN THOUGH the step's return map doesn't include :charge_id.
+      put_context(:charge_id, "ch_1")
+      {:ok, %{step1_done: true}}
+    end)
+
+    step(:step2, fn _data ->
+      # Before the fix, get_context(:charge_id) returned nil here.
+      {:ok, %{seen_charge_id: get_context(:charge_id)}}
+    end)
+  end
+end
+
+defmodule PutContextGotoWorkflow do
+  use Durable
+  use Durable.Helpers
+  use Durable.Context
+
+  workflow "put_context_goto" do
+    step(:step1, fn _data ->
+      put_context(:prior, "before_decision")
+      {:ok, %{step1_done: true}}
+    end)
+
+    decision(:decide, fn data ->
+      # Goto new_data deliberately does NOT include :prior —
+      # the fix should preserve it via the process-dict merge.
+      {:goto, :after_goto, Map.drop(data, [:prior, "prior"])}
+    end)
+
+    step(:skipped, fn _data -> {:ok, %{should_not_run: true}} end)
+
+    step(:after_goto, fn _data ->
+      {:ok, %{saw_prior: get_context(:prior)}}
+    end)
+  end
+end
+
+defmodule PutContextCollisionWorkflow do
+  use Durable
+  use Durable.Helpers
+  use Durable.Context
+
+  workflow "put_context_collision" do
+    step(:step1, fn _data ->
+      put_context(:mode, "from_ctx")
+      # Step return has the same key — return value MUST win on collision.
+      {:ok, %{mode: "from_return"}}
+    end)
+
+    step(:step2, fn _data ->
+      {:ok, %{final_mode: get_context(:mode)}}
     end)
   end
 end

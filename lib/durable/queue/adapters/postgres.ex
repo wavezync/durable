@@ -11,9 +11,11 @@ defmodule Durable.Queue.Adapters.Postgres do
 
   alias Durable.Config
   alias Durable.Repo
-  alias Durable.Storage.Schemas.WorkflowExecution
+  alias Durable.Storage.Schemas.{PendingEvent, PendingInput, StepExecution, WorkflowExecution}
 
   import Ecto.Query
+
+  require Logger
 
   @impl true
   def fetch_jobs(%Config{} = config, queue, limit, node_id)
@@ -52,16 +54,45 @@ defmodule Durable.Queue.Adapters.Postgres do
 
   @impl true
   def ack(%Config{} = config, job_id) when is_binary(job_id) do
+    ack_with_retry(config, job_id, _attempt = 1, _max_attempts = 3)
+  end
+
+  # Retry the ack on transient failures (DB blip, connection lost). If we
+  # gave up here, the workflow would stay locked until stale-recovery
+  # released it 5 minutes later — at which point it would silently re-execute
+  # because there's no idempotency key (Bug M-5). The retry buys us time;
+  # the telemetry surfaces persistent failures so operators can intervene.
+  defp ack_with_retry(%Config{} = config, job_id, attempt, max_attempts) do
     case Repo.get(config, WorkflowExecution, job_id) do
       nil ->
         {:error, :not_found}
 
       execution ->
-        execution
-        |> WorkflowExecution.unlock_changeset()
-        |> Repo.update(config)
+        case execution
+             |> WorkflowExecution.unlock_changeset()
+             |> Repo.update(config) do
+          {:ok, _} ->
+            :ok
 
-        :ok
+          {:error, _reason} when attempt < max_attempts ->
+            backoff_ms = :rand.uniform(50) * attempt
+            Process.sleep(backoff_ms)
+            ack_with_retry(config, job_id, attempt + 1, max_attempts)
+
+          {:error, reason} ->
+            :telemetry.execute(
+              [:durable, :queue, :ack_failed],
+              %{count: 1, attempts: attempt},
+              %{job_id: job_id, reason: reason, durable: config.name}
+            )
+
+            Logger.error(
+              "[Durable] ack failed after #{attempt} attempts for job #{job_id}: " <>
+                inspect(reason)
+            )
+
+            {:error, reason}
+        end
     end
   end
 
@@ -131,6 +162,92 @@ defmodule Durable.Queue.Adapters.Postgres do
       )
 
     {:ok, count}
+  rescue
+    e -> {:error, Exception.message(e)}
+  end
+
+  @impl true
+  def recover_zombie_workflows(%Config{} = config, timeout_seconds) when timeout_seconds > 0 do
+    cutoff = DateTime.add(DateTime.utc_now(), -timeout_seconds, :second)
+
+    # Two zombie classes:
+    #
+    #   1. :waiting workflows with no pending inputs or events to ever unblock them.
+    #   2. :compensating workflows with no actively running compensation step
+    #      (Bug M-1: the compensation handler crashed mid-rollback).
+    #
+    # Executions with a healthy lock heartbeat are excluded — those are still
+    # being actively processed by some worker.
+    waiting_zombies =
+      from(w in WorkflowExecution,
+        as: :workflow,
+        where: w.status == :waiting,
+        where: w.updated_at < ^cutoff,
+        where: is_nil(w.locked_by) or w.locked_at < ^cutoff,
+        where:
+          not exists(
+            from(p in PendingInput,
+              where: p.workflow_id == parent_as(:workflow).id and p.status == :pending
+            )
+          ),
+        where:
+          not exists(
+            from(e in PendingEvent,
+              where: e.workflow_id == parent_as(:workflow).id and e.status == :pending
+            )
+          ),
+        select: w.id
+      )
+
+    compensating_zombies =
+      from(w in WorkflowExecution,
+        as: :workflow,
+        where: w.status == :compensating,
+        where: w.updated_at < ^cutoff,
+        where: is_nil(w.locked_by) or w.locked_at < ^cutoff,
+        where:
+          not exists(
+            from(s in StepExecution,
+              where: s.workflow_id == parent_as(:workflow).id and s.status == :running
+            )
+          ),
+        select: w.id
+      )
+
+    zombie_ids = Repo.all(config, waiting_zombies) ++ Repo.all(config, compensating_zombies)
+
+    if zombie_ids == [] do
+      {:ok, 0}
+    else
+      now = DateTime.utc_now()
+
+      zombie_error = %{
+        "type" => "zombie_detected",
+        "message" =>
+          "Workflow was in :waiting or :compensating status with no active work for longer than the stale lock timeout. Likely crashed during a state transition.",
+        "detected_at" => DateTime.to_iso8601(now)
+      }
+
+      {count, _} =
+        Repo.update_all(
+          config,
+          from(w in WorkflowExecution, where: w.id in ^zombie_ids),
+          set: [
+            status: :failed,
+            error: zombie_error,
+            locked_by: nil,
+            locked_at: nil,
+            completed_at: now,
+            updated_at: now
+          ]
+        )
+
+      Logger.warning(
+        "[Durable] Zombie recovery marked #{count} workflow(s) as :failed: #{inspect(zombie_ids)}"
+      )
+
+      {:ok, count}
+    end
   rescue
     e -> {:error, Exception.message(e)}
   end

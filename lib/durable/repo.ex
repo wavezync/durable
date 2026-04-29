@@ -127,6 +127,20 @@ defmodule Durable.Repo do
   end
 
   # ============================================================================
+  # Transactions
+  # ============================================================================
+
+  @doc """
+  Runs an `Ecto.Multi` (or a function) inside a database transaction on the
+  configured repo. Used to atomically couple state transitions (e.g. marking
+  a PendingInput `:timeout` and resuming the workflow it belongs to) so a
+  crash between the two updates can't orphan the workflow.
+  """
+  def transaction(%Config{} = config, fun_or_multi, opts \\ []) do
+    config.repo.transaction(fun_or_multi, merge_opts(config, opts))
+  end
+
+  # ============================================================================
   # Raw SQL
   # ============================================================================
 
