@@ -12,6 +12,7 @@ defmodule DurableDashboard.Live.OverviewLive do
   alias DurableDashboard.Components.Core
   alias DurableDashboard.Layouts
   alias DurableDashboard.Path, as: DPath
+  alias Phoenix.LiveView.JS
 
   @workflow_kinds [
     :workflow_started,
@@ -106,9 +107,9 @@ defmodule DurableDashboard.Live.OverviewLive do
             <table class="w-full text-[13px]">
               <thead>
                 <tr class="border-b border-border text-[11px] uppercase tracking-wider text-muted-foreground">
-                  <th class="text-left font-medium px-4 py-2.5">Status</th>
-                  <th class="text-left font-medium px-4 py-2.5">Workflow</th>
                   <th class="text-left font-medium px-4 py-2.5">ID</th>
+                  <th class="text-left font-medium px-4 py-2.5">Workflow</th>
+                  <th class="text-left font-medium px-4 py-2.5">Status</th>
                   <th class="text-left font-medium px-4 py-2.5">Queue</th>
                   <th class="text-right font-medium px-4 py-2.5">Started</th>
                 </tr>
@@ -116,18 +117,17 @@ defmodule DurableDashboard.Live.OverviewLive do
               <tbody>
                 <tr
                   :for={exec <- @recent}
-                  class="border-b border-border/60 last:border-b-0 hover:bg-accent/40 transition-colors"
+                  class="border-b border-border/60 last:border-b-0 hover:bg-accent/40 cursor-pointer transition-colors"
+                  phx-click={
+                    JS.dispatch("durable:goto",
+                      to: "html",
+                      detail: %{href: DPath.workflow(@base_path, exec.id)}
+                    )
+                  }
                 >
-                  <td class="px-4 py-2.5"><Core.status_pill status={exec.status} /></td>
-                  <td class="px-4 py-2.5 font-medium">
-                    <.link
-                      href={DPath.workflow(@base_path, exec.id)}
-                      class="hover:text-primary transition-colors"
-                    >
-                      {exec.workflow_name}
-                    </.link>
-                  </td>
                   <td class="px-4 py-2.5"><Core.code>{short_id(exec.id)}</Core.code></td>
+                  <td class="px-4 py-2.5 font-medium">{exec.workflow_name}</td>
+                  <td class="px-4 py-2.5"><Core.status_pill status={exec.status} /></td>
                   <td class="px-4 py-2.5 text-muted-foreground">{exec.queue}</td>
                   <td class="px-4 py-2.5 text-right">
                     <Core.relative_time at={exec.inserted_at} />

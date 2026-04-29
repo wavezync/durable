@@ -116,10 +116,10 @@ defmodule DurableDashboard.Live.WorkflowsLive do
   defp columns(_base_path) do
     [
       %{
-        key: :status,
-        label: "Status",
+        key: :id,
+        label: "ID",
         class: "w-[120px]",
-        render: &render_status/1
+        render: &render_id/1
       },
       %{
         key: :workflow_name,
@@ -128,10 +128,10 @@ defmodule DurableDashboard.Live.WorkflowsLive do
         render: &render_name/1
       },
       %{
-        key: :id,
-        label: "ID",
+        key: :status,
+        label: "Status",
         class: "w-[120px]",
-        render: &render_id/1
+        render: &render_status/1
       },
       %{
         key: :queue,

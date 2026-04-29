@@ -238,12 +238,26 @@ defmodule DurableDashboard.Components.Core do
   slot :inner_block, required: true
 
   def button(assigns) do
-    ~H"""
-    <button type={@type} class={[button_class(@kind, @size), @class]} {@rest}>
-      {render_slot(@inner_block)}
-    </button>
-    """
+    if navigation_attrs?(assigns.rest) do
+      ~H"""
+      <.link class={[button_class(@kind, @size), @class]} {@rest}>
+        {render_slot(@inner_block)}
+      </.link>
+      """
+    else
+      ~H"""
+      <button type={@type} class={[button_class(@kind, @size), @class]} {@rest}>
+        {render_slot(@inner_block)}
+      </button>
+      """
+    end
   end
+
+  defp navigation_attrs?(rest) when is_map(rest) do
+    Map.has_key?(rest, :href) or Map.has_key?(rest, :patch) or Map.has_key?(rest, :navigate)
+  end
+
+  defp navigation_attrs?(_), do: false
 
   defp button_class(kind, size) do
     base =
