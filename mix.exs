@@ -84,6 +84,8 @@ defmodule Durable.MixProject do
       ],
       groups_for_modules: [
         "Mix Tasks": [
+          Mix.Tasks.Durable.Migrations,
+          Mix.Tasks.Durable.Gen.Upgrade,
           Mix.Tasks.Durable.Status,
           Mix.Tasks.Durable.List,
           Mix.Tasks.Durable.Run,

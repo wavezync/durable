@@ -39,6 +39,26 @@ defmodule Durable.Migration.Migrator do
   end
 
   @doc """
+  Returns the latest Durable migration version.
+  """
+  @spec current_version() :: pos_integer()
+  def current_version do
+    all_versions()
+    |> List.last()
+  end
+
+  @doc """
+  Returns the migration version before the given version, or 0 for the first migration.
+  """
+  @spec previous_version(pos_integer()) :: non_neg_integer()
+  def previous_version(version \\ current_version()) do
+    all_versions()
+    |> Enum.filter(&(&1 < version))
+    |> List.last() ||
+      0
+  end
+
+  @doc """
   Runs pending migrations up.
 
   ## Options
@@ -157,16 +177,60 @@ defmodule Durable.Migration.Migrator do
     SchemaMigration.versions(prefix)
   end
 
+  @spec migrated_versions(module(), keyword()) :: [pos_integer()]
+  def migrated_versions(repo, opts) when is_atom(repo) and is_list(opts) do
+    prefix = Keyword.get(opts, :prefix, "durable")
+    SchemaMigration.versions(repo, prefix)
+  end
+
+  @doc """
+  Returns the latest applied migration version, or 0 when Durable hasn't been migrated.
+  """
+  @spec migrated_version(keyword() | module()) :: non_neg_integer()
+  def migrated_version(opts_or_repo \\ [])
+
+  def migrated_version(opts) when is_list(opts) do
+    opts
+    |> migrated_versions()
+    |> latest_version()
+  end
+
+  def migrated_version(repo) when is_atom(repo) do
+    migrated_version(repo, [])
+  end
+
+  @spec migrated_version(module(), keyword()) :: non_neg_integer()
+  def migrated_version(repo, opts) when is_atom(repo) and is_list(opts) do
+    repo
+    |> migrated_versions(opts)
+    |> latest_version()
+  end
+
   @doc """
   Returns pending migration versions.
   """
-  @spec pending_versions(keyword()) :: [pos_integer()]
-  def pending_versions(opts \\ []) do
+  @spec pending_versions(keyword() | module()) :: [pos_integer()]
+  def pending_versions(opts_or_repo \\ [])
+
+  def pending_versions(opts) when is_list(opts) do
     applied = migrated_versions(opts)
     all_versions() -- applied
   end
 
+  def pending_versions(repo) when is_atom(repo) do
+    pending_versions(repo, [])
+  end
+
+  @spec pending_versions(module(), keyword()) :: [pos_integer()]
+  def pending_versions(repo, opts) when is_atom(repo) and is_list(opts) do
+    applied = migrated_versions(repo, opts)
+    all_versions() -- applied
+  end
+
   # Private helpers
+
+  defp latest_version([]), do: 0
+  defp latest_version(versions), do: List.last(versions)
 
   defp filter_to_version(migrations, nil, _direction), do: migrations
 

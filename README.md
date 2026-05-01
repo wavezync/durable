@@ -37,6 +37,17 @@ defmodule MyApp.Repo.Migrations.AddDurable do
 end
 ```
 
+When a Durable upgrade ships new internal migrations, generate a new wrapper
+migration and run your normal Ecto migration flow:
+
+```bash
+mix durable.gen.upgrade -r MyApp.Repo
+mix ecto.migrate
+```
+
+Use `mix durable.migrations -r MyApp.Repo --check` in CI or deploy gates to
+fail when the database is behind the Durable library version.
+
 ### 2. Add to Supervision Tree
 
 ```elixir

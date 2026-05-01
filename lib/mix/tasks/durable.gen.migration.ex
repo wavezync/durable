@@ -5,6 +5,7 @@ defmodule Mix.Tasks.Durable.Gen.Migration do
   Generates a new Durable internal migration.
 
   This is for Durable library developers only, not end users.
+  Host applications should use `mix durable.gen.upgrade` instead.
 
       $ mix durable.gen.migration add_compensation_tracking
 

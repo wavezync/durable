@@ -14,6 +14,11 @@ defmodule Durable.Migration.SchemaMigration do
   """
   @spec ensure_table!(String.t()) :: :ok
   def ensure_table!(prefix) do
+    ensure_table!(get_repo(), prefix)
+  end
+
+  @spec ensure_table!(module(), String.t()) :: :ok
+  def ensure_table!(repo, prefix) do
     # Use direct repo query to ensure table is created immediately
     # (not deferred like Ecto.Migration's execute)
     query = """
@@ -23,7 +28,7 @@ defmodule Durable.Migration.SchemaMigration do
     )
     """
 
-    get_repo().query!(query, [])
+    repo.query!(query, [])
     :ok
   end
 
@@ -32,6 +37,11 @@ defmodule Durable.Migration.SchemaMigration do
   """
   @spec table_exists?(String.t()) :: boolean()
   def table_exists?(prefix) do
+    table_exists?(get_repo(), prefix)
+  end
+
+  @spec table_exists?(module(), String.t()) :: boolean()
+  def table_exists?(repo, prefix) do
     query = """
     SELECT EXISTS (
       SELECT FROM information_schema.tables
@@ -40,7 +50,7 @@ defmodule Durable.Migration.SchemaMigration do
     )
     """
 
-    %{rows: [[exists]]} = get_repo().query!(query, [prefix, @table_name])
+    %{rows: [[exists]]} = repo.query!(query, [prefix, @table_name])
     exists
   end
 
@@ -49,9 +59,14 @@ defmodule Durable.Migration.SchemaMigration do
   """
   @spec versions(String.t()) :: [pos_integer()]
   def versions(prefix) do
-    if table_exists?(prefix) do
+    versions(get_repo(), prefix)
+  end
+
+  @spec versions(module(), String.t()) :: [pos_integer()]
+  def versions(repo, prefix) do
+    if table_exists?(repo, prefix) do
       query = "SELECT version FROM #{prefix}.#{@table_name} ORDER BY version"
-      %{rows: rows} = get_repo().query!(query, [])
+      %{rows: rows} = repo.query!(query, [])
       Enum.map(rows, fn [v] -> v end)
     else
       []
