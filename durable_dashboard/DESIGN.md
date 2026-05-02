@@ -498,23 +498,7 @@ The step→child mapping is sourced from the parent's context:
 
 ---
 
-## 12. Dead code
-
-The following exist in the tree but are not reachable from any live route:
-
-- `assets/src/{main.tsx, App.tsx, views/, hooks/, components/{shared,ui,workflow}/}`
-  — pre-LiveView React SPA. Only `assets/src/v2/main.ts` (+ what it
-  imports from `lib/` and `v2/react/`) is loaded by `Layouts.root_v2/1`.
-- `lib/durable_dashboard/live/dashboard_live.ex` — earlier monolithic
-  `DashboardLive`; the router mounts the per-page LVs
-  (`OverviewLive`, `WorkflowsLive`, `WorkflowLive`, `InputsLive`,
-  `SchedulesLive`, `SettingsLive`) instead.
-- `Layouts.root/1` — paired with the v1 SPA above; only `root_v2/1` is
-  wired.
-
-Audits should skip these files. Removing them cleanly is its own PR.
-
-## 13. Updating this doc
+## 12. Updating this doc
 
 When you ship a UI change that establishes new precedent (a new
 component, a new color use, a new animation), update this doc in the same

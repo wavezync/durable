@@ -4,6 +4,9 @@
 # Crash dumps
 erl_crash.dump
 
+# Test scratch space
+/tmp/
+
 # Workspace-level generated docs (per-project ignores live in each subdir)
 /doc/
 /_build/

@@ -116,7 +116,7 @@ defmodule DurableDashboard.Components.Layout.Sidebar do
   defp footer(assigns) do
     ~H"""
     <div class="border-t border-border px-3 h-10 flex items-center justify-between text-[11px] text-muted-foreground">
-      <span class="font-mono">v2 preview</span>
+      <span class="font-mono">durable</span>
       <span class="flex items-center gap-1.5">
         <span class="size-1.5 rounded-full bg-success led-dot"></span>
         connected

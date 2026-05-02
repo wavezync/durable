@@ -4,7 +4,7 @@ defmodule DurableDashboard.Path do
 
   `base_path` is the full mount prefix the host's router declares with
   `dashboard_routes/2` — e.g. `"/dashboard"` or `"/admin/durable"`. These
-  helpers append the per-page suffix; they do NOT add any v2/legacy segment.
+  helpers append the per-page suffix.
 
   ## Usage
 

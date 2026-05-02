@@ -1,12 +1,9 @@
 defmodule DurableDashboard.Live.WorkflowLive do
   @moduledoc """
   Workflow detail view. One LiveView, six tabs (summary/flow/topology/logs/io/
-  history). Tab routing is `live "/v2/workflows/:id/:tab"` — switching tabs
+  history). Tab routing is `live "/workflows/:id/:tab"` — switching tabs
   re-runs `handle_params` without unmounting, so the loaded workflow + steps
   stay in memory.
-
-  Phase 3 implements summary / I/O / history / logs. Flow + topology stub
-  until phase 4 (ReactFlow island).
   """
 
   use Phoenix.LiveView

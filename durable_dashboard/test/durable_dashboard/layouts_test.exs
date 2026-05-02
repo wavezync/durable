@@ -20,11 +20,11 @@ defmodule DurableDashboard.LayoutsTest do
     :ok
   end
 
-  test "root_v2 loads the dev stylesheet before body content" do
+  test "root loads the dev stylesheet before body content" do
     Application.put_env(:durable_dashboard, :dev_mode, true)
 
     html =
-      render_component(&Layouts.root_v2/1,
+      render_component(&Layouts.root/1,
         config: %{live_socket_path: "/live", base_path: "/dashboard"},
         inner_content: Phoenix.HTML.raw(~s(<main id="dashboard-content"></main>))
       )
