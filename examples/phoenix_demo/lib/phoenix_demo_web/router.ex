@@ -17,20 +17,19 @@ defmodule PhoenixDemoWeb.Router do
   scope "/", PhoenixDemoWeb do
     pipe_through :browser
 
-    # Redirect home to workflows dashboard
-    get "/", PageController, :home
+    live "/", HomeLive, :index
+    live "/executions", ExecutionsLive, :index
+    live "/executions/:id", WorkflowDetailLive, :show
+    live "/pending-inputs", PendingInputsLive, :index
+    live "/pending-events", PendingEventsLive, :index
+    live "/schedules", SchedulesLive, :index
 
-    # Workflow routes
-    live "/workflows", WorkflowLive, :index
-    live "/workflows/new", DocumentLive, :new
+    # Legacy redirects so older bookmarks keep working.
+    live "/workflows", ExecutionsLive, :index
     live "/workflows/:id", WorkflowDetailLive, :show
-
-    # Approval routes
-    live "/approvals", ApprovalLive, :index
   end
 
-  # Other scopes may use custom stacks.
-  # scope "/api", PhoenixDemoWeb do
-  #   pipe_through :api
-  # end
+  # Durable Dashboard — one line, mounts at /dashboard with its own
+  # pipelines (asset routes skip CSRF for cross-origin script-tag fetches).
+  use DurableDashboard.Router, mount: "/dashboard", durable: Durable
 end

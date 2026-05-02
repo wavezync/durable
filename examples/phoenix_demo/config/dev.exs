@@ -20,14 +20,19 @@ config :phoenix_demo, PhoenixDemo.Repo,
 config :phoenix_demo, PhoenixDemoWeb.Endpoint,
   # Binding to loopback ipv4 address prevents access from other machines.
   # Change to `ip: {0, 0, 0, 0}` to allow access from other machines.
-  http: [ip: {127, 0, 0, 1}],
+  http: [ip: {127, 0, 0, 1}, port: 4005],
   check_origin: false,
   code_reloader: true,
   debug_errors: true,
   secret_key_base: "5kJV4d0ZFSlv5V6ZZjpm/1cH3ft45Ed9HoQXwQk6rEkYYQf3HhXzTdiF1HvEDIl6",
   watchers: [
     esbuild: {Esbuild, :install_and_run, [:phoenix_demo, ~w(--sourcemap=inline --watch)]},
-    tailwind: {Tailwind, :install_and_run, [:phoenix_demo, ~w(--watch)]}
+    tailwind: {Tailwind, :install_and_run, [:phoenix_demo, ~w(--watch)]},
+    sh: [
+      "-c",
+      "pnpm vite & PID=$!; trap 'kill $PID 2>/dev/null' EXIT; cat > /dev/null; kill $PID 2>/dev/null",
+      cd: Path.expand("../../../durable_dashboard/assets", __DIR__)
+    ]
   ]
 
 # ## SSL Support
@@ -68,6 +73,13 @@ config :phoenix_demo, PhoenixDemoWeb.Endpoint,
 
 # Enable dev routes for dashboard and mailbox
 config :phoenix_demo, dev_routes: true
+
+# Durable Dashboard: HMR via Vite is the default dev story. The
+# `pnpm vite` watcher is wired into the endpoint above and starts
+# automatically with `mix phx.server`. To opt out (e.g. on a machine
+# without Node/pnpm), set this to `false` — the LV layout will then
+# serve the pre-built bundle in `priv/static/durable_dashboard/`.
+config :durable_dashboard, dev_mode: true
 
 # Do not include metadata nor timestamps in development logs
 config :logger, :default_formatter, format: "[$level] $message\n"

@@ -1,31 +1,15 @@
 defmodule PhoenixDemoWeb.Layouts do
   @moduledoc """
-  This module holds layouts and related functionality
-  used by your application.
+  Application chrome: drawer-based sidebar layout used by every LiveView in
+  the demo. Each LiveView passes `:active_nav` to highlight the current
+  section.
   """
   use PhoenixDemoWeb, :html
 
-  # Embed all files in layouts/* within this module.
-  # The default root.html.heex file contains the HTML
-  # skeleton of your application, namely HTML headers
-  # and other static content.
   embed_templates "layouts/*"
 
-  @doc """
-  Renders your app layout.
-
-  This function is typically invoked from every template,
-  and it often contains your application menu, sidebar,
-  or similar.
-
-  ## Examples
-
-      <Layouts.app flash={@flash}>
-        <h1>Content</h1>
-      </Layouts.app>
-
-  """
-  attr :flash, :map, required: true, doc: "the map of flash messages"
+  attr :flash, :map, required: true
+  attr :active_nav, :atom, default: nil
 
   attr :current_scope, :map,
     default: nil,
@@ -35,56 +19,77 @@ defmodule PhoenixDemoWeb.Layouts do
 
   def app(assigns) do
     ~H"""
-    <header class="navbar bg-base-200 px-4 sm:px-6 lg:px-8 shadow-sm">
-      <div class="flex-1">
-        <a href="/" class="flex items-center gap-2">
-          <.icon name="hero-cog-6-tooth" class="size-8 text-primary" />
-          <span class="text-lg font-bold">Durable Demo</span>
-        </a>
-      </div>
-      <div class="flex-none">
-        <ul class="menu menu-horizontal px-1 space-x-2 items-center">
-          <li>
-            <a href="/workflows" class="btn btn-ghost btn-sm">
-              <.icon name="hero-queue-list" class="size-4" /> Dashboard
-            </a>
-          </li>
-          <li>
-            <a href="/workflows/new" class="btn btn-ghost btn-sm">
-              <.icon name="hero-plus" class="size-4" /> New Workflow
-            </a>
-          </li>
-          <li>
-            <a href="/approvals" class="btn btn-ghost btn-sm">
-              <.icon name="hero-hand-raised" class="size-4" /> Approvals
-            </a>
-          </li>
-          <li>
-            <.theme_toggle />
-          </li>
-        </ul>
-      </div>
-    </header>
+    <div class="drawer lg:drawer-open">
+      <input id="nav-drawer" type="checkbox" class="drawer-toggle" />
 
-    <main class="px-4 py-8 sm:px-6 lg:px-8">
-      <div class="mx-auto max-w-4xl">
-        {render_slot(@inner_block)}
+      <div class="drawer-content flex flex-col min-h-screen bg-base-100">
+        <header class="navbar bg-base-200 border-b border-base-300 px-4 lg:hidden">
+          <label for="nav-drawer" class="btn btn-square btn-ghost">
+            <.icon name="hero-bars-3" class="size-5" />
+          </label>
+          <span class="ml-2 font-semibold">Durable Demo</span>
+        </header>
+
+        <main class="flex-1 px-6 py-8">
+          <div class="mx-auto max-w-6xl w-full">
+            {render_slot(@inner_block)}
+          </div>
+        </main>
       </div>
-    </main>
+
+      <div class="drawer-side">
+        <label for="nav-drawer" class="drawer-overlay" aria-label="close sidebar"></label>
+        <aside class="bg-base-200 min-h-full w-64 border-r border-base-300">
+          <div class="px-6 py-5 border-b border-base-300 flex items-center gap-2">
+            <.icon name="hero-bolt" class="size-6 text-accent" />
+            <div class="leading-tight">
+              <div class="font-bold text-sm">Durable Demo</div>
+              <div class="text-xs text-base-content/60">Workflow showcase</div>
+            </div>
+          </div>
+
+          <ul class="menu menu-sm gap-1 p-3">
+            <.nav_item icon="hero-home" label="Home" path="/" active={@active_nav == :home} />
+            <.nav_item icon="hero-queue-list" label="Executions" path="/executions" active={@active_nav == :executions} />
+            <.nav_item icon="hero-hand-raised" label="Pending Inputs" path="/pending-inputs" active={@active_nav == :pending_inputs} />
+            <.nav_item icon="hero-bolt" label="Pending Events" path="/pending-events" active={@active_nav == :pending_events} />
+            <.nav_item icon="hero-clock" label="Schedules" path="/schedules" active={@active_nav == :schedules} />
+
+            <li class="menu-title pt-4 pb-1 text-xs uppercase tracking-wide">Tools</li>
+            <li>
+              <a href="/dashboard" target="_blank" class="flex items-center gap-2">
+                <.icon name="hero-cog-6-tooth" class="size-4" />
+                <span>Durable Dashboard</span>
+                <.icon name="hero-arrow-top-right-on-square" class="size-3 ml-auto opacity-60" />
+              </a>
+            </li>
+          </ul>
+        </aside>
+      </div>
+    </div>
 
     <.flash_group flash={@flash} />
     """
   end
 
-  @doc """
-  Shows the flash group with standard titles and content.
+  attr :icon, :string, required: true
+  attr :label, :string, required: true
+  attr :path, :string, required: true
+  attr :active, :boolean, default: false
 
-  ## Examples
+  defp nav_item(assigns) do
+    ~H"""
+    <li>
+      <.link navigate={@path} class={["flex items-center gap-2", @active && "menu-active"]}>
+        <.icon name={@icon} class="size-4" />
+        <span>{@label}</span>
+      </.link>
+    </li>
+    """
+  end
 
-      <.flash_group flash={@flash} />
-  """
-  attr :flash, :map, required: true, doc: "the map of flash messages"
-  attr :id, :string, default: "flash-group", doc: "the optional id of flash container"
+  attr :flash, :map, required: true
+  attr :id, :string, default: "flash-group"
 
   def flash_group(assigns) do
     ~H"""
@@ -115,43 +120,6 @@ defmodule PhoenixDemoWeb.Layouts do
         Attempting to reconnect
         <.icon name="hero-arrow-path" class="ml-1 size-3 motion-safe:animate-spin" />
       </.flash>
-    </div>
-    """
-  end
-
-  @doc """
-  Provides dark vs light theme toggle based on themes defined in app.css.
-
-  See <head> in root.html.heex which applies the theme before page load.
-  """
-  def theme_toggle(assigns) do
-    ~H"""
-    <div class="card relative flex flex-row items-center border-2 border-base-300 bg-base-300 rounded-full">
-      <div class="absolute w-1/3 h-full rounded-full border-1 border-base-200 bg-base-100 brightness-200 left-0 [[data-theme=light]_&]:left-1/3 [[data-theme=dark]_&]:left-2/3 transition-[left]" />
-
-      <button
-        class="flex p-2 cursor-pointer w-1/3"
-        phx-click={JS.dispatch("phx:set-theme")}
-        data-phx-theme="system"
-      >
-        <.icon name="hero-computer-desktop-micro" class="size-4 opacity-75 hover:opacity-100" />
-      </button>
-
-      <button
-        class="flex p-2 cursor-pointer w-1/3"
-        phx-click={JS.dispatch("phx:set-theme")}
-        data-phx-theme="light"
-      >
-        <.icon name="hero-sun-micro" class="size-4 opacity-75 hover:opacity-100" />
-      </button>
-
-      <button
-        class="flex p-2 cursor-pointer w-1/3"
-        phx-click={JS.dispatch("phx:set-theme")}
-        data-phx-theme="dark"
-      >
-        <.icon name="hero-moon-micro" class="size-4 opacity-75 hover:opacity-100" />
-      </button>
     </div>
     """
   end

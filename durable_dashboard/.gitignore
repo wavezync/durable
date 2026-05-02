@@ -1,0 +1,10 @@
+# Elixir
+/_build/
+/deps/
+/cover/
+/doc/
+*.ez
+erl_crash.dump
+
+# Node (assets/)
+assets/node_modules/

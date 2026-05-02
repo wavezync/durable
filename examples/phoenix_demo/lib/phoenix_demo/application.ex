@@ -12,8 +12,17 @@ defmodule PhoenixDemo.Application do
       PhoenixDemo.Repo,
       {DNSCluster, query: Application.get_env(:phoenix_demo, :dns_cluster_query) || :ignore},
       {Phoenix.PubSub, name: PhoenixDemo.PubSub},
-      # Durable workflow engine
-      {Durable, repo: PhoenixDemo.Repo, queues: %{default: [concurrency: 5]}},
+      # Durable workflow engine — share the host PubSub so the dashboard can
+      # subscribe to workflow lifecycle events. Fast scheduler poll so the
+      # demo's "* * * * *" cron is visible within a session.
+      {Durable,
+       repo: PhoenixDemo.Repo,
+       queues: %{default: [concurrency: 5]},
+       pubsub: PhoenixDemo.PubSub,
+       scheduler_interval: 5_000,
+       scheduled_modules: [
+         PhoenixDemo.Workflows.HourlyMetricsCronWorkflow
+       ]},
       # Start to serve requests, typically the last entry
       PhoenixDemoWeb.Endpoint
     ]

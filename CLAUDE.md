@@ -4,6 +4,14 @@ Durable workflow engine for Elixir - provides resumable, reliable workflows with
 
 Durable is an **embeddable library** - users add it to their supervision tree and provide their own Ecto repo.
 
+## Dashboard UI work
+
+Before touching any file under `durable_dashboard/`, read
+`durable_dashboard/DESIGN.md`. It codifies the design language (tokens,
+typography, spacing, motion, status semantics, component primitives,
+composition patterns). New visual decisions are made there first, then
+applied in code.
+
 ## Quick Reference
 
 ```bash
