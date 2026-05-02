@@ -30,7 +30,7 @@ defmodule DurableDashboard.MixProject do
 
   defp deps do
     [
-      {:durable, path: ".."},
+      {:durable, path: "../durable"},
       {:phoenix_live_view, "~> 1.1"},
       {:phoenix, "~> 1.8"},
       {:jason, "~> 1.4"},

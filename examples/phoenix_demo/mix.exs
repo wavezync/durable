@@ -63,7 +63,7 @@ defmodule PhoenixDemo.MixProject do
       {:dns_cluster, "~> 0.2.0"},
       {:bandit, "~> 1.5"},
       # Durable workflow engine
-      {:durable, path: "../.."},
+      {:durable, path: "../../durable"},
       {:durable_dashboard, path: "../../durable_dashboard"}
     ]
   end

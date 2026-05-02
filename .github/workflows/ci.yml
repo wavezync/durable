@@ -6,18 +6,43 @@ on:
   pull_request:
     branches: [main]
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   MIX_ENV: test
+  ELIXIR_VERSION: "1.19"
+  OTP_VERSION: "28"
 
 jobs:
-  test:
-    name: Test (Elixir ${{ matrix.elixir }} / OTP ${{ matrix.otp }})
+  changes:
+    name: Detect changes
     runs-on: ubuntu-latest
+    outputs:
+      durable: ${{ steps.filter.outputs.durable }}
+      dashboard: ${{ steps.filter.outputs.dashboard }}
+      ci: ${{ steps.filter.outputs.ci }}
+    steps:
+      - uses: actions/checkout@v6
 
-    strategy:
-      matrix:
-        elixir: ["1.19"]
-        otp: ["28"]
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            durable:
+              - 'durable/**'
+            dashboard:
+              - 'durable/**'
+              - 'durable_dashboard/**'
+            ci:
+              - '.github/workflows/**'
+
+  durable:
+    name: Durable
+    needs: changes
+    if: needs.changes.outputs.durable == 'true' || needs.changes.outputs.ci == 'true' || github.event_name == 'push'
+    runs-on: ubuntu-latest
 
     services:
       postgres:
@@ -33,28 +58,32 @@ jobs:
           --health-timeout=5s
           --health-retries=5
 
+    defaults:
+      run:
+        working-directory: durable
+
     steps:
       - uses: actions/checkout@v6
 
       - name: Set up Elixir
         uses: erlef/setup-beam@v1
         with:
-          elixir-version: ${{ matrix.elixir }}
-          otp-version: ${{ matrix.otp }}
+          elixir-version: ${{ env.ELIXIR_VERSION }}
+          otp-version: ${{ env.OTP_VERSION }}
 
       - name: Restore dependencies cache
         uses: actions/cache@v4
         with:
-          path: deps
-          key: ${{ runner.os }}-mix-${{ hashFiles('**/mix.lock') }}
-          restore-keys: ${{ runner.os }}-mix-
+          path: durable/deps
+          key: ${{ runner.os }}-durable-mix-${{ hashFiles('durable/mix.lock') }}
+          restore-keys: ${{ runner.os }}-durable-mix-
 
       - name: Restore build cache
-        uses: actions/cache@v5
+        uses: actions/cache@v4
         with:
-          path: _build
-          key: ${{ runner.os }}-build-${{ matrix.otp }}-${{ matrix.elixir }}-${{ hashFiles('**/mix.lock') }}
-          restore-keys: ${{ runner.os }}-build-${{ matrix.otp }}-${{ matrix.elixir }}-
+          path: durable/_build
+          key: ${{ runner.os }}-durable-build-${{ env.OTP_VERSION }}-${{ env.ELIXIR_VERSION }}-${{ hashFiles('durable/mix.lock') }}
+          restore-keys: ${{ runner.os }}-durable-build-${{ env.OTP_VERSION }}-${{ env.ELIXIR_VERSION }}-
 
       - name: Install dependencies
         run: mix deps.get
@@ -65,31 +94,86 @@ jobs:
       - name: Compile
         run: mix compile --warnings-as-errors
 
+      - name: Credo
+        run: mix credo --strict
+
       - name: Run tests
         run: mix test
 
-  credo:
-    name: Credo
+  dashboard:
+    name: Dashboard
+    needs: changes
+    if: needs.changes.outputs.dashboard == 'true' || needs.changes.outputs.ci == 'true' || github.event_name == 'push'
     runs-on: ubuntu-latest
 
+    defaults:
+      run:
+        working-directory: durable_dashboard
+
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Set up Elixir
         uses: erlef/setup-beam@v1
         with:
-          elixir-version: "1.19"
-          otp-version: "28"
+          elixir-version: ${{ env.ELIXIR_VERSION }}
+          otp-version: ${{ env.OTP_VERSION }}
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: pnpm
+          cache-dependency-path: durable_dashboard/assets/pnpm-lock.yaml
 
       - name: Restore dependencies cache
         uses: actions/cache@v4
         with:
-          path: deps
-          key: ${{ runner.os }}-mix-${{ hashFiles('**/mix.lock') }}
-          restore-keys: ${{ runner.os }}-mix-
+          path: durable_dashboard/deps
+          key: ${{ runner.os }}-dashboard-mix-${{ hashFiles('durable_dashboard/mix.lock', 'durable/mix.lock') }}
+          restore-keys: ${{ runner.os }}-dashboard-mix-
 
-      - name: Install dependencies
+      - name: Restore build cache
+        uses: actions/cache@v4
+        with:
+          path: durable_dashboard/_build
+          key: ${{ runner.os }}-dashboard-build-${{ env.OTP_VERSION }}-${{ env.ELIXIR_VERSION }}-${{ hashFiles('durable_dashboard/mix.lock', 'durable/mix.lock') }}
+          restore-keys: ${{ runner.os }}-dashboard-build-${{ env.OTP_VERSION }}-${{ env.ELIXIR_VERSION }}-
+
+      - name: Install Elixir dependencies
         run: mix deps.get
 
-      - name: Run Credo
-        run: mix credo --strict
+      - name: Install JS dependencies
+        working-directory: durable_dashboard/assets
+        run: pnpm install --frozen-lockfile
+
+      - name: Check formatting
+        run: mix format --check-formatted
+
+      - name: Build assets
+        working-directory: durable_dashboard/assets
+        run: pnpm build
+
+      - name: Compile
+        run: mix compile --warnings-as-errors
+
+      - name: Run tests
+        run: mix test
+
+  ci-status:
+    name: CI status
+    needs: [changes, durable, dashboard]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify all required jobs passed
+        run: |
+          set -e
+          [[ "${{ needs.changes.result }}" == "success" ]] || exit 1
+          [[ "${{ needs.durable.result }}" =~ ^(success|skipped)$ ]] || exit 1
+          [[ "${{ needs.dashboard.result }}" =~ ^(success|skipped)$ ]] || exit 1
