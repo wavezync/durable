@@ -17,6 +17,6 @@ defmodule DurableDashboard.TestEndpoint do
   plug :put_secret_key_base
 
   defp put_secret_key_base(conn, _) do
-    Plug.Conn.put_secret_key_base(conn, String.duplicate("a", 64))
+    put_in(conn.secret_key_base, String.duplicate("a", 64))
   end
 end
