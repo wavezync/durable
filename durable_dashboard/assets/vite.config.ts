@@ -18,10 +18,8 @@ export default defineConfig(({ command }) => ({
     emptyOutDir: true,
     rollupOptions: {
       input: {
-        // v1 React SPA — kept until phase 6 cutover
-        app: path.resolve(__dirname, "src/main.tsx"),
-        // v2 LiveView-first stack: LiveSocket + ReactFlow island only
-        app_v2: path.resolve(__dirname, "src/v2/main.ts"),
+        // LiveView-first stack: LiveSocket + ReactFlow island only
+        app: path.resolve(__dirname, "src/main.ts"),
       },
       output: {
         entryFileNames: "[name].js",
@@ -29,7 +27,6 @@ export default defineConfig(({ command }) => ({
         assetFileNames: "[name][extname]",
         manualChunks: {
           "vendor-xyflow": ["@xyflow/react", "@dagrejs/dagre"],
-          "vendor-recharts": ["recharts"],
         },
       },
     },

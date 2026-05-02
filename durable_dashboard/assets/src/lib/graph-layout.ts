@@ -15,7 +15,7 @@ import type { Edge, Node } from "@xyflow/react";
 import type { GraphData, GraphEdge } from "./types";
 
 // ---------------------------------------------------------------------------
-// Sizing — must match the React node components in `assets/src/v2/react/nodes`.
+// Sizing — must match the React node components in `assets/src/react/nodes`.
 // Every node is a uniform 88×96 cell (64×64 icon box + label region below)
 // for the n8n-inspired rhythm. See DESIGN.md §11.
 // ---------------------------------------------------------------------------

@@ -1,9 +1,9 @@
 /**
- * ReactFlow island used by the v2 dashboard's workflow detail view.
+ * ReactFlow island used by the dashboard's workflow detail view.
  *
  * Mount via `mountFlowIsland(el, graph)`. Returns a handle the JS hook
  * uses to feed in updates from the LiveView side. The island is the only
- * piece of React in the v2 stack; everything else is HEEx.
+ * piece of React in the dashboard stack; everything else is HEEx.
  *
  * Visual treatment: themed step / decision / parallel nodes live in
  * `./nodes/`. Background, controls, minimap, edges all read from the
@@ -21,9 +21,9 @@ import {
 } from "@xyflow/react";
 import { useEffect, useMemo, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { layoutGraph } from "../../lib/graph-layout";
-import { resolveToken } from "../../lib/tokens";
-import type { GraphData } from "../../lib/types";
+import { layoutGraph } from "../lib/graph-layout";
+import { resolveToken } from "../lib/tokens";
+import type { GraphData } from "../lib/types";
 import { AnimatedFlowEdge } from "./edges/animated_flow_edge";
 import { EndNode } from "./nodes/end_node";
 import { GatewayNode } from "./nodes/gateway_node";

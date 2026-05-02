@@ -10,7 +10,7 @@
  *
  * On mount, the hook:
  *   1. Reads the initial graph from `data-graph`
- *   2. Lazy-imports React + ReactFlow + dagre (keeping the v2 baseline
+ *   2. Lazy-imports React + ReactFlow + dagre (keeping the baseline JS
  *      payload small — the workflow detail page only pays the cost when
  *      actually viewed)
  *   3. Creates a React root inside the element and renders the island
@@ -23,7 +23,7 @@
  * collisions when multiple FlowGraphs render on the same page.
  */
 
-import type { GraphData } from "../../lib/types";
+import type { GraphData } from "../lib/types";
 
 interface FlowIsland {
   setGraph(graph: GraphData): void;
@@ -55,8 +55,8 @@ export const FlowGraph = {
       console.warn("[FlowGraph] failed to parse data-graph attribute:", err);
     }
 
-    // Lazy-import the React island so the v2 baseline JS doesn't pull in
-    // ReactFlow + dagre + react-dom for every page.
+    // Lazy-import the React island so the baseline JS bundle doesn't pull
+    // in ReactFlow + dagre + react-dom for every page.
     const { mountFlowIsland } = await import("../react/flow_graph");
 
     this._island = mountFlowIsland(this.el, initialGraph);
