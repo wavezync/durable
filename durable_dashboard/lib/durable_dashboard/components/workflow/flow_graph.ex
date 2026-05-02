@@ -1,8 +1,8 @@
 defmodule DurableDashboard.Components.Workflow.FlowGraph do
   @moduledoc """
   LiveComponent that wraps the ReactFlow island defined in
-  `assets/src/v2/react/flow_graph.tsx` (mounted by the JS hook in
-  `assets/src/v2/hooks/flow_graph.ts`).
+  `assets/src/react/flow_graph.tsx` (mounted by the JS hook in
+  `assets/src/hooks/flow_graph.ts`).
 
   ## Communication contract
 

@@ -104,7 +104,7 @@ defmodule DurableDashboard.Router do
         pipe_through :durable_dashboard_browser
 
         live_session :durable_dashboard,
-          root_layout: {DurableDashboard.Layouts, :root_v2},
+          root_layout: {DurableDashboard.Layouts, :root},
           session: %{
             "config" => %{
               durable: unquote(durable),

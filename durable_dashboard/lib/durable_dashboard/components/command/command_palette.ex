@@ -1,7 +1,7 @@
 defmodule DurableDashboard.Components.Command.CommandPalette do
   @moduledoc """
   ⌘K command palette. Mounted once in the app layout — always present,
-  hidden when closed. The JS hook (`assets/src/v2/hooks/command_palette.ts`)
+  hidden when closed. The JS hook (`assets/src/hooks/command_palette.ts`)
   bridges keypresses to LC events.
 
   ## Events
@@ -14,8 +14,7 @@ defmodule DurableDashboard.Components.Command.CommandPalette do
 
   ## Items
 
-  Phase 5 v0 ships only the static route set. Live workflow search will
-  land alongside the workflow stub adapter in a follow-up.
+  Ships the static route set. Live workflow search is a future addition.
   """
 
   use Phoenix.LiveComponent

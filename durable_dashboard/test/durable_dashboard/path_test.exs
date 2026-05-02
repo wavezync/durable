@@ -2,8 +2,7 @@ defmodule DurableDashboard.PathTest do
   @moduledoc """
   The host app picks the dashboard's mount prefix when calling the
   `dashboard_routes/2` macro (e.g. `/dashboard`, `/admin/durable`). Path
-  helpers append per-page suffixes — they no longer add any v2/legacy
-  segment of their own.
+  helpers append per-page suffixes onto that prefix.
   """
 
   use ExUnit.Case, async: true

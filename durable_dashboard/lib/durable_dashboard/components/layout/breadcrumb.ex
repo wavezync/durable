@@ -8,7 +8,7 @@ defmodule DurableDashboard.Components.Layout.Breadcrumb do
   ## Crumb shape
 
       [
-        %{label: "Workflows", href: "/dashboard/v2/workflows"},
+        %{label: "Workflows", href: "/dashboard/workflows"},
         %{label: "abc12345"}  # last crumb is unlinked by convention
       ]
   """

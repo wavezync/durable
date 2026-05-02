@@ -2,7 +2,7 @@
  * Design-token resolver.
  *
  * Reads CSS custom properties off `<html>` so React code can stay in step
- * with the theme set by `Layouts.root_v2/1`. Use this anywhere a tailwind
+ * with the theme set by `Layouts.root/1`. Use this anywhere a tailwind
  * utility doesn't fit — e.g. SVG fill/stroke attributes, third-party
  * components that take colors as strings (ReactFlow MiniMap), inline
  * `style` properties.
