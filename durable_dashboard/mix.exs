@@ -11,6 +11,7 @@ defmodule DurableDashboard.MixProject do
       elixir: "~> 1.15",
       elixirc_paths: elixirc_paths(Mix.env()),
       start_permanent: Mix.env() == :prod,
+      aliases: aliases(),
       deps: deps(),
       name: "DurableDashboard",
       description: "Web dashboard for Durable workflow engine",
@@ -35,6 +36,16 @@ defmodule DurableDashboard.MixProject do
       {:phoenix, "~> 1.8"},
       {:jason, "~> 1.4"},
       {:lazy_html, ">= 0.1.0", only: :test}
+    ]
+  end
+
+  defp aliases do
+    [
+      setup: ["deps.get", "assets.setup"],
+      "assets.setup": ["cmd --cd assets pnpm install"],
+      "assets.build": ["cmd --cd assets pnpm build"],
+      "hex.build": ["assets.build", "hex.build"],
+      "hex.publish": ["assets.build", "hex.publish"]
     ]
   end
 
