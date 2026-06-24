@@ -1,14 +1,16 @@
 defmodule PhoenixDemo.Workflows.DripEmailCampaignWorkflow do
   @moduledoc """
-  Multi-stage email drip campaign that visibly progresses across waits.
-  Day 2 is sent after a `schedule_at(now + drip_scale s)` pause; day 7 is
-  sent after a `sleep(drip_scale s)` pause.
+  Three-stage email drip that visibly cycles `:running → :waiting → :running`
+  across progressively longer gaps:
 
-  Both delays default to 30 seconds so a demo session can complete in under
-  two minutes. Override with `config :phoenix_demo, :drip_scale, 5`.
+      welcome
+        → schedule_at(now + 30s) → followup #1
+        → sleep(1m)              → followup #2
+        → sleep(2m)              → followup #3
+        → complete
 
-  Showcases: `sleep`, `schedule_at`, multi-stage workflows that go through
-  `:waiting → :running → :waiting` cycles.
+  Showcases: `schedule_at`, `sleep`, and a multi-stage workflow whose status
+  flips between `:running` and `:waiting` three times.
 
   Input: `%{"customer_email" => "alice@example.com", "campaign" => "welcome"}`
   """
@@ -19,8 +21,6 @@ defmodule PhoenixDemo.Workflows.DripEmailCampaignWorkflow do
   use Durable.Wait
 
   require Logger
-
-  @drip_scale Application.compile_env(:phoenix_demo, :drip_scale, 30)
 
   workflow "drip_email_campaign", timeout: minutes(30) do
     step :send_welcome, fn data ->
@@ -35,31 +35,44 @@ defmodule PhoenixDemo.Workflows.DripEmailCampaignWorkflow do
       {:ok, assign(data, "email_step", "welcome_sent")}
     end
 
-    step :wait_day_2, fn data ->
-      until = DateTime.add(DateTime.utc_now(), @drip_scale, :second)
-      Logger.info("[Drip] Scheduling day-2 nudge at #{DateTime.to_iso8601(until)}")
+    step :wait_first, fn data ->
+      until = DateTime.add(DateTime.utc_now(), 30, :second)
+      Logger.info("[Drip] Scheduling followup #1 at #{DateTime.to_iso8601(until)}")
       schedule_at(until)
       {:ok, data}
     end
 
-    step :send_day_2_email, fn data ->
+    step :send_first_followup, fn data ->
       email = get_context(:customer_email)
-      Logger.info("[Drip] Day-2 email → #{email}")
-      put_context(:day_2_sent_at, DateTime.utc_now() |> DateTime.to_iso8601())
-      {:ok, assign(data, "email_step", "day_2_sent")}
+      Logger.info("[Drip] Followup #1 → #{email}")
+      put_context(:first_sent_at, DateTime.utc_now() |> DateTime.to_iso8601())
+      {:ok, assign(data, "email_step", "first_sent")}
     end
 
-    step :wait_day_7, fn data ->
-      Logger.info("[Drip] Sleeping #{@drip_scale}s before day-7 email")
-      sleep(seconds(@drip_scale))
+    step :wait_second, fn data ->
+      Logger.info("[Drip] Sleeping 1m before followup #2")
+      sleep(minutes(1))
       {:ok, data}
     end
 
-    step :send_day_7_email, fn data ->
+    step :send_second_followup, fn data ->
       email = get_context(:customer_email)
-      Logger.info("[Drip] Day-7 email → #{email}")
-      put_context(:day_7_sent_at, DateTime.utc_now() |> DateTime.to_iso8601())
-      {:ok, assign(data, "email_step", "day_7_sent")}
+      Logger.info("[Drip] Followup #2 → #{email}")
+      put_context(:second_sent_at, DateTime.utc_now() |> DateTime.to_iso8601())
+      {:ok, assign(data, "email_step", "second_sent")}
+    end
+
+    step :wait_third, fn data ->
+      Logger.info("[Drip] Sleeping 2m before followup #3")
+      sleep(minutes(2))
+      {:ok, data}
+    end
+
+    step :send_third_followup, fn data ->
+      email = get_context(:customer_email)
+      Logger.info("[Drip] Followup #3 → #{email}")
+      put_context(:third_sent_at, DateTime.utc_now() |> DateTime.to_iso8601())
+      {:ok, assign(data, "email_step", "third_sent")}
     end
 
     step :complete_campaign, fn _data ->
@@ -71,8 +84,9 @@ defmodule PhoenixDemo.Workflows.DripEmailCampaignWorkflow do
          "campaign" => get_context(:campaign),
          "status" => "completed",
          "welcome_sent_at" => get_context(:welcome_sent_at),
-         "day_2_sent_at" => get_context(:day_2_sent_at),
-         "day_7_sent_at" => get_context(:day_7_sent_at)
+         "first_sent_at" => get_context(:first_sent_at),
+         "second_sent_at" => get_context(:second_sent_at),
+         "third_sent_at" => get_context(:third_sent_at)
        }}
     end
   end
