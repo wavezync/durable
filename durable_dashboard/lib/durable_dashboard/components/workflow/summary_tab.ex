@@ -121,7 +121,7 @@ defmodule DurableDashboard.Components.Workflow.SummaryTab do
   defp row(assigns) do
     ~H"""
     <div class="flex flex-col gap-0.5 min-w-0">
-      <dt class="text-[10px] uppercase tracking-wider text-muted-foreground">{@label}</dt>
+      <dt><Core.label>{@label}</Core.label></dt>
       <dd class="text-[13px]">{render_slot(@inner_block)}</dd>
     </div>
     """
@@ -137,12 +137,7 @@ defmodule DurableDashboard.Components.Workflow.SummaryTab do
       <span class="text-numeric text-2xl font-semibold tabular-nums text-foreground">
         {@value}
       </span>
-      <span class={[
-        "text-[10px] uppercase tracking-wider",
-        stat_label_class(@kind)
-      ]}>
-        {@label}
-      </span>
+      <Core.label class={stat_label_class(@kind)}>{@label}</Core.label>
     </div>
     """
   end
@@ -150,7 +145,7 @@ defmodule DurableDashboard.Components.Workflow.SummaryTab do
   defp stat_label_class("success"), do: "text-success"
   defp stat_label_class("warning"), do: "text-warning"
   defp stat_label_class("destructive"), do: "text-destructive"
-  defp stat_label_class(_), do: "text-muted-foreground"
+  defp stat_label_class(_), do: nil
 
   # ============================================================================
   # Stats / formatting

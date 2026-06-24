@@ -30,7 +30,7 @@ defmodule DurableDashboard.Live.WorkflowLive do
   @input_kinds [:input_requested, :input_provided]
   @detail_kinds @workflow_kinds ++ @step_kinds ++ @input_kinds
 
-  @valid_tabs ~w(summary flow logs io history family)a
+  @valid_tabs ~w(summary flow timeline logs io history family)a
 
   @impl true
   def mount(params, session, socket) do
@@ -59,9 +59,14 @@ defmodule DurableDashboard.Live.WorkflowLive do
        durable: durable,
        workflow_id: id,
        page_title: "Workflow",
-       not_found?: false
+       not_found?: false,
+       # `now` drives the timeline tab's "in-flight" bars (running and
+       # currently-suspended steps grow toward this clock). Refreshed
+       # every 500ms while the workflow has any active step.
+       now: DateTime.utc_now()
      )
-     |> load_workflow()}
+     |> load_workflow()
+     |> maybe_schedule_clock_tick()}
   end
 
   @impl true
@@ -89,19 +94,70 @@ defmodule DurableDashboard.Live.WorkflowLive do
     ArgumentError -> :summary
   end
 
-  defp build_breadcrumbs(%{base_path: base, workflow_id: id}) do
-    [
-      %{label: "Workflows", href: DPath.workflows(base)},
-      %{label: short(id)}
-    ]
+  defp build_breadcrumbs(assigns) do
+    %{base_path: base, workflow_id: id} = assigns
+    workflow_name = workflow_name_for_breadcrumbs(assigns)
+
+    crumbs = [%{label: "Workflows", href: DPath.workflows(base)}]
+
+    crumbs =
+      case workflow_name do
+        nil ->
+          crumbs ++ [%{label: "Executions", href: DPath.executions(base)}]
+
+        name ->
+          crumbs ++ [%{label: name, href: DPath.workflow_executions(base, name)}]
+      end
+
+    crumbs ++ [%{label: short(id)}]
   end
+
+  defp workflow_name_for_breadcrumbs(%{workflow: %{workflow_name: name}})
+       when is_binary(name) and name != "",
+       do: name
+
+  defp workflow_name_for_breadcrumbs(_), do: nil
 
   @impl true
   def handle_info({:durable_event, kind, _payload}, socket) when kind in @detail_kinds do
-    {:noreply, load_workflow(socket)}
+    {:noreply,
+     socket
+     |> load_workflow()
+     |> maybe_schedule_clock_tick()}
+  end
+
+  def handle_info(:clock_tick, socket) do
+    {:noreply,
+     socket
+     |> assign(now: DateTime.utc_now())
+     |> maybe_schedule_clock_tick()}
   end
 
   def handle_info(_msg, socket), do: {:noreply, socket}
+
+  # Schedule a 500ms clock tick if anything in the workflow is still
+  # in-flight — running step, waiting step, or workflow itself in a
+  # transient state. The tick refreshes `now` so the timeline tab's
+  # in-flight bars grow toward real time without waiting for a PubSub
+  # event. Skips scheduling once the workflow is fully settled
+  # (completed / failed / cancelled with no in-flight steps), so an
+  # idle dashboard tab doesn't burn cycles forever.
+  defp maybe_schedule_clock_tick(%{assigns: %{not_found?: true}} = socket), do: socket
+
+  defp maybe_schedule_clock_tick(socket) do
+    if workflow_in_flight?(socket.assigns) do
+      Process.send_after(self(), :clock_tick, 500)
+    end
+
+    socket
+  end
+
+  defp workflow_in_flight?(%{workflow: %{status: status}, steps: steps}) do
+    status in [:pending, :running, :waiting, :compensating] or
+      Enum.any?(steps, &(&1.status in [:pending, :running, :waiting]))
+  end
+
+  defp workflow_in_flight?(_), do: false
 
   @impl true
   def render(assigns) do
@@ -118,8 +174,8 @@ defmodule DurableDashboard.Live.WorkflowLive do
           description={"No execution with id " <> (@workflow_id || "—") <> " on this instance."}
         >
           <:action>
-            <Core.button kind="link" navigate={DPath.workflows(@base_path)}>
-              Back to workflows
+            <Core.button kind="link" navigate={DPath.executions(@base_path)}>
+              Back to executions
             </Core.button>
           </:action>
         </Core.empty_state>
@@ -146,6 +202,7 @@ defmodule DurableDashboard.Live.WorkflowLive do
             pending_inputs={@pending_inputs}
             base_path={@base_path}
             family={@family}
+            now={@now}
           />
         </div>
       <% end %>
@@ -221,7 +278,13 @@ defmodule DurableDashboard.Live.WorkflowLive do
   # Tab dispatch
   # ============================================================================
 
-  alias DurableDashboard.Components.Workflow.{ChildrenTab, HistoryTab, IoTab, SummaryTab}
+  alias DurableDashboard.Components.Workflow.{
+    ChildrenTab,
+    HistoryTab,
+    IoTab,
+    SummaryTab,
+    TimelineTab
+  }
 
   attr :active_tab, :atom, required: true
   attr :workflow, :map, required: true
@@ -229,6 +292,7 @@ defmodule DurableDashboard.Live.WorkflowLive do
   attr :pending_inputs, :list, required: true
   attr :base_path, :string, required: true
   attr :family, :map, required: true
+  attr :now, :any, default: nil
 
   defp tab_content(%{active_tab: :summary} = assigns) do
     ~H"""
@@ -249,6 +313,18 @@ defmodule DurableDashboard.Live.WorkflowLive do
   defp tab_content(%{active_tab: :history} = assigns) do
     ~H"""
     <HistoryTab.history_tab steps={@steps} />
+    """
+  end
+
+  defp tab_content(%{active_tab: :timeline} = assigns) do
+    ~H"""
+    <.live_component
+      module={TimelineTab}
+      id={"timeline-" <> @workflow.id}
+      steps={@steps}
+      workflow={@workflow}
+      now={@now}
+    />
     """
   end
 

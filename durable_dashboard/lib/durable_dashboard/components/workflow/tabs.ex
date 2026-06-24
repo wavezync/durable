@@ -21,6 +21,7 @@ defmodule DurableDashboard.Components.Workflow.Tabs do
       [
         {:summary, "Summary"},
         {:flow, "Flow"},
+        {:timeline, "Timeline"},
         {:logs, "Logs"},
         {:io, "I/O"},
         {:history, "History"}
