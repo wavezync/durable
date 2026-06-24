@@ -238,7 +238,7 @@ defmodule DurableDashboard.Live.WorkflowLive do
         <div class="flex items-center gap-3 text-xs text-muted-foreground">
           <span class="font-mono">{strip_elixir(@workflow.workflow_module)}</span>
           <span class="text-border">·</span>
-          <Core.code>{@workflow.id}</Core.code>
+          <Core.code copy={to_string(@workflow.id)}>{@workflow.id}</Core.code>
         </div>
       </div>
     </div>

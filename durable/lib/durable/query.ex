@@ -365,6 +365,19 @@ defmodule Durable.Query do
       {:status, status}, q when is_atom(status) ->
         from(w in q, where: w.status == ^status)
 
+      {:status, statuses}, q when is_list(statuses) and statuses != [] ->
+        from(w in q, where: w.status in ^statuses)
+
+      # Exact execution id.
+      {:id, id}, q when is_binary(id) and id != "" ->
+        from(w in q, where: w.id == ^id)
+
+      # Id prefix — matches the short (8-char) id shown in lists or any leading
+      # slice of the full UUID. Cast the uuid to text so LIKE works. Callers
+      # must strip LIKE wildcards from user input (the dashboard does).
+      {:id_prefix, prefix}, q when is_binary(prefix) and prefix != "" ->
+        from(w in q, where: fragment("?::text LIKE ?", w.id, ^(prefix <> "%")))
+
       {:queue, queue}, q ->
         queue_str = to_string(queue)
         from(w in q, where: w.queue == ^queue_str)

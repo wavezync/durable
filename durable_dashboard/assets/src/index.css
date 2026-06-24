@@ -359,6 +359,28 @@
 }
 
 /* ============================================================================
+ * Copy button — the global copy listener (hooks/copy.ts) sets
+ * data-copied="true" for ~1.4s after a successful write; swap clipboard ⇄ check.
+ * ========================================================================= */
+
+.copy-btn .copy-done {
+  display: none;
+}
+
+.copy-btn[data-copied="true"] .copy-idle {
+  display: none;
+}
+
+.copy-btn[data-copied="true"] .copy-done {
+  display: inline-block;
+}
+
+.copy-btn[data-copied="true"] {
+  color: var(--success);
+  border-color: color-mix(in oklab, var(--success) 40%, transparent);
+}
+
+/* ============================================================================
  * Scrollbar — thin, hairline thumb, used on log viewer and data surfaces
  * ========================================================================= */
 

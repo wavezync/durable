@@ -11,6 +11,7 @@ import { Socket } from "phoenix";
 import { LiveSocket } from "phoenix_live_view";
 
 import { CommandPalette } from "./hooks/command_palette";
+import { initClipboard } from "./hooks/copy";
 import { FlowGraph } from "./hooks/flow_graph";
 import { localizeTime, localizeTimes } from "./hooks/local_time";
 
@@ -36,6 +37,9 @@ const liveSocket = new LiveSocket(liveSocketPath, Socket, {
 });
 
 liveSocket.connect();
+
+// One delegated listener handles every `<button data-copy>` copy control.
+initClipboard();
 
 // The initial server-rendered DOM is already in place before any patch, so
 // localize it directly.

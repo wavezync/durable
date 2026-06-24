@@ -260,7 +260,19 @@ component.
 
 ### `<.code>`
 
-Inline code chip — IDs, JSON snippets, durations, queue names.
+Inline code chip — IDs, JSON snippets, durations, queue names. Pass
+`copy={"the text"}` to append a hover-revealed `<.copy_button>` (used on the
+execution id, settings config values).
+
+### `<.copy_button>`
+
+A small ghost clipboard button that copies `text` to the clipboard and flashes
+a check (clipboard ⇄ check via `.copy-btn[data-copied]` CSS). It carries
+`data-copy` and is driven by **one delegated listener** (`hooks/copy.ts`, wired
+in `main.ts`) — no `phx-hook`/`id` per button. Reveal it on hover of its host
+(`opacity-0 group-hover/…:opacity-100`), never always-on (DENSITY §8). Already
+baked into `<.json>` (top-right of every JSON block) and `<.code copy={…}>`;
+drop it beside any other copy-worthy value rather than hand-rolling a button.
 
 ### `<.kbd>`
 
@@ -433,6 +445,30 @@ command-palette discipline (§1).
   panels. This is baked into the `DataTable` LiveComponent; hand-rolled tables
   (e.g. Overview's "recent executions") apply the same classes. Sortable
   headers add `hover:text-foreground`. Never reach for sans `tracking-wider`.
+
+### Faceted filter bar
+
+Filtering a list of the system's nouns (e.g. Executions) uses a **facet row**,
+not a search box + dropdowns: a chip per facet (`Components.Data.ExecutionFilters`
+— Workflow, Status, Time, ID), each opening a popover. It's the ops-console query
+builder (Linear / Datadog) and scales as facets are added.
+
+- **Pick the control to the data.** A facet over a *known finite set* (workflow
+  names from `Query.list_workflows`) is a **searchable combobox**, never free
+  text — exact-match free-text search is a trap. Status is **multi-select**.
+  Time is **relative presets + a custom UTC range** (→ the query's `:from`/`:to`).
+- **URL is the source of truth.** The bar owns only transient UI state (which
+  facet is open, combobox search text); values live in the parent's query. Each
+  change sends `{:execution_filters, patch}` to the parent LV, which merges,
+  resets to page 1, and `push_patch`es — so every filtered view is shareable and
+  the table (`DataTable` with `filters={[]}`) re-fetches from the new query.
+- **Open state is server-side** (an `open_facet` assign), not a client toggle,
+  so a LiveView patch can't reset an open panel mid-interaction. Close via
+  `phx-click-away` + `phx-key="Escape"`. Popovers are `bg-popover` + `shadow-lg`.
+- **Active ≠ live.** An active facet fills with `bg-accent` (neutral), never
+  `--primary` — indigo stays reserved for live/now/here (§6 live rail). Active
+  facets show their value inline + an ✕; a global **Clear all** appears when any
+  is set.
 
 ### Status readout (instrument cluster)
 

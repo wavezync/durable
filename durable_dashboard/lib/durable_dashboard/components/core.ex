@@ -208,6 +208,15 @@ defmodule DurableDashboard.Components.Core do
     """
   end
 
+  def icon(%{name: "clipboard"} = assigns) do
+    ~H"""
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class={@class} {@rest}>
+      <path d="M7 3.5A1.5 1.5 0 0 1 8.5 2h3.879a1.5 1.5 0 0 1 1.06.44l3.122 3.12A1.5 1.5 0 0 1 17 6.622V12.5a1.5 1.5 0 0 1-1.5 1.5h-1v-3.379a3 3 0 0 0-.879-2.121L10.5 5.379A3 3 0 0 0 8.379 4.5H7v-1Z" />
+      <path d="M4.5 6A1.5 1.5 0 0 0 3 7.5v9A1.5 1.5 0 0 0 4.5 18h7a1.5 1.5 0 0 0 1.5-1.5v-5.879a1.5 1.5 0 0 0-.44-1.06L9.44 6.439A1.5 1.5 0 0 0 8.378 6H4.5Z" />
+    </svg>
+    """
+  end
+
   def icon(%{name: name} = assigns) when is_binary(name) do
     # Unknown icon — render a placeholder square so it's visible during dev.
     ~H"""
@@ -760,11 +769,54 @@ defmodule DurableDashboard.Components.Core do
 
   def json(assigns) do
     ~H"""
-    <pre class={[
-      "thin-scroll overflow-auto font-mono text-[11px] leading-relaxed text-foreground/90",
-      !@bare && "rounded-md border border-border bg-background/50 p-3",
-      @class
-    ]}><%= Phoenix.HTML.raw(json_iodata(@value, 0)) %></pre>
+    <div class="group/json relative">
+      <.copy_button
+        text={json_plain(@value)}
+        label="Copy JSON"
+        class="absolute right-1.5 top-1.5 z-10 opacity-0 transition-opacity group-hover/json:opacity-100 focus-visible:opacity-100"
+      />
+      <pre class={[
+        "thin-scroll overflow-auto font-mono text-[11px] leading-relaxed text-foreground/90",
+        !@bare && "rounded-md border border-border bg-background/50 p-3",
+        @class
+      ]}><%= Phoenix.HTML.raw(json_iodata(@value, 0)) %></pre>
+    </div>
+    """
+  end
+
+  @doc """
+  A small clipboard button. Copies `text` to the clipboard via the global
+  delegated listener (`assets/src/hooks/copy.ts`, wired in `main.ts`) and
+  flashes a check for ~1.4 s. No `phx-hook`/`id` needed — it's plain markup
+  carrying `data-copy`. Drop it beside any copy-worthy value (JSON box, id
+  chip, config value).
+
+      <.copy_button text={@workflow.id} label="Copy execution id" />
+  """
+  attr :text, :string, required: true
+  attr :label, :string, default: "Copy"
+  attr :class, :any, default: nil
+  attr :rest, :global
+
+  def copy_button(assigns) do
+    ~H"""
+    <button
+      type="button"
+      data-copy={@text}
+      aria-label={@label}
+      title={@label}
+      class={[
+        "copy-btn inline-flex shrink-0 items-center justify-center rounded-md p-1",
+        "border border-border bg-card/80 text-muted-foreground backdrop-blur-sm",
+        "hover:bg-accent hover:text-accent-foreground transition-colors",
+        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+        @class
+      ]}
+      {@rest}
+    >
+      <.icon name="clipboard" class="copy-idle size-3.5" />
+      <.icon name="check" class="copy-done size-3.5 text-success" />
+    </button>
     """
   end
 
@@ -835,6 +887,49 @@ defmodule DurableDashboard.Components.Core do
     text |> Phoenix.HTML.html_escape() |> Phoenix.HTML.safe_to_string()
   end
 
+  # Plain-text twin of `json_iodata/2` — same pretty layout, no `<span>`s — so
+  # the clipboard copy matches the rendered block byte-for-byte (minus color).
+  defp json_plain(value), do: value |> json_text(0) |> IO.iodata_to_binary()
+
+  defp json_text(map, depth) when is_map(map) and not is_struct(map) do
+    case Map.to_list(map) do
+      [] ->
+        "{}"
+
+      pairs ->
+        inner =
+          pairs
+          |> Enum.map(fn {k, v} ->
+            [json_pad(depth + 1), json_encode(to_string(k)), ": ", json_text(v, depth + 1)]
+          end)
+          |> Enum.intersperse([",", "\n"])
+
+        ["{", "\n", inner, "\n", json_pad(depth), "}"]
+    end
+  end
+
+  defp json_text([], _depth), do: "[]"
+
+  defp json_text(list, depth) when is_list(list) do
+    inner =
+      list
+      |> Enum.map(fn v -> [json_pad(depth + 1), json_text(v, depth + 1)] end)
+      |> Enum.intersperse([",", "\n"])
+
+    ["[", "\n", inner, "\n", json_pad(depth), "]"]
+  end
+
+  defp json_text(v, _depth) when is_binary(v), do: json_encode(v)
+  defp json_text(v, _depth) when is_boolean(v), do: to_string(v)
+  defp json_text(nil, _depth), do: "null"
+  defp json_text(v, _depth) when is_integer(v) or is_float(v), do: to_string(v)
+
+  defp json_text(%mod{} = v, _depth) when mod in [DateTime, Date, NaiveDateTime, Time],
+    do: json_encode(to_string(v))
+
+  defp json_text(v, _depth) when is_atom(v), do: json_encode(to_string(v))
+  defp json_text(v, _depth), do: inspect(v)
+
   # ============================================================================
   # Heading
   # ============================================================================
@@ -897,18 +992,28 @@ defmodule DurableDashboard.Components.Core do
       <.code class="text-info">{job.queue}</.code>
   """
   attr :class, :string, default: nil
+  attr :copy, :string, default: nil
   slot :inner_block, required: true
 
   def code(assigns) do
     ~H"""
-    <code class={[
+    <span :if={@copy} class="group/code inline-flex items-center gap-1 align-middle">
+      <code class={code_class(@class)}>{render_slot(@inner_block)}</code>
+      <.copy_button
+        text={@copy}
+        class="opacity-0 group-hover/code:opacity-100 focus-visible:opacity-100"
+      />
+    </span>
+    <code :if={!@copy} class={code_class(@class)}>{render_slot(@inner_block)}</code>
+    """
+  end
+
+  defp code_class(class) do
+    [
       "font-mono text-numeric text-xs text-foreground/90",
       "px-1 py-0.5 rounded-sm bg-muted/40 border border-border",
-      @class
-    ]}>
-      {render_slot(@inner_block)}
-    </code>
-    """
+      class
+    ]
   end
 
   # ============================================================================

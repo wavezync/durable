@@ -47,7 +47,7 @@ defmodule DurableDashboard.Components.Workflow.StepDetail do
 
     ~H"""
     <div class={[
-      "max-w-5xl overflow-hidden rounded-lg border border-border bg-muted/25 shadow-sm",
+      "overflow-hidden rounded-lg border border-border bg-muted/25 shadow-sm",
       @class
     ]}>
       <%!-- Stat strip — compact horizontal header (no tall field column). --%>

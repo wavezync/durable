@@ -69,7 +69,14 @@ defmodule DurableDashboard.Components.Workflow.LogLine do
               <p :if={prefix != ""} class="break-words font-mono text-[11px] text-foreground/70">{prefix}</p>
               <Core.json value={term} class="max-h-[40vh]" />
             <% :text -> %>
-              <div class="break-words whitespace-pre-wrap font-mono text-[11px] text-foreground/90">{@entry["message"]}</div>
+              <div class="group/msg relative">
+                <Core.copy_button
+                  text={to_string(@entry["message"])}
+                  label="Copy message"
+                  class="absolute right-1.5 top-1.5 z-10 opacity-0 transition-opacity group-hover/msg:opacity-100 focus-visible:opacity-100"
+                />
+                <div class="thin-scroll max-h-[40vh] overflow-auto whitespace-pre-wrap break-words rounded-md border border-border bg-background/50 p-3 font-mono text-[11px] text-foreground/90">{@entry["message"]}</div>
+              </div>
           <% end %>
         </div>
 

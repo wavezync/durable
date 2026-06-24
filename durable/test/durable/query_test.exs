@@ -121,4 +121,64 @@ defmodule Durable.QueryTest do
       assert parent_map.parent_workflow_id == nil
     end
   end
+
+  describe "id / id_prefix / status-list / time filters" do
+    test "id selects an exact execution", %{repo: repo} do
+      a = insert_exec(repo, %{workflow_name: "a"})
+      _b = insert_exec(repo, %{workflow_name: "b"})
+
+      rows = Query.list_executions(id: a.id)
+
+      assert Enum.map(rows, & &1.id) == [a.id]
+    end
+
+    test "id_prefix matches the leading slice of the uuid", %{repo: repo} do
+      a = insert_exec(repo, %{workflow_name: "a"})
+      _b = insert_exec(repo, %{workflow_name: "b"})
+      prefix = String.slice(a.id, 0, 8)
+
+      rows = Query.list_executions(id_prefix: prefix)
+
+      assert Enum.any?(rows, &(&1.id == a.id))
+      assert Enum.all?(rows, &String.starts_with?(&1.id, prefix))
+    end
+
+    test "status accepts a list and matches any (IN)", %{repo: repo} do
+      f = insert_exec(repo, %{status: :failed})
+      r = insert_exec(repo, %{status: :running})
+      _c = insert_exec(repo, %{status: :completed})
+
+      rows = Query.list_executions(status: [:failed, :running])
+      ids = MapSet.new(rows, & &1.id)
+
+      assert MapSet.member?(ids, f.id)
+      assert MapSet.member?(ids, r.id)
+      refute Enum.any?(rows, &(&1.status == :completed))
+    end
+
+    test "single status atom still filters", %{repo: repo} do
+      f = insert_exec(repo, %{status: :failed})
+      _c = insert_exec(repo, %{status: :completed})
+
+      rows = Query.list_executions(status: :failed)
+
+      assert Enum.any?(rows, &(&1.id == f.id))
+      assert Enum.all?(rows, &(&1.status == :failed))
+    end
+
+    test "from bounds results by inserted_at", %{repo: repo} do
+      now = DateTime.utc_now()
+
+      old =
+        insert_exec(repo, %{workflow_name: "old", inserted_at: DateTime.add(now, -3_600, :second)})
+
+      recent = insert_exec(repo, %{workflow_name: "recent"})
+
+      rows = Query.list_executions(from: DateTime.add(now, -60, :second))
+      ids = MapSet.new(rows, & &1.id)
+
+      assert MapSet.member?(ids, recent.id)
+      refute MapSet.member?(ids, old.id)
+    end
+  end
 end

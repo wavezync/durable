@@ -51,8 +51,12 @@ defmodule DurableDashboard.Live.SettingsLive do
           <Core.card>
             <:title>Instance</:title>
             <Core.field_list class="gap-y-3">
-              <Core.field key="Name"><Core.code>{@instance.name}</Core.code></Core.field>
-              <Core.field key="Schema prefix"><Core.code>{@instance.prefix}</Core.code></Core.field>
+              <Core.field key="Name">
+                <Core.code copy={to_string(@instance.name)}>{@instance.name}</Core.code>
+              </Core.field>
+              <Core.field key="Schema prefix">
+                <Core.code copy={to_string(@instance.prefix)}>{@instance.prefix}</Core.code>
+              </Core.field>
               <Core.field key="Queue processing">
                 <Core.badge kind={if @instance.queue_enabled, do: "success", else: "muted"}>
                   {if @instance.queue_enabled, do: "enabled", else: "disabled"}
@@ -60,7 +64,7 @@ defmodule DurableDashboard.Live.SettingsLive do
               </Core.field>
               <Core.field key="PubSub">
                 <%= if @instance.pubsub do %>
-                  <Core.code>{@instance.pubsub}</Core.code>
+                  <Core.code copy={to_string(@instance.pubsub)}>{@instance.pubsub}</Core.code>
                 <% else %>
                   <span class="text-muted-foreground">disabled</span>
                 <% end %>
