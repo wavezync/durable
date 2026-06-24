@@ -8,9 +8,18 @@ defmodule DurableDashboard.Path do
 
   ## Usage
 
+      # Workflow definitions list
       <.link navigate={Path.workflows(@base_path)}>Workflows</.link>
-      <.link navigate={Path.workflow(@base_path, exec.id)}>...</.link>
-      <.link patch={Path.workflow_tab(@base_path, exec.id, "logs")}>Logs</.link>
+
+      # Executions for a specific workflow definition
+      <.link navigate={Path.workflow_executions(@base_path, name)}>...</.link>
+
+      # All executions, filterable
+      <.link navigate={Path.executions(@base_path)}>Executions</.link>
+
+      # Single execution detail (and its tabs)
+      <.link navigate={Path.execution(@base_path, exec.id)}>...</.link>
+      <.link patch={Path.execution_tab(@base_path, exec.id, "logs")}>Logs</.link>
   """
 
   @spec base(String.t()) :: String.t()
@@ -22,12 +31,30 @@ defmodule DurableDashboard.Path do
   @spec workflows(String.t()) :: String.t()
   def workflows(base_path), do: prefix(base_path, "/workflows")
 
-  @spec workflow(String.t(), String.t()) :: String.t()
-  def workflow(base_path, id), do: prefix(base_path, "/workflows/#{id}")
+  @spec workflow_executions(String.t(), String.t()) :: String.t()
+  def workflow_executions(base_path, name),
+    do: prefix(base_path, "/workflows/#{URI.encode(name)}")
 
+  @spec executions(String.t()) :: String.t()
+  def executions(base_path), do: prefix(base_path, "/executions")
+
+  @spec execution(String.t(), String.t()) :: String.t()
+  def execution(base_path, id), do: prefix(base_path, "/executions/#{id}")
+
+  @spec execution_tab(String.t(), String.t(), String.t() | atom()) :: String.t()
+  def execution_tab(base_path, id, tab),
+    do: prefix(base_path, "/executions/#{id}/#{tab}")
+
+  # Deprecated — kept so external callers don't break in this release.
+  # New code should use `execution/2` / `execution_tab/3` to match the
+  # IA noun. Both delegate to the new path; the URL is the same.
+  @doc deprecated: "Use execution/2 instead"
+  @spec workflow(String.t(), String.t()) :: String.t()
+  def workflow(base_path, id), do: execution(base_path, id)
+
+  @doc deprecated: "Use execution_tab/3 instead"
   @spec workflow_tab(String.t(), String.t(), String.t() | atom()) :: String.t()
-  def workflow_tab(base_path, id, tab),
-    do: prefix(base_path, "/workflows/#{id}/#{tab}")
+  def workflow_tab(base_path, id, tab), do: execution_tab(base_path, id, tab)
 
   @spec inputs(String.t()) :: String.t()
   def inputs(base_path), do: prefix(base_path, "/inputs")

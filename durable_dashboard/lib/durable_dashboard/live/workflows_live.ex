@@ -1,20 +1,21 @@
 defmodule DurableDashboard.Live.WorkflowsLive do
   @moduledoc """
-  Workflows list view. Wraps the `DataTable` LiveComponent with workflow-shaped
-  columns and filters. URL params drive the table's query state via
-  `handle_params`; the table notifies us back when state changes so we can
-  patch the URL.
+  Workflows catalog — one card per distinct workflow definition that has
+  been executed on this instance. Drilling in opens the executions list
+  filtered to that workflow.
+
+  Workflow definitions aren't compile-time-registered, so the list is
+  derived from execution history via `Durable.Query.list_workflows/1`.
+  Each card shows total runs, a running indicator (live, pulses), the
+  last run's relative time and status.
   """
 
   use Phoenix.LiveView
 
   alias Durable.PubSub, as: DurablePubSub
   alias DurableDashboard.Components.Core
-  alias DurableDashboard.Components.Data.DataTable
   alias DurableDashboard.Layouts
   alias DurableDashboard.Path, as: DPath
-
-  @table_id "workflows-table"
 
   @workflow_kinds [
     :workflow_started,
@@ -25,7 +26,11 @@ defmodule DurableDashboard.Live.WorkflowsLive do
     :workflow_cancelled
   ]
 
-  @statuses ~w(running waiting completed failed cancelled pending)
+  # The full list refreshes on each PubSub event; throttle so a burst of
+  # events (parallel branches all completing at once) doesn't thrash the
+  # query. 250ms is below human-perceptible flicker but well above the
+  # query latency for tens of workflows.
+  @refresh_debounce_ms 250
 
   @impl true
   def mount(_params, session, socket) do
@@ -46,33 +51,45 @@ defmodule DurableDashboard.Live.WorkflowsLive do
        base_path: config.base_path,
        durable: durable,
        page_title: "Workflows",
-       table_id: @table_id
+       refresh_pending?: false,
+       workflows: load_workflows(durable)
      )}
   end
 
   @impl true
-  def handle_params(params, uri, socket) do
-    query = parse_query(params)
-
+  def handle_params(_params, uri, socket) do
     {:noreply,
      assign(socket,
        current_path: URI.parse(uri).path,
-       breadcrumbs: [%{label: "Workflows"}],
-       query: query
+       breadcrumbs: [%{label: "Workflows"}]
      )}
   end
 
   @impl true
   def handle_info({:durable_event, kind, _payload}, socket) when kind in @workflow_kinds do
-    Phoenix.LiveView.send_update(DataTable, id: @table_id, refresh: true)
-    {:noreply, socket}
+    {:noreply, schedule_refresh(socket)}
   end
 
-  def handle_info({:data_table, @table_id, :query_changed, new_query}, socket) do
-    {:noreply, push_patch(socket, to: query_path(socket.assigns.base_path, new_query))}
+  def handle_info(:do_refresh, socket) do
+    {:noreply,
+     assign(socket,
+       refresh_pending?: false,
+       workflows: load_workflows(socket.assigns.durable)
+     )}
   end
 
   def handle_info(_msg, socket), do: {:noreply, socket}
+
+  defp schedule_refresh(%{assigns: %{refresh_pending?: true}} = socket), do: socket
+
+  defp schedule_refresh(socket) do
+    Process.send_after(self(), :do_refresh, @refresh_debounce_ms)
+    assign(socket, refresh_pending?: true)
+  end
+
+  defp load_workflows(durable) do
+    Durable.Query.list_workflows(durable: durable)
+  end
 
   # ============================================================================
   # Render
@@ -86,208 +103,137 @@ defmodule DurableDashboard.Live.WorkflowsLive do
       current_path={@current_path}
       breadcrumbs={@breadcrumbs}
     >
-      <Core.heading level={1} subtitle="Every workflow execution on this instance">
+      <Core.heading
+        level={1}
+        subtitle="Workflow definitions registered on this instance, derived from execution history"
+      >
         Workflows
       </Core.heading>
 
-      <div class="mt-6">
-        <.live_component
-          module={DataTable}
-          id={@table_id}
-          fetcher={fetch_workflows(@durable)}
-          columns={columns(@base_path)}
-          filters={filters()}
-          query={@query}
-          row_navigate={fn row -> DPath.workflow(@base_path, row.id) end}
-          empty_title="No workflows match"
-          empty_description="Adjust the filters or wait for a workflow to start."
-          empty_icon="queue"
-          search_placeholder="Search by workflow name…"
-        />
-      </div>
+      <%= if @workflows == [] do %>
+        <div class="mt-6">
+          <Core.empty_state
+            title="No workflows yet"
+            description="Once a workflow runs at least once it will show up here."
+            icon="queue"
+          />
+        </div>
+      <% else %>
+        <div class="mt-6 grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4">
+          <div :for={wf <- @workflows} class="contents">
+            <.workflow_card workflow={wf} base_path={@base_path} />
+          </div>
+        </div>
+      <% end %>
     </Layouts.app>
     """
   end
 
   # ============================================================================
-  # Column / filter specs
+  # Workflow card
   # ============================================================================
 
-  defp columns(_base_path) do
-    [
-      %{
-        key: :id,
-        label: "ID",
-        class: "w-[120px]",
-        render: &render_id/1
-      },
-      %{
-        key: :workflow_name,
-        label: "Workflow",
-        sortable?: false,
-        render: &render_name/1
-      },
-      %{
-        key: :status,
-        label: "Status",
-        class: "w-[120px]",
-        render: &render_status/1
-      },
-      %{
-        key: :queue,
-        label: "Queue",
-        class: "w-[120px] text-muted-foreground",
-        render: &render_queue/1
-      },
-      %{
-        key: :inserted_at,
-        label: "Started",
-        sortable?: false,
-        class: "w-[140px] text-right",
-        render: &render_started/1
-      }
-    ]
-  end
+  attr :workflow, :map, required: true
+  attr :base_path, :string, required: true
 
-  defp filters do
-    [
-      %{key: :search, type: :search, label: "Search"},
-      %{
-        key: :status,
-        type: :select,
-        label: "Status",
-        options: ["" | @statuses]
-      }
-    ]
-  end
-
-  defp render_status(row) do
-    assigns = %{status: row.status}
-
+  defp workflow_card(assigns) do
     ~H"""
-    <Core.status_pill status={@status} />
+    <.link
+      navigate={DPath.workflow_executions(@base_path, @workflow.workflow_name)}
+      class={[
+        "group block rounded-md border border-border bg-card",
+        "p-4 transition-colors duration-150",
+        "hover:border-primary/50 hover:bg-accent/30",
+        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      ]}
+    >
+      <div class="flex items-start justify-between gap-3">
+        <div class="min-w-0 flex-1">
+          <h3 class="text-[14px] font-semibold text-foreground truncate">
+            {@workflow.workflow_name}
+          </h3>
+          <p class="text-[11px] text-muted-foreground font-mono truncate mt-0.5">
+            {strip_elixir(@workflow.workflow_module)}
+          </p>
+        </div>
+
+        <.running_chip count={@workflow.running_count} />
+      </div>
+
+      <%!-- Segmented readout — same instrument-cluster motif as the Overview
+            KPI strip, so the two "Observe" pages rhyme. --%>
+      <div class="mt-4 grid grid-cols-3 divide-x divide-border rounded-md bg-background/40">
+        <.stat label="Runs" value={@workflow.total_runs} />
+        <.stat
+          label="Failed"
+          value={@workflow.failed_count}
+          tone={if @workflow.failed_count > 0, do: :destructive, else: :muted}
+        />
+        <.stat
+          label="Waiting"
+          value={@workflow.waiting_count}
+          tone={if @workflow.waiting_count > 0, do: :warning, else: :muted}
+        />
+      </div>
+
+      <div class="mt-4 flex items-center justify-between text-[11px] text-muted-foreground">
+        <span class="flex items-center gap-1.5">
+          <Core.icon name="clock" class="size-3" />
+          <%= if @workflow.last_run_at do %>
+            Last run <Core.relative_time at={@workflow.last_run_at} />
+          <% else %>
+            Never run
+          <% end %>
+        </span>
+        <%= if @workflow.last_status do %>
+          <Core.status_pill status={@workflow.last_status} />
+        <% end %>
+      </div>
+    </.link>
     """
   end
 
-  defp render_name(row) do
-    assigns = %{name: row.workflow_name, module: row.workflow_module}
+  attr :count, :integer, required: true
 
+  defp running_chip(%{count: 0} = assigns) do
     ~H"""
-    <div class="flex flex-col leading-tight">
-      <span class="font-medium text-foreground">{@name}</span>
-      <span class="text-[11px] text-muted-foreground font-mono">{strip_elixir(@module)}</span>
+    """
+  end
+
+  defp running_chip(assigns) do
+    ~H"""
+    <span class={[
+      "shrink-0 inline-flex items-center gap-1.5 px-2 h-6 rounded-full",
+      "bg-success/10 border border-success/30 text-success text-[11px] font-medium"
+    ]}>
+      <span class="size-1.5 rounded-full bg-success led-dot"></span>
+      {@count} running
+    </span>
+    """
+  end
+
+  attr :label, :string, required: true
+  attr :value, :integer, required: true
+  attr :tone, :atom, default: :muted
+
+  defp stat(assigns) do
+    ~H"""
+    <div class="px-3 py-2.5">
+      <div class={[
+        "text-numeric text-[17px] font-semibold leading-none tabular-nums",
+        tone_class(@tone)
+      ]}>
+        {@value}
+      </div>
+      <Core.label class="mt-1.5 block">{@label}</Core.label>
     </div>
     """
   end
 
-  defp render_id(row) do
-    assigns = %{id: row.id}
-
-    ~H"""
-    <Core.code>{short_id(@id)}</Core.code>
-    """
-  end
-
-  defp render_queue(row) do
-    assigns = %{queue: row.queue}
-
-    ~H"""
-    {@queue}
-    """
-  end
-
-  defp render_started(row) do
-    assigns = %{at: row.inserted_at}
-
-    ~H"""
-    <Core.relative_time at={@at} />
-    """
-  end
-
-  # ============================================================================
-  # Fetcher (closure over durable name)
-  # ============================================================================
-
-  defp fetch_workflows(durable) do
-    fn query ->
-      per_page = query[:per_page] || 20
-      page = query[:page] || 1
-
-      opts =
-        [durable: durable, limit: per_page, offset: (page - 1) * per_page]
-        |> maybe_add(:status, query[:status])
-        |> maybe_add(:workflow_name, query[:search])
-
-      Durable.Query.list_executions_with_total(opts)
-    end
-  end
-
-  defp maybe_add(opts, _key, nil), do: opts
-  defp maybe_add(opts, _key, ""), do: opts
-
-  defp maybe_add(opts, :status, value) when is_binary(value) do
-    Keyword.put(opts, :status, String.to_existing_atom(value))
-  rescue
-    ArgumentError -> opts
-  end
-
-  defp maybe_add(opts, key, value), do: Keyword.put(opts, key, value)
-
-  # ============================================================================
-  # URL <-> query
-  # ============================================================================
-
-  defp parse_query(params) do
-    %{
-      page: parse_int(params["page"], 1),
-      search: nilify(params["search"]),
-      status: nilify(params["status"]),
-      sort_by: nil,
-      sort_dir: :desc
-    }
-  end
-
-  defp parse_int(nil, default), do: default
-
-  defp parse_int(v, default) when is_binary(v) do
-    case Integer.parse(v) do
-      {n, _} -> n
-      :error -> default
-    end
-  end
-
-  defp parse_int(v, _) when is_integer(v), do: v
-  defp parse_int(_, default), do: default
-
-  defp nilify(nil), do: nil
-  defp nilify(""), do: nil
-  defp nilify(v) when is_binary(v), do: v
-
-  defp query_path(base_path, query) do
-    params = build_params(query)
-    base = DPath.workflows(base_path)
-
-    case URI.encode_query(params) do
-      "" -> base
-      qs -> base <> "?" <> qs
-    end
-  end
-
-  defp build_params(query) do
-    [
-      {"page", if(query[:page] && query[:page] > 1, do: to_string(query[:page]))},
-      {"status", query[:status]},
-      {"search", query[:search]}
-    ]
-    |> Enum.reject(fn {_k, v} -> v in [nil, ""] end)
-  end
-
-  # ============================================================================
-  # Misc
-  # ============================================================================
-
-  defp short_id(nil), do: "—"
-  defp short_id(id) when is_binary(id), do: String.slice(id, 0, 8)
+  defp tone_class(:destructive), do: "text-destructive"
+  defp tone_class(:warning), do: "text-warning"
+  defp tone_class(:success), do: "text-success"
+  defp tone_class(_), do: "text-foreground"
 
   defp strip_elixir(nil), do: ""
   defp strip_elixir(s) when is_binary(s), do: String.replace_prefix(s, "Elixir.", "")

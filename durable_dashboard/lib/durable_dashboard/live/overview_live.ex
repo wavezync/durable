@@ -79,20 +79,26 @@ defmodule DurableDashboard.Live.OverviewLive do
         Overview
       </Core.heading>
 
-      <section class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3 mt-6">
-        <.kpi_card label="Pending" value={@counts.pending} kind="muted" />
-        <.kpi_card label="Running" value={@counts.running} kind="success" />
-        <.kpi_card label="Waiting" value={@counts.waiting} kind="warning" />
-        <.kpi_card label="Completed" value={@counts.completed} kind="success" />
-        <.kpi_card label="Failed" value={@counts.failed} kind="destructive" />
-        <.kpi_card label="Cancelled" value={@counts.cancelled} kind="muted" />
+      <%!-- Status readout — one hairline-segmented instrument cluster rather
+            than six glowing cards. The gap-px + bg-border trick draws the
+            dividers; cells sit on bg-card. Running pulses; only the counts
+            that signal trouble light up. --%>
+      <section class="mt-6">
+        <div class="grid grid-cols-2 gap-px overflow-hidden rounded-xl border border-border bg-border shadow-card md:grid-cols-3 lg:grid-cols-6">
+          <.kpi_cell label="Pending" value={@counts.pending} kind="muted" />
+          <.kpi_cell label="Running" value={@counts.running} kind="success" live />
+          <.kpi_cell label="Waiting" value={@counts.waiting} kind="warning" />
+          <.kpi_cell label="Completed" value={@counts.completed} kind="success" />
+          <.kpi_cell label="Failed" value={@counts.failed} kind="destructive" />
+          <.kpi_cell label="Cancelled" value={@counts.cancelled} kind="muted" />
+        </div>
       </section>
 
       <section class="mt-8">
         <Core.card padding="none">
-          <:title>Recent workflows</:title>
+          <:title>Recent executions</:title>
           <:action>
-            <Core.button kind="link" navigate={DPath.workflows(@base_path)}>
+            <Core.button kind="link" navigate={DPath.executions(@base_path)}>
               View all
             </Core.button>
           </:action>
@@ -106,19 +112,20 @@ defmodule DurableDashboard.Live.OverviewLive do
           <% else %>
             <table class="w-full text-[13px]">
               <thead>
-                <tr class="border-b border-border text-[11px] uppercase tracking-wider text-muted-foreground">
-                  <th class="text-left font-medium px-4 py-2.5">ID</th>
-                  <th class="text-left font-medium px-4 py-2.5">Workflow</th>
-                  <th class="text-left font-medium px-4 py-2.5">Status</th>
-                  <th class="text-left font-medium px-4 py-2.5">Queue</th>
-                  <th class="text-right font-medium px-4 py-2.5">Started</th>
+                <%!-- Headers share the canonical <.label> idiom — see DESIGN.md §6. --%>
+                <tr class="border-b border-border font-mono text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground/70">
+                  <th class="text-left px-4 py-2.5">ID</th>
+                  <th class="text-left px-4 py-2.5">Workflow</th>
+                  <th class="text-left px-4 py-2.5">Status</th>
+                  <th class="text-left px-4 py-2.5">Queue</th>
+                  <th class="text-right px-4 py-2.5">Started</th>
                 </tr>
               </thead>
               <tbody>
                 <tr
                   :for={exec <- @recent}
                   class="border-b border-border/60 last:border-b-0 hover:bg-accent/40 cursor-pointer transition-colors"
-                  phx-click={JS.navigate(DPath.workflow(@base_path, exec.id))}
+                  phx-click={JS.navigate(DPath.execution(@base_path, exec.id))}
                 >
                   <td class="px-4 py-2.5"><Core.code>{short_id(exec.id)}</Core.code></td>
                   <td class="px-4 py-2.5 font-medium">{exec.workflow_name}</td>
@@ -138,31 +145,47 @@ defmodule DurableDashboard.Live.OverviewLive do
   end
 
   # ============================================================================
-  # KPI card
+  # KPI cell — one segment of the status readout cluster
   # ============================================================================
 
   attr :label, :string, required: true
   attr :value, :integer, required: true
   attr :kind, :string, default: "muted"
+  attr :live, :boolean, default: false
 
-  defp kpi_card(assigns) do
+  defp kpi_cell(assigns) do
     ~H"""
-    <div class="flex flex-col gap-1.5 p-4 rounded-md border border-border bg-card">
-      <span class={["text-[11px] uppercase tracking-wider", kpi_label_class(@kind)]}>
-        {@label}
-      </span>
-      <span class="text-numeric text-2xl font-semibold tabular-nums text-foreground">
+    <div class="flex flex-col gap-2.5 bg-card px-4 py-3.5">
+      <div class="flex items-center gap-1.5">
+        <span class={["size-1.5 rounded-full", kpi_dot(@kind), @live && @value > 0 && "led-dot"]} />
+        <Core.label class={kpi_label_tone(@kind)}>{@label}</Core.label>
+      </div>
+      <span class={[
+        "text-numeric text-[26px] font-semibold leading-none tabular-nums",
+        kpi_value_tone(@kind, @value)
+      ]}>
         {@value}
       </span>
     </div>
     """
   end
 
-  defp kpi_label_class("success"), do: "text-success"
-  defp kpi_label_class("warning"), do: "text-warning"
-  defp kpi_label_class("destructive"), do: "text-destructive"
-  defp kpi_label_class("info"), do: "text-info"
-  defp kpi_label_class(_), do: "text-muted-foreground"
+  defp kpi_dot("success"), do: "bg-success"
+  defp kpi_dot("warning"), do: "bg-warning"
+  defp kpi_dot("destructive"), do: "bg-destructive"
+  defp kpi_dot("info"), do: "bg-info"
+  defp kpi_dot(_), do: "bg-muted-foreground/50"
+
+  # Labels stay quiet by default; the "attention" tiers (failed/waiting) carry a
+  # faint tint so the eye lands on them without six competing colors.
+  defp kpi_label_tone("destructive"), do: "text-destructive/80"
+  defp kpi_label_tone("warning"), do: "text-warning/80"
+  defp kpi_label_tone(_), do: nil
+
+  # Only the numbers that signal a problem light up; the rest stay neutral mono.
+  defp kpi_value_tone("destructive", v) when v > 0, do: "text-destructive"
+  defp kpi_value_tone("warning", v) when v > 0, do: "text-warning"
+  defp kpi_value_tone(_, _), do: "text-foreground"
 
   # ============================================================================
   # Data
@@ -201,6 +224,10 @@ defmodule DurableDashboard.Live.OverviewLive do
     {rows, _total} =
       Durable.Query.list_executions_with_total(
         durable: durable,
+        # Top-level runs only — otherwise a single fan-out run inserts N child
+        # rows at nearly the same time and floods "recent executions" with
+        # indistinguishable children of one parent.
+        top_level_only: true,
         limit: @recent_limit,
         offset: 0
       )

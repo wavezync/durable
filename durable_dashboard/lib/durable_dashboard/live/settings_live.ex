@@ -49,41 +49,37 @@ defmodule DurableDashboard.Live.SettingsLive do
         <div class="mt-6 grid grid-cols-1 lg:grid-cols-2 gap-4">
           <Core.card>
             <:title>Instance</:title>
-            <dl class="grid grid-cols-2 gap-x-6 gap-y-3 text-[13px]">
-              <.row label="Name">
-                <Core.code>{@instance.name}</Core.code>
-              </.row>
-              <.row label="Schema prefix">
-                <Core.code>{@instance.prefix}</Core.code>
-              </.row>
-              <.row label="Queue processing">
+            <Core.field_list class="gap-y-3">
+              <Core.field key="Name"><Core.code>{@instance.name}</Core.code></Core.field>
+              <Core.field key="Schema prefix"><Core.code>{@instance.prefix}</Core.code></Core.field>
+              <Core.field key="Queue processing">
                 <Core.badge kind={if @instance.queue_enabled, do: "success", else: "muted"}>
                   {if @instance.queue_enabled, do: "enabled", else: "disabled"}
                 </Core.badge>
-              </.row>
-              <.row label="PubSub">
+              </Core.field>
+              <Core.field key="PubSub">
                 <%= if @instance.pubsub do %>
                   <Core.code>{@instance.pubsub}</Core.code>
                 <% else %>
                   <span class="text-muted-foreground">disabled</span>
                 <% end %>
-              </.row>
-            </dl>
+              </Core.field>
+            </Core.field_list>
           </Core.card>
 
           <Core.card>
             <:title>Resilience</:title>
-            <dl class="grid grid-cols-2 gap-x-6 gap-y-3 text-[13px]">
-              <.row label="Stale lock timeout">
-                <span class="text-numeric">{format_seconds(@instance.stale_lock_timeout)}</span>
-              </.row>
-              <.row label="Heartbeat interval">
-                <span class="text-numeric">{format_ms(@instance.heartbeat_interval)}</span>
-              </.row>
-              <.row label="Scheduler interval">
-                <span class="text-numeric">{format_ms(@instance.scheduler_interval)}</span>
-              </.row>
-            </dl>
+            <Core.field_list class="gap-y-3">
+              <Core.field key="Stale lock timeout">
+                {format_seconds(@instance.stale_lock_timeout)}
+              </Core.field>
+              <Core.field key="Heartbeat interval">
+                {format_ms(@instance.heartbeat_interval)}
+              </Core.field>
+              <Core.field key="Scheduler interval">
+                {format_ms(@instance.scheduler_interval)}
+              </Core.field>
+            </Core.field_list>
           </Core.card>
 
           <Core.card class="lg:col-span-2" padding="none">
@@ -97,10 +93,11 @@ defmodule DurableDashboard.Live.SettingsLive do
             <% else %>
               <table class="w-full text-[13px]">
                 <thead>
-                  <tr class="border-b border-border text-[11px] uppercase tracking-wider text-muted-foreground">
-                    <th class="text-left font-medium px-4 h-10">Name</th>
-                    <th class="text-right font-medium px-4 h-10">Concurrency</th>
-                    <th class="text-right font-medium px-4 h-10">Poll interval</th>
+                  <%!-- Header shares the canonical <.label> idiom — see DESIGN.md §6. --%>
+                  <tr class="border-b border-border font-mono text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground/70">
+                    <th class="text-left px-4 h-10">Name</th>
+                    <th class="text-right px-4 h-10">Concurrency</th>
+                    <th class="text-right px-4 h-10">Poll interval</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -124,22 +121,6 @@ defmodule DurableDashboard.Live.SettingsLive do
         />
       <% end %>
     </Layouts.app>
-    """
-  end
-
-  # ============================================================================
-  # Layout helpers (private)
-  # ============================================================================
-
-  attr :label, :string, required: true
-  slot :inner_block, required: true
-
-  defp row(assigns) do
-    ~H"""
-    <div class="flex flex-col gap-0.5">
-      <dt class="text-[10px] uppercase tracking-wider text-muted-foreground">{@label}</dt>
-      <dd>{render_slot(@inner_block)}</dd>
-    </div>
     """
   end
 
