@@ -40,10 +40,14 @@ defmodule DurableDashboard.Components.Workflow.StepDetail do
       |> assign(:logs, logs)
       |> assign(:has_error, present?(Map.get(step, :error)))
       |> assign(:duration, assigns.duration_ms || Map.get(step, :duration_ms))
+      |> assign(
+        :both_io,
+        present?(Map.get(step, :input)) and present?(Map.get(step, :output))
+      )
 
     ~H"""
     <div class={[
-      "max-w-4xl overflow-hidden rounded-lg border border-border bg-muted/25 shadow-sm",
+      "max-w-5xl overflow-hidden rounded-lg border border-border bg-muted/25 shadow-sm",
       @class
     ]}>
       <%!-- Stat strip — compact horizontal header (no tall field column). --%>
@@ -56,9 +60,10 @@ defmodule DurableDashboard.Components.Workflow.StepDetail do
         <.stat label="attempt">{@step.attempt}</.stat>
       </div>
 
-      <%!-- I/O — boxes hug their content (w-fit) so small payloads don't
-           render a huge empty box. --%>
-      <div class="grid items-start gap-x-6 gap-y-3 p-3.5 md:grid-cols-2">
+      <%!-- I/O — boxes fill their column (w-full). Two columns only when both
+           input and output have data; if one side is empty the present value
+           spans the full panel width instead of being penned into a half. --%>
+      <div class={["grid items-start gap-x-6 gap-y-3 p-3.5", @both_io && "md:grid-cols-2"]}>
         <div class="min-w-0 space-y-1">
           <Core.label>input</Core.label>
           <.io_value value={Map.get(@step, :input)} empty="No input" />
@@ -77,7 +82,7 @@ defmodule DurableDashboard.Components.Workflow.StepDetail do
         <Core.label class="text-destructive">error</Core.label>
         <Core.json
           value={@step.error}
-          class="w-fit max-w-full max-h-48 border-destructive/30 bg-destructive/5"
+          class="w-full max-h-48 border-destructive/30 bg-destructive/5"
         />
       </div>
 
@@ -124,7 +129,7 @@ defmodule DurableDashboard.Components.Workflow.StepDetail do
   defp io_value(assigns) do
     ~H"""
     <%= if present?(@value) do %>
-      <Core.json value={@value} class="w-fit max-w-full max-h-48" />
+      <Core.json value={@value} class="w-full max-h-48" />
     <% else %>
       <p class="font-mono text-[11px] text-muted-foreground/55">{@empty}</p>
     <% end %>

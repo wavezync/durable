@@ -9,6 +9,11 @@ defmodule DurableDashboard.Components.Layout.Sidebar do
   short indigo bar on the left edge): the console's recurring "now / you are
   here" signal, the same indigo that marks the running edge in the graph.
 
+  The brand lockup is the **pulse mark** — a muted oscilloscope baseline with
+  one indigo beat and a `led-dot` blip at its apex: the worker heartbeat made
+  literal ("the engine is alive and durable"), echoed by the `connected`
+  heartbeat in the footer. See `DESIGN.md` §6.
+
   ## Required assigns
 
   - `:base_path` — host app's mount path (e.g. `/dashboard`)
@@ -130,14 +135,32 @@ defmodule DurableDashboard.Components.Layout.Sidebar do
   defp brand(assigns) do
     ~H"""
     <div class="h-14 px-4 flex items-center gap-2.5 border-b border-border">
-      <%!-- The monitor tile + heartbeat: the engine is alive and durable. --%>
-      <div class="relative size-7 rounded-md bg-primary/15 border border-primary/30 flex items-center justify-center">
-        <span class="size-1.5 rounded-full bg-primary led-dot"></span>
+      <%!-- Pulse mark: the worker heartbeat made literal. A muted oscilloscope
+            baseline carries one indigo beat; the led-dot riding its apex is the
+            live blip — the same "alive / durable" signal the footer's `connected`
+            heartbeat echoes. This is the app's one bespoke SVG (the brand
+            lockup); see DESIGN.md §6. --%>
+      <div class="relative h-5 w-9 shrink-0">
+        <svg
+          viewBox="0 0 36 20"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.75"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          class="h-full w-full"
+          aria-hidden="true"
+        >
+          <path d="M1 10 H12 M23 10 H35" class="text-muted-foreground/40" />
+          <path d="M12 10 L16 3 L20 17 L23 10" class="text-primary" />
+        </svg>
+        <span class="absolute left-[13px] top-0 size-1.5 rounded-full bg-primary text-primary led-dot">
+        </span>
       </div>
       <div class="flex flex-col leading-none gap-1">
-        <span class="text-[13px] font-semibold tracking-tight text-foreground">Durable</span>
-        <span class="font-mono text-[9px] text-muted-foreground/80 tracking-[0.22em] uppercase">
-          Console
+        <span class="text-sm font-semibold tracking-tight text-foreground">Durable</span>
+        <span class="font-mono text-[10px] lowercase tracking-[0.12em] text-muted-foreground/70">
+          console
         </span>
       </div>
     </div>

@@ -83,6 +83,7 @@ defmodule DurableDashboard.Live.InputsLive do
       base_path={@base_path}
       current_path={@current_path}
       breadcrumbs={@breadcrumbs}
+      durable={@durable}
     >
       <Core.heading level={1} subtitle="Workflows waiting on human input">
         Pending inputs

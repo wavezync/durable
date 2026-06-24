@@ -106,6 +106,7 @@ defmodule DurableDashboard.Live.ExecutionsLive do
       base_path={@base_path}
       current_path={@current_path}
       breadcrumbs={@breadcrumbs}
+      durable={@durable}
     >
       <Core.heading level={1} subtitle={subtitle(@workflow_name)}>
         {heading(@workflow_name)}

@@ -166,6 +166,7 @@ defmodule DurableDashboard.Live.WorkflowLive do
       base_path={@base_path}
       current_path={@current_path}
       breadcrumbs={@breadcrumbs}
+      durable={@durable}
     >
       <%= if @not_found? do %>
         <Core.empty_state

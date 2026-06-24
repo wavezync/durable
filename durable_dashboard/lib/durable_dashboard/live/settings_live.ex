@@ -40,6 +40,7 @@ defmodule DurableDashboard.Live.SettingsLive do
       base_path={@base_path}
       current_path={@current_path}
       breadcrumbs={@breadcrumbs}
+      durable={@durable}
     >
       <Core.heading level={1} subtitle="Read-only view of the Durable instance configuration">
         Settings

@@ -74,6 +74,7 @@ defmodule DurableDashboard.Live.OverviewLive do
       base_path={@base_path}
       current_path={@current_path}
       breadcrumbs={@breadcrumbs}
+      durable={@durable}
     >
       <Core.heading level={1} subtitle="Live status of all workflows on this instance">
         Overview

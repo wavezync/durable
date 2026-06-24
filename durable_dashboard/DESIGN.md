@@ -353,11 +353,20 @@ its own `Phoenix.LiveComponent` module under
   Nav is split into two intent groups under quiet mono eyebrows —
   **Observe** (Overview, Workflows, Executions) and **Operate** (Inputs,
   Schedules, Settings) — so the destinations read as an IA, not a flat list.
-  Brand lockup is the **monitor tile + heartbeat** (a pulsing `led-dot` in a
-  primary-tinted square): the recurring "the engine is alive and durable"
-  mark, echoed by the `connected` heartbeat in the footer.
-- Topbar: 56 h, breadcrumbs left; the command-palette trigger ("Jump to…",
-  ⌘K) + theme toggle right.
+  Brand lockup is the **pulse mark**: a muted oscilloscope baseline carrying
+  one indigo beat, with a pulsing `led-dot` riding the beat's apex (the live
+  blip). It makes the worker heartbeat literal — "the engine is alive and
+  durable" — and is echoed by the `connected` heartbeat in the footer. No
+  tinted box: color stays earned by the live signal, never spent on a branded
+  surface (§1, §6 live rail). The wordmark is `Durable` (text-sm semibold)
+  over a lowercase mono `console` caption.
+- Topbar: 56 h, breadcrumbs left; the command toolbar right. The toolbar is
+  the **⌘K trigger** (bordered chip, width hugs `search · "Jump to…" · ⌘K` —
+  no dead gap, one `⌘K` chip) then a hairline divider and a **meta group**:
+  running `version` (mono, from `Application.spec(:durable, :vsn)`), a
+  **GitHub** link, and the **theme** toggle. The trigger keeps the bordered
+  surface (primary action); the meta controls are **ghost** (icon-only, no
+  border) so the trigger reads as the one thing to reach for.
 - Main: `max-w-[1400px]` to keep line lengths readable on ultrawide monitors.
 
 #### The live rail (signature)
@@ -367,6 +376,8 @@ console: *now / live / you are here*. It is not generic chrome. It appears as:
 
 - the **active nav rail** — a short `h-4 w-0.5` indigo bar on the left edge
   of the current nav item;
+- the **selected row** in the ⌘K palette — the same `h-4 w-0.5` bar on the
+  row you're about to jump to (selection *is* "where you're going next");
 - the **running edge** in the workflow graph (`.flow-edge-running`);
 - the **"now" line** / in-flight bars in the Timeline.
 
@@ -387,6 +398,28 @@ Subtitle = relative time, scope context, or counts. Never marketing copy.
 ### Tab strip
 
 `<.tabs>` from `Components.Workflow.Tabs`. No ad-hoc nav strips.
+
+### Command palette (⌘K)
+
+`Components.Command.CommandPalette` — rendered **once** by `Layouts.app`
+(needs `base_path` + `durable`), opened by ⌘K or the topbar "Jump to…"
+trigger. It is the canonical global jumper (§9) and follows Linear's
+command-palette discipline (§1).
+
+- **Searches the console's nouns, grouped** under `<.label>` section
+  headers: **Go to** (page routes), **Workflows** (live definitions →
+  their executions), **Recent runs** (latest executions → run detail).
+  Grouping carries result *type*, so rows don't need per-row type chips.
+- **Snapshot on open, filter in memory.** Live data
+  (`Durable.Query.list_workflows` + recent executions) is fetched once on
+  `palette:open` and filtered client-of-the-LC-side on each keystroke —
+  typing never hits the database. Degrades to page routes when `durable`
+  is `nil`.
+- **Selection wears the live rail** (the indigo bar, see signature above)
+  plus a `↵` hint that appears only on the selected row. Keyboard nav
+  wraps across groups via a single flat selection index; hover selects.
+- Row meta is restrained: workflow rows show run count + last-status
+  pill, run rows show short id + status pill. Numbers are `text-numeric`.
 
 ### List / table row
 
@@ -430,8 +463,10 @@ event), so a step reads identically wherever it's opened. Composition:
 
 - **Stat strip** — a compact horizontal header (`started · completed ·
   duration · attempt`), never a tall field column that leaves dead space.
-- **Input / Output** — `<.json>` boxes sized `w-fit max-w-full` so a small
-  payload doesn't render a giant empty box.
+- **Input / Output** — a two-column grid where each `<.json>` box fills its
+  column (`w-full`). The grid drops to **one full-width column when only one
+  side has data** (e.g. a cron step with no input) so the present payload
+  spans the panel instead of being penned into a half beside an empty cell.
 - **Error** — destructive-tinted `<.json>`, only when the step failed.
 - **Logs** — the shared `<LogLine.row>` list; empty falls back to a
   "No logs captured" note rather than a blank box.
@@ -468,8 +503,17 @@ For every list LV:
 - React side: `lucide-react`, imported per icon.
 - Default size: `size-4` (16 px). Larger only inside icon-bg pills, where
   `size-5` is OK.
+- **Brand logos** (e.g. `github`) live in the `core.ex` set like any icon,
+  but may keep their native `viewBox` (the GitHub mark is `0 0 24 24`) — the
+  viewBox sizes the coordinate space, not the render size, so it still scales
+  to `size-4`. Heroicons-style functional glyphs stay `0 0 20 20`.
 - **Forbidden:** inline `<svg>` with hard-coded paths in component files
-  outside `core.ex` and the curated lucide imports.
+  outside `core.ex` and the curated lucide imports. **One sanctioned
+  exception:** the sidebar **pulse mark** (the brand lockup in
+  `Sidebar.brand/1`) — a one-off identity glyph, not reusable iconography, so
+  it lives inline rather than in `core.ex`. Its two paths use
+  `stroke="currentColor"` with `text-*` token classes (muted baseline, primary
+  beat); no other bespoke SVG is allowed.
 
 ## 8. Density
 

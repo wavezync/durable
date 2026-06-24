@@ -102,6 +102,7 @@ defmodule DurableDashboard.Live.WorkflowsLive do
       base_path={@base_path}
       current_path={@current_path}
       breadcrumbs={@breadcrumbs}
+      durable={@durable}
     >
       <Core.heading
         level={1}
