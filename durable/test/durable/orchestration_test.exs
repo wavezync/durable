@@ -13,7 +13,7 @@ defmodule Durable.OrchestrationTest do
 
   alias Durable.Config
   alias Durable.Executor
-  alias Durable.Storage.Schemas.{PendingEvent, WorkflowExecution}
+  alias Durable.Storage.Schemas.{PendingEvent, StepExecution, WorkflowExecution}
 
   import Ecto.Query
 
@@ -63,6 +63,30 @@ defmodule Durable.OrchestrationTest do
       assert parent.status == :completed
       assert parent.context["call_result"] != nil
       assert parent.context["after_call"] == true
+    end
+
+    test "records the spawned child id on the calling step (queryable parent→child link)" do
+      config = Config.get(Durable)
+      repo = config.repo
+
+      {:ok, parent} = create_and_execute_workflow(CallWorkflowParent, %{})
+      assert parent.status == :waiting
+
+      child_id = parent.context["__child:simple_child_workflow"]
+      assert child_id != nil
+
+      # The parent's :call_child step row links directly to the spawned child —
+      # no need to parse the __call_children JSONB context.
+      linked =
+        repo.all(
+          from(s in StepExecution,
+            where: s.workflow_id == ^parent.id and not is_nil(s.child_workflow_id)
+          )
+        )
+
+      assert [step] = linked
+      assert step.step_name == "call_child"
+      assert step.child_workflow_id == child_id
     end
 
     test "parent calls child, child fails, parent gets error" do

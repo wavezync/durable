@@ -93,6 +93,55 @@ defmodule Durable.Wait.TimeoutWorkerIntegrationTest do
     end
   end
 
+  describe "call_workflow child timeout" do
+    test "cancels the abandoned child when the parent's call_workflow wait times out" do
+      config = Config.get(Durable)
+      repo = config.repo
+
+      # A running child whose orchestration parent is waiting on its completion.
+      child = insert_exec(repo, :running)
+      parent = insert_exec(repo, :waiting)
+
+      # Parent's call_workflow wait, already past its timeout.
+      %PendingEvent{}
+      |> Ecto.Changeset.change(%{
+        workflow_id: parent.id,
+        event_name: "__child_done:#{child.id}",
+        step_name: "charge_customer",
+        status: :pending,
+        wait_type: :single,
+        timeout_at: DateTime.add(DateTime.utc_now(), -1, :second),
+        timeout_value: %{"__atom__" => "child_timeout"}
+      })
+      |> repo.insert!()
+
+      TimeoutWorker.check_timeouts(Durable)
+      _ = :sys.get_state(TimeoutWorker.worker_name(Durable))
+
+      # The abandoned child is cancelled synchronously within the sweep, so by
+      # the fence it must be :cancelled — previously it was left running, its
+      # eventual result silently dropped.
+      assert repo.get!(WorkflowExecution, child.id).status == :cancelled
+    end
+  end
+
+  defp insert_exec(repo, status) do
+    %WorkflowExecution{}
+    |> Ecto.Changeset.change(%{
+      # A non-resolvable module is fine: the child is never executed (only
+      # cancelled) and the resumed parent fails module resolution cleanly
+      # rather than affecting this assertion.
+      workflow_module: "Elixir.NoSuchModuleForTimeoutTest",
+      workflow_name: "orphan_test",
+      status: status,
+      queue: "default",
+      priority: 0,
+      input: %{},
+      context: %{}
+    })
+    |> repo.insert!()
+  end
+
   defp repo_pending_event(%Config{repo: repo}, workflow_id, event_name) do
     import Ecto.Query
 

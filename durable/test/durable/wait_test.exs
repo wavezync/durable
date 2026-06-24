@@ -20,6 +20,21 @@ defmodule Durable.WaitTest do
 
   import Ecto.Query
 
+  # The SleepWaker keys off `scheduled_at <= clock_timestamp()` (real wall
+  # clock). A `sleep(1)` schedules only 1ms out, which races the
+  # immediately-following wake in a warm full-suite run and makes these tests
+  # flaky (sometimes `woken == 0`). Back-dating the row's scheduled_at makes
+  # the elapsed condition deterministically true without changing what the
+  # test exercises (the wake -> resume mechanism).
+  defp force_sleep_elapsed!(repo, workflow_id) do
+    repo.update_all(
+      from(w in WorkflowExecution, where: w.id == ^workflow_id and w.status == :waiting),
+      set: [scheduled_at: DateTime.add(DateTime.utc_now(), -60, :second)]
+    )
+
+    :ok
+  end
+
   # ============================================================================
   # Pause Primitives Tests
   # ============================================================================
@@ -47,9 +62,19 @@ defmodule Durable.WaitTest do
       assert diff_ms >= 29_000 and diff_ms <= 31_000
     end
 
-    # Note: Resume for sleep is complex as the step re-runs from beginning
-    # This would require tracking sleep state at the step level
-    # For now, we just test that sleep correctly suspends the workflow
+    test "clears the lock when suspending" do
+      config = Config.get(Durable)
+      repo = config.repo
+
+      {:ok, execution} = create_and_execute_workflow(SleepTestWorkflow, %{})
+
+      execution = repo.get!(WorkflowExecution, execution.id)
+      # The waker depends on a clear lock — without this guarantee a
+      # stale `locked_by` from the worker that suspended the row would
+      # keep it invisible to fetch_jobs after the wake.
+      assert execution.locked_by == nil
+      assert execution.locked_at == nil
+    end
   end
 
   describe "schedule_at/1" do
@@ -72,6 +97,181 @@ defmodule Durable.WaitTest do
       # The workflow schedules for next_business_day at hour 9
       assert execution.scheduled_at.hour == 9
       assert execution.scheduled_at.minute == 0
+    end
+  end
+
+  # ============================================================================
+  # Sleep wake-up (full lifecycle: suspend -> waker -> resume -> complete)
+  # ============================================================================
+
+  describe "sleep + waker resumption" do
+    alias Durable.Queue.Adapter
+    alias Durable.Wait.SleepWaker
+
+    test "sweeper flips elapsed sleep back to :pending and writes marker" do
+      config = Config.get(Durable)
+      repo = config.repo
+
+      {:ok, execution} = create_and_execute_workflow(ShortSleepWorkflow, %{})
+      assert execution.status == :waiting
+      force_sleep_elapsed!(repo, execution.id)
+
+      adapter = Adapter.default_adapter()
+      {:ok, woken} = adapter.wake_sleeping_workflows(config, 100)
+      assert woken == 1
+
+      execution = repo.get!(WorkflowExecution, execution.id)
+      assert execution.status == :pending
+      assert execution.locked_by == nil
+      assert execution.locked_at == nil
+      assert execution.context["__sleep_satisfied__"] == "sleep_step"
+    end
+
+    test "resuming after wake completes the workflow past the sleep" do
+      config = Config.get(Durable)
+      repo = config.repo
+
+      {:ok, execution} = create_and_execute_workflow(ShortSleepWorkflow, %{})
+      assert execution.status == :waiting
+      force_sleep_elapsed!(repo, execution.id)
+
+      Adapter.default_adapter().wake_sleeping_workflows(config, 100)
+
+      # Drive the resumed workflow synchronously, the way the queue
+      # poller would after fetch_jobs claims the now-:pending row.
+      Durable.Executor.execute_workflow(execution.id, config)
+
+      execution = repo.get!(WorkflowExecution, execution.id)
+      assert execution.status == :completed
+      assert execution.context["before"] == true
+      assert execution.context["slept"] == true
+      assert execution.context["completed"] == true
+    end
+
+    test "schedule_at resumes the same way as sleep" do
+      config = Config.get(Durable)
+      repo = config.repo
+
+      {:ok, execution} = create_and_execute_workflow(ShortScheduleAtWorkflow, %{})
+      assert execution.status == :waiting
+
+      Adapter.default_adapter().wake_sleeping_workflows(config, 100)
+      Durable.Executor.execute_workflow(execution.id, config)
+
+      execution = repo.get!(WorkflowExecution, execution.id)
+      assert execution.status == :completed
+      assert execution.context["scheduled"] == true
+    end
+
+    test "two sequential sleep steps both wake correctly" do
+      config = Config.get(Durable)
+      repo = config.repo
+
+      {:ok, execution} = create_and_execute_workflow(TwoSleepWorkflow, %{})
+      assert execution.status == :waiting
+      force_sleep_elapsed!(repo, execution.id)
+
+      Adapter.default_adapter().wake_sleeping_workflows(config, 100)
+      Durable.Executor.execute_workflow(execution.id, config)
+      execution = repo.get!(WorkflowExecution, execution.id)
+      # Suspended again at the second sleep. The first sleep's marker was
+      # dropped the moment :first_sleep completed (one-shot), so it does not
+      # linger into the second suspension.
+      assert execution.status == :waiting
+      assert execution.context["first_done"] == true
+      assert execution.context["__sleep_satisfied__"] == nil
+
+      force_sleep_elapsed!(repo, execution.id)
+      Adapter.default_adapter().wake_sleeping_workflows(config, 100)
+      Durable.Executor.execute_workflow(execution.id, config)
+
+      execution = repo.get!(WorkflowExecution, execution.id)
+      assert execution.status == :completed
+      assert execution.context["second_done"] == true
+      # One-shot marker: once its consuming step completes the marker is
+      # removed, so the finished workflow carries no `__sleep_satisfied__`.
+      # (A lingering marker would make a loop/`each` re-entry of the same
+      # sleep step skip its sleep.)
+      assert execution.context["__sleep_satisfied__"] == nil
+    end
+
+    test "the sweep is a no-op when no rows are eligible" do
+      config = Config.get(Durable)
+      adapter = Adapter.default_adapter()
+
+      assert {:ok, 0} = adapter.wake_sleeping_workflows(config, 100)
+    end
+
+    test "a sleep followed by an event-wait is NOT prematurely re-woken (scheduled_at cleared)" do
+      # Regression for the critical bug: scheduled_at was never cleared once a
+      # sleep woke, so when the *next* step suspended on an event the stale
+      # scheduled_at matched the SleepWaker query and the row was flipped
+      # :waiting -> :pending every tick, churning status and piling up
+      # duplicate PendingEvent rows.
+      config = Config.get(Durable)
+      repo = config.repo
+      adapter = Adapter.default_adapter()
+
+      {:ok, execution} = create_and_execute_workflow(SleepThenEventWorkflow, %{})
+      assert execution.status == :waiting
+      assert execution.scheduled_at != nil
+      force_sleep_elapsed!(repo, execution.id)
+
+      # Wake the sleep and resume — the workflow runs :nap, then suspends on
+      # the "go" event in :await.
+      assert {:ok, 1} = adapter.wake_sleeping_workflows(config, 100)
+      Durable.Executor.execute_workflow(execution.id, config)
+
+      execution = repo.get!(WorkflowExecution, execution.id)
+      assert execution.status == :waiting
+      assert execution.context["napped"] == true
+      # The event-wait suspension must clear scheduled_at so the SleepWaker
+      # leaves the row alone.
+      assert execution.scheduled_at == nil
+
+      pending_count = fn ->
+        repo.aggregate(
+          from(p in PendingEvent, where: p.workflow_id == ^execution.id and p.status == :pending),
+          :count
+        )
+      end
+
+      assert pending_count.() == 1
+
+      # The waker must now be a no-op for this row, no matter how many ticks
+      # fire. Before the fix each call woke it and duplicated the pending event.
+      assert {:ok, 0} = adapter.wake_sleeping_workflows(config, 100)
+      assert {:ok, 0} = adapter.wake_sleeping_workflows(config, 100)
+
+      execution = repo.get!(WorkflowExecution, execution.id)
+      assert execution.status == :waiting
+      assert pending_count.() == 1
+
+      # And the event still resumes the workflow to completion.
+      :ok = Wait.send_event(execution.id, "go", %{ok: true})
+      Durable.Executor.execute_workflow(execution.id, config)
+
+      execution = repo.get!(WorkflowExecution, execution.id)
+      assert execution.status == :completed
+      assert execution.context["result"]["ok"] == true
+    end
+
+    test "wake_now/1 dispatches via the named SleepWaker" do
+      # The DataCase default boots Durable with `queue_enabled: false`, so the
+      # SleepWaker isn't running. Start one manually and verify wake_now/1
+      # routes to the *named* GenServer and returns a sweep result. The actual
+      # waking of an elapsed row is covered deterministically by the
+      # adapter-level tests above (which call wake_sleeping_workflows directly
+      # on the test connection); this test isolates the named-dispatch path,
+      # which would otherwise be entangled with cross-process sandbox
+      # visibility under the shared-mode harness.
+      config = Config.get(Durable)
+      pid = start_supervised!({SleepWaker, config: config, interval: 60_000})
+      assert is_pid(pid)
+      assert Process.whereis(SleepWaker.worker_name(Durable)) == pid
+
+      assert {:ok, count} = SleepWaker.wake_now(Durable)
+      assert is_integer(count) and count >= 0
     end
   end
 
@@ -746,9 +946,19 @@ defmodule Durable.WaitTest do
       wait_group = get_wait_group(repo, execution.id)
       assert wait_group.status == :completed
 
-      # Trying to send second event should fail - either :not_found or :not_waiting
-      result = Wait.send_event(execution.id, "failure", %{"status" => "error"})
-      assert result in [{:error, :not_found}, {:error, :not_waiting}]
+      # A late event for a wait group that has already :completed is a
+      # silent no-op — the wait_group's received_events does NOT grow,
+      # and the workflow does not resume a second time. This is the
+      # intentional contract: late arrivals are idempotent rather than
+      # error-returning, because non-atomic implementations of
+      # send_event used to leak inconsistent states (event :received
+      # but wait group not updated) and tests can't rely on the error
+      # type that previously surfaced.
+      :ok = Wait.send_event(execution.id, "failure", %{"status" => "error"})
+
+      wait_group = get_wait_group(repo, execution.id)
+      assert wait_group.status == :completed
+      refute Map.has_key?(wait_group.received_events, "failure")
     end
   end
 
@@ -996,6 +1206,81 @@ defmodule ScheduleAtTestWorkflow do
     step(:schedule_step, fn data ->
       schedule_at(next_business_day(hour: 9))
       {:ok, assign(data, :after_schedule, true)}
+    end)
+  end
+end
+
+# Short-duration workflows for the wake-up integration tests. The 1ms
+# sleep / past-DateTime is essentially "wake immediately on next sweep,"
+# which is what the tests need to drive the full lifecycle without
+# slowing the suite down.
+
+defmodule ShortSleepWorkflow do
+  use Durable
+  use Durable.Helpers
+  use Durable.Wait
+
+  workflow "short_sleep" do
+    step(:before_step, fn data -> {:ok, assign(data, :before, true)} end)
+
+    step(:sleep_step, fn data ->
+      sleep(1)
+      {:ok, assign(data, :slept, true)}
+    end)
+
+    step(:after_step, fn data -> {:ok, assign(data, :completed, true)} end)
+  end
+end
+
+defmodule ShortScheduleAtWorkflow do
+  use Durable
+  use Durable.Helpers
+  use Durable.Wait
+
+  workflow "short_schedule_at" do
+    step(:schedule_step, fn data ->
+      schedule_at(DateTime.add(DateTime.utc_now(), -1, :second))
+      {:ok, assign(data, :scheduled, true)}
+    end)
+  end
+end
+
+defmodule TwoSleepWorkflow do
+  use Durable
+  use Durable.Helpers
+  use Durable.Wait
+
+  workflow "two_sleep" do
+    step(:first_sleep, fn data ->
+      sleep(1)
+      {:ok, assign(data, :first_done, true)}
+    end)
+
+    step(:second_sleep, fn data ->
+      sleep(1)
+      {:ok, assign(data, :second_done, true)}
+    end)
+  end
+end
+
+defmodule SleepThenEventWorkflow do
+  use Durable
+  use Durable.Helpers
+  use Durable.Wait
+
+  # A sleep step immediately followed by an event-wait step. This is the
+  # shape that exposed the `scheduled_at` premature-wake bug: after the sleep
+  # woke and completed, the row's stale scheduled_at made the SleepWaker
+  # repeatedly flip the event-waiting row back to :pending.
+  workflow "sleep_then_event" do
+    step(:nap, fn data ->
+      sleep(1)
+      {:ok, assign(data, :napped, true)}
+    end)
+
+    step(:await, fn data ->
+      result = wait_for_event("go")
+      {:ok, assign(data, :result, result)}
     end)
   end
 end
