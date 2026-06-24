@@ -18,12 +18,6 @@ defmodule DurableDashboard.MixProject do
   # Versioned independently of durable.
   @version "0.1.0-rc"
 
-  # Hex requirement for durable when this package is published. In the monorepo
-  # durable is a path dependency (see durable_dep/0); the published package must
-  # depend on a released Hex version instead. durable and durable_dashboard
-  # version independently, so bump this to match the durable release you target.
-  @durable_version "~> 0.1.0-rc"
-
   @elixir_requirement Keyword.fetch!(shared, :elixir)
   @source_url Keyword.fetch!(shared, :source_url)
   @homepage_url Keyword.fetch!(shared, :homepage_url)
@@ -65,7 +59,13 @@ defmodule DurableDashboard.MixProject do
 
   defp deps do
     [
-      {:durable, durable_dep()},
+      # The Hex version is the committed default, so a plain `mix deps.get` and
+      # `mix hex.publish` resolve durable from Hex with no special steps. For
+      # monorepo co-development, comment it and uncomment the path dep below.
+      # Bump the requirement to the durable release this dashboard targets.
+      # (Same toggle pattern as elixir-nx/nx's torchx.)
+      {:durable, "~> 0.1.0-rc"},
+      # {:durable, path: "../durable"},
       {:phoenix_live_view, "~> 1.1"},
       {:phoenix, "~> 1.8"},
       {:jason, "~> 1.4"},
@@ -73,21 +73,6 @@ defmodule DurableDashboard.MixProject do
       {:ex_doc, "~> 0.34", only: :dev, runtime: false}
     ]
   end
-
-  # Path dependency for local monorepo development; the released Hex version when
-  # building or publishing the package. Hex refuses to publish a package with a
-  # path dependency, so the hex.build / hex.publish tasks (or DURABLE_PUBLISH=1)
-  # switch to the version requirement.
-  defp durable_dep do
-    if publishing?(), do: @durable_version, else: [path: "../durable"]
-  end
-
-  defp publishing? do
-    System.get_env("DURABLE_PUBLISH") in ~w(1 true) or publish_task?(System.argv())
-  end
-
-  defp publish_task?([task | _]), do: task in ~w(hex.build hex.publish)
-  defp publish_task?(_), do: false
 
   defp aliases do
     [
