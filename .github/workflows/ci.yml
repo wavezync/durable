@@ -12,8 +12,8 @@ concurrency:
 
 env:
   MIX_ENV: test
-  ELIXIR_VERSION: "1.19"
-  OTP_VERSION: "28"
+  ELIXIR_VERSION: "1.20"
+  OTP_VERSION: "29"
 
 jobs:
   changes:
