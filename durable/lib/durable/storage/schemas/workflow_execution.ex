@@ -77,6 +77,9 @@ defmodule Durable.Storage.Schemas.WorkflowExecution do
     field(:completed_at, :utc_datetime_usec)
     field(:locked_by, :string)
     field(:locked_at, :utc_datetime_usec)
+    # Per-claim fencing token (fresh UUID stamped on each claim). Lets a worker
+    # detect its claim was superseded by stale-lock recovery + reclaim.
+    field(:lock_token, :binary_id)
 
     # Compensation/Saga support
     field(:compensation_results, {:array, :map}, default: [])

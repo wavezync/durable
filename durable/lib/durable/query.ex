@@ -159,6 +159,31 @@ defmodule Durable.Query do
   end
 
   @doc """
+  Returns a `%{parent_workflow_id => child_count}` map for the given parent
+  ids, in a single query. Used to render a "N children" drill-down affordance
+  on top-level run rows without an N+1. Parents with no children are omitted.
+
+  ## Options
+
+  - `:durable` - The Durable instance name (default: Durable)
+  """
+  @spec child_counts([String.t()], keyword()) :: %{String.t() => non_neg_integer()}
+  def child_counts(parent_ids, opts \\ [])
+  def child_counts([], _opts), do: %{}
+
+  def child_counts(parent_ids, opts) when is_list(parent_ids) do
+    config = get_config(opts)
+
+    from(w in WorkflowExecution,
+      where: w.parent_workflow_id in ^parent_ids,
+      group_by: w.parent_workflow_id,
+      select: {w.parent_workflow_id, count(w.id)}
+    )
+    |> then(&Repo.all(config, &1))
+    |> Map.new()
+  end
+
+  @doc """
   Returns workflow execution counts grouped by status.
 
   Returns a map like `%{pending: 5, running: 3, completed: 100, ...}`.
@@ -180,6 +205,92 @@ defmodule Durable.Query do
 
     Repo.all(config, query)
     |> Map.new()
+  end
+
+  @doc """
+  Lists distinct workflow definitions, derived from execution history.
+
+  Returns one row per `{workflow_module, workflow_name}` pair that has
+  ever been executed, with aggregate stats. There is no compile-time
+  registry of definitions in the engine — the executor only resolves
+  modules by name on demand — so the dashboard derives the catalog from
+  the persisted executions.
+
+  Each row contains:
+    * `:workflow_module` (string)
+    * `:workflow_name` (string)
+    * `:total_runs` (non_neg_integer)
+    * `:running_count` (non_neg_integer)
+    * `:waiting_count` (non_neg_integer)
+    * `:failed_count` (non_neg_integer)
+    * `:last_run_at` (DateTime.t() | nil) — most recent inserted_at
+    * `:last_status` (atom | nil) — status of the most recent run
+
+  Sorted by `last_run_at DESC NULLS LAST`.
+
+  ## Options
+
+  - `:durable` - The Durable instance name (default: Durable)
+  """
+  @spec list_workflows(keyword()) :: [map()]
+  def list_workflows(opts \\ []) do
+    config = get_config(opts)
+
+    # Two queries instead of a window function:
+    #   1. Aggregate counts + max(inserted_at) per (module, name)
+    #   2. The status of the row that matched max(inserted_at) per pair
+    # Joining a window function would be cleaner but Ecto's window API
+    # is awkward and the row count here is "number of distinct
+    # workflows in this app" — typically tens, not millions.
+    aggregate_query =
+      from(w in WorkflowExecution,
+        # Top-level runs only. Parallel/`each`/`call_workflow` children
+        # inherit the parent's (module, name), so counting them here would
+        # inflate total_runs and the status counts by the fan-out width and
+        # could drive last_status off a child row.
+        where: is_nil(w.parent_workflow_id),
+        group_by: [w.workflow_module, w.workflow_name],
+        select: %{
+          workflow_module: w.workflow_module,
+          workflow_name: w.workflow_name,
+          total_runs: count(w.id),
+          running_count: fragment("count(*) FILTER (WHERE ? = 'running')", w.status),
+          waiting_count: fragment("count(*) FILTER (WHERE ? = 'waiting')", w.status),
+          failed_count: fragment("count(*) FILTER (WHERE ? = 'failed')", w.status),
+          last_run_at: max(w.inserted_at)
+        }
+      )
+
+    aggregates = Repo.all(config, aggregate_query)
+
+    aggregates
+    |> Enum.map(&attach_last_status(config, &1))
+    |> sort_by_last_run_desc()
+  end
+
+  defp sort_by_last_run_desc(rows) do
+    {with_dates, without} = Enum.split_with(rows, &(not is_nil(&1.last_run_at)))
+    Enum.sort_by(with_dates, & &1.last_run_at, {:desc, DateTime}) ++ without
+  end
+
+  defp attach_last_status(_config, %{last_run_at: nil} = row) do
+    Map.put(row, :last_status, nil)
+  end
+
+  defp attach_last_status(config, row) do
+    query =
+      from(w in WorkflowExecution,
+        where:
+          is_nil(w.parent_workflow_id) and
+            w.workflow_module == ^row.workflow_module and
+            w.workflow_name == ^row.workflow_name and
+            w.inserted_at == ^row.last_run_at,
+        select: w.status,
+        limit: 1
+      )
+
+    last_status = Repo.one(config, query)
+    Map.put(row, :last_status, last_status)
   end
 
   @doc """
@@ -238,6 +349,19 @@ defmodule Durable.Query do
       {:workflow_name, name}, q ->
         from(w in q, where: w.workflow_name == ^name)
 
+      # Top-level runs only — exclude parallel/`each`/`call_workflow` children
+      # (which carry a non-nil parent_workflow_id and inherit the parent's
+      # workflow_name verbatim). Without this, run lists are flooded with
+      # indistinguishable child rows and per-definition counts are inflated by
+      # the fan-out width. Lists default to this; the detail page's Family tab
+      # and the per-parent drill-down surface the children.
+      {:top_level_only, true}, q ->
+        from(w in q, where: is_nil(w.parent_workflow_id))
+
+      # Drill-down: only the children of a specific parent execution.
+      {:parent_workflow_id, parent_id}, q when is_binary(parent_id) ->
+        from(w in q, where: w.parent_workflow_id == ^parent_id)
+
       {:status, status}, q when is_atom(status) ->
         from(w in q, where: w.status == ^status)
 
@@ -268,6 +392,7 @@ defmodule Durable.Query do
       context: execution.context,
       current_step: execution.current_step,
       error: execution.error,
+      parent_workflow_id: execution.parent_workflow_id,
       scheduled_at: execution.scheduled_at,
       started_at: execution.started_at,
       completed_at: execution.completed_at,
@@ -298,7 +423,8 @@ defmodule Durable.Query do
       error: step.error,
       duration_ms: step.duration_ms,
       started_at: step.started_at,
-      completed_at: step.completed_at
+      completed_at: step.completed_at,
+      child_workflow_id: step.child_workflow_id
     }
 
     if include_logs do

@@ -56,6 +56,11 @@ defmodule Durable.Storage.Schemas.StepExecution do
     field(:compensation_for, :string)
     field(:is_compensation, :boolean, default: false)
 
+    # Queryable parent→child link: the WorkflowExecution this step spawned via
+    # `call_workflow`/`start_workflow`. Lets step→child be resolved directly
+    # instead of parsing the parent's mutable `__call_children` JSONB context.
+    field(:child_workflow_id, :binary_id)
+
     belongs_to(:workflow, Durable.Storage.Schemas.WorkflowExecution, foreign_key: :workflow_id)
 
     timestamps(type: :utc_datetime_usec)
@@ -74,7 +79,8 @@ defmodule Durable.Storage.Schemas.StepExecution do
     :completed_at,
     :duration_ms,
     :compensation_for,
-    :is_compensation
+    :is_compensation,
+    :child_workflow_id
   ]
 
   @doc """

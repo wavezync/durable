@@ -45,6 +45,8 @@ defmodule Durable.Config do
           heartbeat_interval: pos_integer(),
           scheduled_modules: [module()],
           scheduler_interval: pos_integer(),
+          sleep_waker_interval: pos_integer(),
+          sleep_waker_batch_size: pos_integer(),
           log_level: false | :debug | :info | :warning | :error,
           pubsub: atom() | nil,
           owns_pubsub?: boolean()
@@ -60,6 +62,8 @@ defmodule Durable.Config do
     :heartbeat_interval,
     :scheduled_modules,
     :scheduler_interval,
+    :sleep_waker_interval,
+    :sleep_waker_batch_size,
     :log_level,
     :pubsub,
     owns_pubsub?: false
@@ -110,6 +114,18 @@ defmodule Durable.Config do
       type: :pos_integer,
       default: 60_000,
       doc: "Milliseconds between scheduler polls for due schedules"
+    ],
+    sleep_waker_interval: [
+      type: :pos_integer,
+      default: 1_000,
+      doc:
+        "Milliseconds between sleep-waker sweeps that revive workflows " <>
+          "whose `sleep/1` or `schedule_at/1` wait has elapsed"
+    ],
+    sleep_waker_batch_size: [
+      type: :pos_integer,
+      default: 100,
+      doc: "Maximum number of sleeping workflows to wake in a single sweep"
     ],
     log_level: [
       type: {:in, [false, :debug, :info, :warning, :error]},

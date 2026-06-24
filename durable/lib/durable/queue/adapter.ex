@@ -27,7 +27,12 @@ defmodule Durable.Queue.Adapter do
           input: map(),
           context: map(),
           scheduled_at: DateTime.t() | nil,
-          current_step: String.t() | nil
+          current_step: String.t() | nil,
+          # Per-claim fencing token stamped by `fetch_jobs`. Workers pass it back
+          # to `heartbeat`/`ack`/`nack` so a claim superseded by stale-lock
+          # recovery can be detected (heartbeat → `{:error, :fenced}`) and a
+          # late ack/nack from a fenced worker becomes a no-op.
+          lock_token: String.t() | nil
         }
 
   @doc """
@@ -121,7 +126,21 @@ defmodule Durable.Queue.Adapter do
   @callback recover_zombie_workflows(config :: Config.t(), timeout_seconds :: pos_integer()) ::
               {:ok, non_neg_integer()} | {:error, term()}
 
-  @optional_callbacks recover_zombie_workflows: 2
+  @doc """
+  Wakes workflows whose `sleep/1` or `schedule_at/1` wait has elapsed.
+
+  Atomically transitions rows where `status = :waiting AND scheduled_at <= NOW()`
+  back to `:pending`, clears the lock, and merges a `__sleep_satisfied__`
+  marker into context so the step body's next `sleep`/`schedule_at` call
+  returns immediately instead of re-throwing.
+
+  Returns the count of workflows woken. Optional so older adapters keep
+  working — when not implemented, the SleepWaker simply skips its sweep.
+  """
+  @callback wake_sleeping_workflows(config :: Config.t(), batch_size :: pos_integer()) ::
+              {:ok, non_neg_integer()} | {:error, term()}
+
+  @optional_callbacks recover_zombie_workflows: 2, wake_sleeping_workflows: 2
 
   @doc """
   Returns the default adapter module.

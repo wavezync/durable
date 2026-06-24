@@ -18,7 +18,14 @@ defmodule Durable.Executor.Backoff do
         }
 
   @default_base 1_000
-  @default_max_backoff 3_600_000
+  # Backoff is currently an in-process `Process.sleep/1` that blocks the worker
+  # and holds the job lock for its duration. A multi-minute (let alone 1-hour)
+  # default would pin a queue concurrency slot and risk crossing the stale-lock
+  # timeout. Cap the default well under `stale_lock_timeout` (300s). Callers
+  # that genuinely want longer, durable backoff should set `max_backoff`
+  # explicitly — and ideally a future re-enqueue-based backoff will lift this
+  # ceiling without blocking a worker.
+  @default_max_backoff 30_000
 
   @doc """
   Calculates the delay before the next retry attempt.
@@ -32,7 +39,9 @@ defmodule Durable.Executor.Backoff do
   ## Options
 
   - `:base` - Base delay in milliseconds (default: 1000)
-  - `:max_backoff` - Maximum delay in milliseconds (default: 3600000 = 1 hour)
+  - `:max_backoff` - Maximum delay in milliseconds (default: 30000 = 30s).
+    Kept low because the backoff blocks the worker in-process; raise it only
+    if your `stale_lock_timeout` comfortably exceeds the chosen ceiling.
 
   ## Examples
 
@@ -83,15 +92,21 @@ defmodule Durable.Executor.Backoff do
       Backoff.calculate_with_jitter(:exponential, 1, %{base: 1000})
 
   """
-  @spec calculate_with_jitter(strategy(), pos_integer(), opts()) :: pos_integer()
+  @spec calculate_with_jitter(strategy(), pos_integer(), opts()) :: non_neg_integer()
   def calculate_with_jitter(strategy, attempt, opts \\ %{}) do
     base_delay = calculate(strategy, attempt, opts)
-    jitter_factor = 0.25
-    jitter_range = trunc(base_delay * jitter_factor)
+    jitter_range = trunc(base_delay * 0.25)
 
-    # Add random jitter between -jitter_range and +jitter_range
-    jitter = :rand.uniform(jitter_range * 2) - jitter_range
-    max(0, base_delay + jitter)
+    # `:rand.uniform/1` requires a positive argument. For small delays (a base
+    # under ~4 ms, e.g. fast test retries) `jitter_range` truncates to 0 and
+    # `:rand.uniform(0)` would crash the worker mid-retry. Skip jitter when
+    # there's no meaningful range to jitter over.
+    if jitter_range <= 0 do
+      base_delay
+    else
+      jitter = :rand.uniform(jitter_range * 2) - jitter_range
+      max(0, base_delay + jitter)
+    end
   end
 
   @doc """

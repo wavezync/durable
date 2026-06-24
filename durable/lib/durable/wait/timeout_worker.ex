@@ -214,6 +214,8 @@ defmodule Durable.Wait.TimeoutWorker do
             "in workflow #{pending_event.workflow_id}"
         )
 
+        maybe_cancel_timed_out_child(config, pending_event.event_name)
+
       {:error, stage, reason, _changes} ->
         Logger.error(
           "Failed event timeout transaction for #{pending_event.workflow_id}: " <>
@@ -221,6 +223,27 @@ defmodule Durable.Wait.TimeoutWorker do
         )
     end
   end
+
+  # A `call_workflow` parent waits on a PendingEvent named
+  # `__child_done:<child_id>`. When that wait times out the parent resumes with
+  # its `timeout_value`, but the child keeps running — wasted work whose result
+  # is then silently dropped (and which could mutate shared state the parent
+  # has moved past). Cancel the abandoned child so the timeout actually stops
+  # it. Best-effort: a child that already finished/cancelled is a harmless no-op.
+  defp maybe_cancel_timed_out_child(config, "__child_done:" <> child_id)
+       when byte_size(child_id) > 0 do
+    Logger.warning(
+      "[Durable] call_workflow wait timed out — cancelling abandoned child #{child_id}"
+    )
+
+    Executor.cancel_workflow(child_id, "parent_call_timeout", durable: config.name)
+  rescue
+    e ->
+      Logger.warning("[Durable] failed to cancel timed-out child #{child_id}: #{inspect(e)}")
+      :ok
+  end
+
+  defp maybe_cancel_timed_out_child(_config, _event_name), do: :ok
 
   # Atomically: persist the pending row's :timeout transition AND flip the
   # owning workflow back to :pending with the timeout payload merged into

@@ -7,6 +7,7 @@ defmodule Durable.Storage.Schemas.WaitGroup do
 
   use Ecto.Schema
   import Ecto.Changeset
+  import Ecto.Query
 
   @type wait_type :: :any | :all
 
@@ -116,6 +117,46 @@ defmodule Durable.Storage.Schemas.WaitGroup do
 
     wait_group
     |> cast(changes, [:received_events, :status, :completed_at])
+  end
+
+  @doc """
+  Locks the wait group row `FOR UPDATE`, merges the event into
+  `received_events`, and (when the wait condition is satisfied) flips
+  `status` to `:completed`. Must be called inside a transaction.
+
+  Returns `{:ok, %{wait_group: updated, just_completed: boolean}}` on
+  success — `just_completed` is true iff this call transitioned the
+  group from `:pending` to `:completed`. Already-completed/timed-out
+  groups are treated as a no-op (`just_completed: false`) so late
+  arrivals don't double-resume the parent.
+
+  Without the row lock, two concurrent callers can read the same
+  `received_events`, each merge in only their own event, and have the
+  later UPDATE silently overwrite the earlier one — leaving the group
+  permanently short an entry and the parent stuck in `:waiting`.
+  """
+  def add_event_locked(repo, wait_group_id, event_name, payload) do
+    query =
+      from(w in __MODULE__,
+        where: w.id == ^wait_group_id,
+        lock: "FOR UPDATE"
+      )
+
+    case repo.one(query) do
+      nil ->
+        {:error, :not_found}
+
+      %__MODULE__{status: :pending} = wait_group ->
+        with {:ok, updated} <-
+               wait_group
+               |> add_event_changeset(event_name, payload)
+               |> repo.update() do
+          {:ok, %{wait_group: updated, just_completed: updated.status == :completed}}
+        end
+
+      %__MODULE__{} = wait_group ->
+        {:ok, %{wait_group: wait_group, just_completed: false}}
+    end
   end
 
   @doc """
