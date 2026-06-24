@@ -62,8 +62,10 @@ defmodule PhoenixDemo.MixProject do
       {:jason, "~> 1.2"},
       {:dns_cluster, "~> 0.2.0"},
       {:bandit, "~> 1.5"},
-      # Durable workflow engine
-      {:durable, path: "../../durable"},
+      # Durable workflow engine. durable_dashboard depends on durable via Hex
+      # (its committed default), so override here to build the whole demo against
+      # the local durable checkout rather than the published release.
+      {:durable, path: "../../durable", override: true},
       {:durable_dashboard, path: "../../durable_dashboard"}
     ]
   end

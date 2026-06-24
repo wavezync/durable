@@ -9,7 +9,9 @@ defmodule DurableWorkspace.MixProject do
       version: "0.0.0",
       elixir: "~> 1.15",
       deps: [
-        {:durable, path: "durable"},
+        # durable_dashboard depends on durable via Hex (its committed default),
+        # so override to resolve the whole workspace against the local checkout.
+        {:durable, path: "durable", override: true},
         {:durable_dashboard, path: "durable_dashboard"}
       ],
       aliases: [
