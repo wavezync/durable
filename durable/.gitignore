@@ -22,6 +22,9 @@ erl_crash.dump
 # Ignore package tarball (built via "mix hex.build").
 durable-*.tar
 
+# Generated copy of the monorepo's ../shared.exs (canonical file lives at root).
+/shared.exs
+
 # JS package manager
 node_modules/
 package-lock.json

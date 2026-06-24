@@ -1,15 +1,33 @@
 defmodule Durable.MixProject do
   use Mix.Project
 
+  # Shared monorepo metadata. Canonical values live in ../shared.exs; Hex
+  # tarballs can't reference files outside the package root, so we copy that
+  # file next to this mix.exs (the copy is what ships) and read it back.
+  # Edit ../shared.exs, never the git-ignored copy beside this file.
+  shared_src = Path.join(__DIR__, "../shared.exs")
+  shared_dst = Path.join(__DIR__, "shared.exs")
+
+  if File.exists?(shared_src) and
+       (not File.exists?(shared_dst) or File.read!(shared_dst) != File.read!(shared_src)) do
+    File.cp!(shared_src, shared_dst)
+  end
+
+  {shared, _bindings} = Code.eval_file(shared_dst)
+
+  # Versioned independently of durable_dashboard.
   @version "0.0.0-alpha"
-  @source_url "https://github.com/wavezync/durable"
-  @homepage_url "https://durable.wavezync.com"
+  @elixir_requirement Keyword.fetch!(shared, :elixir)
+  @source_url Keyword.fetch!(shared, :source_url)
+  @homepage_url Keyword.fetch!(shared, :homepage_url)
+  @maintainers Keyword.fetch!(shared, :maintainers)
+  @licenses Keyword.fetch!(shared, :licenses)
 
   def project do
     [
       app: :durable,
       version: @version,
-      elixir: "~> 1.15",
+      elixir: @elixir_requirement,
       elixirc_paths: elixirc_paths(Mix.env()),
       start_permanent: Mix.env() == :prod,
       aliases: aliases(),
@@ -98,9 +116,10 @@ defmodule Durable.MixProject do
 
   defp package do
     [
-      licenses: ["MIT"],
-      links: %{"GitHub" => @source_url},
-      files: ~w(lib priv .formatter.exs mix.exs README.md LICENSE)
+      maintainers: @maintainers,
+      licenses: @licenses,
+      links: %{"GitHub" => @source_url, "Homepage" => @homepage_url},
+      files: ~w(lib priv .formatter.exs mix.exs README.md LICENSE shared.exs)
     ]
   end
 end
