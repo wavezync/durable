@@ -32,7 +32,7 @@ defmodule DurableDashboard.Components.Layout.Topbar do
         <button
           type="button"
           class={[
-            "flex items-center gap-2 h-8 px-2.5 rounded-md",
+            "flex items-center gap-2 h-8 w-[228px] px-2.5 rounded-md",
             "border border-border text-[13px] text-muted-foreground",
             "bg-card/40 hover:bg-accent hover:text-accent-foreground",
             "transition-colors focus-visible:outline-none focus-visible:ring-2",
@@ -41,9 +41,9 @@ defmodule DurableDashboard.Components.Layout.Topbar do
           aria-label="Open command palette"
           phx-click={Phoenix.LiveView.JS.dispatch("durable:open-palette", to: "html")}
         >
-          <Core.icon name="search" class="size-3.5" />
-          <span>Search</span>
-          <span class="ml-3 flex items-center gap-1">
+          <Core.icon name="search" class="size-3.5 shrink-0" />
+          <span>Jump to…</span>
+          <span class="ml-auto flex items-center gap-1">
             <Core.kbd>⌘</Core.kbd>
             <Core.kbd>K</Core.kbd>
           </span>

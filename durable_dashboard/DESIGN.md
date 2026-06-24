@@ -268,8 +268,40 @@ Keyboard hint inside command palette / tooltips.
 
 ### `<.relative_time at={dt}>`
 
-Humanized "2m ago" with absolute ISO in `title`. Always use this; never
-hand-format times.
+Humanized "2m ago" (past) or "in 2h" (future) for durations. Always use this;
+never hand-format times. It is sign-aware — a future timestamp (e.g. a
+schedule's next run) reads "in …", never "just now". The hover tooltip is
+localized to the viewer's timezone by the same `local_time.ts` hook (it carries
+`data-rel` so only the title is rewritten; the relative text stays). Use
+`local_time` instead when the user needs the exact moment shown inline.
+
+### `<.local_time at={dt} format="time|datetime|date">`
+
+For **absolute** timestamps the user reads. The server only knows UTC, so a
+raw ISO string is ambiguous; this emits a `<time data-ts data-format>` with
+a UTC fallback as its text, and the client rewrites it to the viewer's
+timezone (`assets/src/hooks/local_time.ts`, wired via LiveSocket's `dom`
+callbacks — no per-element id needed). Never print a bare UTC timestamp;
+use `relative_time` for "ago" durations and `local_time` for the moment.
+
+### `<.label>` and `<.field key="…">`
+
+The canonical "this is a label, not a value" treatment: small mono,
+uppercase, `tracking-[0.14em]`, `text-muted-foreground/70`. Use `<.label>`
+for **every** field-name / section-header / metadata-key — never hand-roll
+the `font-mono … uppercase tracking-…` string again (it was previously
+duplicated across the inspector, logs, and IO panels).
+
+```heex
+<.label>level</.label>
+<.label class="text-destructive">error</.label>
+```
+
+`<.field key="level">info</.field>` is the key/value detail row built on
+`<.label>`: a fixed-width label column beside a monospace value. Use inside
+a `<dl>` for aligned metadata tables (step inspector, log detail, etc.).
+Labels read as labels and values as values — keys are never lowercase plain
+text indistinguishable from their values.
 
 ### `<.skeleton>`, `<.empty_state>`, `<.error_state>`
 
@@ -317,10 +349,29 @@ its own `Phoenix.LiveComponent` module under
                 </main>
 ```
 
-- Sidebar: collapsible, lucide icons, fixed width when expanded.
-- Topbar: 28 h, breadcrumbs left, theme toggle + ⌘K hint right.
-- Main: `max-w-screen-2xl` to keep line lengths readable on ultrawide
-  monitors.
+- Sidebar: fixed 220 px, `bg-card/40` + hairline right border, heroicons.
+  Nav is split into two intent groups under quiet mono eyebrows —
+  **Observe** (Overview, Workflows, Executions) and **Operate** (Inputs,
+  Schedules, Settings) — so the destinations read as an IA, not a flat list.
+  Brand lockup is the **monitor tile + heartbeat** (a pulsing `led-dot` in a
+  primary-tinted square): the recurring "the engine is alive and durable"
+  mark, echoed by the `connected` heartbeat in the footer.
+- Topbar: 56 h, breadcrumbs left; the command-palette trigger ("Jump to…",
+  ⌘K) + theme toggle right.
+- Main: `max-w-[1400px]` to keep line lengths readable on ultrawide monitors.
+
+#### The live rail (signature)
+
+The accent (`--primary` indigo) carries **one** meaning across the whole
+console: *now / live / you are here*. It is not generic chrome. It appears as:
+
+- the **active nav rail** — a short `h-4 w-0.5` indigo bar on the left edge
+  of the current nav item;
+- the **running edge** in the workflow graph (`.flow-edge-running`);
+- the **"now" line** / in-flight bars in the Timeline.
+
+Same hue, same idea, everywhere. Don't spend primary on decoration — if
+something is tinted indigo it should mean "live / current."
 
 ### Page header
 
@@ -343,11 +394,62 @@ Subtitle = relative time, scope context, or counts. Never marketing copy.
 - Hover: `bg-accent/50`.
 - Click anywhere on the row → `live_patch` to detail.
 - Right-aligned secondary actions reveal on hover.
+- **Column headers** use the canonical `<.label>` idiom — `font-mono
+  text-[10px] uppercase tracking-[0.14em] text-muted-foreground/70` — so a
+  table header reads as a label, identical to field-name labels in the detail
+  panels. This is baked into the `DataTable` LiveComponent; hand-rolled tables
+  (e.g. Overview's "recent executions") apply the same classes. Sortable
+  headers add `hover:text-foreground`. Never reach for sans `tracking-wider`.
+
+### Status readout (instrument cluster)
+
+Aggregate counts (Overview's status KPIs, a workflow card's runs/failed/
+waiting) render as a **segmented readout**, not a row of free-floating cards:
+one panel with hairline-divided cells, so it reads like an instrument cluster.
+
+- Draw the dividers with the **`gap-px` + `bg-border` trick** when the grid
+  wraps responsively (container `bg-border`, cells `bg-card`, `gap-px`);
+  use `divide-x divide-border` only for a fixed single row that never wraps.
+- Numbers are **mono** (`text-numeric`) — they're machine facts. Labels use
+  `<.label>`.
+- **Restraint of color:** the dot carries status; only the counts that signal
+  trouble light up (failed → destructive, waiting → warning, when `> 0`).
+  Running pulses (`led-dot`). Everything else stays neutral, so the eye lands
+  on what's wrong instead of a rainbow. No gradient glows.
 
 ### Detail sheet / drawer
 
 `data-slot="sheet-content"` is styled centrally in `index.css`. **Don't**
 override its background or backdrop-blur in the sheet itself.
+
+### Step detail panel (`Components.Workflow.StepDetail`)
+
+The in-place inspector for a single step execution — **one** component
+shared by the Timeline (click a bar's row) and History (click a trace
+event), so a step reads identically wherever it's opened. Composition:
+
+- **Stat strip** — a compact horizontal header (`started · completed ·
+  duration · attempt`), never a tall field column that leaves dead space.
+- **Input / Output** — `<.json>` boxes sized `w-fit max-w-full` so a small
+  payload doesn't render a giant empty box.
+- **Error** — destructive-tinted `<.json>`, only when the step failed.
+- **Logs** — the shared `<LogLine.row>` list; empty falls back to a
+  "No logs captured" note rather than a blank box.
+
+Pass `class` for the caller's margins, `duration_ms` to override (Timeline
+sums it across resume segments).
+
+### Trace spine (execution history)
+
+A chronological list where order is itself information (a failure and its
+retry are two adjacent events) renders as a **vertical trace**, not a flat
+table: a hairline spine down the left with a status-colored node bead per
+event (`ring-4 ring-card` masks the connector behind the bead; the
+connector is trimmed at the first/last events). Uniform node beads — never
+variable-width status pills lined up in a column. Each event is a native
+`<details>`; the row is the `<summary>`, expanding `StepDetail` inline.
+Reserve this for genuinely sequential data — for unordered lists use the
+plain List/table row above.
 
 ### Empty / loading / error shells
 
@@ -423,12 +525,13 @@ groups. Background is the dot-grid surface ReactFlow ships.
 
 ### Node types
 
-| Type        | Component       | Lucide icon | Purpose                            |
-| ----------- | --------------- | ----------- | ---------------------------------- |
-| `start`     | `StartNode`     | `Play`      | Boundary marker (success tone)     |
-| `end`       | `EndNode`       | `Flag`      | Boundary marker                    |
-| `step`      | `StepNode`      | `Box`       | Regular step (clickable)           |
-| `decision`  | `GatewayNode`   | `GitBranch` | Conditional branching point        |
+| Type             | Component            | Lucide icon | Purpose                                      |
+| ---------------- | -------------------- | ----------- | -------------------------------------------- |
+| `start`          | `StartNode`          | `Play`      | Boundary marker (success tone)               |
+| `end`            | `EndNode`            | `Flag`      | Boundary marker                              |
+| `step`           | `StepNode`           | `Box`       | Regular step (clickable)                     |
+| `decision`       | `GatewayNode`        | `GitBranch` | Conditional branching point                  |
+| `child_workflow` | `ChildWorkflowNode`  | `GitFork`   | Step that spawned its own child execution    |
 
 There are **no marker nodes** for parallel fork/join or branch
 fork/join. Fan-out and fan-in are expressed purely through edge
@@ -447,19 +550,34 @@ A single custom edge component (`AnimatedFlowEdge`) — a flowing bezier
 path. Status-driven stroke is set by classes the server attaches via
 `graph_builder.overlay_status/3`:
 
-- `.flow-edge-completed` — `--success` solid, 1.5 px.
+- `.flow-edge-completed` — `--success` solid, 1.5 px. Static by
+  default in linear flow (animating every completed edge in a long
+  workflow is too noisy).
 - `.flow-edge-running` — `--primary` with `dash-flow` animation.
 - `.flow-edge-pending` — `--border` 1 px dashed.
 - `.flow-edge-conditional` — `--primary/55` dashed. Used for
   decision-step `{:goto, :target, _}` paths extracted at compile time
-  by `Durable.DSL.Step.build_decision/3`. Stays dashed regardless of
-  runtime state because it represents a *possible* path, not a
-  *taken* one.
+  by `Durable.DSL.Step.build_decision/3`. **Repainted at runtime** when
+  the goto target actually executed: takes on `flow-edge-completed`
+  styling **and the dash-flow animation** for the taken path; only the
+  *un-taken* branches keep the dashed conditional look. The animation
+  is the deliberate signal — at a decision node it's the only visual
+  cue distinguishing the executed branch from the still-dashed
+  alternatives. See `graph_builder.apply_edge_status/3`.
+
+Hover and selected states layer on top of those resting strokes:
+
+- `:hover` bumps stroke to 2 px and adds a subtle `--primary 35%`
+  drop-shadow filter so the edge "lifts" under the cursor.
+- `.selected` / `:focus-visible` re-paints the stroke with `--primary`
+  at 2.25 px so the active edge is unambiguous when the user
+  click-selects via ReactFlow.
 
 Edge labels (branch clause names like `low` / `high` / `default`, and
 decision goto targets like `goto :auto_remove`) render as
 `<.badge kind="muted">`-style chips at the bezier midpoint via
-`<EdgeLabelRenderer>`.
+`<EdgeLabelRenderer>`. Their background tints toward `--primary` on the
+parent edge's hover/selected state.
 
 ### "Current execution" emphasis
 
@@ -468,10 +586,40 @@ step's icon box receives
 `ring-2 ring-primary/60 ring-offset-2 ring-offset-background`. This is
 the only place 2 px borders are sanctioned (§2.5).
 
+### Child workflow node (`ChildWorkflowNode`)
+
+Steps that spawned their own `WorkflowExecution` (parallel children
+materialised as separate runs, plus `call_workflow` / `start_workflow`
+sub-workflows) render with the **exact same 200 × 56 card as `StepNode`**
+— same footprint, same status palette, same row rhythm — so they never
+break the timeline. The **only** difference is the drill-in signature:
+
+- **Stacked sheet** — a second, neutral card peeking ~6 px behind the top
+  edge (`absolute -top-1.5 left-1.5`, `border-border/55 bg-card/70`). This
+  is the one motif reserved for "a whole workflow is nested inside here";
+  nothing else in the graph stacks. It lifts 2 px on hover. It stays
+  neutral so status color is carried by the front card alone. The sheet
+  only peeks a few px beyond the dagre box, so the node keeps the cell
+  footprint (no special-casing in `graph-layout.ts`).
+- **Fork icon** (`GitFork`) in the status-tinted tile instead of `Box`.
+- **Meta line** leads with `sub-workflow`, then `status · duration` — same
+  grammar as `StepNode`'s meta line.
+- **Drill-in chevron** (`ChevronRight text-primary/70`) before the status
+  dot.
+
+No input-preview line and no footer: a 56 px card can't carry them
+legibly, and the parent step's input/output already live one click away in
+the inspector. The whole card is the click target — it fires the same
+`durable:step-clicked` event as `StepNode`; the FlowGraph LC's
+`handle_event/3` routes it (parallel children → navigate to the child's
+flow page; in-process children → open the inspector with the Child tab).
+
 ### Drill-in arrow + child preview
 
-A step with an associated child workflow gets a small chevron badge at
-the top-right corner of the icon box. Two cases:
+`StepNode` (the regular 88 × 96 cell) keeps the small chevron badge at
+the top-right of the icon box for the rare case a regular step carries
+a `child_workflow_id` but isn't a child-workflow node — fallback only;
+prefer the `ChildWorkflowNode` variant. Two routing cases:
 
 1. **Parallel-child step** — the child runs in its own
    `WorkflowExecution` with its own steps. Clicking the step navigates
@@ -498,7 +646,106 @@ The step→child mapping is sourced from the parent's context:
 
 ---
 
-## 12. Updating this doc
+## 12. Information architecture
+
+The dashboard distinguishes **workflow definitions** (registered
+modules) from **executions** (individual runs). Routes follow the
+nouns:
+
+| URL                              | LiveView         | Purpose                                  |
+| -------------------------------- | ---------------- | ---------------------------------------- |
+| `/`                              | `OverviewLive`   | Instance KPIs + recent executions        |
+| `/workflows`                     | `WorkflowsLive`  | Catalog of distinct workflow definitions |
+| `/workflows/:name`               | `ExecutionsLive` | Executions filtered to that workflow     |
+| `/executions`                    | `ExecutionsLive` | All executions on the instance           |
+| `/executions/:id[/:tab]`         | `WorkflowLive`   | Single execution detail (six tabs)       |
+| `/inputs`, `/schedules`, `/settings` | (own LV)     | Operator surfaces                        |
+
+The `/workflows` page is **derived from execution history** —
+`Durable.Query.list_workflows/1` runs a single GROUP BY against
+`durable.workflow_executions`, since the engine has no compile-time
+registry of definitions. Each row is a card showing total runs, a
+live-pulsing **running chip** (only rendered when `running_count > 0`),
+the last run's relative time, and the last status pill. Clicking a
+card patches to the per-workflow `ExecutionsLive`.
+
+### Detail tabs
+
+`WorkflowLive` renders six tabs: **Summary, Flow, Timeline, Logs, I/O,
+History** (plus a conditional **Family** when the execution has a
+parent or descendants).
+
+### Timeline tab
+
+An **absolute-time Gantt** spanning the workflow's wall-clock window —
+modelled on Temporal's Event History timeline. Pure HEEx + CSS, no
+SVG, no React island. Composition:
+
+- **200-pixel left gutter** per row: status pill (canonical palette
+  per §4), display name (parallel/branch macro qualifier stripped to
+  match the Flow tab labels), `×N` retry chip, right-aligned mono
+  total active duration for the row.
+- **Track** (flex-1): one absolutely-positioned segment per
+  `step_execution`, at `left: <pct>%; width: max(6px, <pct>%)` of
+  the workflow window. The 6 px floor keeps 1ms bars readable even
+  inside a 28s window — Temporal does the same.
+- **Multiple segments per row** mean the step suspended and resumed
+  (durable's wait/resume model writes one `step_exec` for the
+  suspension marker and another for the resumed body). Suspensions
+  read as the literal gap between segments — no separate annotation.
+  Retries appear the same way.
+- **Tick axis** uses adaptive intervals from a curated nice list
+  (1 ms → 24 h). Aim ~6 ticks; pick the smallest interval whose
+  tick count fits the window. The 0% tick suppresses its left
+  border so it doesn't draw outside the card.
+
+#### Window calculation
+
+- `window_start` = earliest `started_at` across all step_execs.
+- `window_end`:
+  - `now` when `workflow_live?(workflow)` is true (live workflow).
+    Driven off the *workflow's* status, not step statuses, because
+    durable's wait/resume leaves stale `:waiting` rows around
+    forever and they would otherwise pull the window forward
+    indefinitely.
+  - Otherwise `max(completed_at || updated_at || started_at)` per
+    step_exec. A finished workflow viewed an hour later still
+    shows its original wall-clock duration.
+
+#### `:waiting` step_exec end time
+
+The suspension marker durable writes before a `wait_for_event` /
+`sleep` body throws has `status = :waiting, completed_at = nil` and
+sticks around forever after the workflow resumes (a *new* step_exec
+is written for the resumed body). The Timeline ends those segments
+at `step_exec.updated_at` (the moment the row was flipped to
+`:waiting`), never `now` — so they collapse to ~6 px instead of
+stretching across the window.
+
+#### Realtime
+
+`WorkflowLive` ticks `assigns.now` every 500 ms while
+`workflow_in_flight?/1` is true. Each tick re-renders the Timeline
+tab; in-flight bars (`:running` segments without `completed_at`)
+recompute their width against `now`, transition over 150 ms for
+smooth growth, pulse via `animate-pulse`, and carry a led-dot at
+their right edge. The clock stops ticking when nothing is in
+flight, so idle dashboards don't burn cycles.
+
+#### Why an absolute-time Gantt rather than left-stacked bars
+
+A left-stacked layout (each row's bar starting at `x = 0`) makes
+parallel children indistinguishable from sequential children — three
+parallel scans starting at the same wall-clock time would look like
+they ran one after another. The absolute-time positioning is what
+makes parallel-vs-sequential read at a glance.
+
+The Timeline is the analytical view; the History tab remains the
+chronological list with expandable input/output details. They are
+not duplicates — Timeline is for *durations + ordering*, History is
+for *per-step inspection*.
+
+## 13. Updating this doc
 
 When you ship a UI change that establishes new precedent (a new
 component, a new color use, a new animation), update this doc in the same
