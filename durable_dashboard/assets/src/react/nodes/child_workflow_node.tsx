@@ -1,30 +1,38 @@
 /**
- * Step node — a horizontal status card (200×56) in the spirit of Argo /
- * Dagster / GitHub Actions run graphs: a status-tinted icon tile, the step
- * name, a mono meta line, and a trailing status dot. Calm + neutral by
- * default so saturated status color stays scarce and legible; the running
- * dot pulses via the shared `led-dot` keyframe.
+ * Child workflow node — a step that spawned its own `WorkflowExecution`
+ * (a `call_workflow` / `start_workflow` sub-workflow, or a parallel branch
+ * that materialises as its own run).
  *
- * Click → dispatches `durable:step-clicked` so the FlowGraph LC opens its
- * inspector sheet (or navigates when the node is a parallel-child workflow).
+ * It shares the exact silhouette of `StepNode` (the same 200×56 card) so it
+ * sits in the row rhythm with its siblings — the ONE difference is a
+ * stacked-sheet behind the card, signalling "a whole workflow lives inside
+ * here, open it". That stacked motif (plus the fork icon and the drill-in
+ * chevron) is the only thing that marks it as a drill-in; status color stays
+ * as scarce as on a regular step.
+ *
+ * Clicking dispatches the same `durable:step-clicked` event as `StepNode`;
+ * the FlowGraph LC routes it (parallel child → navigate to the child's flow
+ * page; in-process sub-workflow → open the inspector with the Child tab).
+ *
+ * Layout: 200×56, identical to the step cell. `graph-layout.ts` sizes it the
+ * same; the stacked sheet peeks a few px beyond the box but never enough to
+ * collide given NODESEP/RANKSEP.
  */
 
 import { Handle, type NodeProps, Position } from "@xyflow/react";
-import { Box, ChevronRight } from "lucide-react";
+import { ChevronRight, GitFork } from "lucide-react";
 import { memo, useCallback } from "react";
 
-interface StepNodeData {
+interface ChildWorkflowNodeData {
   label: string;
   step_type: string;
   name: string;
   status?: string;
   attempt?: number;
   duration_ms?: number;
-  started_at?: string;
-  completed_at?: string;
-  step_execution_id?: string;
-  is_current?: boolean;
   child_workflow_id?: string;
+  is_current?: boolean;
+  step_execution_id?: string;
 }
 
 interface Tone {
@@ -86,13 +94,16 @@ function formatMs(ms: number): string {
   return `${Math.floor(ms / 60_000)}m`;
 }
 
-// Near-invisible read-only handles — the graph isn't user-editable, so the
-// ports just anchor the edges to the card's left/right faces.
+// Near-invisible read-only handles — the graph isn't user-editable; the ports
+// just anchor edges to the card's left/right faces. Matches StepNode.
 const HANDLE_CLASS = "!h-1 !w-1 !min-w-0 !border-0 !bg-muted-foreground/40";
 
-function metaLine(node: StepNodeData): string {
+// "sub-workflow" is the meta-line lede so the card reads as a container, with
+// status + duration trailing — same grammar as StepNode's meta line.
+function metaLine(node: ChildWorkflowNodeData): string {
   return [
-    node.status || node.step_type,
+    "sub-workflow",
+    node.status || null,
     node.duration_ms != null && node.status !== "running" ? formatMs(node.duration_ms) : null,
     node.attempt != null && node.attempt > 1 ? `×${node.attempt}` : null,
   ]
@@ -100,9 +111,10 @@ function metaLine(node: StepNodeData): string {
     .join(" · ");
 }
 
-function StepNodeComponent({ data }: NodeProps) {
-  const node = data as unknown as StepNodeData;
+function ChildWorkflowNodeComponent({ data }: NodeProps) {
+  const node = data as unknown as ChildWorkflowNodeData;
   const tone = toneFor(node.status);
+  const isCurrent = Boolean(node.is_current);
 
   const handleClick = useCallback(
     (e: React.SyntheticEvent) => {
@@ -122,14 +134,10 @@ function StepNodeComponent({ data }: NodeProps) {
     [node.name, node.step_execution_id, node.child_workflow_id],
   );
 
-  const isCurrent = Boolean(node.is_current);
-  const isDrillIn = Boolean(node.child_workflow_id);
-
   const tooltip = [
-    node.label,
+    `Open ${node.label}`,
     node.status ? node.status.toUpperCase() : null,
     node.duration_ms != null ? formatMs(node.duration_ms) : null,
-    node.attempt != null && node.attempt > 1 ? `attempt ×${node.attempt}` : null,
   ]
     .filter(Boolean)
     .join(" · ");
@@ -138,9 +146,17 @@ function StepNodeComponent({ data }: NodeProps) {
     <div className="group relative">
       <Handle type="target" position={Position.Left} className={HANDLE_CLASS} />
 
+      {/* Stacked sheet — the signature. A second card peeking behind the top
+          edge says "a whole workflow is nested in here". Kept neutral so the
+          status color stays carried by the front card alone. */}
+      <div
+        aria-hidden="true"
+        className="absolute -top-1.5 left-1.5 h-14 w-[200px] rounded-lg border border-border/55 bg-card/70 shadow-sm transition-transform duration-150 group-hover:-translate-y-0.5"
+      />
+
       <div
         className={[
-          "nopan flex h-14 w-[200px] cursor-pointer items-center gap-2.5 rounded-lg border bg-card px-2.5 shadow-sm",
+          "nopan relative flex h-14 w-[200px] cursor-pointer items-center gap-2.5 rounded-lg border bg-card px-2.5 shadow-sm",
           "transition-colors duration-150 hover:border-foreground/30",
           tone.border,
           isCurrent ? "ring-2 ring-primary/60 ring-offset-2 ring-offset-background" : "",
@@ -154,7 +170,7 @@ function StepNodeComponent({ data }: NodeProps) {
         }}
         role="button"
         tabIndex={0}
-        aria-label={node.label}
+        aria-label={`Open child workflow ${node.label}`}
         title={tooltip}
       >
         <div
@@ -163,7 +179,7 @@ function StepNodeComponent({ data }: NodeProps) {
             tone.iconBg,
           ].join(" ")}
         >
-          <Box className={["size-4", tone.iconColor].join(" ")} aria-hidden="true" />
+          <GitFork className={["size-4", tone.iconColor].join(" ")} aria-hidden="true" />
         </div>
 
         <div className="flex min-w-0 flex-1 flex-col">
@@ -175,9 +191,8 @@ function StepNodeComponent({ data }: NodeProps) {
           </span>
         </div>
 
-        {isDrillIn ? (
-          <ChevronRight className="size-3.5 shrink-0 text-primary/70" aria-hidden="true" />
-        ) : null}
+        {/* Drill-in chevron — the click target opens the nested run. */}
+        <ChevronRight className="size-3.5 shrink-0 text-primary/70" aria-hidden="true" />
 
         <span
           className={[
@@ -193,4 +208,4 @@ function StepNodeComponent({ data }: NodeProps) {
   );
 }
 
-export const StepNode = memo(StepNodeComponent);
+export const ChildWorkflowNode = memo(ChildWorkflowNodeComponent);

@@ -1,6 +1,6 @@
 /**
- * End marker — paired with `StartNode`. Anchors the right edge of the
- * workflow graph.
+ * End marker — paired with `StartNode`. A small terminal pill anchoring the
+ * right edge of the workflow graph.
  */
 
 import { Handle, Position } from "@xyflow/react";
@@ -9,18 +9,15 @@ import { memo } from "react";
 
 function EndNodeComponent() {
   return (
-    <div className="relative flex w-[88px] flex-col items-center">
+    <div className="relative">
       <Handle
         type="target"
         position={Position.Left}
-        className="!h-1.5 !w-1.5 !border-muted-foreground/40 !bg-muted-foreground/60"
+        className="!h-1 !w-1 !min-w-0 !border-0 !bg-muted-foreground/50"
       />
 
-      <div className="relative flex size-16 items-center justify-center rounded-md border border-border bg-card shadow-sm">
-        <Flag className="size-5 text-muted-foreground" aria-hidden="true" />
-      </div>
-
-      <div className="mt-1.5 flex w-full flex-col items-center text-center leading-tight">
+      <div className="flex h-7 items-center gap-1 rounded-full border border-border bg-muted/60 pr-2 pl-1.5">
+        <Flag className="size-2.5 text-muted-foreground" aria-hidden="true" />
         <span className="font-mono text-[9px] uppercase tracking-widest text-muted-foreground">
           end
         </span>

@@ -1,13 +1,15 @@
 /**
- * Workflow edge — bezier path with optional label chip rendered through
- * ReactFlow's portal. Status-driven stroke styling is applied via the
- * `flow-edge-{completed,running,pending}` classes set on the edge wrapper
- * by `graph_builder.overlay_status/3` (DESIGN.md §11). This component
- * focuses on label rendering; we keep edge stroke handled by CSS so the
- * theme can shift it without a re-render.
+ * Workflow edge — orthogonal **smoothstep** path with an optional label chip.
+ * Smoothstep (vs the old free bezier) is the load-bearing fix for "odd
+ * branching": edges leave the source's right face, run straight, then step to
+ * each target's Y, so fan-out/fan-in form clean parallel trunks instead of
+ * overlapping swoops (the Argo/Dagster/GitHub-Actions look). Status stroke is
+ * applied via the `flow-edge-{completed,running,pending,conditional}` classes
+ * set by `graph_builder.overlay_status/3` (DESIGN.md §11), so the theme/status
+ * can shift the stroke without a re-render.
  */
 
-import { BaseEdge, EdgeLabelRenderer, type EdgeProps, getBezierPath } from "@xyflow/react";
+import { BaseEdge, EdgeLabelRenderer, type EdgeProps, getSmoothStepPath } from "@xyflow/react";
 import { memo } from "react";
 
 function AnimatedFlowEdgeComponent({
@@ -21,13 +23,17 @@ function AnimatedFlowEdgeComponent({
   label,
   markerEnd,
 }: EdgeProps) {
-  const [path, labelX, labelY] = getBezierPath({
+  const [path, labelX, labelY] = getSmoothStepPath({
     sourceX,
     sourceY,
     targetX,
     targetY,
     sourcePosition,
     targetPosition,
+    // Soft modern corners + a 20px straight run out of each handle so sibling
+    // branches share a clean trunk before splaying to their lanes.
+    borderRadius: 8,
+    offset: 20,
   });
 
   return (

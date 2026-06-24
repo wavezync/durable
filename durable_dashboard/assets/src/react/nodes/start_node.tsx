@@ -1,6 +1,6 @@
 /**
- * Start marker — n8n-style 64×64 boundary node anchoring the left edge
- * of a workflow graph.
+ * Start marker — a small terminal pill (not a full card) so the workflow's
+ * boundary reads as a terminal, not a step.
  */
 
 import { Handle, Position } from "@xyflow/react";
@@ -9,20 +9,17 @@ import { memo } from "react";
 
 function StartNodeComponent() {
   return (
-    <div className="relative flex w-[88px] flex-col items-center">
-      <div className="relative flex size-16 items-center justify-center rounded-md border border-success/40 bg-success/5 shadow-sm">
-        <Play className="size-5 fill-success text-success" aria-hidden="true" />
+    <div className="relative">
+      <div className="flex h-7 items-center gap-1 rounded-full border border-success/40 bg-success/10 pr-2 pl-1.5">
+        <Play className="size-2.5 fill-success text-success" aria-hidden="true" />
+        <span className="font-mono text-[9px] uppercase tracking-widest text-success">start</span>
       </div>
 
       <Handle
         type="source"
         position={Position.Right}
-        className="!h-1.5 !w-1.5 !border-success/40 !bg-success/60"
+        className="!h-1 !w-1 !min-w-0 !border-0 !bg-success/60"
       />
-
-      <div className="mt-1.5 flex w-full flex-col items-center text-center leading-tight">
-        <span className="font-mono text-[9px] uppercase tracking-widest text-success">start</span>
-      </div>
     </div>
   );
 }

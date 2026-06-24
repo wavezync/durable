@@ -1,9 +1,10 @@
 /**
- * Gateway node — used for `decision` and `branch_fork` step types. Same
- * 64×64 icon-first square as StepNode, but with the GitBranch glyph and
- * three right-side handles so the dagre layout can fan branch arms out
- * cleanly without overlapping connectors.
+ * Gateway node — `decision` / `branch_fork` step types. Same 200×56 horizontal
+ * card as StepNode, with the GitBranch glyph and a DECIDE/BRANCH eyebrow chip.
  *
+ * A single right-center source handle; smoothstep edges (offset 20) + dagre
+ * sub-lane separation splay the branches into clean parallel lanes. (Per-edge
+ * sourceHandle distribution is the escalation path for very wide fan-outs.)
  * Edge labels (clause names) are rendered by `AnimatedFlowEdge`.
  */
 
@@ -22,28 +23,43 @@ interface Tone {
   border: string;
   dotBg: string;
   iconColor: string;
+  iconBg: string;
 }
 
 function toneFor(status: string | undefined): Tone {
   switch (status) {
     case "running":
-      return { border: "border-primary/60", dotBg: "bg-primary", iconColor: "text-primary" };
+      return {
+        border: "border-primary/60",
+        dotBg: "bg-primary",
+        iconColor: "text-primary",
+        iconBg: "bg-primary/10",
+      };
     case "completed":
-      return { border: "border-success/40", dotBg: "bg-success", iconColor: "text-success" };
+      return {
+        border: "border-success/40",
+        dotBg: "bg-success",
+        iconColor: "text-success",
+        iconBg: "bg-success/10",
+      };
     case "failed":
       return {
         border: "border-destructive/60",
         dotBg: "bg-destructive",
         iconColor: "text-destructive",
+        iconBg: "bg-destructive/10",
       };
     default:
       return {
         border: "border-border",
         dotBg: "bg-muted-foreground/50",
         iconColor: "text-muted-foreground",
+        iconBg: "bg-muted/60",
       };
   }
 }
+
+const HANDLE_CLASS = "!h-1 !w-1 !min-w-0 !border-0 !bg-muted-foreground/40";
 
 function GatewayNodeComponent({ data, type }: NodeProps) {
   const node = data as unknown as GatewayNodeData;
@@ -51,59 +67,38 @@ function GatewayNodeComponent({ data, type }: NodeProps) {
   const eyebrow = type === "branch_fork" ? "branch" : "decide";
 
   return (
-    <div className="relative flex w-[88px] flex-col items-center">
-      <Handle
-        type="target"
-        position={Position.Left}
-        className="!h-1.5 !w-1.5 !border-border !bg-muted-foreground/50"
-      />
+    <div className="relative">
+      <Handle type="target" position={Position.Left} className={HANDLE_CLASS} />
 
       <div
         className={[
-          "relative flex size-16 items-center justify-center",
-          "rounded-md border bg-card shadow-sm",
+          "flex h-14 w-[200px] items-center gap-2.5 rounded-lg border bg-card px-2.5 shadow-sm",
           tone.border,
         ].join(" ")}
+        title={node.label}
       >
-        <GitBranch className={["size-6", tone.iconColor].join(" ")} aria-hidden="true" />
-        <span
+        <div
           className={[
-            "pointer-events-none absolute top-1.5 right-1.5 size-1.5 rounded-full",
-            tone.dotBg,
+            "flex size-7 shrink-0 items-center justify-center rounded-md",
+            tone.iconBg,
           ].join(" ")}
-        />
+        >
+          <GitBranch className={["size-4", tone.iconColor].join(" ")} aria-hidden="true" />
+        </div>
+
+        <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+          <span className="w-fit rounded-sm bg-primary/10 px-1 font-mono text-[9px] uppercase tracking-wider text-primary/80">
+            {eyebrow}
+          </span>
+          <span className="truncate text-[13px] font-medium leading-tight text-foreground">
+            {node.label}
+          </span>
+        </div>
+
+        <span className={["size-1.5 shrink-0 self-start rounded-full", tone.dotBg].join(" ")} />
       </div>
 
-      {/* Three source handles → distinct y offsets so dagre routes 1–3
-          branches without connectors stacking. */}
-      <Handle
-        id="top"
-        type="source"
-        position={Position.Right}
-        style={{ top: "30%" }}
-        className="!h-1.5 !w-1.5 !border-border !bg-muted-foreground/50"
-      />
-      <Handle
-        id="middle"
-        type="source"
-        position={Position.Right}
-        style={{ top: "50%" }}
-        className="!h-1.5 !w-1.5 !border-border !bg-muted-foreground/50"
-      />
-      <Handle
-        id="bottom"
-        type="source"
-        position={Position.Right}
-        style={{ top: "70%" }}
-        className="!h-1.5 !w-1.5 !border-border !bg-muted-foreground/50"
-      />
-
-      <div className="mt-1.5 flex w-full flex-col items-center text-center leading-tight">
-        <span className="font-mono text-[9px] uppercase tracking-widest text-muted-foreground">
-          {eyebrow}
-        </span>
-        <span className="line-clamp-2 text-[11px] font-medium text-foreground">{node.label}</span>
-      </div>
+      <Handle type="source" position={Position.Right} className={HANDLE_CLASS} />
     </div>
   );
 }
