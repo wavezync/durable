@@ -26,7 +26,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: dorny/paths-filter@v3
+      - uses: dorny/paths-filter@v4
         id: filter
         with:
           filters: |
@@ -72,14 +72,14 @@ jobs:
           otp-version: ${{ env.OTP_VERSION }}
 
       - name: Restore dependencies cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: durable/deps
           key: ${{ runner.os }}-durable-mix-${{ hashFiles('durable/mix.lock') }}
           restore-keys: ${{ runner.os }}-durable-mix-
 
       - name: Restore build cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: durable/_build
           key: ${{ runner.os }}-durable-build-${{ env.OTP_VERSION }}-${{ env.ELIXIR_VERSION }}-${{ hashFiles('durable/mix.lock') }}
@@ -120,26 +120,26 @@ jobs:
           otp-version: ${{ env.OTP_VERSION }}
 
       - name: Set up pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
         with:
           version: 9
 
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: "20"
           cache: pnpm
           cache-dependency-path: durable_dashboard/assets/pnpm-lock.yaml
 
       - name: Restore dependencies cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: durable_dashboard/deps
           key: ${{ runner.os }}-dashboard-mix-${{ hashFiles('durable_dashboard/mix.lock', 'durable/mix.lock') }}
           restore-keys: ${{ runner.os }}-dashboard-mix-
 
       - name: Restore build cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: durable_dashboard/_build
           key: ${{ runner.os }}-dashboard-build-${{ env.OTP_VERSION }}-${{ env.ELIXIR_VERSION }}-${{ hashFiles('durable_dashboard/mix.lock', 'durable/mix.lock') }}

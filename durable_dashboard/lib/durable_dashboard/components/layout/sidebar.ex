@@ -3,6 +3,17 @@ defmodule DurableDashboard.Components.Layout.Sidebar do
   Left navigation sidebar. Stateless function component — active item is
   derived from `@current_path` passed by the parent layout.
 
+  Nav is split into two intent groups — **Observe** (read the running system)
+  and **Operate** (act on it) — so the six destinations read as an information
+  architecture, not a flat list. The active item carries the "live rail" (a
+  short indigo bar on the left edge): the console's recurring "now / you are
+  here" signal, the same indigo that marks the running edge in the graph.
+
+  The brand lockup is the **pulse mark** — a muted oscilloscope baseline with
+  one indigo beat and a `led-dot` blip at its apex: the worker heartbeat made
+  literal ("the engine is alive and durable"), echoed by the `connected`
+  heartbeat in the footer. See `DESIGN.md` §6.
+
   ## Required assigns
 
   - `:base_path` — host app's mount path (e.g. `/dashboard`)
@@ -20,8 +31,7 @@ defmodule DurableDashboard.Components.Layout.Sidebar do
   attr :class, :string, default: nil
 
   def sidebar(assigns) do
-    items = nav_items(assigns.base_path)
-    assigns = assign(assigns, items: items)
+    assigns = assign(assigns, groups: nav_groups(assigns.base_path))
 
     ~H"""
     <aside class={[
@@ -29,14 +39,15 @@ defmodule DurableDashboard.Components.Layout.Sidebar do
       "border-r border-border bg-card/40 backdrop-blur-sm",
       @class
     ]}>
-      <.brand base_path={@base_path} />
+      <.brand />
 
-      <nav class="flex-1 overflow-y-auto thin-scroll px-2 py-2">
-        <ul class="space-y-0.5">
-          <li :for={item <- @items}>
-            <.nav_link item={item} current_path={@current_path} />
-          </li>
-        </ul>
+      <nav class="flex-1 overflow-y-auto thin-scroll px-2.5 py-3 space-y-5">
+        <div :for={group <- @groups} class="space-y-0.5">
+          <p class="px-2.5 pb-1.5 font-mono text-[9px] uppercase tracking-[0.18em] text-muted-foreground/55">
+            {group.label}
+          </p>
+          <.nav_link :for={item <- group.items} item={item} current_path={@current_path} />
+        </div>
       </nav>
 
       <.footer />
@@ -44,13 +55,25 @@ defmodule DurableDashboard.Components.Layout.Sidebar do
     """
   end
 
-  defp nav_items(base) do
+  # Two intent groups. "Observe" reads the system; "Operate" acts on it.
+  defp nav_groups(base) do
     [
-      %{label: "Overview", href: P.overview(base), icon: "home", match: :exact},
-      %{label: "Workflows", href: P.workflows(base), icon: "queue", match: :prefix},
-      %{label: "Inputs", href: P.inputs(base), icon: "inbox", match: :prefix},
-      %{label: "Schedules", href: P.schedules(base), icon: "calendar", match: :prefix},
-      %{label: "Settings", href: P.settings(base), icon: "settings", match: :prefix}
+      %{
+        label: "Observe",
+        items: [
+          %{label: "Overview", href: P.overview(base), icon: "home", match: :exact},
+          %{label: "Workflows", href: P.workflows(base), icon: "queue", match: :prefix},
+          %{label: "Executions", href: P.executions(base), icon: "play", match: :prefix}
+        ]
+      },
+      %{
+        label: "Operate",
+        items: [
+          %{label: "Inputs", href: P.inputs(base), icon: "inbox", match: :prefix},
+          %{label: "Schedules", href: P.schedules(base), icon: "calendar", match: :prefix},
+          %{label: "Settings", href: P.settings(base), icon: "settings", match: :prefix}
+        ]
+      }
     ]
   end
 
@@ -59,13 +82,19 @@ defmodule DurableDashboard.Components.Layout.Sidebar do
 
   defp nav_link(assigns) do
     active? = active?(assigns.current_path, assigns.item)
-    assigns = assign(assigns, active?: active?)
+
+    icon_class =
+      if active?,
+        do: "size-4 shrink-0",
+        else: "size-4 shrink-0 text-muted-foreground/70 group-hover:text-accent-foreground"
+
+    assigns = assign(assigns, active?: active?, icon_class: icon_class)
 
     ~H"""
     <.link
       navigate={@item.href}
       class={[
-        "flex items-center gap-2.5 px-2.5 h-8 rounded-md",
+        "group relative flex items-center gap-2.5 px-2.5 h-8 rounded-md",
         "text-[13px] font-medium transition-colors",
         "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
         if @active? do
@@ -76,7 +105,13 @@ defmodule DurableDashboard.Components.Layout.Sidebar do
       ]}
       aria-current={@active? && "page"}
     >
-      <Core.icon name={@item.icon} class="size-4 shrink-0" />
+      <%!-- The live rail — the active channel. Same indigo as the running edge. --%>
+      <span
+        :if={@active?}
+        class="absolute left-0 top-1/2 h-4 w-0.5 -translate-y-1/2 rounded-full bg-primary"
+      >
+      </span>
+      <Core.icon name={@item.icon} class={@icon_class} />
       <span>{@item.label}</span>
     </.link>
     """
@@ -97,17 +132,36 @@ defmodule DurableDashboard.Components.Layout.Sidebar do
   defp default_root(""), do: "/"
   defp default_root(path), do: path
 
-  attr :base_path, :string, required: true
-
   defp brand(assigns) do
     ~H"""
-    <div class="h-14 px-4 flex items-center gap-2 border-b border-border">
-      <div class="size-6 rounded-md bg-primary/15 border border-primary/30 flex items-center justify-center">
-        <span class="size-1.5 rounded-full bg-primary led-dot"></span>
+    <div class="h-14 px-4 flex items-center gap-2.5 border-b border-border">
+      <%!-- Pulse mark: the worker heartbeat made literal. A muted oscilloscope
+            baseline carries one indigo beat; the led-dot riding its apex is the
+            live blip — the same "alive / durable" signal the footer's `connected`
+            heartbeat echoes. This is the app's one bespoke SVG (the brand
+            lockup); see DESIGN.md §6. --%>
+      <div class="relative h-5 w-9 shrink-0">
+        <svg
+          viewBox="0 0 36 20"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.75"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          class="h-full w-full"
+          aria-hidden="true"
+        >
+          <path d="M1 10 H12 M23 10 H35" class="text-muted-foreground/40" />
+          <path d="M12 10 L16 3 L20 17 L23 10" class="text-primary" />
+        </svg>
+        <span class="absolute left-[13px] top-0 size-1.5 rounded-full bg-primary text-primary led-dot">
+        </span>
       </div>
-      <div class="flex flex-col leading-none">
-        <span class="text-[13px] font-semibold tracking-tight text-foreground">Durable</span>
-        <span class="text-[10px] text-muted-foreground tracking-wider uppercase">Console</span>
+      <div class="flex flex-col leading-none gap-1">
+        <span class="text-sm font-semibold tracking-tight text-foreground">Durable</span>
+        <span class="font-mono text-[10px] lowercase tracking-[0.12em] text-muted-foreground/70">
+          console
+        </span>
       </div>
     </div>
     """
@@ -115,9 +169,9 @@ defmodule DurableDashboard.Components.Layout.Sidebar do
 
   defp footer(assigns) do
     ~H"""
-    <div class="border-t border-border px-3 h-10 flex items-center justify-between text-[11px] text-muted-foreground">
-      <span class="font-mono">durable</span>
-      <span class="flex items-center gap-1.5">
+    <div class="border-t border-border px-3.5 h-10 flex items-center justify-between text-[11px]">
+      <span class="font-mono text-muted-foreground/70">durable</span>
+      <span class="flex items-center gap-1.5 font-mono text-muted-foreground">
         <span class="size-1.5 rounded-full bg-success led-dot"></span>
         connected
       </span>

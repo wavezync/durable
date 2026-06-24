@@ -28,6 +28,7 @@ defmodule Durable.Queue.Poller do
     :node_id,
     :active_jobs,
     :worker_refs,
+    :job_tokens,
     :paused,
     :timer_ref
   ]
@@ -119,6 +120,7 @@ defmodule Durable.Queue.Poller do
       node_id: generate_node_id(),
       active_jobs: MapSet.new(),
       worker_refs: %{},
+      job_tokens: %{},
       paused: false,
       timer_ref: nil
     }
@@ -216,7 +218,8 @@ defmodule Durable.Queue.Poller do
         state = %{
           state
           | active_jobs: MapSet.delete(state.active_jobs, job_id),
-            worker_refs: Map.delete(state.worker_refs, ref)
+            worker_refs: Map.delete(state.worker_refs, ref),
+            job_tokens: Map.delete(state.job_tokens, job_id)
         }
 
         {:noreply, state}
@@ -272,7 +275,8 @@ defmodule Durable.Queue.Poller do
         %{
           state
           | active_jobs: MapSet.put(state.active_jobs, job.id),
-            worker_refs: Map.put(state.worker_refs, ref, job.id)
+            worker_refs: Map.put(state.worker_refs, ref, job.id),
+            job_tokens: Map.put(state.job_tokens, job.id, job[:lock_token])
         }
 
       {:error, reason} ->
@@ -283,18 +287,24 @@ defmodule Durable.Queue.Poller do
 
   defp handle_job_completion(state, job_id, result) do
     adapter = Adapter.default_adapter()
+    token = Map.get(state.job_tokens, job_id)
 
     case result do
       :ok ->
-        adapter.ack(state.config, job_id)
+        adapter.ack(state.config, job_id, token)
 
       :waiting ->
         # Job is waiting for sleep/event/input - don't ack, leave as-is
         # The executor already updated the status to :waiting
         :ok
 
+      :fenced ->
+        # The worker detected it was fenced out and aborted. The row now
+        # belongs to its new owner — don't ack/nack it, just clean up locally.
+        :ok
+
       {:error, reason} ->
-        adapter.nack(state.config, job_id, reason)
+        adapter.nack(state.config, job_id, reason, token)
     end
 
     # Find and remove the monitor ref for this job
@@ -309,7 +319,12 @@ defmodule Durable.Queue.Poller do
 
     if ref, do: Process.demonitor(ref, [:flush])
 
-    %{state | active_jobs: MapSet.delete(state.active_jobs, job_id), worker_refs: worker_refs}
+    %{
+      state
+      | active_jobs: MapSet.delete(state.active_jobs, job_id),
+        worker_refs: worker_refs,
+        job_tokens: Map.delete(state.job_tokens, job_id)
+    }
   end
 
   defp schedule_poll(state, delay) do

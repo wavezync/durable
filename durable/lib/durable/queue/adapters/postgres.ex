@@ -35,9 +35,9 @@ defmodule Durable.Queue.Adapters.Postgres do
       FOR UPDATE SKIP LOCKED
     )
     UPDATE #{prefix}.workflow_executions
-    SET locked_by = $3, locked_at = NOW(), status = 'running'
+    SET locked_by = $3, locked_at = NOW(), status = 'running', lock_token = gen_random_uuid()
     WHERE id IN (SELECT id FROM claimable)
-    RETURNING id, workflow_module, workflow_name, queue, priority, input, context, scheduled_at, current_step;
+    RETURNING id, workflow_module, workflow_name, queue, priority, input, context, scheduled_at, current_step, lock_token;
     """
 
     case Repo.query(config, sql, [queue, limit, node_id]) do
@@ -54,7 +54,15 @@ defmodule Durable.Queue.Adapters.Postgres do
 
   @impl true
   def ack(%Config{} = config, job_id) when is_binary(job_id) do
-    ack_with_retry(config, job_id, _attempt = 1, _max_attempts = 3)
+    ack_with_retry(config, job_id, _attempt = 1, _max_attempts = 3, nil)
+  end
+
+  # Fencing-aware ack. When the caller supplies the `lock_token` it claimed
+  # with, an ack from a worker whose claim was already superseded (stale
+  # recovery + reclaim by another worker) is a no-op instead of stomping the
+  # new owner's lock.
+  def ack(%Config{} = config, job_id, lock_token) when is_binary(job_id) do
+    ack_with_retry(config, job_id, 1, 3, lock_token)
   end
 
   # Retry the ack on transient failures (DB blip, connection lost). If we
@@ -62,82 +70,123 @@ defmodule Durable.Queue.Adapters.Postgres do
   # released it 5 minutes later — at which point it would silently re-execute
   # because there's no idempotency key (Bug M-5). The retry buys us time;
   # the telemetry surfaces persistent failures so operators can intervene.
-  defp ack_with_retry(%Config{} = config, job_id, attempt, max_attempts) do
+  defp ack_with_retry(%Config{} = config, job_id, attempt, max_attempts, lock_token) do
     case Repo.get(config, WorkflowExecution, job_id) do
       nil ->
         {:error, :not_found}
 
       execution ->
-        case execution
-             |> WorkflowExecution.unlock_changeset()
-             |> Repo.update(config) do
-          {:ok, _} ->
-            :ok
+        ack_loaded(config, execution, job_id, attempt, max_attempts, lock_token)
+    end
+  end
 
-          {:error, _reason} when attempt < max_attempts ->
-            backoff_ms = :rand.uniform(50) * attempt
-            Process.sleep(backoff_ms)
-            ack_with_retry(config, job_id, attempt + 1, max_attempts)
+  defp ack_loaded(config, execution, job_id, attempt, max_attempts, lock_token) do
+    if fenced?(execution, lock_token) do
+      # Another worker owns this row now (stale recovery + reclaim); our ack
+      # would stomp their claim — no-op.
+      :ok
+    else
+      case execution
+           |> WorkflowExecution.unlock_changeset()
+           |> Repo.update(config) do
+        {:ok, _} ->
+          :ok
 
-          {:error, reason} ->
-            :telemetry.execute(
-              [:durable, :queue, :ack_failed],
-              %{count: 1, attempts: attempt},
-              %{job_id: job_id, reason: reason, durable: config.name}
-            )
+        {:error, _reason} when attempt < max_attempts ->
+          backoff_ms = :rand.uniform(50) * attempt
+          Process.sleep(backoff_ms)
+          ack_with_retry(config, job_id, attempt + 1, max_attempts, lock_token)
 
-            Logger.error(
-              "[Durable] ack failed after #{attempt} attempts for job #{job_id}: " <>
-                inspect(reason)
-            )
+        {:error, reason} ->
+          :telemetry.execute(
+            [:durable, :queue, :ack_failed],
+            %{count: 1, attempts: attempt},
+            %{job_id: job_id, reason: reason, durable: config.name}
+          )
 
-            {:error, reason}
-        end
+          Logger.error(
+            "[Durable] ack failed after #{attempt} attempts for job #{job_id}: " <>
+              inspect(reason)
+          )
+
+          {:error, reason}
+      end
     end
   end
 
   @impl true
   def nack(%Config{} = config, job_id, reason) when is_binary(job_id) do
+    do_nack(config, job_id, reason, nil)
+  end
+
+  def nack(%Config{} = config, job_id, reason, lock_token) when is_binary(job_id) do
+    do_nack(config, job_id, reason, lock_token)
+  end
+
+  defp do_nack(config, job_id, reason, lock_token) do
     case Repo.get(config, WorkflowExecution, job_id) do
       nil ->
         {:error, :not_found}
 
       execution ->
-        error = normalize_error(reason)
+        if fenced?(execution, lock_token) do
+          :ok
+        else
+          error = normalize_error(reason)
 
-        execution
-        |> Ecto.Changeset.change(
-          status: :failed,
-          error: error,
-          completed_at: DateTime.utc_now(),
-          locked_by: nil,
-          locked_at: nil
-        )
-        |> Repo.update(config)
+          execution
+          |> Ecto.Changeset.change(
+            status: :failed,
+            error: error,
+            completed_at: DateTime.utc_now(),
+            locked_by: nil,
+            locked_at: nil,
+            lock_token: nil
+          )
+          |> Repo.update(config)
 
-        :ok
+          :ok
+        end
     end
   end
 
   @impl true
   def reschedule(%Config{} = config, job_id, run_at) when is_binary(job_id) do
+    do_reschedule(config, job_id, run_at, nil)
+  end
+
+  def reschedule(%Config{} = config, job_id, run_at, lock_token) when is_binary(job_id) do
+    do_reschedule(config, job_id, run_at, lock_token)
+  end
+
+  defp do_reschedule(config, job_id, run_at, lock_token) do
     case Repo.get(config, WorkflowExecution, job_id) do
       nil ->
         {:error, :not_found}
 
       execution ->
-        execution
-        |> Ecto.Changeset.change(
-          status: :pending,
-          scheduled_at: run_at,
-          locked_by: nil,
-          locked_at: nil
-        )
-        |> Repo.update(config)
+        if fenced?(execution, lock_token) do
+          :ok
+        else
+          execution
+          |> Ecto.Changeset.change(
+            status: :pending,
+            scheduled_at: run_at,
+            locked_by: nil,
+            locked_at: nil,
+            lock_token: nil
+          )
+          |> Repo.update(config)
 
-        :ok
+          :ok
+        end
     end
   end
+
+  # A fenced row is one whose current lock_token differs from the token the
+  # caller claimed with. `nil` token = legacy/un-fenced caller → never fenced.
+  defp fenced?(_execution, nil), do: false
+  defp fenced?(%WorkflowExecution{lock_token: current}, token), do: current != token
 
   @impl true
   def recover_stale_locks(%Config{} = config, timeout_seconds) when timeout_seconds > 0 do
@@ -157,7 +206,10 @@ defmodule Durable.Queue.Adapters.Postgres do
         set: [
           status: :pending,
           locked_by: nil,
-          locked_at: nil
+          locked_at: nil,
+          # Clear the fencing token on release so the next claim stamps a fresh
+          # one and the fenced-out worker's token can never match again.
+          lock_token: nil
         ]
       )
 
@@ -184,6 +236,11 @@ defmodule Durable.Queue.Adapters.Postgres do
         where: w.status == :waiting,
         where: w.updated_at < ^cutoff,
         where: is_nil(w.locked_by) or w.locked_at < ^cutoff,
+        # Sleeping workflows (`sleep/1` / `schedule_at/1`) carry a non-nil
+        # scheduled_at and are revived by the SleepWaker, not the zombie
+        # sweeper. Excluding them here prevents a multi-minute sleep from
+        # being misclassified as a crash and marked :failed.
+        where: is_nil(w.scheduled_at),
         where:
           not exists(
             from(p in PendingInput,
@@ -253,21 +310,117 @@ defmodule Durable.Queue.Adapters.Postgres do
   end
 
   @impl true
+  def wake_sleeping_workflows(%Config{} = config, batch_size)
+      when is_integer(batch_size) and batch_size > 0 do
+    prefix = config.prefix
+
+    # Atomically wake any rows whose sleep has elapsed:
+    #
+    #   1. Flip status :waiting -> :pending so the queue poller can claim them.
+    #   2. Clear the lock (set NULL) so a stale `locked_by` from the
+    #      worker that originally suspended them doesn't keep them invisible
+    #      to fetch_jobs after the wake.
+    #   3. Merge `__sleep_satisfied__: <current_step>` into context so the
+    #      step body's next sleep/schedule_at call returns immediately
+    #      instead of re-throwing.
+    #
+    # FOR UPDATE SKIP LOCKED keeps multiple SleepWakers (across nodes)
+    # from contending on the same rows; if a competitor is mid-update,
+    # we just skip and pick the row up next tick.
+    # `clock_timestamp()` rather than `NOW()` so the comparison reflects
+    # the *real* wall clock, not the transaction-start snapshot. This
+    # matters for two cases: (1) the SQL Sandbox-based test suite, where
+    # one transaction wraps the whole test and NOW() would be from
+    # before the row's scheduled_at was set; and (2) any future caller
+    # that wraps the sweep in a longer-running transaction. In normal
+    # production calls the two are essentially identical.
+    # `current_step IS NOT NULL` is a safety guard: the marker we stamp is
+    # `__sleep_satisfied__ => current_step`, and `Wait.sleep_satisfied?/0`
+    # only matches when that value equals the running step's name. A row with
+    # a NULL current_step would get an empty-string marker that never matches,
+    # so the woken step would re-throw its sleep and re-suspend every tick — a
+    # busy churn. A legitimately sleeping row always has current_step set
+    # (the executor stamps it before each step), so excluding NULL ones costs
+    # nothing and removes the churn failure mode.
+    #
+    # `scheduled_at = NULL` on wake keeps the invariant that scheduled_at is
+    # non-null ONLY while a row is genuinely sleeping — so a later
+    # event/input/wait-group suspend (which sets :waiting) can never be
+    # mistaken for an elapsed sleep and prematurely woken.
+    sql = """
+    WITH wakeable AS (
+      SELECT id FROM #{prefix}.workflow_executions
+      WHERE status = 'waiting'
+        AND scheduled_at IS NOT NULL
+        AND scheduled_at <= clock_timestamp()
+        AND current_step IS NOT NULL
+      ORDER BY scheduled_at ASC
+      LIMIT $1
+      FOR UPDATE SKIP LOCKED
+    )
+    UPDATE #{prefix}.workflow_executions w
+    SET status = 'pending',
+        scheduled_at = NULL,
+        locked_by = NULL,
+        locked_at = NULL,
+        context = jsonb_set(
+          COALESCE(w.context, '{}'::jsonb),
+          '{__sleep_satisfied__}',
+          to_jsonb(w.current_step),
+          true
+        ),
+        updated_at = clock_timestamp()
+    WHERE w.id IN (SELECT id FROM wakeable);
+    """
+
+    case Repo.query(config, sql, [batch_size]) do
+      {:ok, %{num_rows: count}} -> {:ok, count}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @impl true
   def heartbeat(%Config{} = config, job_id) when is_binary(job_id) do
+    do_heartbeat(config, job_id, nil)
+  end
+
+  # Fencing-aware heartbeat. When the worker passes the token it claimed with,
+  # a refresh that touches 0 rows is classified: `:fenced` means another worker
+  # now owns this row (running with a different token) and the caller should
+  # abort to avoid a double-execution; `:not_found` is a benign miss (the row
+  # completed/suspended/cancelled, or was released but not yet reclaimed).
+  def heartbeat(%Config{} = config, job_id, lock_token) when is_binary(job_id) do
+    do_heartbeat(config, job_id, lock_token)
+  end
+
+  defp do_heartbeat(config, job_id, lock_token) do
     now = DateTime.utc_now()
 
-    query =
+    base =
       from(w in WorkflowExecution,
         where: w.id == ^job_id,
         where: w.status == :running
       )
 
-    {count, _} = Repo.update_all(config, query, set: [locked_at: now])
+    guarded =
+      if lock_token, do: from(w in base, where: w.lock_token == ^lock_token), else: base
 
-    if count == 1 do
-      :ok
-    else
-      {:error, :not_found}
+    {count, _} = Repo.update_all(config, guarded, set: [locked_at: now])
+
+    cond do
+      count == 1 -> :ok
+      is_nil(lock_token) -> {:error, :not_found}
+      true -> classify_lost_lock(config, job_id, lock_token)
+    end
+  end
+
+  defp classify_lost_lock(config, job_id, lock_token) do
+    case Repo.get(config, WorkflowExecution, job_id) do
+      %WorkflowExecution{status: :running, lock_token: current} when current != lock_token ->
+        {:error, :fenced}
+
+      _ ->
+        {:error, :not_found}
     end
   end
 
@@ -330,7 +483,8 @@ defmodule Durable.Queue.Adapters.Postgres do
       input: decode_json(job.input),
       context: decode_json(job.context),
       scheduled_at: job.scheduled_at,
-      current_step: job.current_step
+      current_step: job.current_step,
+      lock_token: decode_uuid(job.lock_token)
     }
   end
 

@@ -20,7 +20,7 @@ defmodule Durable.Queue.Worker do
   alias Durable.Config
   alias Durable.Queue.Adapter
 
-  defstruct [:job, :config, :poller_pid, :started_at, :task_ref, :heartbeat_timer]
+  defstruct [:job, :config, :poller_pid, :started_at, :task_ref, :task_pid, :heartbeat_timer]
 
   @type t :: %__MODULE__{
           job: map(),
@@ -28,6 +28,7 @@ defmodule Durable.Queue.Worker do
           poller_pid: pid(),
           started_at: integer(),
           task_ref: reference() | nil,
+          task_pid: pid() | nil,
           heartbeat_timer: reference() | nil
         }
 
@@ -73,28 +74,30 @@ defmodule Durable.Queue.Worker do
     # Start heartbeat timer
     timer = schedule_heartbeat(state.config.heartbeat_interval)
 
-    {:noreply, %{state | task_ref: task.ref, heartbeat_timer: timer}}
+    {:noreply, %{state | task_ref: task.ref, task_pid: task.pid, heartbeat_timer: timer}}
   end
 
   @impl true
   def handle_info(:heartbeat, state) do
-    # Send heartbeat to update locked_at
+    # Refresh the lock, passing the per-claim fencing token so a heartbeat can
+    # tell whether we've been fenced out by stale-lock recovery + reclaim.
     adapter = Adapter.default_adapter()
 
-    case adapter.heartbeat(state.config, state.job.id) do
+    case adapter.heartbeat(state.config, state.job.id, state.job[:lock_token]) do
+      {:error, :fenced} ->
+        self_fence(state)
+
       :ok ->
-        :ok
+        emit_heartbeat_telemetry(state.job)
+        timer = schedule_heartbeat(state.config.heartbeat_interval)
+        {:noreply, %{state | heartbeat_timer: timer}}
 
       {:error, reason} ->
         Logger.warning("Heartbeat failed for job #{state.job.id}: #{inspect(reason)}")
+        emit_heartbeat_telemetry(state.job)
+        timer = schedule_heartbeat(state.config.heartbeat_interval)
+        {:noreply, %{state | heartbeat_timer: timer}}
     end
-
-    # Emit telemetry
-    emit_heartbeat_telemetry(state.job)
-
-    # Schedule next heartbeat
-    timer = schedule_heartbeat(state.config.heartbeat_interval)
-    {:noreply, %{state | heartbeat_timer: timer}}
   end
 
   # Task completed successfully
@@ -168,6 +171,33 @@ defmodule Durable.Queue.Worker do
          type: "#{kind}",
          message: inspect(reason)
        }}
+  end
+
+  # We've been fenced: stale-lock recovery released our claim and another worker
+  # re-claimed it. Abort the in-flight Task so we don't run the workflow to
+  # completion a second time (and stomp the new owner). Report `:fenced` to the
+  # poller so it cleans us up WITHOUT acking/nacking the row.
+  defp self_fence(state) do
+    Logger.error(
+      "[Durable] worker for job #{state.job.id} was fenced (lock reclaimed by another " <>
+        "worker after stale-lock recovery) — aborting to avoid a duplicate execution"
+    )
+
+    cancel_heartbeat(state.heartbeat_timer)
+    if state.task_ref, do: Process.demonitor(state.task_ref, [:flush])
+    if state.task_pid && Process.alive?(state.task_pid), do: Process.exit(state.task_pid, :kill)
+
+    duration_ms = System.monotonic_time(:millisecond) - state.started_at
+
+    :telemetry.execute(
+      [:durable, :queue, :worker_fenced],
+      %{count: 1, duration_ms: duration_ms},
+      %{job_id: state.job.id, queue: state.job.queue}
+    )
+
+    send(state.poller_pid, {:job_complete, state.job.id, :fenced, duration_ms})
+
+    {:stop, :normal, %{state | heartbeat_timer: nil}}
   end
 
   defp schedule_heartbeat(interval) do

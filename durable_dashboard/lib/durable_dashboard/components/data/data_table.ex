@@ -323,11 +323,14 @@ defmodule DurableDashboard.Components.Data.DataTable do
         <div class="overflow-x-auto thin-scroll">
           <table class="w-full text-[13px]">
             <thead>
-              <tr class="border-b border-border text-[11px] uppercase tracking-wider text-muted-foreground">
+              <tr class="border-b border-border">
                 <th
                   :for={col <- @columns}
                   class={[
-                    "text-left font-medium px-4 h-10 whitespace-nowrap",
+                    # Column headers share the canonical <.label> idiom (mono,
+                    # uppercase, tracking-[0.14em], muted) — see DESIGN.md §6.
+                    "px-4 h-10 text-left whitespace-nowrap align-middle",
+                    "font-mono text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground/70",
                     col[:class],
                     col[:sortable?] && "cursor-pointer select-none hover:text-foreground"
                   ]}

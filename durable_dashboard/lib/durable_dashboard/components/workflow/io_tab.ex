@@ -48,11 +48,7 @@ defmodule DurableDashboard.Components.Workflow.IoTab do
         {@empty}
       </div>
     <% else %>
-      <pre class={[
-        "text-xs font-mono leading-relaxed",
-        "px-4 py-3 max-h-[600px] overflow-auto thin-scroll",
-        "bg-muted/20 text-foreground/90 whitespace-pre"
-      ]}><code>{pretty(@payload)}</code></pre>
+      <Core.json value={@payload} bare class="max-h-[600px] bg-muted/20 px-4 py-3" />
     <% end %>
     """
   end
@@ -62,12 +58,6 @@ defmodule DurableDashboard.Components.Workflow.IoTab do
   defp empty?([]), do: true
   defp empty?(""), do: true
   defp empty?(_), do: false
-
-  defp pretty(payload) do
-    Jason.encode!(payload, pretty: true)
-  rescue
-    _ -> inspect(payload, pretty: true, limit: :infinity)
-  end
 
   defp byte_size_kb(nil), do: "—"
 

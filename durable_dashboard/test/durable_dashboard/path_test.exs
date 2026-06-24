@@ -16,16 +16,33 @@ defmodule DurableDashboard.PathTest do
       assert P.overview(@base) == "/dashboard"
     end
 
-    test "workflows list" do
+    test "workflows list (definitions)" do
       assert P.workflows(@base) == "/dashboard/workflows"
     end
 
-    test "workflow detail" do
-      assert P.workflow(@base, "abc-123") == "/dashboard/workflows/abc-123"
+    test "workflow_executions list (executions for one workflow)" do
+      assert P.workflow_executions(@base, "drip_email_campaign") ==
+               "/dashboard/workflows/drip_email_campaign"
     end
 
-    test "workflow tab" do
-      assert P.workflow_tab(@base, "abc-123", "logs") == "/dashboard/workflows/abc-123/logs"
+    test "executions list (all)" do
+      assert P.executions(@base) == "/dashboard/executions"
+    end
+
+    test "execution detail" do
+      assert P.execution(@base, "abc-123") == "/dashboard/executions/abc-123"
+    end
+
+    test "execution tab" do
+      assert P.execution_tab(@base, "abc-123", "logs") == "/dashboard/executions/abc-123/logs"
+    end
+
+    test "deprecated workflow/2 still returns the new execution path" do
+      assert P.workflow(@base, "abc-123") == "/dashboard/executions/abc-123"
+    end
+
+    test "deprecated workflow_tab/3 still returns the new execution path" do
+      assert P.workflow_tab(@base, "abc-123", "logs") == "/dashboard/executions/abc-123/logs"
     end
 
     test "inputs / schedules / settings" do
@@ -41,7 +58,8 @@ defmodule DurableDashboard.PathTest do
     test "preserves the prefix" do
       assert P.overview(@base) == "/admin/durable"
       assert P.workflows(@base) == "/admin/durable/workflows"
-      assert P.workflow_tab(@base, "x", "summary") == "/admin/durable/workflows/x/summary"
+      assert P.executions(@base) == "/admin/durable/executions"
+      assert P.execution_tab(@base, "x", "summary") == "/admin/durable/executions/x/summary"
     end
   end
 

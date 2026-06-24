@@ -91,7 +91,7 @@ defmodule PhoenixDemoWeb.HomeLive do
       title: "Drip Email Campaign",
       module: Workflows.DripEmailCampaignWorkflow,
       description:
-        "Welcome → schedule_at(+30s) → day-2 → sleep(30s) → day-7. The status flips :running ↔ :waiting visibly across the run.",
+        "Welcome → schedule_at(+30s) → followup #1 → sleep(1m) → followup #2 → sleep(2m) → followup #3. Status flips :running ↔ :waiting three times.",
       pills: ["sleep", "schedule_at", "multi-stage"],
       fields: [
         %{

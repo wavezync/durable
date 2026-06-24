@@ -36,8 +36,10 @@ defmodule DurableDashboard.Router do
   `:durable_dashboard_assets`) and two scopes:
 
   - `GET /dashboard` (Overview)
-  - `GET /dashboard/workflows` (list)
-  - `GET /dashboard/workflows/:id[/:tab]` (detail)
+  - `GET /dashboard/workflows` (list of workflow definitions)
+  - `GET /dashboard/workflows/:name` (executions for that workflow)
+  - `GET /dashboard/executions` (global executions list)
+  - `GET /dashboard/executions/:id[/:tab]` (single execution detail)
   - `GET /dashboard/inputs`
   - `GET /dashboard/schedules`
   - `GET /dashboard/settings`
@@ -115,8 +117,10 @@ defmodule DurableDashboard.Router do
           } do
           live "/", DurableDashboard.Live.OverviewLive, :index
           live "/workflows", DurableDashboard.Live.WorkflowsLive, :index
-          live "/workflows/:id", DurableDashboard.Live.WorkflowLive, :show
-          live "/workflows/:id/:tab", DurableDashboard.Live.WorkflowLive, :show
+          live "/workflows/:name", DurableDashboard.Live.ExecutionsLive, :show
+          live "/executions", DurableDashboard.Live.ExecutionsLive, :index
+          live "/executions/:id", DurableDashboard.Live.WorkflowLive, :show
+          live "/executions/:id/:tab", DurableDashboard.Live.WorkflowLive, :show
           live "/inputs", DurableDashboard.Live.InputsLive, :index
           live "/schedules", DurableDashboard.Live.SchedulesLive, :index
           live "/settings", DurableDashboard.Live.SettingsLive, :index

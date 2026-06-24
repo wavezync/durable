@@ -5,6 +5,7 @@ defmodule DurableDashboard.Layouts do
 
   import Phoenix.Controller, only: [get_csrf_token: 0]
 
+  alias DurableDashboard.Components.Command.CommandPalette
   alias DurableDashboard.Components.Layout.Sidebar
   alias DurableDashboard.Components.Layout.Topbar
 
@@ -98,6 +99,7 @@ defmodule DurableDashboard.Layouts do
   attr :current_path, :string, required: true
   attr :breadcrumbs, :list, default: []
   attr :base_path, :string, required: true
+  attr :durable, :any, default: nil
   slot :inner_block, required: true
 
   def app(assigns) do
@@ -120,6 +122,13 @@ defmodule DurableDashboard.Layouts do
           {render_slot(@inner_block)}
         </main>
       </div>
+
+      <.live_component
+        module={CommandPalette}
+        id="command-palette"
+        base_path={@base_path}
+        durable={@durable}
+      />
     </div>
     """
   end

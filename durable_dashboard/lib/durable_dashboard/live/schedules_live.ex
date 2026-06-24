@@ -85,6 +85,7 @@ defmodule DurableDashboard.Live.SchedulesLive do
       base_path={@base_path}
       current_path={@current_path}
       breadcrumbs={@breadcrumbs}
+      durable={@durable}
     >
       <Core.heading level={1} subtitle="Cron-driven workflows registered on this instance">
         Schedules

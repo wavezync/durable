@@ -115,6 +115,7 @@ defmodule Durable.Supervisor do
           [
             {Durable.Queue.Manager, config: config},
             {Durable.Wait.TimeoutWorker, config: config},
+            {Durable.Wait.SleepWaker, config: config},
             {Durable.Scheduler,
              config: config,
              interval: config.scheduler_interval,

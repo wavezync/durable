@@ -544,13 +544,14 @@ The macro adds the dashboard's pipelines, asset routes, and live routes
 in-place — no `forward`, no extra endpoint. You get:
 
 - Overview with live status counts and recent executions
-- Workflow list with filters, search, and pagination
-- Workflow detail with summary, ReactFlow graph, topology, logs, I/O,
-  and child execution history
+- Workflow catalog + an Executions list with a faceted filter bar (workflow,
+  status, time range, execution id) driven by shareable URL params
+- Execution detail with Summary, ReactFlow graph, Timeline, Logs, I/O, and
+  History trace (plus a Family tab for parent/child runs)
 - Pending inputs queue
 - Schedules list with toggle / trigger actions
 - Settings view
-- ⌘K command palette
+- ⌘K command palette — jump to any page, workflow, or recent run
 
 See [`durable_dashboard/README.md`](durable_dashboard/) for the full
 option list and design notes.

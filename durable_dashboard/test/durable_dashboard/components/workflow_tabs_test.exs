@@ -90,7 +90,7 @@ defmodule DurableDashboard.Components.WorkflowTabsTest do
         <Tabs.tabs base_path="/dashboard" workflow_id="abc-123" active={:summary} />
         """)
 
-      for label <- ["Summary", "Flow", "Logs", "I/O", "History"] do
+      for label <- ["Summary", "Flow", "Timeline", "Logs", "I/O", "History"] do
         assert html =~ label
       end
 
@@ -100,7 +100,7 @@ defmodule DurableDashboard.Components.WorkflowTabsTest do
       assert html =~ "border-primary"
     end
 
-    test "every link points at <base>/workflows/:id/:tab" do
+    test "every link points at <base>/executions/:id/:tab" do
       assigns = %{}
 
       html =
@@ -108,9 +108,9 @@ defmodule DurableDashboard.Components.WorkflowTabsTest do
         <Tabs.tabs base_path="/dashboard" workflow_id="abc-123" active={:summary} />
         """)
 
-      assert html =~ "/dashboard/workflows/abc-123/summary"
-      assert html =~ "/dashboard/workflows/abc-123/flow"
-      assert html =~ "/dashboard/workflows/abc-123/logs"
+      assert html =~ "/dashboard/executions/abc-123/summary"
+      assert html =~ "/dashboard/executions/abc-123/flow"
+      assert html =~ "/dashboard/executions/abc-123/logs"
     end
   end
 
@@ -234,7 +234,7 @@ defmodule DurableDashboard.Components.WorkflowTabsTest do
       assert html =~ "running"
     end
 
-    test "marks attempt > 1 with a warning indicator" do
+    test "marks a retry attempt with a warning badge" do
       assigns = %{steps: sample_steps()}
 
       html =
@@ -242,10 +242,10 @@ defmodule DurableDashboard.Components.WorkflowTabsTest do
         <HistoryTab.history_tab steps={@steps} />
         """)
 
-      assert html =~ "attempt 2"
+      assert html =~ "retry 2"
     end
 
-    test "expandable details block when input/output/error present" do
+    test "each event expands to the shared step-detail panel (timing, I/O)" do
       assigns = %{steps: sample_steps()}
 
       html =
@@ -253,9 +253,27 @@ defmodule DurableDashboard.Components.WorkflowTabsTest do
         <HistoryTab.history_tab steps={@steps} />
         """)
 
+      # Each row is a native disclosure with the shared StepDetail panel.
       assert html =~ "<details"
-      assert html =~ "Input"
-      assert html =~ "Output"
+      assert html =~ ">started</span>"
+      assert html =~ ">input</span>"
+      assert html =~ ">output</span>"
+      # I/O is syntax-highlighted JSON, not a raw dump.
+      assert html =~ ~s(<span class="text-info">true</span>)
+    end
+
+    test "threads events on a status-node spine (uniform nodes, not pills)" do
+      assigns = %{steps: sample_steps()}
+
+      html =
+        rendered_to_string(~H"""
+        <HistoryTab.history_tab steps={@steps} />
+        """)
+
+      # The completed step's node is success-toned; the spine ring masks the
+      # connector. No status_pill (the ragged-width badge) in the trace.
+      assert html =~ "bg-success"
+      assert html =~ "ring-card"
     end
   end
 end

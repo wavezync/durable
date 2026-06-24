@@ -45,7 +45,8 @@ A sample Phoenix LiveView application demonstrating the [Durable](https://github
 
 5. **Open in browser**:
 
-   Navigate to [http://localhost:4000](http://localhost:4000)
+   Navigate to [http://localhost:4005](http://localhost:4005) (the dashboard is
+   mounted at [http://localhost:4005/dashboard](http://localhost:4005/dashboard))
 
 ### Stopping the Database
 

@@ -16,6 +16,8 @@ defmodule Durable.Executor.StepRunner do
   alias Durable.Repo
   alias Durable.Storage.Schemas.StepExecution
 
+  import Ecto.Query, only: [from: 2]
+
   require Logger
 
   @type result ::
@@ -44,7 +46,36 @@ defmodule Durable.Executor.StepRunner do
   @spec execute(Step.t(), map(), String.t(), Config.t()) :: result()
   def execute(%Step{} = step, data, workflow_id, %Config{} = config) do
     max_attempts = get_max_attempts(step)
-    execute_with_retry(step, data, workflow_id, 1, max_attempts, config)
+    start_attempt = next_attempt(config, workflow_id, step)
+    execute_with_retry(step, data, workflow_id, start_attempt, max_attempts, config)
+  end
+
+  # Seed the retry counter from durable state instead of always starting at 1.
+  #
+  # The retry budget must survive a worker crash / stale-lock recovery: if a
+  # step is on attempt 3 of 5 when the node dies, the resumed run must continue
+  # at attempt 4 — not restart at 1 and re-run the side effect up to 5 more
+  # times (the previous behaviour silently exceeded max_attempts globally and
+  # contradicted the "durable/resumable" contract).
+  #
+  # We count `:failed` step_executions for (workflow_id, step_name), NOT the max
+  # attempt number: a `:waiting` row is a *suspension* (sleep/event), not a
+  # failed attempt, so it must not advance the retry counter. Each genuine retry
+  # writes exactly one `:failed` row, so `failed_count + 1` is the next attempt.
+  defp next_attempt(config, workflow_id, %Step{name: name}) do
+    step_name = Atom.to_string(name)
+
+    failed_count =
+      Repo.one(
+        config,
+        from(s in StepExecution,
+          where:
+            s.workflow_id == ^workflow_id and s.step_name == ^step_name and s.status == :failed,
+          select: count(s.id)
+        )
+      )
+
+    (failed_count || 0) + 1
   end
 
   defp execute_with_retry(step, data, workflow_id, attempt, max_attempts, config) do
@@ -154,7 +185,11 @@ defmodule Durable.Executor.StepRunner do
               :call_workflow
             ] do
     %{step_exec: step_exec, config: config} = ctx
-    {:ok, _} = update_step_execution(config, step_exec, :waiting)
+    # A call_workflow throw carries the spawned child id — record it on this
+    # step's row so step→child is queryable (the parent context map is the
+    # fallback, not the source of truth).
+    child_id = if wait_type == :call_workflow, do: opts[:child_id], else: nil
+    {:ok, _} = update_step_execution(config, step_exec, :waiting, child_id)
     {wait_type, opts}
   end
 
@@ -263,9 +298,12 @@ defmodule Durable.Executor.StepRunner do
     end
   end
 
-  defp update_step_execution(config, step_exec, :waiting) do
+  defp update_step_execution(config, step_exec, :waiting, child_id) do
+    changes =
+      if child_id, do: [status: :waiting, child_workflow_id: child_id], else: [status: :waiting]
+
     case step_exec
-         |> Ecto.Changeset.change(status: :waiting)
+         |> Ecto.Changeset.change(changes)
          |> Repo.update(config) do
       {:ok, updated} = ok ->
         DurablePubSub.broadcast_step(config, :step_waiting, step_event(updated))

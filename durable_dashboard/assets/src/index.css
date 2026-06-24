@@ -22,27 +22,29 @@
     "Inter Variable", "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   --font-mono: "JetBrains Mono Variable", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 
-  /* Light theme — operators on bright monitors */
-  --background: oklch(1 0 0);
-  --foreground: oklch(0.18 0 0);
+  /* Light theme — operators on bright monitors. Off-white canvas (a hair of
+     violet) so pure-white cards lift on top of it; same richer indigo accent
+     as dark for a consistent brand read. */
+  --background: oklch(0.995 0.002 285);
+  --foreground: oklch(0.2 0.01 285);
 
-  --card: oklch(0.985 0 0);
-  --card-foreground: oklch(0.18 0 0);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.2 0.01 285);
 
-  --popover: oklch(0.99 0 0);
-  --popover-foreground: oklch(0.18 0 0);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.2 0.01 285);
 
-  --primary: oklch(0.5 0.2 250);
+  --primary: oklch(0.52 0.21 274);
   --primary-foreground: oklch(0.99 0 0);
 
-  --secondary: oklch(0.96 0 0);
-  --secondary-foreground: oklch(0.22 0 0);
+  --secondary: oklch(0.965 0.003 285);
+  --secondary-foreground: oklch(0.24 0.01 285);
 
-  --muted: oklch(0.96 0 0);
-  --muted-foreground: oklch(0.5 0 0);
+  --muted: oklch(0.965 0.003 285);
+  --muted-foreground: oklch(0.5 0.01 285);
 
-  --accent: oklch(0.95 0 0);
-  --accent-foreground: oklch(0.22 0 0);
+  --accent: oklch(0.955 0.004 285);
+  --accent-foreground: oklch(0.24 0.01 285);
 
   --destructive: oklch(0.55 0.22 22);
   --destructive-foreground: oklch(0.99 0 0);
@@ -51,9 +53,9 @@
   --warning: oklch(0.65 0.18 75);
   --info: oklch(0.55 0.16 230);
 
-  --border: oklch(0.92 0 0);
-  --input: oklch(0.94 0 0);
-  --ring: oklch(0.5 0.2 250 / 0.4);
+  --border: oklch(0.915 0.004 285);
+  --input: oklch(0.94 0.004 285);
+  --ring: oklch(0.52 0.21 274 / 0.4);
 
   --chart-1: oklch(0.5 0.2 250);
   --chart-2: oklch(0.55 0.16 230);
@@ -72,27 +74,32 @@
 }
 
 .dark {
-  /* True neutral near-black — no warm hue. Reads as disciplined console. */
-  --background: oklch(0.145 0 0);
-  --foreground: oklch(0.98 0 0);
+  /* Dark surfaces with a whisper of violet (hue 285, very low chroma) so the
+     console reads warm + modern rather than flat-neutral. Surfaces step up in
+     lightness — background → card → popover — so cards visibly lift off the
+     canvas (the old 0.145→0.185 step was too subtle to read as elevation). */
+  --background: oklch(0.165 0.006 285);
+  --foreground: oklch(0.98 0.003 285);
 
-  --card: oklch(0.185 0 0);
-  --card-foreground: oklch(0.98 0 0);
+  --card: oklch(0.215 0.007 285);
+  --card-foreground: oklch(0.98 0.003 285);
 
-  --popover: oklch(0.205 0 0);
-  --popover-foreground: oklch(0.98 0 0);
+  --popover: oklch(0.245 0.008 285);
+  --popover-foreground: oklch(0.98 0.003 285);
 
-  --primary: oklch(0.72 0.16 250);
+  /* Richer indigo accent — more saturated + a hair more violet than the old
+     flat blue, the single brand hue Inngest-style consoles lean on. */
+  --primary: oklch(0.7 0.19 274);
   --primary-foreground: oklch(0.16 0 0);
 
-  --secondary: oklch(0.22 0 0);
-  --secondary-foreground: oklch(0.98 0 0);
+  --secondary: oklch(0.245 0.006 285);
+  --secondary-foreground: oklch(0.98 0.003 285);
 
-  --muted: oklch(0.21 0 0);
-  --muted-foreground: oklch(0.62 0 0);
+  --muted: oklch(0.225 0.006 285);
+  --muted-foreground: oklch(0.66 0.01 285);
 
-  --accent: oklch(0.24 0 0);
-  --accent-foreground: oklch(0.98 0 0);
+  --accent: oklch(0.275 0.008 285);
+  --accent-foreground: oklch(0.98 0.003 285);
 
   --destructive: oklch(0.72 0.2 22);
   --destructive-foreground: oklch(0.99 0 0);
@@ -101,9 +108,9 @@
   --warning: oklch(0.82 0.16 80);
   --info: oklch(0.78 0.13 230);
 
-  --border: oklch(0.27 0 0);
+  --border: oklch(0.3 0.008 285);
   --input: oklch(1 0 0 / 8%);
-  --ring: oklch(0.72 0.16 250 / 0.55);
+  --ring: oklch(0.7 0.19 274 / 0.55);
 
   --chart-1: oklch(0.72 0.16 250);
   --chart-2: oklch(0.78 0.13 230);
@@ -140,6 +147,13 @@
   --color-chart-3: var(--chart-3);
   --color-chart-4: var(--chart-4);
   --color-chart-5: var(--chart-5);
+
+  /* Elevation. Soft, layered shadows give surfaces depth (the old "no chrome /
+     elevation via background contrast only" rule read as flat/dull). Tuned to
+     stay subtle on dark and crisp on light. */
+  --shadow-card: 0 1px 2px -1px oklch(0 0 0 / 0.35), 0 8px 20px -8px oklch(0 0 0 / 0.28);
+  --shadow-card-hover: 0 2px 4px -1px oklch(0 0 0 / 0.4), 0 16px 32px -10px oklch(0 0 0 / 0.36);
+  --shadow-pop: 0 4px 12px -2px oklch(0 0 0 / 0.3), 0 20px 40px -12px oklch(0 0 0 / 0.4);
 
   --font-sans: var(--font-sans);
   --font-mono: var(--font-mono);
@@ -186,6 +200,20 @@
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
   font-feature-settings: "tnum", "zero";
+}
+
+/* Accessibility: honour the OS "reduce motion" preference globally — disables
+   led-dot, dash-flow, animate-pulse, and all transitions. DESIGN.md §3/§9
+   promised this; it was missing. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }
 
 /* ============================================================================
@@ -281,6 +309,35 @@
   stroke-dasharray: 5 4;
 }
 
+/* Edge interaction — hover and selection states.
+ *
+ * The status-driven `.flow-edge-{status}` classes set the resting stroke;
+ * these rules layer hover/selected on top so the user gets feedback that
+ * the edge is interactive. ReactFlow renders an invisible thicker
+ * `.react-flow__edge-interaction` overlay for the hit area, so the
+ * pointer events land naturally on the edge group. */
+.react-flow__edge:hover .react-flow__edge-path {
+  stroke-width: 2;
+  filter: drop-shadow(0 0 3px color-mix(in oklch, var(--primary) 35%, transparent));
+}
+
+.react-flow__edge.selected .react-flow__edge-path,
+.react-flow__edge:focus .react-flow__edge-path,
+.react-flow__edge:focus-visible .react-flow__edge-path {
+  stroke: var(--primary);
+  stroke-width: 2.25;
+}
+
+.react-flow__edge:hover .react-flow__edge-textbg,
+.react-flow__edge.selected .react-flow__edge-textbg {
+  fill: color-mix(in oklch, var(--card) 88%, var(--primary) 12%);
+}
+
+.react-flow__edge:hover .react-flow__edge-text,
+.react-flow__edge.selected .react-flow__edge-text {
+  fill: var(--foreground);
+}
+
 /* ============================================================================
  * LED status dot — used by status pills for active/running indicators
  * ========================================================================= */
@@ -299,6 +356,28 @@
 
 .led-dot {
   animation: led-pulse 1.6s ease-in-out infinite;
+}
+
+/* ============================================================================
+ * Copy button — the global copy listener (hooks/copy.ts) sets
+ * data-copied="true" for ~1.4s after a successful write; swap clipboard ⇄ check.
+ * ========================================================================= */
+
+.copy-btn .copy-done {
+  display: none;
+}
+
+.copy-btn[data-copied="true"] .copy-idle {
+  display: none;
+}
+
+.copy-btn[data-copied="true"] .copy-done {
+  display: inline-block;
+}
+
+.copy-btn[data-copied="true"] {
+  color: var(--success);
+  border-color: color-mix(in oklab, var(--success) 40%, transparent);
 }
 
 /* ============================================================================

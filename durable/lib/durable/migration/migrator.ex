@@ -15,7 +15,9 @@ defmodule Durable.Migration.Migrator do
   @migrations [
     Durable.Migration.Migrations.V20260103000000InitialSchema,
     Durable.Migration.Migrations.V20260104000000AddWaitPrimitives,
-    Durable.Migration.Migrations.V20260413000000AddSchedulerResilience
+    Durable.Migration.Migrations.V20260413000000AddSchedulerResilience,
+    Durable.Migration.Migrations.V20260623000000AddLockFencing,
+    Durable.Migration.Migrations.V20260623000001AddChildWorkflowLink
   ]
 
   @doc """

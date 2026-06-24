@@ -484,6 +484,88 @@ defmodule Durable.Queue.Adapters.PostgresTest do
     end
   end
 
+  describe "lock fencing" do
+    test "fetch_jobs stamps a unique lock_token per claim, persisted on the row" do
+      insert_execution(workflow_name: "fence_a")
+      insert_execution(workflow_name: "fence_b")
+
+      jobs = Postgres.fetch_jobs(config(), "default", 2, "node_a")
+      assert length(jobs) == 2
+
+      tokens = Enum.map(jobs, & &1.lock_token)
+      assert Enum.all?(tokens, &is_binary/1)
+      assert tokens == Enum.uniq(tokens)
+
+      for job <- jobs do
+        assert repo().get!(WorkflowExecution, job.id).lock_token == job.lock_token
+      end
+    end
+
+    test "heartbeat: matching token refreshes; stale token is :fenced; no token is legacy-ok" do
+      insert_execution(workflow_name: "fence_hb")
+      [job] = Postgres.fetch_jobs(config(), "default", 1, "node_a")
+
+      assert :ok = Postgres.heartbeat(config(), job.id, job.lock_token)
+      assert :ok = Postgres.heartbeat(config(), job.id)
+
+      # The row is :running with token A; a worker holding a different token has
+      # been superseded → :fenced so it can abort instead of double-executing.
+      assert {:error, :fenced} = Postgres.heartbeat(config(), job.id, Ecto.UUID.generate())
+    end
+
+    test "a finished row reports :not_found, not :fenced (no spurious abort on completion)" do
+      insert_execution(workflow_name: "fence_done")
+      [job] = Postgres.fetch_jobs(config(), "default", 1, "node_a")
+
+      repo().get!(WorkflowExecution, job.id)
+      |> Ecto.Changeset.change(status: :completed)
+      |> repo().update!()
+
+      assert {:error, :not_found} = Postgres.heartbeat(config(), job.id, job.lock_token)
+    end
+
+    test "ack with a stale token is a no-op; the real owner's ack releases the row" do
+      insert_execution(workflow_name: "fence_ack")
+      [job] = Postgres.fetch_jobs(config(), "default", 1, "node_a")
+
+      assert :ok = Postgres.ack(config(), job.id, Ecto.UUID.generate())
+      still = repo().get!(WorkflowExecution, job.id)
+      assert still.status == :running
+      assert still.locked_by == "node_a"
+
+      assert :ok = Postgres.ack(config(), job.id, job.lock_token)
+      assert repo().get!(WorkflowExecution, job.id).locked_by == nil
+    end
+
+    test "nack with a stale token is a no-op" do
+      insert_execution(workflow_name: "fence_nack")
+      [job] = Postgres.fetch_jobs(config(), "default", 1, "node_a")
+
+      assert :ok = Postgres.nack(config(), job.id, %{message: "boom"}, Ecto.UUID.generate())
+      assert repo().get!(WorkflowExecution, job.id).status == :running
+
+      assert :ok = Postgres.nack(config(), job.id, %{message: "boom"}, job.lock_token)
+      assert repo().get!(WorkflowExecution, job.id).status == :failed
+    end
+
+    test "recover_stale_locks clears the lock_token so the fenced token can't re-match" do
+      insert_execution(workflow_name: "fence_recover")
+      [job] = Postgres.fetch_jobs(config(), "default", 1, "node_a")
+      assert is_binary(job.lock_token)
+
+      repo().get!(WorkflowExecution, job.id)
+      |> Ecto.Changeset.change(locked_at: DateTime.add(DateTime.utc_now(), -600, :second))
+      |> repo().update!()
+
+      {:ok, n} = Postgres.recover_stale_locks(config(), 300)
+      assert n >= 1
+
+      recovered = repo().get!(WorkflowExecution, job.id)
+      assert recovered.status == :pending
+      assert recovered.lock_token == nil
+    end
+  end
+
   describe "get_stats/2" do
     test "returns queue statistics" do
       insert_execution(workflow_name: "pending1", status: :pending)
@@ -505,6 +587,133 @@ defmodule Durable.Queue.Adapters.PostgresTest do
 
   # Helper functions
 
+  describe "wake_sleeping_workflows/2" do
+    test "flips elapsed sleeps back to :pending and writes the satisfied marker" do
+      past = DateTime.add(DateTime.utc_now(), -60, :second)
+
+      sleeper =
+        insert_execution(
+          workflow_name: "sleeper",
+          status: :waiting,
+          scheduled_at: past,
+          current_step: "wait_step",
+          locked_by: "stale_node",
+          locked_at: DateTime.add(DateTime.utc_now(), -120, :second)
+        )
+
+      {:ok, count} = Postgres.wake_sleeping_workflows(config(), 100)
+      assert count == 1
+
+      reloaded = repo().get!(WorkflowExecution, sleeper.id)
+      assert reloaded.status == :pending
+      assert reloaded.locked_by == nil
+      assert reloaded.locked_at == nil
+      assert reloaded.context["__sleep_satisfied__"] == "wait_step"
+    end
+
+    test "leaves :waiting rows whose scheduled_at is still in the future" do
+      future = DateTime.add(DateTime.utc_now(), 3600, :second)
+
+      sleeper =
+        insert_execution(
+          workflow_name: "future_sleeper",
+          status: :waiting,
+          scheduled_at: future,
+          current_step: "wait_step"
+        )
+
+      {:ok, count} = Postgres.wake_sleeping_workflows(config(), 100)
+      assert count == 0
+
+      reloaded = repo().get!(WorkflowExecution, sleeper.id)
+      assert reloaded.status == :waiting
+    end
+
+    test "leaves :waiting rows with no scheduled_at (event/input waits)" do
+      waiter =
+        insert_execution(
+          workflow_name: "event_waiter",
+          status: :waiting,
+          current_step: "await"
+        )
+
+      {:ok, count} = Postgres.wake_sleeping_workflows(config(), 100)
+      assert count == 0
+
+      reloaded = repo().get!(WorkflowExecution, waiter.id)
+      assert reloaded.status == :waiting
+    end
+
+    test "preserves prior context keys when merging the marker" do
+      past = DateTime.add(DateTime.utc_now(), -60, :second)
+
+      sleeper =
+        insert_execution(
+          workflow_name: "rich_sleeper",
+          status: :waiting,
+          scheduled_at: past,
+          current_step: "wait_step"
+        )
+
+      {1, _} =
+        repo().update_all(
+          from(w in WorkflowExecution, where: w.id == ^sleeper.id),
+          set: [context: %{"customer_email" => "alice@example.com"}]
+        )
+
+      {:ok, _count} = Postgres.wake_sleeping_workflows(config(), 100)
+
+      reloaded = repo().get!(WorkflowExecution, sleeper.id)
+      assert reloaded.context["customer_email"] == "alice@example.com"
+      assert reloaded.context["__sleep_satisfied__"] == "wait_step"
+    end
+
+    test "respects batch_size cap" do
+      past = DateTime.add(DateTime.utc_now(), -60, :second)
+
+      for i <- 1..3 do
+        insert_execution(
+          workflow_name: "batched_#{i}",
+          status: :waiting,
+          scheduled_at: past,
+          current_step: "wait"
+        )
+      end
+
+      {:ok, count} = Postgres.wake_sleeping_workflows(config(), 2)
+      assert count == 2
+    end
+  end
+
+  describe "recover_zombie_workflows/2 — sleeping workflows are not zombies" do
+    test "leaves :waiting rows whose scheduled_at is set, even when stale" do
+      long_ago = DateTime.add(DateTime.utc_now(), -3600, :second)
+      # An ostensibly "stuck" sleeper: stale updated_at, no pending
+      # input/event, no lock — would be flagged a zombie by the old
+      # logic. Now exempt because scheduled_at is non-nil; the
+      # SleepWaker is the right component to deal with it.
+      sleeper =
+        insert_execution(
+          workflow_name: "long_sleeper",
+          status: :waiting,
+          scheduled_at: DateTime.add(DateTime.utc_now(), 3600, :second),
+          current_step: "wait_step"
+        )
+
+      {1, _} =
+        repo().update_all(
+          from(w in WorkflowExecution, where: w.id == ^sleeper.id),
+          set: [updated_at: long_ago]
+        )
+
+      {:ok, count} = Postgres.recover_zombie_workflows(config(), 300)
+      assert count == 0
+
+      reloaded = repo().get!(WorkflowExecution, sleeper.id)
+      assert reloaded.status == :waiting
+    end
+  end
+
   defp insert_execution(opts) do
     attrs = %{
       workflow_module: "TestWorkflow",
@@ -515,6 +724,7 @@ defmodule Durable.Queue.Adapters.PostgresTest do
       input: %{},
       context: %{},
       scheduled_at: Keyword.get(opts, :scheduled_at),
+      current_step: Keyword.get(opts, :current_step),
       locked_by: Keyword.get(opts, :locked_by),
       locked_at: Keyword.get(opts, :locked_at)
     }

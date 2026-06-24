@@ -101,10 +101,27 @@ defmodule Durable.Wait do
       sleep(hours(2))
       sleep(days(1))
 
+  ## Resumption semantics
+
+  Like `wait_for_event/2`, `sleep/1` is a resumption barrier: when the
+  step re-runs after the wake fires, the SleepWaker has merged a
+  `:__sleep_satisfied__` marker into context that this call recognises
+  and returns `nil` for instead of re-throwing. Any side effects
+  *before* `sleep/1` therefore run twice (once on suspend, again on
+  resume) — keep them idempotent or move them into a prior step.
+
+  Multiple `sleep/1` calls inside one step body are not supported: the
+  marker is per-step, not per-call, so the second call on resume would
+  return immediately rather than wait. Use one wait per step.
+
   """
   @spec sleep(integer()) :: nil
   def sleep(duration_ms) when is_integer(duration_ms) do
-    throw({:sleep, duration_ms: duration_ms})
+    if sleep_satisfied?() do
+      nil
+    else
+      throw({:sleep, duration_ms: duration_ms})
+    end
   end
 
   @doc """
@@ -116,10 +133,40 @@ defmodule Durable.Wait do
       schedule_at(next_business_day(hour: 9))
       schedule_at(next_weekday(:monday, hour: 9))
 
+  See `sleep/1` for resumption semantics — they are identical.
   """
   @spec schedule_at(DateTime.t()) :: nil
   def schedule_at(%DateTime{} = datetime) do
-    throw({:sleep, until: datetime})
+    if sleep_satisfied?() do
+      nil
+    else
+      throw({:sleep, until: datetime})
+    end
+  end
+
+  # On resume after a sleep wake, the SleepWaker writes
+  # `:__sleep_satisfied__ => "<step_name>"` into the workflow's context.
+  # When the step body re-runs, this guard makes `sleep`/`schedule_at`
+  # return `nil` instead of throwing again — so the rest of the step
+  # body runs, the step completes, and the workflow advances.
+  #
+  # The marker is keyed by step name (not by call site), so it survives
+  # exactly until the user step finishes. Subsequent sleep steps get
+  # their own marker written by the next wake.
+  defp sleep_satisfied? do
+    context = Process.get(:durable_context, %{})
+    step = Process.get(:durable_current_step)
+
+    cond do
+      Map.get(context, :__cancelled__) == true ->
+        true
+
+      step != nil and Map.get(context, :__sleep_satisfied__) == Atom.to_string(step) ->
+        true
+
+      true ->
+        false
+    end
   end
 
   # ============================================================================
@@ -605,42 +652,93 @@ defmodule Durable.Wait do
     # Sanitize at the API boundary — same rationale as provide_input/4.
     safe_payload = Durable.Executor.sanitize_for_json(payload)
 
-    with {:ok, pending_event} <- find_pending_event(config, workflow_id, event_name),
-         {:ok, _} <- receive_pending_event(config, pending_event, safe_payload),
-         {:ok, _} <- maybe_resume_workflow(config, workflow_id, event_name, safe_payload, opts) do
-      :ok
+    with {:ok, pending_event} <- find_pending_event(config, workflow_id, event_name) do
+      # PendingEvent.payload is typed `:map`. Non-map payloads (e.g. an event
+      # sent with just a string identifier) get wrapped under "value" so the
+      # cast always succeeds. The wait group / resume context use the
+      # unwrapped payload so user code reading `received_events` sees the
+      # original shape it sent.
+      storable_payload =
+        if is_map(safe_payload), do: safe_payload, else: %{"value" => safe_payload}
+
+      multi =
+        build_send_event_multi(
+          workflow_id,
+          event_name,
+          pending_event,
+          storable_payload,
+          safe_payload
+        )
+
+      case Repo.transaction(config, multi) do
+        {:ok, _} ->
+          :ok
+
+        {:error, stage, reason, _} ->
+          require Logger
+
+          Logger.error(
+            "[Durable] failed to atomically fulfill event + (optional wait_group) + resume: " <>
+              "stage=#{stage} reason=#{inspect(reason)} workflow=#{workflow_id} event=#{event_name}"
+          )
+
+          {:error, reason}
+      end
     end
   end
 
-  defp maybe_resume_workflow(config, workflow_id, event_name, payload, opts) do
-    # Check if this is part of a wait group
-    case find_wait_group_for_event(config, workflow_id, event_name) do
-      {:ok, wait_group} ->
-        # Update the wait group with the received event
-        handle_wait_group_event(config, wait_group, event_name, payload, opts)
+  # Single Ecto.Multi covering:
+  #
+  #   1. PendingEvent -> :received
+  #   2. If the event belongs to a wait group: lock + merge into received_events,
+  #      flip to :completed when satisfied (closes the lost-update race).
+  #   3. Resume the workflow (`:waiting` -> `:pending`) when the wait condition
+  #      is satisfied — either the single-event case, or the wait group just
+  #      transitioned to :completed.
+  #
+  # All three steps share the same transaction so a crash anywhere can't leave
+  # us with the "event :received but parent stuck :waiting" state that zombie
+  # detection misreads as a workflow crash.
+  defp build_send_event_multi(
+         workflow_id,
+         event_name,
+         pending_event,
+         storable_payload,
+         resume_payload
+       ) do
+    Ecto.Multi.new()
+    |> Ecto.Multi.update(
+      :event,
+      PendingEvent.receive_changeset(pending_event, storable_payload)
+    )
+    |> Ecto.Multi.run(:resume, fn repo, _ ->
+      resume_after_event(repo, workflow_id, event_name, pending_event, resume_payload)
+    end)
+  end
 
-      {:error, :not_found} ->
-        # Single event - resume immediately
-        event_data = %{event_name => payload}
-        Durable.Executor.resume_workflow(workflow_id, event_data, opts)
+  defp resume_after_event(repo, workflow_id, event_name, pending_event, payload) do
+    case pending_event.wait_group_id do
+      nil ->
+        # Plain wait_for_event — no wait group, resume immediately.
+        Durable.Executor.resume_parent_in_multi(repo, workflow_id, %{event_name => payload})
+
+      wait_group_id ->
+        merge_wait_group_and_maybe_resume(repo, wait_group_id, event_name, payload)
     end
   end
 
-  defp handle_wait_group_event(config, wait_group, event_name, payload, opts) do
-    {:ok, updated_group} =
-      wait_group
-      |> WaitGroup.add_event_changeset(event_name, payload)
-      |> Repo.update(config)
-
-    if updated_group.status == :completed do
-      # All required events received - resume workflow
-      Durable.Executor.resume_workflow(
-        updated_group.workflow_id,
-        updated_group.received_events,
-        opts
-      )
-    else
-      {:ok, updated_group}
+  defp merge_wait_group_and_maybe_resume(repo, wait_group_id, event_name, payload) do
+    with {:ok, wg_result} <-
+           WaitGroup.add_event_locked(repo, wait_group_id, event_name, payload) do
+      if wg_result.just_completed do
+        Durable.Executor.resume_parent_in_multi(
+          repo,
+          wg_result.wait_group.workflow_id,
+          wg_result.wait_group.received_events
+        )
+      else
+        {:ok, %{no_op: true, wait_group: wg_result.wait_group}}
+      end
     end
   end
 
@@ -810,21 +908,6 @@ defmodule Durable.Wait do
     end
   end
 
-  defp find_wait_group_for_event(config, workflow_id, event_name) do
-    query =
-      from(w in WaitGroup,
-        where:
-          w.workflow_id == ^workflow_id and
-            ^event_name in w.event_names and
-            w.status == :pending
-      )
-
-    case Repo.one(config, query) do
-      nil -> {:error, :not_found}
-      wait_group -> {:ok, wait_group}
-    end
-  end
-
   defp complete_pending_input(config, pending, response) do
     # PendingInput.response is typed `:map`. Non-map responses (a single
     # string from wait_for_choice/wait_for_text, an approval atom, etc.)
@@ -843,23 +926,6 @@ defmodule Durable.Wait do
 
     pending
     |> PendingInput.complete_changeset(storable_response)
-    |> Repo.update(config)
-  end
-
-  defp receive_pending_event(config, pending_event, payload) do
-    # PendingEvent.payload is typed `:map`. Same wrap pattern as
-    # complete_pending_input/3 — non-map payloads (e.g. an event sent with
-    # just a string identifier) get stored under `"value"` so the cast
-    # always succeeds and the workflow resume isn't blocked.
-    storable_payload =
-      if is_map(payload) do
-        payload
-      else
-        %{"value" => payload}
-      end
-
-    pending_event
-    |> PendingEvent.receive_changeset(storable_payload)
     |> Repo.update(config)
   end
 

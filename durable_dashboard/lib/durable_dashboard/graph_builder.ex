@@ -74,11 +74,32 @@ defmodule DurableDashboard.GraphBuilder do
     %{nodes: nodes, edges: edges}
   end
 
-  # Conditional edges (decision :goto branches) keep their dashed style
-  # regardless of runtime status — they represent possible paths, not the
-  # path actually taken.
-  defp apply_edge_status(%{className: "flow-edge-conditional"} = edge, _matched, _running),
-    do: edge
+  # Conditional edges (decision :goto branches): if the target step
+  # actually ran (running OR matched), repaint as the taken path so the
+  # operator can see at a glance which branch the workflow followed.
+  # Untaken goto edges stay dashed as `flow-edge-conditional` — they
+  # represent paths-not-taken at this run.
+  #
+  # The taken goto path is *animated* (dash-flow) even after completion,
+  # because at a decision node the still-dashed not-taken branches and
+  # the taken branch are otherwise hard to tell apart at a glance.
+  defp apply_edge_status(%{className: "flow-edge-conditional"} = edge, matched, running) do
+    cond do
+      MapSet.member?(running, edge.target) ->
+        edge
+        |> Map.put(:animated, true)
+        |> Map.put(:className, "flow-edge-running")
+
+      MapSet.member?(matched, edge.source) and MapSet.member?(matched, edge.target) ->
+        edge
+        |> Map.put(:animated, true)
+        |> Map.put(:className, "flow-edge-completed")
+
+      true ->
+        # Untaken — leave the dashed conditional styling alone.
+        edge
+    end
+  end
 
   defp apply_edge_status(edge, matched_ids, running_ids) do
     cond do
@@ -88,6 +109,9 @@ defmodule DurableDashboard.GraphBuilder do
         |> Map.put(:className, "flow-edge-running")
 
       MapSet.member?(matched_ids, edge.source) and MapSet.member?(matched_ids, edge.target) ->
+        # Linear-flow completed edges stay static — only running and
+        # taken-goto edges animate, otherwise a long workflow becomes
+        # visually noisy with everything dashing simultaneously.
         Map.put(edge, :className, "flow-edge-completed")
 
       true ->
@@ -115,19 +139,72 @@ defmodule DurableDashboard.GraphBuilder do
     |> put_in([:data, :completed_at], iso8601(step_exec.completed_at))
     |> put_in([:data, :step_execution_id], step_exec.id)
     |> put_in([:data, :workflow_execution_id], Map.get(step_exec, :workflow_id))
+    |> put_in([:data, :input_preview], preview(Map.get(step_exec, :input)))
+    |> put_in([:data, :output_preview], preview(Map.get(step_exec, :output)))
+    |> put_in([:data, :has_error], not is_nil(Map.get(step_exec, :error)))
     |> put_in(
       [:data, :is_current],
       not is_nil(current_id) and Map.get(step_exec, :workflow_id) == current_id
     )
+    |> maybe_link_child(step_exec)
+  end
+
+  # Prefer the queryable `step_executions.child_workflow_id` link (recorded by
+  # the executor when a step calls call_workflow/start_workflow) over parsing
+  # the parent's mutable `__call_children` context. When present, flip the node
+  # to the `child_workflow` type (same cell footprint, stacked-sheet drill-in).
+  defp maybe_link_child(node, step_exec) do
+    case Map.get(step_exec, :child_workflow_id) do
+      child_id when is_binary(child_id) ->
+        node
+        |> put_in([:data, :child_workflow_id], child_id)
+        |> Map.put(:type, "child_workflow")
+
+      _ ->
+        node
+    end
+  end
+
+  # Single-line preview of an input/output blob, suitable for an n8n-style
+  # card. Full data lives on the StepExecution row and is fetched on demand
+  # when the user opens the drawer — keeps the graph payload lean.
+  @preview_max 80
+  defp preview(nil), do: nil
+  defp preview(value) when value == %{}, do: nil
+
+  defp preview(value) do
+    case Jason.encode(value) do
+      {:ok, json} -> truncate(json, @preview_max)
+      _ -> nil
+    end
+  end
+
+  defp truncate(s, max) when is_binary(s) do
+    if String.length(s) > max do
+      String.slice(s, 0, max - 1) <> "…"
+    else
+      s
+    end
   end
 
   # When a node represents a parallel child step that ran in its own
-  # `WorkflowExecution`, surface the child workflow id in node.data so
-  # the FlowGraph LC can route a click to that child's detail page.
+  # `WorkflowExecution`, surface the child workflow id in node.data AND
+  # flip the node type to `child_workflow` so the React side renders the
+  # drill-in variant (the step card with a stacked sheet behind it).
   defp attach_child_workflow_id(%{data: data} = node, lookup) when map_size(lookup) > 0 do
-    case Map.get(lookup, get_in(data, [:name])) || Map.get(lookup, node.id) do
-      nil -> node
-      child_id -> put_in(node, [:data, :child_workflow_id], child_id)
+    cond do
+      # Already linked via the queryable step_executions.child_workflow_id
+      # column (call_workflow children) — don't second-guess it.
+      get_in(data, [:child_workflow_id]) ->
+        node
+
+      child_id = Map.get(lookup, get_in(data, [:name])) || Map.get(lookup, node.id) ->
+        node
+        |> put_in([:data, :child_workflow_id], child_id)
+        |> Map.put(:type, "child_workflow")
+
+      true ->
+        node
     end
   end
 

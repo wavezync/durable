@@ -197,6 +197,26 @@ defmodule DurableDashboard.Components.Core do
     """
   end
 
+  def icon(%{name: "github"} = assigns) do
+    # Brand mark — solid octocat. Native 24×24 viewBox; scales to `size-4`
+    # like the heroicons-mini set (viewBox sizes the coordinate space, not
+    # the render size).
+    ~H"""
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class={@class} {@rest}>
+      <path d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12" />
+    </svg>
+    """
+  end
+
+  def icon(%{name: "clipboard"} = assigns) do
+    ~H"""
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class={@class} {@rest}>
+      <path d="M7 3.5A1.5 1.5 0 0 1 8.5 2h3.879a1.5 1.5 0 0 1 1.06.44l3.122 3.12A1.5 1.5 0 0 1 17 6.622V12.5a1.5 1.5 0 0 1-1.5 1.5h-1v-3.379a3 3 0 0 0-.879-2.121L10.5 5.379A3 3 0 0 0 8.379 4.5H7v-1Z" />
+      <path d="M4.5 6A1.5 1.5 0 0 0 3 7.5v9A1.5 1.5 0 0 0 4.5 18h7a1.5 1.5 0 0 0 1.5-1.5v-5.879a1.5 1.5 0 0 0-.44-1.06L9.44 6.439A1.5 1.5 0 0 0 8.378 6H4.5Z" />
+    </svg>
+    """
+  end
+
   def icon(%{name: name} = assigns) when is_binary(name) do
     # Unknown icon — render a placeholder square so it's visible during dev.
     ~H"""
@@ -511,50 +531,128 @@ defmodule DurableDashboard.Components.Core do
   # ============================================================================
 
   @doc """
-  Renders a relative time like "2m ago" with a tooltip showing the absolute
-  ISO timestamp.
+  Renders a relative time like "2m ago" (past) or "in 2h" (future), with a
+  hover tooltip showing the absolute moment in the **viewer's local timezone**.
+
+  Emits a `<time data-ts data-rel>`; the client localizes only the tooltip and
+  leaves the relative text alone (`assets/src/hooks/local_time.ts`). The
+  pre-JS `title` is a UTC fallback so it's still legible. Use this for "ago" /
+  "in" durations; use `local_time` when the user needs the exact moment inline.
 
   ## Examples
 
       <.relative_time at={execution.inserted_at} />
+      <.relative_time at={schedule.next_run_at} />
   """
   attr :at, :any, required: true
   attr :class, :string, default: nil
 
   def relative_time(assigns) do
-    {label, full} = relative_time_label(assigns.at)
-    assigns = assign(assigns, label: label, full: full)
+    {label, iso, full} = relative_time_parts(assigns.at)
+    assigns = assign(assigns, label: label, iso: iso, full: full)
 
     ~H"""
-    <span class={["text-numeric text-xs", @class]} title={@full}>
-      {@label}
-    </span>
+    <time
+      :if={@iso}
+      datetime={@iso}
+      data-ts={@iso}
+      data-rel="1"
+      title={@full}
+      class={["text-numeric text-xs", @class]}
+    >{@label}</time>
+    <span :if={!@iso} class={["text-numeric text-xs", @class]}>{@label}</span>
     """
   end
 
-  defp relative_time_label(nil), do: {"—", "—"}
+  # {humanized_label, iso8601 | nil, utc_fallback_tooltip}. `data-rel` tells the
+  # client hook to localize the tooltip only and keep the relative text.
+  defp relative_time_parts(nil), do: {"—", nil, nil}
 
-  defp relative_time_label(%DateTime{} = dt) do
+  defp relative_time_parts(%DateTime{} = dt) do
     diff_s = DateTime.diff(DateTime.utc_now(), dt, :second)
-    {humanize_diff(diff_s), DateTime.to_iso8601(dt)}
+
+    {humanize_diff(diff_s), DateTime.to_iso8601(dt),
+     Calendar.strftime(dt, "%b %-d, %Y, %H:%M:%S UTC")}
   end
 
-  defp relative_time_label(%NaiveDateTime{} = dt) do
+  defp relative_time_parts(%NaiveDateTime{} = dt) do
     case DateTime.from_naive(dt, "Etc/UTC") do
-      {:ok, utc} -> relative_time_label(utc)
-      _ -> {"—", "—"}
+      {:ok, utc} -> relative_time_parts(utc)
+      _ -> {"—", nil, nil}
     end
   end
 
-  defp relative_time_label(other), do: {to_string(other), to_string(other)}
+  defp relative_time_parts(other), do: {to_string(other), nil, nil}
 
-  defp humanize_diff(s) when s < 5, do: "just now"
-  defp humanize_diff(s) when s < 60, do: "#{s}s ago"
-  defp humanize_diff(s) when s < 3600, do: "#{div(s, 60)}m ago"
-  defp humanize_diff(s) when s < 86_400, do: "#{div(s, 3600)}h ago"
-  defp humanize_diff(s) when s < 604_800, do: "#{div(s, 86_400)}d ago"
-  defp humanize_diff(s) when s < 2_592_000, do: "#{div(s, 604_800)}w ago"
-  defp humanize_diff(s), do: "#{div(s, 2_592_000)}mo ago"
+  # Sign-aware: negative diff means the timestamp is in the future ("in 2h").
+  defp humanize_diff(s) when abs(s) < 5, do: "just now"
+  defp humanize_diff(s) when s < 0, do: "in " <> humanize_magnitude(-s)
+  defp humanize_diff(s), do: humanize_magnitude(s) <> " ago"
+
+  defp humanize_magnitude(s) when s < 60, do: "#{s}s"
+  defp humanize_magnitude(s) when s < 3600, do: "#{div(s, 60)}m"
+  defp humanize_magnitude(s) when s < 86_400, do: "#{div(s, 3600)}h"
+  defp humanize_magnitude(s) when s < 604_800, do: "#{div(s, 86_400)}d"
+  defp humanize_magnitude(s) when s < 2_592_000, do: "#{div(s, 604_800)}w"
+  defp humanize_magnitude(s), do: "#{div(s, 2_592_000)}mo"
+
+  @doc """
+  Renders an absolute timestamp in the **viewer's local timezone**.
+
+  The server only knows UTC, so a raw ISO string is ambiguous to read. This
+  emits a `<time>` carrying the UTC ISO (plus a UTC-formatted fallback as its
+  text, so it's legible without JS); the client localizes it to the browser's
+  timezone — see `assets/src/hooks/local_time.ts`. Use this for any absolute
+  time the user reads; use `relative_time` for "2m ago" durations.
+
+  `format` is `"time"` (time of day), `"datetime"` (date + time), or `"date"`.
+
+  ## Examples
+
+      <.local_time at={step.completed_at} format="time" />
+      <.local_time at={log["timestamp"]} format="datetime" class="text-muted-foreground" />
+  """
+  attr :at, :any, required: true
+  attr :format, :string, default: "datetime", values: ~w(time datetime date)
+  attr :class, :any, default: nil
+
+  def local_time(assigns) do
+    {iso, fallback} = local_time_parts(assigns.at, assigns.format)
+    assigns = assign(assigns, iso: iso, fallback: fallback)
+
+    ~H"""
+    <time datetime={@iso} data-ts={@iso} data-format={@format} class={@class}>{@fallback}</time>
+    """
+  end
+
+  # Returns {iso8601_utc | nil, server_fallback_text}. The fallback is what
+  # renders before/without JS — a plain UTC formatting, still legible.
+  defp local_time_parts(nil, _format), do: {nil, "—"}
+
+  defp local_time_parts(%DateTime{} = dt, format),
+    do: {DateTime.to_iso8601(dt), local_time_fallback(dt, format)}
+
+  defp local_time_parts(%NaiveDateTime{} = ndt, format) do
+    case DateTime.from_naive(ndt, "Etc/UTC") do
+      {:ok, dt} -> local_time_parts(dt, format)
+      _ -> {nil, "—"}
+    end
+  end
+
+  defp local_time_parts(s, format) when is_binary(s) do
+    case DateTime.from_iso8601(s) do
+      {:ok, dt, _offset} -> {DateTime.to_iso8601(dt), local_time_fallback(dt, format)}
+      _ -> {nil, s}
+    end
+  end
+
+  defp local_time_parts(other, _format), do: {nil, to_string(other)}
+
+  defp local_time_fallback(dt, "time"),
+    do: dt |> Calendar.strftime("%H:%M:%S.%f") |> String.slice(0, 12)
+
+  defp local_time_fallback(dt, "date"), do: Calendar.strftime(dt, "%b %-d, %Y")
+  defp local_time_fallback(dt, _datetime), do: Calendar.strftime(dt, "%b %-d, %Y, %H:%M:%S")
 
   # ============================================================================
   # Empty state
@@ -622,7 +720,7 @@ defmodule DurableDashboard.Components.Core do
     ~H"""
     <section
       class={[
-        "rounded-md border border-border bg-card text-card-foreground",
+        "rounded-xl border border-border bg-card text-card-foreground shadow-card",
         @class
       ]}
       {@rest}
@@ -649,6 +747,188 @@ defmodule DurableDashboard.Components.Core do
   defp card_padding_class("sm"), do: "p-3"
   defp card_padding_class("md"), do: "p-4"
   defp card_padding_class("lg"), do: "p-6"
+
+  # ============================================================================
+  # JSON — syntax-highlighted, pretty-printed value
+  # ============================================================================
+
+  @doc """
+  Renders a decoded term (map / list / scalar from JSONB) as pretty-printed,
+  syntax-highlighted JSON. Keys, strings, numbers, booleans and null are
+  colored via design tokens. Reuse anywhere JSON is shown — logs, I/O, the
+  step inspector — instead of a plain `<pre>` dump.
+
+      <.json value={@step.input} />
+
+  Pass `raw: false`-style scalars freely; non-JSON terms fall back to
+  `inspect/1`.
+  """
+  attr :value, :any, required: true
+  attr :class, :string, default: nil
+  attr :bare, :boolean, default: false
+
+  def json(assigns) do
+    ~H"""
+    <div class="group/json relative">
+      <.copy_button
+        text={json_plain(@value)}
+        label="Copy JSON"
+        class="absolute right-1.5 top-1.5 z-10 opacity-0 transition-opacity group-hover/json:opacity-100 focus-visible:opacity-100"
+      />
+      <pre class={[
+        "thin-scroll overflow-auto font-mono text-[11px] leading-relaxed text-foreground/90",
+        !@bare && "rounded-md border border-border bg-background/50 p-3",
+        @class
+      ]}><%= Phoenix.HTML.raw(json_iodata(@value, 0)) %></pre>
+    </div>
+    """
+  end
+
+  @doc """
+  A small clipboard button. Copies `text` to the clipboard via the global
+  delegated listener (`assets/src/hooks/copy.ts`, wired in `main.ts`) and
+  flashes a check for ~1.4 s. No `phx-hook`/`id` needed — it's plain markup
+  carrying `data-copy`. Drop it beside any copy-worthy value (JSON box, id
+  chip, config value).
+
+      <.copy_button text={@workflow.id} label="Copy execution id" />
+  """
+  attr :text, :string, required: true
+  attr :label, :string, default: "Copy"
+  attr :class, :any, default: nil
+  attr :rest, :global
+
+  def copy_button(assigns) do
+    ~H"""
+    <button
+      type="button"
+      data-copy={@text}
+      aria-label={@label}
+      title={@label}
+      class={[
+        "copy-btn inline-flex shrink-0 items-center justify-center rounded-md p-1",
+        "border border-border bg-card/80 text-muted-foreground backdrop-blur-sm",
+        "hover:bg-accent hover:text-accent-foreground transition-colors",
+        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+        @class
+      ]}
+      {@rest}
+    >
+      <.icon name="clipboard" class="copy-idle size-3.5" />
+      <.icon name="check" class="copy-done size-3.5 text-success" />
+    </button>
+    """
+  end
+
+  # Recursively builds an iolist of raw `<span>`s + HTML-escaped content. We
+  # control every byte of whitespace/indentation here (rather than relying on a
+  # HEEx template inside a <pre>, which would inject its own indentation).
+  defp json_iodata(map, depth) when is_map(map) and not is_struct(map) do
+    case Map.to_list(map) do
+      [] ->
+        json_punct("{}")
+
+      pairs ->
+        inner =
+          pairs
+          |> Enum.map(fn {k, v} ->
+            [json_pad(depth + 1), json_key(k), json_punct(": "), json_iodata(v, depth + 1)]
+          end)
+          |> Enum.intersperse([json_punct(","), "\n"])
+
+        [json_punct("{"), "\n", inner, "\n", json_pad(depth), json_punct("}")]
+    end
+  end
+
+  defp json_iodata([], _depth), do: json_punct("[]")
+
+  defp json_iodata(list, depth) when is_list(list) do
+    inner =
+      list
+      |> Enum.map(fn v -> [json_pad(depth + 1), json_iodata(v, depth + 1)] end)
+      |> Enum.intersperse([json_punct(","), "\n"])
+
+    [json_punct("["), "\n", inner, "\n", json_pad(depth), json_punct("]")]
+  end
+
+  defp json_iodata(v, _depth) when is_binary(v), do: json_token("text-success", json_encode(v))
+  defp json_iodata(v, _depth) when is_boolean(v), do: json_token("text-info", to_string(v))
+  defp json_iodata(nil, _depth), do: json_token("text-muted-foreground", "null")
+
+  defp json_iodata(v, _depth) when is_integer(v) or is_float(v),
+    do: json_token("text-warning", to_string(v))
+
+  defp json_iodata(%mod{} = v, _depth) when mod in [DateTime, Date, NaiveDateTime, Time],
+    do: json_token("text-success", json_encode(to_string(v)))
+
+  defp json_iodata(v, _depth) when is_atom(v),
+    do: json_token("text-success", json_encode(to_string(v)))
+
+  defp json_iodata(v, _depth), do: json_token("text-foreground/80", inspect(v))
+
+  defp json_key(k), do: json_token("text-primary", json_encode(to_string(k)))
+  defp json_pad(n), do: String.duplicate("  ", n)
+
+  # Structural punctuation ({ } [ ] : ,) — HTML-safe characters, no escaping.
+  defp json_punct(s), do: ["<span class=\"text-muted-foreground/50\">", s, "</span>"]
+
+  defp json_token(class, text) do
+    ["<span class=\"", class, "\">", html_escape_to_string(text), "</span>"]
+  end
+
+  defp json_encode(s) do
+    case Jason.encode(s) do
+      {:ok, encoded} -> encoded
+      _ -> inspect(s)
+    end
+  end
+
+  defp html_escape_to_string(text) do
+    text |> Phoenix.HTML.html_escape() |> Phoenix.HTML.safe_to_string()
+  end
+
+  # Plain-text twin of `json_iodata/2` — same pretty layout, no `<span>`s — so
+  # the clipboard copy matches the rendered block byte-for-byte (minus color).
+  defp json_plain(value), do: value |> json_text(0) |> IO.iodata_to_binary()
+
+  defp json_text(map, depth) when is_map(map) and not is_struct(map) do
+    case Map.to_list(map) do
+      [] ->
+        "{}"
+
+      pairs ->
+        inner =
+          pairs
+          |> Enum.map(fn {k, v} ->
+            [json_pad(depth + 1), json_encode(to_string(k)), ": ", json_text(v, depth + 1)]
+          end)
+          |> Enum.intersperse([",", "\n"])
+
+        ["{", "\n", inner, "\n", json_pad(depth), "}"]
+    end
+  end
+
+  defp json_text([], _depth), do: "[]"
+
+  defp json_text(list, depth) when is_list(list) do
+    inner =
+      list
+      |> Enum.map(fn v -> [json_pad(depth + 1), json_text(v, depth + 1)] end)
+      |> Enum.intersperse([",", "\n"])
+
+    ["[", "\n", inner, "\n", json_pad(depth), "]"]
+  end
+
+  defp json_text(v, _depth) when is_binary(v), do: json_encode(v)
+  defp json_text(v, _depth) when is_boolean(v), do: to_string(v)
+  defp json_text(nil, _depth), do: "null"
+  defp json_text(v, _depth) when is_integer(v) or is_float(v), do: to_string(v)
+
+  defp json_text(%mod{} = v, _depth) when mod in [DateTime, Date, NaiveDateTime, Time],
+    do: json_encode(to_string(v))
+
+  defp json_text(v, _depth) when is_atom(v), do: json_encode(to_string(v))
+  defp json_text(v, _depth), do: inspect(v)
 
   # ============================================================================
   # Heading
@@ -712,17 +992,110 @@ defmodule DurableDashboard.Components.Core do
       <.code class="text-info">{job.queue}</.code>
   """
   attr :class, :string, default: nil
+  attr :copy, :string, default: nil
   slot :inner_block, required: true
 
   def code(assigns) do
     ~H"""
-    <code class={[
+    <span :if={@copy} class="group/code inline-flex items-center gap-1 align-middle">
+      <code class={code_class(@class)}>{render_slot(@inner_block)}</code>
+      <.copy_button
+        text={@copy}
+        class="opacity-0 group-hover/code:opacity-100 focus-visible:opacity-100"
+      />
+    </span>
+    <code :if={!@copy} class={code_class(@class)}>{render_slot(@inner_block)}</code>
+    """
+  end
+
+  defp code_class(class) do
+    [
       "font-mono text-numeric text-xs text-foreground/90",
       "px-1 py-0.5 rounded-sm bg-muted/40 border border-border",
+      class
+    ]
+  end
+
+  # ============================================================================
+  # Label + field — the app's standard "this is a label, not a value" idiom
+  # ============================================================================
+
+  @doc """
+  A small uppercase, letter-spaced field label — the standard treatment for
+  key names, section headers, and metadata keys so a label reads as a label,
+  not a value. Centralizes the `font-mono uppercase tracking-…` idiom used
+  across the inspector, logs, and detail panels.
+
+  ## Examples
+
+      <.label>level</.label>
+      <.label class="text-destructive">error</.label>
+  """
+  attr :class, :any, default: nil
+  attr :rest, :global
+  slot :inner_block, required: true
+
+  def label(assigns) do
+    ~H"""
+    <span
+      class={[
+        "font-mono text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground/70",
+        @class
+      ]}
+      {@rest}
+    >{render_slot(@inner_block)}</span>
+    """
+  end
+
+  @doc """
+  One key/value detail row, rendered as a `<dt>`/`<dd>` **grid cell pair**.
+
+  Place several inside `<.field_list>` (or any `display: grid` `<dl>` with two
+  columns + `items-baseline`). The label column auto-sizes to the widest key,
+  so labels hug their values and every value shares one left edge — no ragged
+  fixed-width gutter.
+
+  ## Examples
+
+      <.field_list>
+        <.field key="level">info</.field>
+        <.field key="source">logger</.field>
+      </.field_list>
+  """
+  attr :key, :string, required: true
+  attr :class, :any, default: nil
+  slot :inner_block, required: true
+
+  def field(assigns) do
+    ~H"""
+    <dt class="pt-px"><.label>{@key}</.label></dt>
+    <dd class={["min-w-0 break-words font-mono text-[11px] text-foreground/85", @class]}>{render_slot(@inner_block)}</dd>
+    """
+  end
+
+  @doc """
+  Grid container for `<.field>` rows: a two-column `auto / 1fr` `<dl>` with a
+  tight, even rhythm and baseline-aligned cells. The single source of truth
+  for "aligned key/value metadata table".
+
+  ## Examples
+
+      <.field_list>
+        <.field key="level">info</.field>
+        <.field key="time">{ts}</.field>
+      </.field_list>
+  """
+  attr :class, :any, default: nil
+  slot :inner_block, required: true
+
+  def field_list(assigns) do
+    ~H"""
+    <dl class={[
+      "grid grid-cols-[auto_minmax(0,1fr)] items-baseline gap-x-4 gap-y-1.5",
       @class
     ]}>
       {render_slot(@inner_block)}
-    </code>
+    </dl>
     """
   end
 

@@ -79,7 +79,7 @@ config :phoenix_demo, dev_routes: true
 # automatically with `mix phx.server`. To opt out (e.g. on a machine
 # without Node/pnpm), set this to `false` — the LV layout will then
 # serve the pre-built bundle in `priv/static/durable_dashboard/`.
-config :durable_dashboard, dev_mode: true
+config :durable_dashboard, dev_mode: false
 
 # Do not include metadata nor timestamps in development logs
 config :logger, :default_formatter, format: "[$level] $message\n"

@@ -10,13 +10,19 @@ just one router macro.
 ## Features
 
 - **Overview** — live status counts and recent executions
-- **Workflows** — searchable, filterable list with pagination
-- **Workflow detail** — summary, flow graph, topology, logs, I/O, and
-  child-execution history
+- **Workflows** — catalog of registered workflows (run counts, last status),
+  derived from execution history
+- **Executions** — every run, with a faceted filter bar: pick a workflow
+  (autocomplete), multi-select status, a relative/custom time range, or an
+  execution id (prefix filter + jump). Filters live in the URL, so views are
+  shareable
+- **Execution detail** — Summary, Flow graph, Timeline (absolute-time Gantt),
+  Logs, I/O, and History (trace spine), plus a Family tab for parent/child runs
 - **Pending inputs** — surface and resolve human-in-the-loop steps
 - **Schedules** — toggle, trigger, and inspect cron-driven workflows
 - **Settings** — inspect Durable's runtime configuration
-- **⌘K command palette** — keyboard-driven navigation
+- **⌘K command palette** — jump to any page, workflow, or recent run
+- **Copy buttons** — one-click copy on JSON payloads, ids, and config values
 
 ## Installation
 
@@ -63,8 +69,11 @@ inline in your router. It must live at the **top level** — not inside a
 The macro emits these routes under your `:mount` prefix:
 
 - `GET /` — Overview
-- `GET /workflows` — list
-- `GET /workflows/:id[/:tab]` — detail
+- `GET /workflows` — workflow catalog
+- `GET /workflows/:name` — executions for one workflow
+- `GET /executions` — all executions (faceted filters)
+- `GET /executions/:id[/:tab]` — execution detail (Summary / Flow / Timeline /
+  Logs / I/O / History)
 - `GET /inputs`
 - `GET /schedules`
 - `GET /settings`

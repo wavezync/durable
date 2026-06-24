@@ -206,6 +206,21 @@ defmodule DurableDashboard.Components.FlowGraphTest do
       assert status_for(nodes, "parallel_200__do_b") == "failed"
     end
 
+    test "a step carrying child_workflow_id flips to the child_workflow node type" do
+      definition = simple_workflow()
+      graph = GraphBuilder.build(definition)
+
+      execs = [
+        step_execution(name: "register", status: :completed, child_workflow_id: "child-abc")
+      ]
+
+      %{nodes: nodes} = GraphBuilder.overlay_status(graph, execs)
+      node = Enum.find(nodes, &(&1.id == "register"))
+
+      assert node.type == "child_workflow"
+      assert node.data.child_workflow_id == "child-abc"
+    end
+
     test "top-level step names continue to match by id" do
       definition = simple_workflow()
       graph = GraphBuilder.build(definition)
@@ -241,6 +256,41 @@ defmodule DurableDashboard.Components.FlowGraphTest do
       assert data.started_at == DateTime.to_iso8601(started)
       assert data.completed_at == DateTime.to_iso8601(completed)
       assert data.step_execution_id == "step-exec-1"
+    end
+  end
+
+  # ============================================================================
+  # normalize_edge — runtime edge styling must survive serialization
+  # ============================================================================
+
+  describe "FlowGraph data-graph — edge className/label reach the client (regression)" do
+    test "a running step's inbound edge keeps its flow-edge-running className" do
+      # b is running, so graph_builder paints the a->b edge flow-edge-running.
+      # Before the fix, normalize_edge/1 dropped :className (and :label), so
+      # the client never received any edge status — the graph never reflected
+      # execution. This asserts the styling reaches the serialized data-graph.
+      steps = [
+        step_execution(name: "a", status: :completed, duration_ms: 5),
+        step_execution(name: "b", status: :running)
+      ]
+
+      html =
+        render_component(FlowGraph,
+          id: "fg-edge",
+          kind: :flow,
+          workflow: %{
+            id: "wf-1",
+            workflow_module: Atom.to_string(DurableDashboard.Components.FlowGraphTestWorkflow),
+            workflow_name: "fg_test"
+          },
+          steps: steps
+        )
+
+      assert html =~ ~s(phx-hook="FlowGraph")
+      assert html =~ "flow-edge-running"
+      # The serialized edge shape now carries the className + label keys.
+      assert html =~ "className"
+      assert html =~ "label"
     end
   end
 
@@ -407,6 +457,7 @@ defmodule DurableDashboard.Components.FlowGraphTest do
       duration_ms: Keyword.get(opts, :duration_ms),
       started_at: Keyword.get(opts, :started_at),
       completed_at: Keyword.get(opts, :completed_at),
+      child_workflow_id: Keyword.get(opts, :child_workflow_id),
       inserted_at: Keyword.get(opts, :inserted_at, DateTime.utc_now())
     }
   end

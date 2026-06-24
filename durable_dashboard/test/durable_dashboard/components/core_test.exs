@@ -108,10 +108,28 @@ defmodule DurableDashboard.Components.CoreTest do
       assert html =~ "2m ago"
     end
 
-    test "renders em-dash for nil" do
+    test "renders 'in …' for future timestamps, not 'just now'" do
+      future = DateTime.add(DateTime.utc_now(), 2 * 3600, :second)
+      assigns = %{at: future}
+      html = rendered_to_string(~H[<Core.relative_time at={@at} />])
+      assert html =~ "in 2h"
+      refute html =~ "just now"
+    end
+
+    test "emits <time data-ts data-rel> so the client localizes the tooltip" do
+      now = DateTime.utc_now()
+      assigns = %{at: now}
+      html = rendered_to_string(~H[<Core.relative_time at={@at} />])
+      assert html =~ "<time"
+      assert html =~ ~s(data-rel="1")
+      assert html =~ ~s(data-ts="#{DateTime.to_iso8601(now)}")
+    end
+
+    test "renders em-dash for nil, without a data-ts to localize" do
       assigns = %{at: nil}
       html = rendered_to_string(~H[<Core.relative_time at={@at} />])
       assert html =~ "—"
+      refute html =~ "data-ts"
     end
   end
 
@@ -181,6 +199,42 @@ defmodule DurableDashboard.Components.CoreTest do
       assert html =~ "<code"
       assert html =~ "font-mono"
       assert html =~ "abc12345"
+    end
+  end
+
+  describe "local_time/1" do
+    test "emits a <time> carrying the UTC ISO for the client to localize" do
+      assigns = %{at: ~U[2026-06-23 11:39:40.328499Z]}
+      html = rendered_to_string(~H[<Core.local_time at={@at} format="datetime" />])
+
+      assert html =~ "<time"
+      # The client hook reads data-ts (UTC ISO) and data-format.
+      assert html =~ ~s(data-ts="2026-06-23T11:39:40.328499Z")
+      assert html =~ ~s(data-format="datetime")
+      # A UTC fallback renders so it's legible before/without JS.
+      assert html =~ "Jun 23, 2026"
+    end
+
+    test "the time format renders a ms-precision time-of-day fallback" do
+      assigns = %{at: ~U[2026-06-23 11:39:40.328499Z]}
+      html = rendered_to_string(~H[<Core.local_time at={@at} format="time" />])
+
+      assert html =~ ~s(data-format="time")
+      assert html =~ "11:39:40.328"
+    end
+
+    test "accepts an ISO string and normalizes it to data-ts" do
+      assigns = %{at: "2026-06-23T11:39:40Z"}
+      html = rendered_to_string(~H[<Core.local_time at={@at} format="datetime" />])
+
+      assert html =~ ~s(data-ts="2026-06-23T11:39:40Z")
+    end
+
+    test "renders an em dash for a nil timestamp" do
+      assigns = %{at: nil}
+      html = rendered_to_string(~H[<Core.local_time at={@at} />])
+
+      assert html =~ "—"
     end
   end
 end

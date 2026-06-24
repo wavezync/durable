@@ -26,6 +26,7 @@ defmodule DurableDashboard.Components.Workflow.FlowGraph do
   use Phoenix.LiveComponent
 
   alias DurableDashboard.Components.Core
+  alias DurableDashboard.Components.Workflow.LogLine
   alias DurableDashboard.GraphBuilder
   alias DurableDashboard.Path, as: DPath
 
@@ -104,7 +105,7 @@ defmodule DurableDashboard.Components.Workflow.FlowGraph do
     {:noreply, assign(socket, sheet_open?: false, child_workflow: nil, child_steps: [])}
   end
 
-  def handle_event("set-tab", %{"tab" => tab}, socket) when tab in ~w(info io error child) do
+  def handle_event("set-tab", %{"tab" => tab}, socket) when tab in ~w(info io logs error child) do
     {:noreply, assign(socket, active_tab: tab)}
   end
 
@@ -276,6 +277,12 @@ defmodule DurableDashboard.Components.Workflow.FlowGraph do
             <.tab_button label="Info" tab="info" active_tab={@active_tab} target={@target} />
             <.tab_button label="I/O" tab="io" active_tab={@active_tab} target={@target} />
             <.tab_button
+              label={logs_tab_label(@step)}
+              tab="logs"
+              active_tab={@active_tab}
+              target={@target}
+            />
+            <.tab_button
               :if={@step.error}
               label="Error"
               tab="error"
@@ -290,6 +297,8 @@ defmodule DurableDashboard.Components.Workflow.FlowGraph do
                 <.info_tab step={@step} />
               <% "io" -> %>
                 <.io_tab step={@step} />
+              <% "logs" -> %>
+                <.logs_tab step={@step} />
               <% "error" -> %>
                 <.error_tab step={@step} />
               <% "child" -> %>
@@ -371,9 +380,7 @@ defmodule DurableDashboard.Components.Workflow.FlowGraph do
   defp info_row(assigns) do
     ~H"""
     <div class="flex items-center justify-between gap-4 px-6 py-2.5">
-      <dt class="font-mono text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
-        {@label}
-      </dt>
+      <dt><Core.label>{@label}</Core.label></dt>
       <dd class={[
         "truncate text-right text-xs text-foreground",
         @mono && "font-mono"
@@ -402,16 +409,53 @@ defmodule DurableDashboard.Components.Workflow.FlowGraph do
     ~H"""
     <div class="border border-border">
       <div class="flex items-center justify-between border-b border-border bg-muted/30 px-3 py-1.5">
-        <span class="font-mono text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
-          {@label}
-        </span>
+        <Core.label>{@label}</Core.label>
         <span class="font-mono text-[9px] text-muted-foreground/60">
           {if @value, do: "JSON", else: "null"}
         </span>
       </div>
-      <pre class="thin-scroll max-h-[40vh] overflow-auto bg-background/50 p-3 font-mono text-[11px] text-foreground/90">{format_json(@value)}</pre>
+      <Core.json value={@value} bare class="max-h-[40vh] bg-background/50 p-3" />
     </div>
     """
+  end
+
+  attr :step, :any, required: true
+
+  # Per-step logs, captured by the engine during the step body and stored on
+  # the step_execution row. Renders the SAME dense, expandable `LogLine.row`
+  # as the page-level Logs tab (single source of truth) — scoped to this one
+  # step, so the step column is suppressed.
+  defp logs_tab(assigns) do
+    logs =
+      assigns.step
+      |> Map.get(:logs)
+      |> List.wrap()
+      |> Enum.sort_by(&Map.get(&1, "timestamp", ""))
+
+    assigns = assign(assigns, logs: logs)
+
+    ~H"""
+    <%= if @logs == [] do %>
+      <div class="px-6 py-12 text-center">
+        <Core.empty_state
+          icon="information-circle"
+          title="No logs"
+          description="This step produced no log output (logs are captured per step while its body runs)."
+        />
+      </div>
+    <% else %>
+      <div class="thin-scroll overflow-auto">
+        <LogLine.row :for={entry <- @logs} entry={entry} show_step={false} />
+      </div>
+    <% end %>
+    """
+  end
+
+  defp logs_tab_label(step) do
+    case step |> Map.get(:logs) |> List.wrap() |> length() do
+      0 -> "Logs"
+      n -> "Logs (#{n})"
+    end
   end
 
   attr :child_workflow, :any, required: true
@@ -542,17 +586,13 @@ defmodule DurableDashboard.Components.Workflow.FlowGraph do
     ~H"""
     <div class="space-y-4 p-6">
       <div :if={Map.get(@step.error || %{}, "type") || Map.get(@step.error || %{}, :type)}>
-        <p class="font-mono text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
-          Type
-        </p>
+        <Core.label>Type</Core.label>
         <p class="mt-1 font-mono text-xs text-destructive">
           {error_field(@step.error, "type")}
         </p>
       </div>
       <div :if={Map.get(@step.error || %{}, "message") || Map.get(@step.error || %{}, :message)}>
-        <p class="font-mono text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
-          Message
-        </p>
+        <Core.label>Message</Core.label>
         <p class="mt-1 text-[13px] text-destructive/90">
           {error_field(@step.error, "message")}
         </p>
@@ -561,7 +601,7 @@ defmodule DurableDashboard.Components.Workflow.FlowGraph do
         <div class="border-b border-destructive/30 bg-destructive/5 px-3 py-1.5 font-mono text-[10px] uppercase tracking-[0.18em] text-destructive">
           Full trace
         </div>
-        <pre class="thin-scroll max-h-[40vh] overflow-auto bg-destructive/5 p-3 font-mono text-[11px] text-destructive/80">{format_json(@step.error)}</pre>
+        <Core.json value={@step.error} bare class="max-h-[40vh] bg-destructive/5 p-3" />
       </div>
     </div>
     """
@@ -631,15 +671,6 @@ defmodule DurableDashboard.Components.Workflow.FlowGraph do
 
   defp format_timestamp(other) when is_binary(other), do: other
   defp format_timestamp(_), do: "—"
-
-  defp format_json(nil), do: "null"
-
-  defp format_json(value) do
-    case Jason.encode(value, pretty: true) do
-      {:ok, json} -> json
-      _ -> inspect(value, pretty: true)
-    end
-  end
 
   # ============================================================================
   # Graph construction
@@ -742,12 +773,24 @@ defmodule DurableDashboard.Components.Workflow.FlowGraph do
   end
 
   defp normalize_edge(edge) do
+    # `className` and `label` carry ALL the runtime edge semantics:
+    # `graph_builder.apply_edge_status/3` paints status via className
+    # (flow-edge-running / -completed / -pending / -conditional) and
+    # `build_clause_path` / `prepend_branch_edges` set the label (clause
+    # names, "goto :x"). `graph-layout.ts` reads `e.className`/`e.label`
+    # off each edge and forwards them to ReactFlow. Dropping them here —
+    # as this function did — silently discarded every edge color, the
+    # taken-vs-not-taken decision branch, conditional dashing, and all
+    # clause/goto labels, so the graph never reflected execution. Always
+    # emit them (nil is fine: a null className/label is a no-op client-side).
     %{
       id: to_string(edge.id),
       source: to_string(edge.source),
       target: to_string(edge.target),
       animated: Map.get(edge, :animated, false),
-      style: Map.get(edge, :style, %{})
+      style: Map.get(edge, :style, %{}),
+      className: Map.get(edge, :className),
+      label: Map.get(edge, :label)
     }
   end
 
