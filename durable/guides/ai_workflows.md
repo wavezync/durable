@@ -10,7 +10,7 @@ Build reliable AI agent workflows with automatic retries, state persistence, and
 # mix.exs
 defp deps do
   [
-    {:durable, "~> 0.1.0"},
+    {:durable, "~> 0.1.0-rc"},
     {:req_llm, "~> 1.1"}
   ]
 end

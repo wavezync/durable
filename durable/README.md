@@ -21,7 +21,7 @@ A durable, resumable workflow engine for Elixir. Similar to Temporal/Inngest.
 
 ```elixir
 def deps do
-  [{:durable, "~> 0.0.0-alpha"}]
+  [{:durable, "~> 0.1.0-rc"}]
 end
 ```
 

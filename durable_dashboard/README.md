@@ -31,8 +31,8 @@ Add `durable_dashboard` alongside `durable`:
 ```elixir
 def deps do
   [
-    {:durable, "~> 0.0.0-alpha"},
-    {:durable_dashboard, "~> 0.0.0-alpha"}
+    {:durable, "~> 0.1.0-rc"},
+    {:durable_dashboard, "~> 0.1.0-rc"}
   ]
 end
 ```

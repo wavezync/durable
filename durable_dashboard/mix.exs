@@ -16,13 +16,13 @@ defmodule DurableDashboard.MixProject do
   {shared, _bindings} = Code.eval_file(shared_dst)
 
   # Versioned independently of durable.
-  @version "0.0.0-alpha"
+  @version "0.1.0-rc"
 
   # Hex requirement for durable when this package is published. In the monorepo
   # durable is a path dependency (see durable_dep/0); the published package must
   # depend on a released Hex version instead. durable and durable_dashboard
   # version independently, so bump this to match the durable release you target.
-  @durable_version "~> 0.0.0-alpha"
+  @durable_version "~> 0.1.0-rc"
 
   @elixir_requirement Keyword.fetch!(shared, :elixir)
   @source_url Keyword.fetch!(shared, :source_url)
