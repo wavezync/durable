@@ -20,8 +20,6 @@ defmodule Durable.Executor.CompensationRunner do
   alias Durable.Repo
   alias Durable.Storage.Schemas.StepExecution
 
-  require Logger
-
   @type result :: {:ok, any()} | {:error, any()}
 
   @doc """
@@ -176,12 +174,12 @@ defmodule Durable.Executor.CompensationRunner do
     |> Repo.update(config)
   end
 
+  defp serialize_output(nil), do: nil
   defp serialize_output(output) when is_map(output), do: output
   defp serialize_output(output) when is_list(output), do: %{value: output}
   defp serialize_output(output) when is_binary(output), do: %{value: output}
   defp serialize_output(output) when is_number(output), do: %{value: output}
   defp serialize_output(output) when is_atom(output), do: %{value: Atom.to_string(output)}
   defp serialize_output(output) when is_tuple(output), do: %{value: Tuple.to_list(output)}
-  defp serialize_output(nil), do: nil
   defp serialize_output(output), do: %{value: inspect(output)}
 end

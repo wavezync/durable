@@ -398,8 +398,6 @@ defmodule Durable.DSL.Step do
 
   defp pattern_to_clause_name({:_, _, _}), do: :default
   defp pattern_to_clause_name(atom) when is_atom(atom), do: atom
-  defp pattern_to_clause_name(true), do: true
-  defp pattern_to_clause_name(false), do: false
   defp pattern_to_clause_name(string) when is_binary(string), do: String.to_atom(string)
   defp pattern_to_clause_name(int) when is_integer(int), do: :"val_#{int}"
   defp pattern_to_clause_name(_), do: :match

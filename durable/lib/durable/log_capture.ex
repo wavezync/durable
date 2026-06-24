@@ -272,10 +272,10 @@ defmodule Durable.LogCapture do
   end
 
   defp serialize_value(v) when is_binary(v), do: v
+  defp serialize_value(nil), do: nil
+  defp serialize_value(v) when is_boolean(v), do: v
   defp serialize_value(v) when is_atom(v), do: Atom.to_string(v)
   defp serialize_value(v) when is_number(v), do: v
-  defp serialize_value(v) when is_boolean(v), do: v
-  defp serialize_value(nil), do: nil
 
   defp serialize_value(v) do
     # Bug M-6: surface (once per step) when log metadata has been silently

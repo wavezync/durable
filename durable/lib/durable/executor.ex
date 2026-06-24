@@ -122,7 +122,7 @@ defmodule Durable.Executor do
       else
         # Pipeline model: start with workflow input or restored context
         initial_data =
-          if execution.context && execution.context != %{} do
+          if execution.context != %{} do
             atomize_keys(execution.context)
           else
             execution.input
@@ -429,9 +429,6 @@ defmodule Durable.Executor do
 
   defp handle_wait_result(config, exec, :wait_for_all, opts),
     do: {:waiting, handle_wait_for_all(config, exec, opts) |> elem(1)}
-
-  defp handle_wait_result(config, exec, :call_workflow, opts),
-    do: handle_call_workflow(config, exec, opts)
 
   # ============================================================================
   # Workflow Orchestration (call_workflow)

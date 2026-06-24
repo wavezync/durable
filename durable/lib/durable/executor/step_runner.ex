@@ -18,8 +18,6 @@ defmodule Durable.Executor.StepRunner do
 
   import Ecto.Query, only: [from: 2]
 
-  require Logger
-
   @type result ::
           {:ok, map()}
           | {:error, any()}

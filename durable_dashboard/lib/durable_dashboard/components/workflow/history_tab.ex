@@ -153,7 +153,6 @@ defmodule DurableDashboard.Components.Workflow.HistoryTab do
 
   defp pulsing?(s), do: to_string(s) in ["running", "waiting", "compensating"]
 
-  defp format_duration(nil), do: "—"
   defp format_duration(ms) when ms < 1000, do: "#{ms}ms"
   defp format_duration(ms) when ms < 60_000, do: "#{Float.round(ms / 1000, 1)}s"
   defp format_duration(ms), do: "#{div(ms, 60_000)}m"
