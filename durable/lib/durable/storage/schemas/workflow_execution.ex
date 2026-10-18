@@ -39,6 +39,9 @@ defmodule Durable.Storage.Schemas.WorkflowExecution do
           locked_at: DateTime.t() | nil,
           compensation_results: list(map()),
           compensated_at: DateTime.t() | nil,
+          retried_at: DateTime.t() | nil,
+          trigger: :api | :schedule | :parent | :rerun | nil,
+          trigger_ref: String.t() | nil,
           inserted_at: DateTime.t(),
           updated_at: DateTime.t()
         }
@@ -85,6 +88,16 @@ defmodule Durable.Storage.Schemas.WorkflowExecution do
     field(:compensation_results, {:array, :map}, default: [])
     field(:compensated_at, :utc_datetime_usec)
 
+    # Operator controls: when Durable.retry/2 last resumed this run (attempt
+    # budgets count from here), and what started it.
+    field(:retried_at, :utc_datetime_usec)
+    field(:trigger, Ecto.Enum, values: [:api, :schedule, :parent, :rerun], default: :api)
+    field(:trigger_ref, :string)
+
+    # Set from the workflow's `timeout:` when the run is created; a run past it
+    # fails with a "timeout" error before its next step.
+    field(:deadline_at, :utc_datetime_usec)
+
     has_many(:step_executions, Durable.Storage.Schemas.StepExecution, foreign_key: :workflow_id)
     has_many(:pending_inputs, Durable.Storage.Schemas.PendingInput, foreign_key: :workflow_id)
 
@@ -107,7 +120,10 @@ defmodule Durable.Storage.Schemas.WorkflowExecution do
     :locked_by,
     :locked_at,
     :compensation_results,
-    :compensated_at
+    :compensated_at,
+    :trigger,
+    :trigger_ref,
+    :deadline_at
   ]
 
   @doc """
@@ -162,14 +178,19 @@ defmodule Durable.Storage.Schemas.WorkflowExecution do
   Creates a changeset for marking workflow as compensated (all compensations succeeded).
   """
   def compensated_changeset(execution, results) do
+    now = DateTime.utc_now()
+
+    # A rolled-back run is finished too: completed_at marks the end of every
+    # terminal run, so durations and retention treat them alike.
     execution
     |> cast(
       %{
         status: :compensated,
         compensation_results: results,
-        compensated_at: DateTime.utc_now()
+        compensated_at: now,
+        completed_at: now
       },
-      [:status, :compensation_results, :compensated_at]
+      [:status, :compensation_results, :compensated_at, :completed_at]
     )
   end
 
@@ -183,9 +204,10 @@ defmodule Durable.Storage.Schemas.WorkflowExecution do
         status: :compensation_failed,
         compensation_results: results,
         error: error,
-        compensated_at: DateTime.utc_now()
+        compensated_at: DateTime.utc_now(),
+        completed_at: DateTime.utc_now()
       },
-      [:status, :compensation_results, :error, :compensated_at]
+      [:status, :compensation_results, :error, :compensated_at, :completed_at]
     )
   end
 end
