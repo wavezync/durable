@@ -431,6 +431,19 @@ defmodule Durable.Queue.Adapters.PostgresTest do
       assert execution.locked_at == nil
       assert execution.completed_at != nil
     end
+
+    # The executor records a run's final status itself; nack is the fallback
+    # for a worker that crashed before it could. It must never overwrite a
+    # status the executor already settled (e.g. a saga that rolled back).
+    test "leaves a status the executor already settled alone" do
+      for settled <- [:compensated, :compensation_failed, :failed, :cancelled, :waiting] do
+        job = insert_execution(workflow_name: "test", status: settled)
+
+        :ok = Postgres.nack(config(), job.id, %{message: "worker saw an error"})
+
+        assert repo().get!(WorkflowExecution, job.id).status == settled
+      end
+    end
   end
 
   describe "reschedule/3" do

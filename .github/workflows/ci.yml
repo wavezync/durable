@@ -106,6 +106,22 @@ jobs:
     if: needs.changes.outputs.dashboard == 'true' || needs.changes.outputs.ci == 'true' || github.event_name == 'push'
     runs-on: ubuntu-latest
 
+    # Page tests (DurableDashboard.LiveCase) mount the LiveViews against a
+    # real Durable instance.
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 54321:5432
+        options: >-
+          --health-cmd="pg_isready -U postgres"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+
     defaults:
       run:
         working-directory: durable_dashboard

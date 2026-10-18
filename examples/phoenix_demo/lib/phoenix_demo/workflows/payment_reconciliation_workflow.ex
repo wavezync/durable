@@ -18,7 +18,7 @@ defmodule PhoenixDemo.Workflows.PaymentReconciliationWorkflow do
   require Logger
 
   workflow "reconcile_payment", timeout: minutes(10) do
-    step :submit_to_processor, fn data ->
+    step(:submit_to_processor, fn data ->
       txn_id = data["transaction_id"] || "TXN-#{:rand.uniform(99_999)}"
 
       Logger.info("[Recon] Submitting #{txn_id} to processor")
@@ -28,9 +28,9 @@ defmodule PhoenixDemo.Workflows.PaymentReconciliationWorkflow do
       put_context(:submitted_at, DateTime.utc_now() |> DateTime.to_iso8601())
 
       {:ok, assign(data, "transaction_id", txn_id)}
-    end
+    end)
 
-    step :await_webhook, fn data ->
+    step(:await_webhook, fn data ->
       txn_id = get_context(:txn_id)
       Logger.info("[Recon] #{txn_id} — waiting for webhook_received event")
 
@@ -43,9 +43,9 @@ defmodule PhoenixDemo.Workflows.PaymentReconciliationWorkflow do
       Logger.info("[Recon] #{txn_id} received webhook: #{inspect(payload)}")
       put_context(:webhook_payload, payload)
       {:ok, assign(data, "webhook", payload)}
-    end
+    end)
 
-    decision :route_on_status, fn data ->
+    decision(:route_on_status, fn data ->
       payload = get_context(:webhook_payload) || %{}
 
       case payload["status"] do
@@ -57,9 +57,9 @@ defmodule PhoenixDemo.Workflows.PaymentReconciliationWorkflow do
           Logger.warning("[Recon] Payment did not settle (status=#{other}) — handling failure")
           {:goto, :handle_failure, assign(data, "failure_status", other)}
       end
-    end
+    end)
 
-    step :reconcile, fn _data ->
+    step(:reconcile, fn _data ->
       txn_id = get_context(:txn_id)
       payload = get_context(:webhook_payload)
 
@@ -72,9 +72,9 @@ defmodule PhoenixDemo.Workflows.PaymentReconciliationWorkflow do
          "settlement" => payload,
          "reconciled_at" => DateTime.utc_now() |> DateTime.to_iso8601()
        }}
-    end
+    end)
 
-    step :handle_failure, fn data ->
+    step(:handle_failure, fn data ->
       txn_id = get_context(:txn_id)
       status = data["failure_status"] || "unknown"
 
@@ -87,6 +87,6 @@ defmodule PhoenixDemo.Workflows.PaymentReconciliationWorkflow do
          "failure_status" => status,
          "failed_at" => DateTime.utc_now() |> DateTime.to_iso8601()
        }}
-    end
+    end)
   end
 end

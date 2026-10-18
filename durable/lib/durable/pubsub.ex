@@ -44,6 +44,7 @@ defmodule Durable.PubSub do
           | :workflow_completed
           | :workflow_failed
           | :workflow_cancelled
+          | :workflow_retried
           | :step_started
           | :step_completed
           | :step_failed

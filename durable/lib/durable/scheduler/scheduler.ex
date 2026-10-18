@@ -213,6 +213,15 @@ defmodule Durable.Scheduler do
             "[Durable.Scheduler] Auto-disabled #{schedule.name} after " <>
               "#{updated.consecutive_failures} consecutive failures: #{message}"
           )
+
+          Durable.Activity.record(config, "schedule_disabled",
+            queue: schedule.queue,
+            details: %{
+              schedule: schedule.name,
+              failures: updated.consecutive_failures,
+              error: message
+            }
+          )
         else
           Logger.warning(
             "[Durable.Scheduler] Schedule #{schedule.name} failure " <>
@@ -233,7 +242,9 @@ defmodule Durable.Scheduler do
       {:ok, cron} ->
         case CronScheduler.get_next_run_date(cron, DateTime.utc_now() |> DateTime.to_naive()) do
           {:ok, naive} ->
-            DateTime.from_naive!(naive, "Etc/UTC")
+            naive
+            |> DateTime.from_naive!("Etc/UTC")
+            |> then(&%{&1 | microsecond: {elem(&1.microsecond, 0), 6}})
 
           _ ->
             DateTime.add(DateTime.utc_now(), 300, :second)
@@ -267,7 +278,9 @@ defmodule Durable.Scheduler do
       Durable.Executor.start_workflow(module, schedule.input,
         workflow: schedule.workflow_name,
         queue: String.to_atom(schedule.queue),
-        durable: config.name
+        durable: config.name,
+        trigger: :schedule,
+        trigger_ref: schedule.name
       )
 
     case result do
@@ -275,7 +288,7 @@ defmodule Durable.Scheduler do
         # Update last_run_at and next_run_at
         case API.mark_run(schedule, config) do
           {:ok, _} ->
-            emit_schedule_triggered(schedule, workflow_id)
+            emit_schedule_triggered(schedule, workflow_id, config)
 
             Logger.info("Triggered schedule #{schedule.name} -> workflow_id=#{workflow_id}")
 
@@ -290,15 +303,16 @@ defmodule Durable.Scheduler do
     end
   end
 
-  defp emit_schedule_triggered(schedule, workflow_id) do
+  defp emit_schedule_triggered(schedule, workflow_id, config) do
     :telemetry.execute(
-      [:durable, :scheduler, :triggered],
+      [:durable, :schedule, :trigger],
       %{count: 1},
       %{
-        schedule_name: schedule.name,
+        durable: config.name,
+        schedule: schedule.name,
         workflow_id: workflow_id,
         workflow_module: schedule.workflow_module,
-        workflow_name: schedule.workflow_name,
+        workflow: schedule.workflow_name,
         queue: schedule.queue
       }
     )

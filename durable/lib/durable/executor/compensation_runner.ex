@@ -31,7 +31,21 @@ defmodule Durable.Executor.CompensationRunner do
   @spec execute(Compensation.t(), String.t(), atom(), Config.t()) :: result()
   def execute(%Compensation{} = compensation, workflow_id, compensating_step, %Config{} = config) do
     max_attempts = get_max_attempts(compensation)
-    execute_with_retry(compensation, workflow_id, compensating_step, 1, max_attempts, config)
+
+    meta = %{
+      durable: config.name,
+      workflow_id: workflow_id,
+      workflow: Map.get(Durable.Telemetry.run_meta(), :workflow),
+      compensation: compensation.name,
+      step: compensating_step
+    }
+
+    :telemetry.span([:durable, :compensation], meta, fn ->
+      result =
+        execute_with_retry(compensation, workflow_id, compensating_step, 1, max_attempts, config)
+
+      {result, Map.put(meta, :result, if(match?({:ok, _}, result), do: :ok, else: :error))}
+    end)
   end
 
   defp execute_with_retry(
@@ -65,17 +79,8 @@ defmodule Durable.Executor.CompensationRunner do
       try do
         output = Compensation.execute(compensation, Context.context())
         {:ok, output}
-      rescue
-        e ->
-          {:error,
-           %{
-             type: inspect(e.__struct__),
-             message: Exception.message(e),
-             stacktrace: Exception.format_stacktrace(__STACKTRACE__)
-           }}
       catch
-        kind, reason ->
-          {:error, %{type: "#{kind}", message: inspect(reason)}}
+        kind, reason -> {:error, Durable.Executor.caught_error(kind, reason, __STACKTRACE__)}
       end
 
     end_time = System.monotonic_time(:millisecond)

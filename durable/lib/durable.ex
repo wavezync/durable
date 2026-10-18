@@ -94,6 +94,8 @@ defmodule Durable do
 
   """
 
+  alias Durable.Config
+  alias Durable.Queue.Control, as: QueueControl
   alias Durable.Scheduler.API, as: SchedulerAPI
 
   defmacro __using__(_opts) do
@@ -245,7 +247,15 @@ defmodule Durable do
   end
 
   @doc """
-  Cancels a running or pending workflow.
+  Cancels a pending, running or waiting workflow, and its child workflows.
+
+  The cancel is final: once it returns `:ok` the run stays `:cancelled`. A
+  running workflow stops at its next step boundary: the step already in
+  flight finishes and is recorded, but its output isn't merged into the run's
+  context and no later step runs. Cancelling does not run compensations.
+
+  Returns `{:error, :already_completed}` if the run has already finished, and
+  `{:error, :not_found}` for an unknown id.
 
   ## Examples
 
@@ -256,6 +266,104 @@ defmodule Durable do
   @spec cancel(String.t(), String.t() | nil) :: :ok | {:error, term()}
   def cancel(workflow_id, reason \\ nil) do
     Durable.Executor.cancel_workflow(workflow_id, reason)
+  end
+
+  @doc """
+  Resumes a failed workflow at the step that failed.
+
+  Steps that already completed are not re-run, and the failed step gets its
+  full retry budget again. Inside a parallel block only the children that
+  failed are re-queued.
+
+  Returns `{:error, :rolled_back}` for runs whose compensations ran — use
+  `rerun/2` for those — and `{:error, :not_failed}` for runs that aren't failed.
+
+  ## Options
+
+  - `:durable` - The Durable instance name (default: Durable)
+
+  ## Examples
+
+      {:ok, ^workflow_id} = Durable.retry(workflow_id)
+
+  """
+  @spec retry(String.t(), keyword()) :: {:ok, String.t()} | {:error, term()}
+  def retry(workflow_id, opts \\ []) do
+    Durable.Executor.retry_workflow(workflow_id, opts)
+  end
+
+  @doc """
+  Starts a fresh run of a finished workflow, with its original input or a new
+  one. The new run's `trigger` is `:rerun` and its `trigger_ref` is the
+  original run's id.
+
+  ## Options
+
+  - `:input` - Input for the new run (default: the original run's input)
+  - `:durable` - The Durable instance name (default: Durable)
+
+  ## Examples
+
+      {:ok, new_id} = Durable.rerun(workflow_id)
+      {:ok, new_id} = Durable.rerun(workflow_id, input: %{"order_id" => "ORD-1043"})
+
+  """
+  @spec rerun(String.t(), keyword()) :: {:ok, String.t()} | {:error, term()}
+  def rerun(workflow_id, opts \\ []) do
+    Durable.Executor.rerun_workflow(workflow_id, opts)
+  end
+
+  @doc """
+  Pauses a queue on every node. Runs already executing finish; no node claims
+  new work from the queue until `resume_queue/2`. The pause survives restarts.
+
+  Recorded in `Durable.Activity` as `"queue_paused"`.
+
+  ## Options
+
+  - `:durable` - The Durable instance name (default: Durable)
+  - `:by` - who paused it, kept with the activity record
+  """
+  @spec pause_queue(atom() | String.t(), keyword()) :: :ok | {:error, term()}
+  def pause_queue(queue, opts \\ []) do
+    QueueControl.pause(Config.get(Keyword.get(opts, :durable, Durable)), queue, opts)
+  end
+
+  @doc """
+  Resumes a queue paused with `pause_queue/2`, on every node.
+  """
+  @spec resume_queue(atom() | String.t(), keyword()) :: :ok | {:error, term()}
+  def resume_queue(queue, opts \\ []) do
+    QueueControl.resume(Config.get(Keyword.get(opts, :durable, Durable)), queue, opts)
+  end
+
+  @doc """
+  Returns the names of queues currently paused with `pause_queue/2`.
+  """
+  @spec paused_queues(keyword()) :: [String.t()]
+  def paused_queues(opts \\ []) do
+    QueueControl.paused(Config.get(Keyword.get(opts, :durable, Durable)))
+  end
+
+  @doc """
+  Lists the Durable nodes that have heartbeated recently, newest first. Each
+  has `:id`, `:queues`, `:version`, `:started_at`, `:heartbeat_at`, a
+  `:status` of `:alive` or `:missing` (no heartbeat for 30 s), and `:running`,
+  the number of runs it is executing.
+  """
+  @spec list_nodes(keyword()) :: [map()]
+  def list_nodes(opts \\ []) do
+    Durable.NodeRegistry.list(Config.get(Keyword.get(opts, :durable, Durable)))
+  end
+
+  @doc """
+  Deletes finished runs past the `:prune` retention now, instead of waiting
+  for the hourly sweep. Returns the number deleted per group, or `%{}` when
+  `:prune` isn't configured.
+  """
+  @spec prune(keyword()) :: %{atom() => non_neg_integer()}
+  def prune(opts \\ []) do
+    Durable.Pruner.prune(Config.get(Keyword.get(opts, :durable, Durable)))
   end
 
   @doc """

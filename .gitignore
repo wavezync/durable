@@ -11,3 +11,6 @@ erl_crash.dump
 /doc/
 /_build/
 /deps/
+
+# macOS Finder metadata
+.DS_Store

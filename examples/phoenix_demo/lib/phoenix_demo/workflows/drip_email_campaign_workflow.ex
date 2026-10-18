@@ -23,7 +23,7 @@ defmodule PhoenixDemo.Workflows.DripEmailCampaignWorkflow do
   require Logger
 
   workflow "drip_email_campaign", timeout: minutes(30) do
-    step :send_welcome, fn data ->
+    step(:send_welcome, fn data ->
       email = data["customer_email"] || "demo@example.com"
       campaign = data["campaign"] || "welcome"
 
@@ -33,49 +33,49 @@ defmodule PhoenixDemo.Workflows.DripEmailCampaignWorkflow do
 
       Logger.info("[Drip] Welcome email → #{email} (#{campaign})")
       {:ok, assign(data, "email_step", "welcome_sent")}
-    end
+    end)
 
-    step :wait_first, fn data ->
+    step(:wait_first, fn data ->
       until = DateTime.add(DateTime.utc_now(), 30, :second)
       Logger.info("[Drip] Scheduling followup #1 at #{DateTime.to_iso8601(until)}")
       schedule_at(until)
       {:ok, data}
-    end
+    end)
 
-    step :send_first_followup, fn data ->
+    step(:send_first_followup, fn data ->
       email = get_context(:customer_email)
       Logger.info("[Drip] Followup #1 → #{email}")
       put_context(:first_sent_at, DateTime.utc_now() |> DateTime.to_iso8601())
       {:ok, assign(data, "email_step", "first_sent")}
-    end
+    end)
 
-    step :wait_second, fn data ->
+    step(:wait_second, fn data ->
       Logger.info("[Drip] Sleeping 1m before followup #2")
       sleep(minutes(1))
       {:ok, data}
-    end
+    end)
 
-    step :send_second_followup, fn data ->
+    step(:send_second_followup, fn data ->
       email = get_context(:customer_email)
       Logger.info("[Drip] Followup #2 → #{email}")
       put_context(:second_sent_at, DateTime.utc_now() |> DateTime.to_iso8601())
       {:ok, assign(data, "email_step", "second_sent")}
-    end
+    end)
 
-    step :wait_third, fn data ->
+    step(:wait_third, fn data ->
       Logger.info("[Drip] Sleeping 2m before followup #3")
       sleep(minutes(2))
       {:ok, data}
-    end
+    end)
 
-    step :send_third_followup, fn data ->
+    step(:send_third_followup, fn data ->
       email = get_context(:customer_email)
       Logger.info("[Drip] Followup #3 → #{email}")
       put_context(:third_sent_at, DateTime.utc_now() |> DateTime.to_iso8601())
       {:ok, assign(data, "email_step", "third_sent")}
-    end
+    end)
 
-    step :complete_campaign, fn _data ->
+    step(:complete_campaign, fn _data ->
       email = get_context(:customer_email)
 
       {:ok,
@@ -88,6 +88,6 @@ defmodule PhoenixDemo.Workflows.DripEmailCampaignWorkflow do
          "second_sent_at" => get_context(:second_sent_at),
          "third_sent_at" => get_context(:third_sent_at)
        }}
-    end
+    end)
   end
 end

@@ -1,4 +1,4 @@
-// Dashboard entry point — LiveSocket + the FlowGraph hook only.
+// Dashboard entry point — LiveSocket and its hooks.
 //
 // Pages render server-side via LiveView; React only shows up inside a
 // `phx-hook="FlowGraph"` island for the workflow-graph view. Everything
@@ -14,6 +14,8 @@ import { CommandPalette } from "./hooks/command_palette";
 import { initClipboard } from "./hooks/copy";
 import { FlowGraph } from "./hooks/flow_graph";
 import { localizeTime, localizeTimes } from "./hooks/local_time";
+import { QuerySuggest } from "./hooks/query_suggest";
+import { initTooltips } from "./tooltip";
 
 const csrfToken = document.querySelector("meta[name='csrf-token']")?.getAttribute("content");
 
@@ -21,7 +23,7 @@ const liveSocketPath =
   document.querySelector("meta[name='live-socket-path']")?.getAttribute("content") || "/live";
 
 const liveSocket = new LiveSocket(liveSocketPath, Socket, {
-  hooks: { FlowGraph, CommandPalette },
+  hooks: { FlowGraph, CommandPalette, QuerySuggest },
   params: { _csrf_token: csrfToken },
   dom: {
     // Render UTC `<time data-ts>` elements in the viewer's timezone — once for
@@ -37,6 +39,7 @@ const liveSocket = new LiveSocket(liveSocketPath, Socket, {
 });
 
 liveSocket.connect();
+initTooltips();
 
 // One delegated listener handles every `<button data-copy>` copy control.
 initClipboard();

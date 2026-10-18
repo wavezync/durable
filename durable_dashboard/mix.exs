@@ -64,12 +64,13 @@ defmodule DurableDashboard.MixProject do
       # monorepo co-development, comment it and uncomment the path dep below.
       # Bump the requirement to the durable release this dashboard targets.
       # (Same toggle pattern as elixir-nx/nx's torchx.)
-      {:durable, "~> 0.1.0-rc"},
-      # {:durable, path: "../durable"},
+      # {:durable, "~> 1.0"},
+      {:durable, path: "../durable"},
       {:phoenix_live_view, "~> 1.1"},
       {:phoenix, "~> 1.8"},
       {:jason, "~> 1.4"},
       {:lazy_html, ">= 0.1.0", only: :test},
+      {:stream_data, "~> 1.1", only: :test},
       {:ex_doc, "~> 0.34", only: :dev, runtime: false}
     ]
   end

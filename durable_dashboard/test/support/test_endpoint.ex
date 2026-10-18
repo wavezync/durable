@@ -1,7 +1,8 @@
 defmodule DurableDashboard.TestEndpoint do
   @moduledoc """
-  Minimal `Phoenix.Endpoint` for `live_isolated/3` tests. Not part of the
-  shipped library — defined under `test/support/` and started by
+  Minimal `Phoenix.Endpoint` for `live_isolated/3` tests and the page tests
+  (`DurableDashboard.LiveCase`), which go through `TestRouter`. Not part of
+  the shipped library — defined under `test/support/` and started by
   `test_helper.exs`.
   """
 
@@ -15,6 +16,8 @@ defmodule DurableDashboard.TestEndpoint do
     signing_salt: "test-salt"
 
   plug :put_secret_key_base
+
+  plug DurableDashboard.TestRouter
 
   defp put_secret_key_base(conn, _) do
     put_in(conn.secret_key_base, String.duplicate("a", 64))

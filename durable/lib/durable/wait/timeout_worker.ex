@@ -1,6 +1,8 @@
 defmodule Durable.Wait.TimeoutWorker do
   @moduledoc """
-  Background worker that enforces timeouts for pending inputs and events.
+  Background worker that enforces timeouts for pending inputs and events, and
+  wakes waiting runs that passed their workflow `timeout:` so they fail now
+  rather than when their wait ends.
 
   Periodically checks for timed-out waits and either:
   - Resumes the workflow with the timeout_value (if on_timeout: :resume)
@@ -93,6 +95,38 @@ defmodule Durable.Wait.TimeoutWorker do
     process_timed_out_inputs(config, now)
     process_timed_out_events(config, now)
     process_timed_out_wait_groups(config, now)
+    process_expired_runs(config, now)
+  end
+
+  # A waiting run past its deadline is resumed; the executor sees the deadline
+  # before the step re-runs and fails the run (running its compensations).
+  # Resume first, so an input answered at the same moment isn't marked timed
+  # out; only then close the waits it no longer needs.
+  defp process_expired_runs(config, now) do
+    ids =
+      Repo.all(
+        config,
+        from(w in WorkflowExecution,
+          where: w.status == :waiting and w.deadline_at <= ^now,
+          select: w.id,
+          limit: 500
+        )
+      )
+
+    for id <- ids,
+        {:ok, _} <- [Executor.resume_workflow(id, %{}, durable: config.name)] do
+      close_waits(config, id, now)
+    end
+  end
+
+  defp close_waits(config, workflow_id, now) do
+    for schema <- [PendingInput, PendingEvent, WaitGroup] do
+      Repo.update_all(
+        config,
+        from(p in schema, where: p.workflow_id == ^workflow_id and p.status == :pending),
+        set: [status: :timeout, completed_at: now]
+      )
+    end
   end
 
   defp process_timed_out_inputs(config, now) do

@@ -20,9 +20,12 @@ defmodule Durable.DSL.Workflow do
 
   ## Options
 
-  - `:timeout` - Maximum workflow duration in milliseconds
-  - `:max_retries` - Maximum retry attempts for the entire workflow
-  - `:queue` - Default queue for this workflow
+  - `:timeout` - How long a run may take, in milliseconds, from when it is due
+    to start — waits and sleeps included. A run past it fails with a
+    `"timeout"` error before its next step, running compensations like any
+    failure; a waiting run is woken to do so. The deadline is checked between
+    steps, so it can't interrupt a step that is still running.
+  - `:queue` - The queue runs start on unless `Durable.start/3` names one
 
   """
 
@@ -32,7 +35,7 @@ defmodule Durable.DSL.Workflow do
   Defines a workflow with the given name and options.
   """
   defmacro workflow(name, opts \\ [], do: block) do
-    normalized_opts = normalize_workflow_opts(opts)
+    validate_workflow_opts!(opts, name)
 
     # Generate unique function names for this workflow
     definition_fn = :"__workflow_def_#{name}__"
@@ -81,7 +84,9 @@ defmodule Durable.DSL.Workflow do
           module: __MODULE__,
           steps: unquote(steps_fn)(),
           compensations: unquote(compensations_fn)(),
-          opts: unquote(Macro.escape(normalized_opts))
+          # Evaluated here, in the workflow module, so `timeout: hours(2)` is
+          # a number rather than the quoted call.
+          opts: Map.new(unquote(opts))
         }
       end
 
@@ -95,10 +100,19 @@ defmodule Durable.DSL.Workflow do
     end
   end
 
-  @doc false
-  def normalize_workflow_opts(opts) do
-    opts
-    |> Keyword.take([:timeout, :max_retries, :queue])
-    |> Enum.into(%{})
+  @workflow_opts [:timeout, :queue]
+
+  defp validate_workflow_opts!(opts, name) when is_list(opts) do
+    case Keyword.keys(opts) -- @workflow_opts do
+      [] ->
+        :ok
+
+      unknown ->
+        raise ArgumentError,
+              "unknown option(s) #{inspect(unknown)} for workflow #{inspect(name)}; " <>
+                "supported: #{inspect(@workflow_opts)}"
+    end
   end
+
+  defp validate_workflow_opts!(_opts, _name), do: :ok
 end

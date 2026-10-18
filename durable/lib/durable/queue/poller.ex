@@ -117,7 +117,7 @@ defmodule Durable.Queue.Poller do
       concurrency: Keyword.get(opts, :concurrency, @default_concurrency),
       poll_interval: Keyword.get(opts, :poll_interval, @default_poll_interval),
       worker_supervisor: worker_supervisor,
-      node_id: generate_node_id(),
+      node_id: config.node_id,
       active_jobs: MapSet.new(),
       worker_refs: %{},
       job_tokens: %{},
@@ -334,16 +334,6 @@ defmodule Durable.Queue.Poller do
 
     timer_ref = Process.send_after(self(), :poll, delay)
     %{state | timer_ref: timer_ref}
-  end
-
-  defp generate_node_id do
-    hostname =
-      case :inet.gethostname() do
-        {:ok, name} -> to_string(name)
-        _ -> "unknown"
-      end
-
-    "#{hostname}-#{:erlang.system_info(:scheduler_id)}-#{System.unique_integer([:positive])}"
   end
 
   defp emit_poll_telemetry(queue_name, jobs_fetched, available_slots) do

@@ -181,4 +181,60 @@ defmodule Durable.QueryTest do
       refute MapSet.member?(ids, old.id)
     end
   end
+
+  describe "search filters" do
+    defp ids(filters), do: filters |> Query.list_executions() |> MapSet.new(& &1.id)
+
+    test "current_step, trigger and error_contains", %{repo: repo} do
+      shipping =
+        insert_exec(repo,
+          status: :failed,
+          current_step: "ship_order",
+          error: %{"type" => "RuntimeError", "message" => "carrier returned 503"}
+        )
+
+      returned =
+        insert_exec(repo,
+          status: :failed,
+          current_step: "charge",
+          error: %{"reason" => "Card declined: 50% limit_hit"},
+          trigger: :schedule,
+          trigger_ref: "nightly"
+        )
+
+      assert ids(current_step: "ship_order") == MapSet.new([shipping.id])
+      assert ids(trigger: :schedule) == MapSet.new([returned.id])
+      assert ids(trigger_ref: "nightly") == MapSet.new([returned.id])
+      assert ids(error_contains: "CARRIER") == MapSet.new([shipping.id])
+      assert ids(error_contains: "declined") == MapSet.new([returned.id])
+
+      # LIKE wildcards in the search text are literal, not patterns.
+      assert ids(error_contains: "50%") == MapSet.new([returned.id])
+      assert ids(error_contains: "_") == MapSet.new([returned.id])
+    end
+
+    test "input matches exact values by dotted path", %{repo: repo} do
+      gold = insert_exec(repo, input: %{"order_id" => "ORD-1", "customer" => %{"tier" => "gold"}})
+
+      _silver =
+        insert_exec(repo, input: %{"order_id" => "ORD-2", "customer" => %{"tier" => "silver"}})
+
+      numeric = insert_exec(repo, input: %{"order_id" => 42})
+
+      assert ids(input: %{"order_id" => "ORD-1"}) == MapSet.new([gold.id])
+      assert ids(input: %{"customer.tier" => "gold"}) == MapSet.new([gold.id])
+      assert ids(input: %{"order_id" => 42}) == MapSet.new([numeric.id])
+      assert ids(input: %{"order_id" => "ORD-1", "customer.tier" => "silver"}) == MapSet.new()
+    end
+
+    test "count_by_status ignores the status filter but honours the rest", %{repo: repo} do
+      insert_exec(repo, status: :failed, workflow_name: "a")
+      insert_exec(repo, status: :failed, workflow_name: "a")
+      insert_exec(repo, status: :completed, workflow_name: "a")
+      insert_exec(repo, status: :failed, workflow_name: "b")
+
+      assert Query.count_by_status(workflow_name: "a", status: [:completed]) ==
+               %{failed: 2, completed: 1}
+    end
+  end
 end

@@ -26,11 +26,12 @@ defmodule DurableDashboard.Components.CoreTest do
   end
 
   describe "button/1" do
-    test "primary kind picks up the primary background" do
+    test "primary kind is ink-inverted, keeping blue for live state" do
       assigns = %{}
       html = rendered_to_string(~H[<Core.button kind="primary">Save</Core.button>])
       assert html =~ "Save"
-      assert html =~ "bg-primary"
+      assert html =~ "bg-foreground text-background"
+      refute html =~ "bg-primary"
     end
 
     test "ghost kind has no primary background" do
@@ -61,20 +62,28 @@ defmodule DurableDashboard.Components.CoreTest do
   end
 
   describe "status_pill/1" do
-    test "running state renders the LED pulse dot" do
+    test "running state renders the pulsing live mark in the primary tone" do
       assigns = %{}
       html = rendered_to_string(~H[<Core.status_pill status={:running} />])
-      assert html =~ "running"
-      assert html =~ "led-dot"
-      assert html =~ "bg-success"
+      assert html =~ "Running"
+      assert html =~ "st-dot st-running"
+      assert html =~ "text-primary"
+    end
+
+    test "failed state is a diamond mark, not just a color" do
+      assigns = %{}
+      html = rendered_to_string(~H[<Core.status_pill status={:failed} />])
+      assert html =~ "Failed"
+      assert html =~ "st-failed"
+      assert html =~ "text-destructive"
     end
 
     test "completed state renders solid success dot, no animation" do
       assigns = %{}
       html = rendered_to_string(~H[<Core.status_pill status="completed" />])
-      assert html =~ "completed"
-      assert html =~ "bg-success"
-      refute html =~ "led-dot"
+      assert html =~ "Completed"
+      assert html =~ "st-completed"
+      refute html =~ "st-running"
     end
 
     test "failed state uses destructive color" do
@@ -87,8 +96,8 @@ defmodule DurableDashboard.Components.CoreTest do
     test "unknown status falls back to muted" do
       assigns = %{}
       html = rendered_to_string(~H[<Core.status_pill status="garbled" />])
-      assert html =~ "garbled"
-      assert html =~ "text-muted-foreground"
+      assert html =~ "Garbled"
+      assert html =~ "text-subtle-foreground"
     end
   end
 

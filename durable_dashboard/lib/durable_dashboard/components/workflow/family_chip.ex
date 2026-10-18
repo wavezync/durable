@@ -52,14 +52,16 @@ defmodule DurableDashboard.Components.Workflow.FamilyChip do
   defp parent_link(assigns) do
     ~H"""
     <.link
-      navigate={DPath.workflow_tab(@base_path, @parent.id, :flow)}
+      navigate={DPath.execution_tab(@base_path, @parent.id, :graph)}
       class={[
         "inline-flex items-center gap-1.5 h-6 px-2 rounded-sm",
         "border border-border bg-card text-foreground/80",
-        "font-mono text-[10px] uppercase tracking-wider",
+        "text-xs",
         "hover:border-primary/60 hover:text-primary transition-colors"
       ]}
-      title={"Open parent " <> @parent.id}
+      data-tip-title="Parent run"
+      data-tip="The run that started this one · opens its graph"
+      data-tip-meta={@parent.id}
     >
       <Core.icon name="chevron-left" class="h-3 w-3" />
       <span>parent</span>
@@ -76,15 +78,19 @@ defmodule DurableDashboard.Components.Workflow.FamilyChip do
   defp children_popover(assigns) do
     ~H"""
     <details class="group/family relative">
-      <summary class={[
-        "list-none cursor-pointer inline-flex items-center gap-1.5 h-6 px-2 rounded-sm",
-        "border border-border bg-card text-foreground/80",
-        "font-mono text-[10px] uppercase tracking-wider",
-        "hover:border-primary/60 hover:text-primary transition-colors",
-        "select-none"
-      ]}>
+      <summary
+        class={[
+          "list-none cursor-pointer inline-flex items-center gap-1.5 h-6 px-2 rounded-sm",
+          "border border-border bg-card text-foreground/80",
+          "text-xs",
+          "hover:border-primary/60 hover:text-primary transition-colors",
+          "select-none"
+        ]}
+        data-tip-title="Child runs"
+        data-tip="Runs this one started from its steps · pick one to open it"
+      >
         <span class="size-1 rounded-full bg-primary" />
-        <span>{length(@children)} children</span>
+        <span>{length(@children)} {if length(@children) == 1, do: "child", else: "children"}</span>
         <Core.icon
           name="chevron-down"
           class="h-3 w-3 transition-transform group-open/family:rotate-180"
@@ -97,20 +103,24 @@ defmodule DurableDashboard.Components.Workflow.FamilyChip do
         "bg-popover/95 shadow-lg backdrop-blur-sm",
         "p-1.5"
       ]}>
-        <div class="px-2 py-1 font-mono text-[9px] uppercase tracking-widest text-muted-foreground">
+        <div class="px-2 py-1 text-xs text-muted-foreground">
           Child workflows
         </div>
         <ul class="flex flex-col gap-0.5">
           <li :for={child <- @children}>
             <.link
-              navigate={DPath.workflow_tab(@base_path, child.id, :flow)}
+              navigate={DPath.execution_tab(@base_path, child.id, :graph)}
               class={[
                 "flex items-center gap-2 px-2 py-1.5 rounded-sm",
                 "hover:bg-accent transition-colors"
               ]}
             >
               <Core.status_pill status={child.status} />
-              <div class="flex-1 min-w-0 flex flex-col leading-tight">
+              <div
+                class="flex-1 min-w-0 flex flex-col leading-tight"
+                data-tip={child_tip(child, @parent_step_lookup)}
+                data-tip-meta={child.id}
+              >
                 <span class="font-mono text-[11px] truncate">
                   {child_label(child, @parent_step_lookup)}
                 </span>
@@ -131,6 +141,13 @@ defmodule DurableDashboard.Components.Workflow.FamilyChip do
     case Map.get(parent_step_lookup, child.id) do
       nil -> "(no step)"
       step_name -> humanize_step_name(step_name)
+    end
+  end
+
+  defp child_tip(child, parent_step_lookup) do
+    case Map.get(parent_step_lookup, child.id) do
+      nil -> "Not tied to a step of this run"
+      step_name -> "Started by step " <> humanize_step_name(step_name)
     end
   end
 

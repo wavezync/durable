@@ -324,6 +324,27 @@ defmodule Durable.SchedulerTest do
       assert schedule.next_run_at != nil
     end
 
+    test "re-enables an every-minute schedule (whole-second next run)" do
+      {:ok, _} = Durable.schedule(SimpleWorkflow, "* * * * *", name: "minutely", enabled: false)
+
+      assert {:ok, %{enabled: true, next_run_at: next}} = Durable.enable_schedule("minutely")
+      assert next.second == 0
+      assert {:ok, %{enabled: false}} = Durable.disable_schedule("minutely")
+      assert {:ok, %{enabled: true}} = Durable.enable_schedule("minutely")
+    end
+
+    test "upcoming_runs lists the next fire times in UTC" do
+      {:ok, _} = Durable.schedule(SimpleWorkflow, "0 9 * * *", name: "nine")
+      {:ok, schedule} = Durable.get_schedule("nine")
+
+      [first, second, third] = API.upcoming_runs(schedule, 3)
+
+      assert DateTime.compare(first, DateTime.utc_now()) == :gt
+      assert {first.hour, first.minute} == {9, 0}
+      assert DateTime.diff(second, first, :hour) == 24
+      assert DateTime.diff(third, second, :hour) == 24
+    end
+
     test "disables an enabled schedule" do
       {:ok, _} = Durable.schedule(SimpleWorkflow, "0 9 * * *", name: "disable_test")
 

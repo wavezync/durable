@@ -37,5 +37,14 @@ mix test
 
 ## Test DB
 
-Phoenix demo runs against port `53412`. See `examples/phoenix_demo` in the
+`mix test` needs Postgres: the page tests (`DurableDashboard.LiveCase`) mount
+the real LiveViews against a Durable instance on `TestRepo` — the compose
+Postgres on port `54321` (`docker compose up -d` in the repo root), database
+`durable_dashboard_test`, created and migrated by `test_helper.exs`. Runs come
+from `DurableDashboard.Fixtures` (real workflows, executed inline).
+
+A page test that shows a real, unfixed bug is tagged `:known_bug` and
+excluded; `mix test --only known_bug` runs them.
+
+The Phoenix demo runs against port `53412`. See `examples/phoenix_demo` in the
 repo root.

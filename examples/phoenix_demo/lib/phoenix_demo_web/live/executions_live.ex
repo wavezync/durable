@@ -45,11 +45,17 @@ defmodule PhoenixDemoWeb.ExecutionsLive do
 
   @impl true
   def handle_info(:refresh, socket) do
-    {:noreply, assign(socket, workflows: list_workflows(socket.assigns.status, socket.assigns.module), modules: list_modules())}
+    {:noreply,
+     assign(socket,
+       workflows: list_workflows(socket.assigns.status, socket.assigns.module),
+       modules: list_modules()
+     )}
   end
 
-  def handle_info({event, _, _}, socket) when event in [:workflow_completed, :workflow_rejected] do
-    {:noreply, assign(socket, workflows: list_workflows(socket.assigns.status, socket.assigns.module))}
+  def handle_info({event, _, _}, socket)
+      when event in [:workflow_completed, :workflow_rejected] do
+    {:noreply,
+     assign(socket, workflows: list_workflows(socket.assigns.status, socket.assigns.module))}
   end
 
   def handle_info(_, socket), do: {:noreply, socket}
@@ -167,7 +173,9 @@ defmodule PhoenixDemoWeb.ExecutionsLive do
               <td class="font-mono text-xs">{String.slice(w.id, 0, 8)}</td>
               <td class="text-sm">
                 <div class="font-semibold">{w.workflow_name}</div>
-                <div class="text-xs text-base-content/50 font-mono">{short_module(w.workflow_module)}</div>
+                <div class="text-xs text-base-content/50 font-mono">
+                  {short_module(w.workflow_module)}
+                </div>
               </td>
               <td><span class={status_badge(w.status)}>{w.status}</span></td>
               <td class="text-sm">{w.current_step || "-"}</td>

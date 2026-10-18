@@ -1,6 +1,7 @@
 defmodule PhoenixDemoWeb.Telemetry do
   use Supervisor
   import Telemetry.Metrics
+  require Logger
 
   def start_link(arg) do
     Supervisor.start_link(__MODULE__, arg, name: __MODULE__)
@@ -8,6 +9,17 @@ defmodule PhoenixDemoWeb.Telemetry do
 
   @impl true
   def init(_arg) do
+    # One log line per finished run and failed step.
+    Durable.Telemetry.attach_default_logger()
+
+    # Audit trail of what people do in the Durable dashboard.
+    :telemetry.attach(
+      "durable-dashboard-audit",
+      [:durable_dashboard, :action],
+      &__MODULE__.log_dashboard_action/4,
+      nil
+    )
+
     children = [
       # Telemetry poller will execute the given period measurements
       # every 10_000ms. Learn more here: https://hexdocs.pm/telemetry_metrics
@@ -80,7 +92,14 @@ defmodule PhoenixDemoWeb.Telemetry do
       summary("vm.total_run_queue_lengths.total"),
       summary("vm.total_run_queue_lengths.cpu"),
       summary("vm.total_run_queue_lengths.io")
-    ]
+    ] ++ Durable.Telemetry.metrics()
+  end
+
+  @doc false
+  def log_dashboard_action(_event, _measurements, meta, _config) do
+    Logger.info(
+      "[Dashboard] #{meta.user} #{meta.action} #{Enum.join(meta.ids, ", ")}: #{inspect(meta.result)}"
+    )
   end
 
   defp periodic_measurements do

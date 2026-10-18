@@ -28,7 +28,7 @@ defmodule DurableDashboard.Components.Layout.Breadcrumb do
           <Core.icon
             :if={i > 0}
             name="chevron-right"
-            class="size-3.5 text-muted-foreground/60"
+            class="size-3.5 text-muted-foreground"
           />
           <.crumb_item crumb={crumb} last?={i == length(@crumbs) - 1} />
         </li>

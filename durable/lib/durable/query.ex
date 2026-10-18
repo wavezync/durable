@@ -53,6 +53,12 @@ defmodule Durable.Query do
   - `:workflow_name` - Filter by workflow name
   - `:status` - Filter by status
   - `:queue` - Filter by queue
+  - `:current_step` - Runs currently at (or that stopped at) this step
+  - `:trigger` - What started the run: `:api`, `:schedule`, `:parent` or `:rerun`
+  - `:trigger_ref` - What it points at: a schedule's name, or the run a rerun copied
+  - `:error_contains` - Case-insensitive text anywhere in the run's error
+  - `:input` - Map of dotted input paths to exact values, e.g.
+    `%{"order_id" => "ORD-1042"}`
   - `:limit` - Maximum results (default: 50)
   - `:offset` - Offset for pagination (default: 0)
   - `:durable` - The Durable instance name (default: Durable)
@@ -86,6 +92,21 @@ defmodule Durable.Query do
     query = from(w in WorkflowExecution, select: count(w.id))
     query = apply_filters(query, filters)
     Repo.one(config, query)
+  end
+
+  @doc """
+  Counts runs per status, applying every filter except `:status` — what a
+  "Failed (12) · Running (3)" view switcher needs in one query.
+  """
+  @spec count_by_status(keyword()) :: %{atom() => non_neg_integer()}
+  def count_by_status(filters \\ []) do
+    config = get_config(filters)
+
+    query =
+      from(w in WorkflowExecution, group_by: w.status, select: {w.status, count(w.id)})
+      |> apply_filters(Keyword.delete(filters, :status))
+
+    config |> Repo.all(query) |> Map.new()
   end
 
   @doc """
@@ -388,10 +409,35 @@ defmodule Durable.Query do
       {:to, to_date}, q ->
         from(w in q, where: w.inserted_at <= ^to_date)
 
+      {:current_step, step}, q when is_binary(step) and step != "" ->
+        from(w in q, where: w.current_step == ^step)
+
+      {:trigger, trigger}, q when is_atom(trigger) and not is_nil(trigger) ->
+        from(w in q, where: w.trigger == ^trigger)
+
+      {:trigger_ref, ref}, q when is_binary(ref) and ref != "" ->
+        from(w in q, where: w.trigger_ref == ^ref)
+
+      # Case-insensitive substring of the stored error (type, message, or any
+      # field a step returned in `{:error, map}`).
+      {:error_contains, text}, q when is_binary(text) and text != "" ->
+        pattern = "%" <> escape_like(text) <> "%"
+        from(w in q, where: fragment("?::text ILIKE ?", w.error, ^pattern))
+
+      # Exact match on fields of the run's input, by dotted path:
+      # `input: %{"order_id" => "ORD-1", "customer.tier" => "gold"}`.
+      {:input, fields}, q when is_map(fields) ->
+        Enum.reduce(fields, q, fn {path, value}, acc ->
+          keys = path |> to_string() |> String.split(".")
+          from(w in acc, where: fragment("? #>> ? = ?", w.input, ^keys, ^to_string(value)))
+        end)
+
       _, q ->
         q
     end)
   end
+
+  defp escape_like(text), do: String.replace(text, ["\\", "%", "_"], &("\\" <> &1))
 
   defp execution_to_map(execution, include_steps, include_logs) do
     base = %{
@@ -406,9 +452,13 @@ defmodule Durable.Query do
       current_step: execution.current_step,
       error: execution.error,
       parent_workflow_id: execution.parent_workflow_id,
+      trigger: execution.trigger,
+      trigger_ref: execution.trigger_ref,
+      locked_by: execution.locked_by,
       scheduled_at: execution.scheduled_at,
       started_at: execution.started_at,
       completed_at: execution.completed_at,
+      retried_at: execution.retried_at,
       inserted_at: execution.inserted_at,
       updated_at: execution.updated_at
     }

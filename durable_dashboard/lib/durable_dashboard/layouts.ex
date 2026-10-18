@@ -7,7 +7,7 @@ defmodule DurableDashboard.Layouts do
 
   alias DurableDashboard.Components.Command.CommandPalette
   alias DurableDashboard.Components.Layout.Sidebar
-  alias DurableDashboard.Components.Layout.Topbar
+  alias DurableDashboard.Components.Layout.Breadcrumb
 
   # ============================================================================
   # Root layout — HTML shell, theme bootstrap, asset loading.
@@ -29,7 +29,7 @@ defmodule DurableDashboard.Layouts do
         <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="anonymous" />
         <link
           rel="stylesheet"
-          href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
+          href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap"
         />
         <link :if={!@dev_mode} rel="stylesheet" href={asset_path(assigns, "app.css")} />
         <link :if={@dev_mode} rel="stylesheet" href="http://localhost:5173/src/index.css" />
@@ -100,6 +100,7 @@ defmodule DurableDashboard.Layouts do
   attr :breadcrumbs, :list, default: []
   attr :base_path, :string, required: true
   attr :durable, :any, default: nil
+  attr :inbox_count, :integer, default: 0, doc: "pending inputs, for the sidebar badge"
   slot :inner_block, required: true
 
   def app(assigns) do
@@ -111,14 +112,15 @@ defmodule DurableDashboard.Layouts do
       Skip to main content
     </a>
     <div class="flex min-h-screen">
-      <Sidebar.sidebar base_path={@base_path} current_path={@current_path} />
+      <Sidebar.sidebar base_path={@base_path} current_path={@current_path} durable={@durable} inbox_count={@inbox_count} />
       <div class="flex flex-col flex-1 min-w-0">
-        <Topbar.topbar crumbs={@breadcrumbs} />
         <main
           id="main-content"
           tabindex="-1"
-          class="flex-1 px-6 py-6 max-w-[1400px] w-full mx-auto"
+          class="flex-1 px-7 pt-5 pb-10 max-w-[1440px] w-full mx-auto"
         >
+          <%!-- No topbar: deep pages show their trail above the heading. --%>
+          <Breadcrumb.breadcrumb :if={length(@breadcrumbs) > 1} crumbs={@breadcrumbs} class="mb-3" />
           {render_slot(@inner_block)}
         </main>
       </div>
@@ -135,7 +137,32 @@ defmodule DurableDashboard.Layouts do
 
   defp asset_path(assigns, file) do
     base = get_in(assigns, [:config, :base_path]) || ""
-    "#{base}/__assets__/#{file}"
+    "#{base}/__assets__/#{file}?vsn=#{asset_digest()}"
+  end
+
+  # Content digest of the built bundle. Assets are served immutable for a
+  # year, so the URL must change whenever the dashboard is upgraded or the
+  # browser keeps the old CSS/JS. Computed once per boot.
+  defp asset_digest do
+    case :persistent_term.get({__MODULE__, :asset_digest}, nil) do
+      nil ->
+        dir = Application.app_dir(:durable_dashboard, "priv/static/durable_dashboard")
+
+        digest =
+          ["app.css", "app.js"]
+          |> Enum.map(&Path.join(dir, &1))
+          |> Enum.filter(&File.exists?/1)
+          |> Enum.map(&File.read!/1)
+          |> then(&:crypto.hash(:md5, &1))
+          |> Base.url_encode64(padding: false)
+          |> binary_part(0, 10)
+
+        :persistent_term.put({__MODULE__, :asset_digest}, digest)
+        digest
+
+      digest ->
+        digest
+    end
   end
 
   defp dev_mode? do

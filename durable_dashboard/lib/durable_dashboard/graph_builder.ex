@@ -3,19 +3,30 @@ defmodule DurableDashboard.GraphBuilder do
   Converts a `%Durable.Definition.Workflow{}` into ReactFlow-compatible
   nodes and edges for graph visualization.
 
-  ## Implementation note — polymorphic prev_ids
+  ## Shape
 
   The reduce accumulator's third element is a *list* of "tail ids" — the
-  set of node ids that the *next* step's inbound edges should originate
-  from. Linear steps return a one-element list. `parallel` returns the
-  list of all child ids so the next step's edges fan in directly from
-  every branch. `branch` returns the list of "last step in each clause"
-  ids for the same reason. This is what lets us drop synthetic
-  fork/join marker nodes — the n8n-style splay/converge falls out of
-  the edge geometry alone.
+  node ids the *next* step's inbound edges start from. A linear step returns
+  itself. A `parallel` block fans out from the previous step to every child
+  and joins them in a small `join` node ("all 3 done"), which is its one
+  tail. A `branch` is a `branch` gateway node with one labelled, dashed edge
+  per clause; the last step of each clause is a tail.
+
+  Without the join and the gateway, a parallel block followed by a branch
+  wired every child to every clause — N × M labelled edges for what is one
+  join and one choice.
+
+  `overlay_status/3` then marks what ran: step statuses from their
+  executions, the join from its members, the branch from the clause whose
+  first step ran (`taken`), and — once the run has finished — the steps
+  that never ran (`not_run`).
   """
 
   alias Durable.Definition.{Step, Workflow}
+  alias DurableDashboard.Trace
+
+  # Run statuses after which a step without an execution never ran.
+  @finished [:completed, :failed, :cancelled, :compensated, :compensation_failed]
 
   @doc """
   Builds a ReactFlow graph from a workflow definition.
@@ -29,10 +40,24 @@ defmodule DurableDashboard.GraphBuilder do
         process_step(step, nodes, edges, prev_ids)
       end)
 
-    %{nodes: Enum.reverse(nodes), edges: Enum.reverse(edges)}
+    by_name = Map.new(steps, &{to_string(&1.name), &1})
+
+    %{
+      nodes: nodes |> Enum.reverse() |> Enum.map(&put_max_attempts(&1, by_name)),
+      edges: Enum.reverse(edges)
+    }
   end
 
   def build(_), do: %{nodes: [], edges: []}
+
+  # Retry budget from the step's definition, for "attempt 2 of 3".
+  defp put_max_attempts(%{data: %{name: name}} = node, by_name) do
+    case by_name[name] do
+      %Step{opts: %{retry: %{max_attempts: max}}} -> put_in(node, [:data, :max_attempts], max)
+      %Step{type: :step} -> put_in(node, [:data, :max_attempts], 1)
+      _ -> node
+    end
+  end
 
   @doc """
   Overlays runtime step execution status onto graph nodes.
@@ -47,6 +72,7 @@ defmodule DurableDashboard.GraphBuilder do
     by_original = index_by_original(step_executions)
     current_id = Keyword.get(opts, :current_workflow_id)
     parallel_children = Keyword.get(opts, :parallel_children_lookup, %{})
+    finished? = Keyword.get(opts, :run_status) in @finished
 
     nodes =
       Enum.map(nodes, fn node ->
@@ -57,6 +83,15 @@ defmodule DurableDashboard.GraphBuilder do
           end
 
         attach_child_workflow_id(node, parallel_children)
+      end)
+
+    statuses = Map.new(nodes, &{&1.id, &1.data.status})
+
+    nodes =
+      Enum.map(nodes, fn node ->
+        node
+        |> derive_block_status(statuses)
+        |> mark_not_run(finished?)
       end)
 
     matched_node_ids =
@@ -74,15 +109,44 @@ defmodule DurableDashboard.GraphBuilder do
     %{nodes: nodes, edges: edges}
   end
 
-  # Conditional edges (decision :goto branches): if the target step
-  # actually ran (running OR matched), repaint as the taken path so the
-  # operator can see at a glance which branch the workflow followed.
-  # Untaken goto edges stay dashed as `flow-edge-conditional` — they
-  # represent paths-not-taken at this run.
-  #
-  # The taken goto path is *animated* (dash-flow) even after completion,
-  # because at a decision node the still-dashed not-taken branches and
-  # the taken branch are otherwise hard to tell apart at a glance.
+  # A join is done when every member is; a branch has run once the first
+  # step of one of its clauses has (that clause is `taken`).
+  defp derive_block_status(%{type: "join", data: %{members: members}} = node, statuses) do
+    member_statuses = Enum.map(members, &statuses[&1])
+
+    status =
+      cond do
+        "failed" in member_statuses -> "failed"
+        Enum.any?(member_statuses, &(&1 in ["running", "waiting"])) -> "running"
+        Enum.all?(member_statuses, &(&1 == "completed")) -> "completed"
+        true -> "pending"
+      end
+
+    node
+    |> put_in([:data, :status], status)
+    |> put_in([:data, :done], Enum.count(member_statuses, &(&1 == "completed")))
+  end
+
+  defp derive_block_status(%{type: "branch", data: %{paths: paths}} = node, statuses) do
+    taken = Enum.find(paths, &(&1.first && statuses[&1.first] not in [nil, "pending"]))
+
+    node
+    |> put_in([:data, :status], if(taken, do: "completed", else: "pending"))
+    |> put_in([:data, :taken], taken && taken.clause)
+  end
+
+  defp derive_block_status(node, _statuses), do: node
+
+  # In a finished run, a step with no execution never ran — say so, rather
+  # than "pending", which reads as "about to".
+  defp mark_not_run(%{data: %{status: "pending"}} = node, true),
+    do: put_in(node, [:data, :not_run], true)
+
+  defp mark_not_run(node, _finished?), do: node
+
+  # Conditional edges (branch clauses, decision :goto targets): the taken one
+  # repaints as the run's path; untaken ones stay dashed as
+  # `flow-edge-conditional` — the paths this run didn't take.
   defp apply_edge_status(%{className: "flow-edge-conditional"} = edge, matched, running) do
     cond do
       MapSet.member?(running, edge.target) ->
@@ -91,9 +155,7 @@ defmodule DurableDashboard.GraphBuilder do
         |> Map.put(:className, "flow-edge-running")
 
       MapSet.member?(matched, edge.source) and MapSet.member?(matched, edge.target) ->
-        edge
-        |> Map.put(:animated, true)
-        |> Map.put(:className, "flow-edge-completed")
+        Map.put(edge, :className, "flow-edge-completed")
 
       true ->
         # Untaken — leave the dashed conditional styling alone.
@@ -140,14 +202,35 @@ defmodule DurableDashboard.GraphBuilder do
     |> put_in([:data, :step_execution_id], step_exec.id)
     |> put_in([:data, :workflow_execution_id], Map.get(step_exec, :workflow_id))
     |> put_in([:data, :input_preview], preview(Map.get(step_exec, :input)))
-    |> put_in([:data, :output_preview], preview(Map.get(step_exec, :output)))
+    |> put_in([:data, :output_preview], preview(Trace.returned(Map.get(step_exec, :output))))
     |> put_in([:data, :has_error], not is_nil(Map.get(step_exec, :error)))
-    |> put_in(
-      [:data, :is_current],
-      not is_nil(current_id) and Map.get(step_exec, :workflow_id) == current_id
-    )
+    |> put_in([:data, :error], error_line(Map.get(step_exec, :error)))
     |> maybe_link_child(step_exec)
+    |> maybe_ran_in_child(step_exec, current_id)
   end
+
+  defp error_line(%{} = error) do
+    type = error["type"] || error[:type]
+    message = error["message"] || error[:message]
+    [type, message] |> Enum.reject(&is_nil/1) |> Enum.join(": ") |> truncate(160)
+  end
+
+  defp error_line(_error), do: nil
+
+  # A parallel child that ran as its own run: its execution belongs to that
+  # run, not this one. Open it from the card.
+  defp maybe_ran_in_child(%{data: %{child_workflow_id: id}} = node, _step_exec, _current)
+       when is_binary(id),
+       do: node
+
+  defp maybe_ran_in_child(node, %{workflow_id: run_id}, current_id)
+       when is_binary(run_id) and is_binary(current_id) and run_id != current_id do
+    node
+    |> put_in([:data, :child_workflow_id], run_id)
+    |> Map.put(:type, "child_workflow")
+  end
+
+  defp maybe_ran_in_child(node, _step_exec, _current_id), do: node
 
   # Prefer the queryable `step_executions.child_workflow_id` link (recorded by
   # the executor when a step calls call_workflow/start_workflow) over parsing
@@ -277,32 +360,69 @@ defmodule DurableDashboard.GraphBuilder do
     {[node | nodes], edges, [id]}
   end
 
-  # Branch step — N clauses, each a sub-pipeline. No fork/join markers;
-  # the previous step's prev_ids fan out to the first step of each
-  # clause, and the last step of each clause becomes a tail returned to
-  # the next step.
+  # Branch step — a gateway node, then one labelled conditional edge to the
+  # first step of each clause (in the order they're written). The last step
+  # of each clause is a tail; an empty clause makes the gateway itself one.
   defp process_step(%Step{type: :branch} = step, nodes, edges, prev_ids) do
     clauses = step.opts[:clauses] || %{}
 
-    {clause_nodes, clause_edges, clause_tails} =
-      Enum.reduce(clauses, {[], [], []}, fn {{clause_key, _idx}, step_names}, {cn, ce, tails} ->
-        build_clause_path(prev_ids, clause_key, step_names, cn, ce, tails)
-      end)
+    if clauses == %{} do
+      {nodes, edges, prev_ids}
+    else
+      id = to_string(step.name)
+      ordered = Enum.sort_by(clauses, fn {{_key, idx}, _names} -> idx end)
 
-    nodes = Enum.reverse(clause_nodes) ++ nodes
-    edges = Enum.reverse(clause_edges) ++ edges
+      paths =
+        for {{key, _idx}, names} <- ordered,
+            do: %{clause: format_clause_key(key), first: names |> List.first() |> to_str()}
 
-    # No clauses → branch is a passthrough; the next step's edges come
-    # straight from the same prev_ids.
-    new_prev = if clause_tails == [], do: prev_ids, else: Enum.reverse(clause_tails)
-    {nodes, edges, new_prev}
+      gateway = %{
+        id: id,
+        type: "branch",
+        data: %{label: "branch", step_type: "branch", name: id, paths: paths}
+      }
+
+      {clause_nodes, clause_edges, clause_tails} =
+        Enum.reduce(ordered, {[], [], []}, fn {{clause_key, _idx}, step_names}, {cn, ce, tails} ->
+          build_clause_path([id], clause_key, step_names, cn, ce, tails)
+        end)
+
+      nodes = Enum.reverse(clause_nodes) ++ [gateway | nodes]
+      edges = Enum.reverse(clause_edges) ++ add_edges(edges, prev_ids, id)
+      {nodes, edges, Enum.reverse(clause_tails)}
+    end
   end
 
-  # Parallel step — N children running concurrently. No fork/join
-  # markers; previous step's prev_ids fan out to every child, and every
-  # child becomes a tail returned to the next step.
+  # Parallel step — N children running concurrently. The previous step fans
+  # out to every child; the children meet in a `join` node, the block's one
+  # tail.
   defp process_step(%Step{type: :parallel} = step, nodes, edges, prev_ids) do
-    child_steps = step.opts[:steps] || step.opts[:all_steps] || []
+    case step.opts[:steps] || step.opts[:all_steps] || [] do
+      [] -> {nodes, edges, prev_ids}
+      child_steps -> parallel_block(step, child_steps, nodes, edges, prev_ids)
+    end
+  end
+
+  # Fallback for unknown types
+  defp process_step(%Step{} = step, nodes, edges, prev_ids) do
+    id = to_string(step.name)
+
+    node = %{
+      id: id,
+      type: "step",
+      data: %{
+        label: to_string(step.name),
+        step_type: to_string(step.type),
+        name: to_string(step.name)
+      }
+    }
+
+    edges = add_edges(edges, prev_ids, id)
+    {[node | nodes], edges, [id]}
+  end
+
+  defp parallel_block(step, child_steps, nodes, edges, prev_ids) do
+    join_id = "#{step.name}__join"
 
     {child_nodes, child_edges, child_ids} =
       Enum.reduce(child_steps, {[], [], []}, fn child_name, {cn, ce, ids} ->
@@ -325,28 +445,23 @@ defmodule DurableDashboard.GraphBuilder do
         {[child_node | cn], ce, [child_id | ids]}
       end)
 
-    nodes = Enum.reverse(child_nodes) ++ nodes
-    edges = Enum.reverse(child_edges) ++ edges
-    {nodes, edges, Enum.reverse(child_ids)}
-  end
+    child_ids = Enum.reverse(child_ids)
 
-  # Fallback for unknown types
-  defp process_step(%Step{} = step, nodes, edges, prev_ids) do
-    id = to_string(step.name)
-
-    node = %{
-      id: id,
-      type: "step",
-      data: %{
-        label: to_string(step.name),
-        step_type: to_string(step.type),
-        name: to_string(step.name)
-      }
+    join = %{
+      id: join_id,
+      type: "join",
+      data: %{label: "join", step_type: "join", name: join_id, members: child_ids}
     }
 
-    edges = add_edges(edges, prev_ids, id)
-    {[node | nodes], edges, [id]}
+    join_edges = Enum.reduce(child_ids, [], &[build_edge(&1, join_id) | &2])
+
+    nodes = [join | Enum.reverse(child_nodes)] ++ nodes
+    edges = join_edges ++ Enum.reverse(child_edges) ++ edges
+    {nodes, edges, [join_id]}
   end
+
+  defp to_str(nil), do: nil
+  defp to_str(name), do: to_string(name)
 
   # ============================================================================
   # Edge / branch helpers
@@ -370,8 +485,8 @@ defmodule DurableDashboard.GraphBuilder do
         first_id = to_string(first_name)
         last_id = to_string(List.last(names))
 
-        # Fan-in to first step in clause; tag this edge with the clause
-        # label so operators see which path led here.
+        # The gateway's edge into the clause, labelled with its value and
+        # dashed until the run takes it.
         fan_in =
           for src <- prev_ids || [] do
             %{
@@ -380,7 +495,8 @@ defmodule DurableDashboard.GraphBuilder do
               target: first_id,
               animated: false,
               style: %{},
-              label: clause_label
+              label: clause_label,
+              className: "flow-edge-conditional"
             }
           end
 
@@ -465,7 +581,7 @@ defmodule DurableDashboard.GraphBuilder do
     end
   end
 
-  defp format_clause_key(:default), do: "default"
+  defp format_clause_key(key) when key in [:default, :_], do: "otherwise"
   defp format_clause_key(key) when is_atom(key), do: Atom.to_string(key)
   defp format_clause_key(key) when is_binary(key), do: key
   defp format_clause_key(key), do: inspect(key)

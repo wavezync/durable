@@ -1,77 +1,163 @@
 defmodule DurableDashboard.Components.Layout.Sidebar do
   @moduledoc """
-  Left navigation sidebar. Stateless function component — active item is
-  derived from `@current_path` passed by the parent layout.
+  Left navigation. Stateless — the active item is derived from
+  `@current_path` passed by the parent layout.
 
-  Nav is split into two intent groups — **Observe** (read the running system)
-  and **Operate** (act on it) — so the six destinations read as an information
-  architecture, not a flat list. The active item carries the "live rail" (a
-  short indigo bar on the left edge): the console's recurring "now / you are
-  here" signal, the same indigo that marks the running edge in the graph.
-
-  The brand lockup is the **pulse mark** — a muted oscilloscope baseline with
-  one indigo beat and a `led-dot` blip at its apex: the worker heartbeat made
-  literal ("the engine is alive and durable"), echoed by the `connected`
-  heartbeat in the footer. See `DESIGN.md` §6.
-
-  ## Required assigns
-
-  - `:base_path` — host app's mount path (e.g. `/dashboard`)
-  - `:current_path` — the LV's current request path; nav items match against
-    this and highlight the active route
+  Destinations are grouped by intent — **Observe** (read the system),
+  **Operate** (act on it), **Instrument** (wire it up) — so the nav reads as
+  an information architecture rather than a flat list. The ⌘K jump button,
+  theme toggle and version live here too; there is no topbar. See
+  `DESIGN.md` §6.
   """
 
   use Phoenix.Component
 
   alias DurableDashboard.Components.Core
   alias DurableDashboard.Path, as: P
+  alias Phoenix.LiveView.JS
+
+  @repo_url "https://github.com/wavezync/durable"
 
   attr :base_path, :string, required: true
   attr :current_path, :string, required: true
+  attr :durable, :any, default: nil
+  attr :inbox_count, :integer, default: 0
   attr :class, :string, default: nil
 
   def sidebar(assigns) do
-    assigns = assign(assigns, groups: nav_groups(assigns.base_path))
+    assigns =
+      assign(assigns,
+        groups: nav_groups(assigns.base_path, assigns.inbox_count),
+        prefix: prefix(assigns.durable),
+        version: durable_version(),
+        repo_url: @repo_url
+      )
 
     ~H"""
     <aside class={[
-      "flex flex-col w-[220px] shrink-0 h-screen sticky top-0",
-      "border-r border-border bg-card/40 backdrop-blur-sm",
+      "flex flex-col w-[232px] shrink-0 h-screen sticky top-0",
+      "border-r border-border bg-card",
       @class
     ]}>
-      <.brand />
+      <div class="flex items-center gap-2.5 px-4 pt-4 pb-3">
+        <Core.icon name="mark" class="size-[22px] text-foreground" />
+        <div class="flex flex-col leading-tight min-w-0">
+          <span class="text-sm font-semibold">Durable</span>
+          <span
+            class="text-xs text-muted-foreground truncate"
+            data-tip-title="Postgres schema"
+            data-tip="Where Durable keeps its tables · set with the :prefix option"
+            data-tip-meta={@prefix <> ".workflow_executions, " <> @prefix <> ".step_executions, …"}
+          >
+            {@prefix} schema
+          </span>
+        </div>
+      </div>
 
-      <nav class="flex-1 overflow-y-auto thin-scroll px-2.5 py-3 space-y-5">
-        <div :for={group <- @groups} class="space-y-0.5">
-          <p class="px-2.5 pb-1.5 font-mono text-[9px] uppercase tracking-[0.18em] text-muted-foreground/55">
-            {group.label}
-          </p>
+      <div class="px-3 pb-1">
+        <%!-- Composite control (icon + label + kbd), so it stays raw markup. --%>
+        <button
+          type="button"
+          class={[
+            "w-full flex items-center gap-2 h-[30px] px-2.5 rounded-md",
+            "border border-input bg-card text-[13px] text-muted-foreground",
+            "hover:bg-accent hover:text-foreground transition-colors",
+            "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          ]}
+          aria-label="Open command palette"
+          data-tip-title="Command palette"
+          data-tip="Jump to a run by its id, a workflow or a page"
+          data-tip-kbd="⌘K"
+          phx-click={JS.dispatch("durable:open-palette", to: "html")}
+        >
+          <Core.icon name="search" class="size-3.5 shrink-0" />
+          <span>Jump to run, workflow…</span>
+          <span class="ml-auto font-mono text-[11px]">⌘K</span>
+        </button>
+      </div>
+
+      <nav class="flex-1 overflow-y-auto thin-scroll px-3 pb-3" aria-label="Primary">
+        <div :for={group <- @groups}>
+          <p class="px-2.5 pt-3.5 pb-1 text-xs text-muted-foreground">{group.label}</p>
           <.nav_link :for={item <- group.items} item={item} current_path={@current_path} />
         </div>
       </nav>
 
-      <.footer />
+      <div class="flex items-center gap-2 border-t border-border px-4 h-11 text-xs text-muted-foreground">
+        <span
+          class="flex items-center gap-2"
+          data-tip-title="Live"
+          data-tip="Pages update by themselves as runs change"
+          data-tip-meta={"node " <> to_string(node())}
+        >
+          <Core.status_dot status={:running} />
+          <span>Live</span>
+        </span>
+        <span
+          :if={@version}
+          class="font-mono"
+          data-tip-title="Durable version"
+          data-tip="The library this dashboard reads"
+        >
+          · {@version}
+        </span>
+        <div class="ml-auto flex items-center">
+          <a
+            href={@repo_url}
+            target="_blank"
+            rel="noopener noreferrer"
+            class={icon_ctl()}
+            aria-label="View source on GitHub"
+            data-tip="Source on GitHub"
+          >
+            <Core.icon name="github" class="size-4" />
+          </a>
+          <%!-- Two-icon swap (moon ⇄ sun) — `Core.icon_button` takes one icon. --%>
+          <button
+            type="button"
+            class={icon_ctl()}
+            aria-label="Toggle theme"
+            data-tip="Switch between light and dark"
+            phx-click={JS.dispatch("durable:toggle-theme", to: "html")}
+          >
+            <Core.icon name="moon" class="size-4 dark:hidden" />
+            <Core.icon name="sun" class="size-4 hidden dark:block" />
+          </button>
+        </div>
+      </div>
     </aside>
     """
   end
 
-  # Two intent groups. "Observe" reads the system; "Operate" acts on it.
-  defp nav_groups(base) do
+  defp nav_groups(base, inbox_count) do
     [
       %{
         label: "Observe",
         items: [
-          %{label: "Overview", href: P.overview(base), icon: "home", match: :exact},
-          %{label: "Workflows", href: P.workflows(base), icon: "queue", match: :prefix},
-          %{label: "Executions", href: P.executions(base), icon: "play", match: :prefix}
+          %{label: "Overview", href: P.overview(base), icon: "nav-overview", match: :exact},
+          %{label: "Runs", href: P.executions(base), icon: "nav-runs", match: :prefix},
+          %{label: "Workflows", href: P.workflows(base), icon: "nav-workflows", match: :prefix}
         ]
       },
       %{
         label: "Operate",
         items: [
-          %{label: "Inputs", href: P.inputs(base), icon: "inbox", match: :prefix},
-          %{label: "Schedules", href: P.schedules(base), icon: "calendar", match: :prefix},
-          %{label: "Settings", href: P.settings(base), icon: "settings", match: :prefix}
+          %{
+            label: "Inbox",
+            href: P.inputs(base),
+            icon: "nav-inbox",
+            match: :prefix,
+            count: inbox_count
+          },
+          %{label: "Queues & nodes", href: P.queues(base), icon: "nav-queues", match: :prefix},
+          %{label: "Schedules", href: P.schedules(base), icon: "nav-schedules", match: :prefix}
+        ]
+      },
+      %{
+        label: "Instrument",
+        items: [
+          %{label: "Telemetry", href: P.telemetry(base), icon: "nav-telemetry", match: :prefix},
+          %{label: "Settings", href: P.settings(base), icon: "nav-settings", match: :prefix}
         ]
       }
     ]
@@ -81,38 +167,32 @@ defmodule DurableDashboard.Components.Layout.Sidebar do
   attr :current_path, :string, required: true
 
   defp nav_link(assigns) do
-    active? = active?(assigns.current_path, assigns.item)
-
-    icon_class =
-      if active?,
-        do: "size-4 shrink-0",
-        else: "size-4 shrink-0 text-muted-foreground/70 group-hover:text-accent-foreground"
-
-    assigns = assign(assigns, active?: active?, icon_class: icon_class)
+    assigns = assign(assigns, active?: active?(assigns.current_path, assigns.item))
 
     ~H"""
     <.link
       navigate={@item.href}
       class={[
-        "group relative flex items-center gap-2.5 px-2.5 h-8 rounded-md",
-        "text-[13px] font-medium transition-colors",
+        "flex items-center gap-2.5 h-8 px-2.5 rounded-md text-[13px] font-medium transition-colors",
         "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-        if @active? do
-          "bg-primary/10 text-primary"
-        else
-          "text-muted-foreground hover:bg-accent hover:text-accent-foreground"
-        end
+        if(@active?,
+          do: "bg-secondary text-foreground",
+          else: "text-subtle-foreground hover:bg-accent hover:text-foreground"
+        )
       ]}
       aria-current={@active? && "page"}
     >
-      <%!-- The live rail — the active channel. Same indigo as the running edge. --%>
-      <span
-        :if={@active?}
-        class="absolute left-0 top-1/2 h-4 w-0.5 -translate-y-1/2 rounded-full bg-primary"
-      >
-      </span>
-      <Core.icon name={@item.icon} class={@icon_class} />
+      <Core.icon name={@item.icon} class={["size-4 shrink-0", @active? && "text-primary"]} />
       <span>{@item.label}</span>
+      <span
+        :if={(@item[:count] || 0) > 0}
+        class="ml-auto rounded-full bg-warning/15 px-1.5 font-mono text-[11px] leading-[18px] text-warning"
+        aria-label={"#{@item.count} waiting"}
+        data-tip-title={"#{@item.count} waiting on a person"}
+        data-tip="Runs paused for someone's input · answer them here"
+      >
+        {@item.count}
+      </span>
     </.link>
     """
   end
@@ -132,50 +212,27 @@ defmodule DurableDashboard.Components.Layout.Sidebar do
   defp default_root(""), do: "/"
   defp default_root(path), do: path
 
-  defp brand(assigns) do
-    ~H"""
-    <div class="h-14 px-4 flex items-center gap-2.5 border-b border-border">
-      <%!-- Pulse mark: the worker heartbeat made literal. A muted oscilloscope
-            baseline carries one indigo beat; the led-dot riding its apex is the
-            live blip — the same "alive / durable" signal the footer's `connected`
-            heartbeat echoes. This is the app's one bespoke SVG (the brand
-            lockup); see DESIGN.md §6. --%>
-      <div class="relative h-5 w-9 shrink-0">
-        <svg
-          viewBox="0 0 36 20"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="1.75"
-          stroke-linecap="round"
-          stroke-linejoin="round"
-          class="h-full w-full"
-          aria-hidden="true"
-        >
-          <path d="M1 10 H12 M23 10 H35" class="text-muted-foreground/40" />
-          <path d="M12 10 L16 3 L20 17 L23 10" class="text-primary" />
-        </svg>
-        <span class="absolute left-[13px] top-0 size-1.5 rounded-full bg-primary text-primary led-dot">
-        </span>
-      </div>
-      <div class="flex flex-col leading-none gap-1">
-        <span class="text-sm font-semibold tracking-tight text-foreground">Durable</span>
-        <span class="font-mono text-[10px] lowercase tracking-[0.12em] text-muted-foreground/70">
-          console
-        </span>
-      </div>
-    </div>
-    """
+  defp icon_ctl do
+    [
+      "size-7 inline-flex items-center justify-center rounded-md",
+      "text-muted-foreground hover:bg-accent hover:text-foreground transition-colors",
+      "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+    ]
   end
 
-  defp footer(assigns) do
-    ~H"""
-    <div class="border-t border-border px-3.5 h-10 flex items-center justify-between text-[11px]">
-      <span class="font-mono text-muted-foreground/70">durable</span>
-      <span class="flex items-center gap-1.5 font-mono text-muted-foreground">
-        <span class="size-1.5 rounded-full bg-success led-dot"></span>
-        connected
-      </span>
-    </div>
-    """
+  defp prefix(nil), do: "durable"
+
+  defp prefix(durable) do
+    case Durable.Config.get_safe(durable) do
+      %{prefix: prefix} -> prefix
+      _ -> "durable"
+    end
+  end
+
+  defp durable_version do
+    case Application.spec(:durable, :vsn) do
+      nil -> nil
+      vsn -> List.to_string(vsn)
+    end
   end
 end
