@@ -266,7 +266,14 @@ defmodule Durable.DSL.Step do
     condition_fn = Keyword.fetch!(opts, :on)
     clauses = extract_clauses(block)
 
-    branch_id = :erlang.unique_integer([:positive])
+    {shape, _} = process_branch_clauses(clauses, 0)
+
+    branch_id =
+      block_id(
+        __CALLER__,
+        :branch,
+        for({pattern, _, names, _} <- shape, do: {pattern_to_key(pattern), names})
+      )
 
     {clause_data, all_step_defs} = process_branch_clauses(clauses, branch_id)
 
@@ -318,6 +325,24 @@ defmodule Durable.DSL.Step do
 
       unquote_splicing(step_registrations)
     end
+  end
+
+  # A block's id prefixes the names of the steps inside it, and those names are
+  # stored on runs — a run suspended inside a branch resumes by name. So the id
+  # must survive recompiles and deploys: it's derived from the block's shape
+  # (clause patterns and step names), never its code, and bumped past ids an
+  # identical block earlier in the same module already took.
+  defp block_id(caller, kind, shape) do
+    taken = Module.get_attribute(caller.module, :__durable_block_ids__) || MapSet.new()
+
+    id =
+      {kind, shape}
+      |> :erlang.phash2()
+      |> Stream.iterate(&(&1 + 1))
+      |> Enum.find(&(not MapSet.member?(taken, &1)))
+
+    Module.put_attribute(caller.module, :__durable_block_ids__, MapSet.put(taken, id))
+    id
   end
 
   defp extract_clauses(block) do
@@ -467,7 +492,8 @@ defmodule Durable.DSL.Step do
 
   """
   defmacro parallel(opts \\ [], do: block) do
-    parallel_id = :erlang.unique_integer([:positive])
+    shape = for {_, _, %{original_name: name}} <- extract_parallel_steps(block, 0), do: name
+    parallel_id = block_id(__CALLER__, :parallel, shape)
 
     step_defs = extract_parallel_steps(block, parallel_id)
     step_names = Enum.map(step_defs, fn {name, _, _} -> name end)
