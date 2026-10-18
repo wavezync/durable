@@ -20,15 +20,17 @@ defmodule DurableDashboard.Components.Workflow.ChildrenTab do
 
   alias DurableDashboard.Components.Core
   alias DurableDashboard.Path, as: DPath
+  alias DurableDashboard.Trace
 
   attr :workflow, :map, required: true
   attr :family, :map, required: true
+  attr :steps, :list, default: [], doc: "the family's step executions, to name what a child ran"
   attr :base_path, :string, required: true
 
   def children_tab(assigns) do
     assigns =
       assigns
-      |> assign(:step_lookup, parent_step_lookup(assigns.family))
+      |> assign(:step_lookup, step_lookup(assigns.family, assigns.steps))
       |> assign(:family_members, family_members(assigns.workflow, assigns.family))
 
     ~H"""
@@ -68,11 +70,11 @@ defmodule DurableDashboard.Components.Workflow.ChildrenTab do
     ~H"""
     <Core.card padding="md">
       <div class="flex flex-col gap-2">
-        <div class="font-mono text-[10px] uppercase tracking-widest text-muted-foreground">
+        <div class="text-xs text-muted-foreground">
           Parent execution
         </div>
         <.link
-          navigate={DPath.workflow_tab(@base_path, @family.parent.id, :flow)}
+          navigate={DPath.execution_tab(@base_path, @family.parent.id, :graph)}
           class="flex items-center gap-3 group"
         >
           <Core.status_pill status={@family.parent.status} />
@@ -80,11 +82,18 @@ defmodule DurableDashboard.Components.Workflow.ChildrenTab do
             <span class="font-mono text-[13px] text-foreground group-hover:text-primary transition-colors truncate">
               {@family.parent.workflow_name}
             </span>
-            <span class="font-mono text-[10px] text-muted-foreground">
+            <span
+              class="font-mono text-[10px] text-muted-foreground"
+              data-tip="Parent run id"
+              data-tip-meta={@family.parent.id}
+            >
               {short(@family.parent.id)}
             </span>
           </div>
-          <span class="text-[11px] text-muted-foreground font-mono">
+          <span
+            class="text-[11px] text-muted-foreground font-mono"
+            data-tip="The parent's step this run was started for"
+          >
             this child ran <span class="text-primary">{current_step_name(@workflow, @step_lookup)}</span>
           </span>
           <Core.icon
@@ -106,7 +115,7 @@ defmodule DurableDashboard.Components.Workflow.ChildrenTab do
     ~H"""
     <Core.card padding="none">
       <div class="flex items-center justify-between border-b border-border px-4 py-2.5">
-        <div class="font-mono text-[10px] uppercase tracking-widest text-muted-foreground">
+        <div class="text-xs text-muted-foreground">
           Family executions ({length(@members)})
         </div>
         <div class="flex items-center gap-2 text-[10px] text-muted-foreground font-mono">
@@ -138,7 +147,7 @@ defmodule DurableDashboard.Components.Workflow.ChildrenTab do
   defp member_row(assigns) do
     ~H"""
     <.link
-      navigate={DPath.workflow_tab(@base_path, @member.id, :flow)}
+      navigate={DPath.execution_tab(@base_path, @member.id, :graph)}
       class={[
         "flex items-center gap-3 px-4 py-2.5 hover:bg-accent/50 transition-colors",
         @member.id == @workflow.id && "bg-primary/[0.04]"
@@ -147,21 +156,34 @@ defmodule DurableDashboard.Components.Workflow.ChildrenTab do
       <Core.status_pill status={@member.status} />
       <div class="flex flex-col leading-tight min-w-0 flex-1">
         <div class="flex items-center gap-2 min-w-0">
-          <span class="font-mono text-xs text-foreground truncate">
-            {Map.get(@step_lookup, @member.id) |> humanize_step_name()}
+          <span
+            class="font-mono text-xs text-foreground truncate"
+            data-tip="The parent's step that started this run"
+          >
+            {step_of(@member, @step_lookup) |> humanize_step_name()}
           </span>
           <span
             :if={@member.id == @workflow.id}
-            class="font-mono text-[9px] uppercase tracking-widest text-primary"
+            class="text-xs text-primary"
           >
             viewing
           </span>
         </div>
-        <span class="font-mono text-[10px] text-muted-foreground">
+        <span
+          class="font-mono text-[10px] text-muted-foreground"
+          data-tip="Run id"
+          data-tip-meta={@member.id}
+        >
           {short(@member.id)}
         </span>
       </div>
-      <div :if={duration(@member)} class="text-numeric text-[11px] text-muted-foreground">
+      <div
+        :if={duration(@member)}
+        class="text-numeric text-[11px] text-muted-foreground"
+        data-tip-title="Duration"
+        data-tip="From starting to finishing"
+        data-tip-meta={span_meta(@member)}
+      >
         {duration(@member)}
       </div>
       <Core.icon name="chevron-right" class="h-3.5 w-3.5 text-muted-foreground" />
@@ -173,18 +195,26 @@ defmodule DurableDashboard.Components.Workflow.ChildrenTab do
   # Helpers
   # ----------------------------------------------------------------------
 
+  # Which step each child ran: the parent step that started it (from the
+  # root's context) or, since a finished parallel block drops its key, the
+  # first step the child executed itself.
+  defp step_lookup(family, steps) do
+    ran =
+      steps
+      |> Enum.sort_by(& &1.inserted_at, DateTime)
+      |> Enum.reverse()
+      |> Map.new(&{&1.workflow_id, &1.step_name})
+
+    Map.merge(ran, parent_step_lookup(family))
+  end
+
   defp parent_step_lookup(%{root: nil}), do: %{}
 
   defp parent_step_lookup(%{root: root}) when is_map(root) do
-    case get_in(root.context || %{}, ["__parallel_children"]) do
-      m when is_map(m) ->
-        Map.new(m, fn {child_id, meta} ->
-          {child_id, meta["step_name"] || meta[:step_name]}
-        end)
-
-      _ ->
-        %{}
-    end
+    for key <- ["__parallel_children", "__call_children"],
+        {child_id, meta} <- Map.get(root.context || %{}, key) || %{},
+        into: %{},
+        do: {child_id, meta["step_name"] || meta[:step_name]}
   end
 
   defp parent_step_lookup(_), do: %{}
@@ -196,8 +226,10 @@ defmodule DurableDashboard.Components.Workflow.ChildrenTab do
   defp family_members(_workflow, _), do: []
 
   defp current_step_name(workflow, step_lookup) do
-    Map.get(step_lookup, workflow.id) |> humanize_step_name()
+    workflow |> step_of(step_lookup) |> humanize_step_name()
   end
+
+  defp step_of(run, step_lookup), do: Map.get(step_lookup, run.id) || Map.get(run, :current_step)
 
   defp humanize_step_name(nil), do: "(no step)"
 
@@ -215,16 +247,14 @@ defmodule DurableDashboard.Components.Workflow.ChildrenTab do
   defp short(id) when is_binary(id), do: String.slice(id, 0, 8)
 
   defp duration(%{started_at: started, completed_at: completed})
-       when not is_nil(started) and not is_nil(completed) do
-    seconds = DateTime.diff(completed, started, :second)
-    format_seconds(seconds)
-  end
+       when not is_nil(started) and not is_nil(completed),
+       do: Trace.format_ms(DateTime.diff(completed, started, :millisecond))
 
   defp duration(_), do: nil
 
-  defp format_seconds(s) when s < 60, do: "#{s}s"
-  defp format_seconds(s) when s < 3600, do: "#{div(s, 60)}m #{rem(s, 60)}s"
-  defp format_seconds(s), do: "#{div(s, 3600)}h #{div(rem(s, 3600), 60)}m"
+  defp span_meta(%{started_at: started, completed_at: completed}),
+    do:
+      "#{Calendar.strftime(started, "%H:%M:%S")} → #{Calendar.strftime(completed, "%H:%M:%S")} UTC"
 
   defp status_summary(members) do
     members

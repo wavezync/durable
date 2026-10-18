@@ -44,15 +44,22 @@ defmodule DurableDashboard.Components.Workflow.LogLine do
         <Core.local_time
           at={@entry["timestamp"]}
           format="time"
-          class="shrink-0 whitespace-nowrap tabular-nums text-muted-foreground/70"
+          class="shrink-0 whitespace-nowrap tabular-nums text-muted-foreground"
         />
         <span class={["w-12 shrink-0 font-semibold uppercase", level_class(@level)]}>{@entry["level"] || "—"}</span>
         <span
           :if={@show_step}
-          class="hidden shrink-0 truncate text-muted-foreground/55 md:inline md:max-w-[150px]"
+          class="hidden shrink-0 truncate text-muted-foreground md:inline md:max-w-[150px]"
+          data-tip-title="Step"
+          data-tip={@entry["__step__"]}
         >{@entry["__step__"]}</span>
         <span class="min-w-0 flex-1 break-words text-foreground/90">{inline_message(@parsed, @entry["message"])}</span>
-        <span :if={@labels != ""} class="hidden shrink-0 whitespace-nowrap text-[10px] text-muted-foreground/45 group-open/row:hidden lg:inline">{@labels}</span>
+        <span
+          :if={@labels != ""}
+          class="hidden shrink-0 whitespace-nowrap text-[10px] text-muted-foreground/45 group-open/row:hidden lg:inline"
+          data-tip-title="Logger metadata"
+          data-tip={meta_lines(@entry)}
+        >{@labels}</span>
         <Core.icon
           name="chevron-down"
           class="size-3 shrink-0 self-center text-muted-foreground/40 transition-transform group-open/row:rotate-180"
@@ -126,6 +133,13 @@ defmodule DurableDashboard.Components.Workflow.LogLine do
       _ ->
         ""
     end
+  end
+
+  # The same pairs in full, one per line, for the labels' tooltip.
+  defp meta_lines(entry) do
+    entry["metadata"]
+    |> Enum.reject(fn {k, _} -> to_string(k) in @noise_meta end)
+    |> Enum.map_join("\n", fn {k, v} -> "#{k}=#{if is_binary(v), do: v, else: inspect(v)}" end)
   end
 
   defp inline_value(v) when is_binary(v) or is_number(v) or is_atom(v) do

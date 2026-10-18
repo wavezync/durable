@@ -52,8 +52,10 @@ defmodule DurableDashboard.Router do
   - `:durable` — Durable instance name (default: `Durable`)
   - `:live_socket_path` — path the host configured for `Phoenix.LiveView.Socket`
     (default: `"/live"`)
-  - `:on_mount` — list of `on_mount` hooks the host wants to inject for
-    auth/etc (default: `[]`)
+  - `:on_mount` — `on_mount` hooks the host wants to run on every dashboard
+    LiveView, e.g. authentication (default: `[]`)
+  - `:resolver` — a `DurableDashboard.Access` module deciding who may
+    retry, cancel, pause and so on. Without one the dashboard is read-only.
   """
 
   @doc """
@@ -83,6 +85,7 @@ defmodule DurableDashboard.Router do
     durable = Keyword.get(opts, :durable, Durable)
     live_socket_path = Keyword.get(opts, :live_socket_path, "/live")
     on_mount = Keyword.get(opts, :on_mount, [])
+    resolver = Keyword.get(opts, :resolver)
 
     quote do
       pipeline :durable_dashboard_browser do
@@ -107,22 +110,32 @@ defmodule DurableDashboard.Router do
 
         live_session :durable_dashboard,
           root_layout: {DurableDashboard.Layouts, :root},
-          session: %{
-            "config" => %{
-              durable: unquote(durable),
-              base_path: unquote(prefix),
-              live_socket_path: unquote(live_socket_path),
-              on_mount: unquote(on_mount)
-            }
-          } do
+          on_mount: [
+            {DurableDashboard.Access, :default},
+            {DurableDashboard.InboxBadge, :default} | List.wrap(unquote(on_mount))
+          ],
+          session:
+            {DurableDashboard.Access, :session,
+             [
+               %{
+                 durable: unquote(durable),
+                 base_path: unquote(prefix),
+                 live_socket_path: unquote(live_socket_path)
+               },
+               unquote(resolver)
+             ]} do
           live "/", DurableDashboard.Live.OverviewLive, :index
           live "/workflows", DurableDashboard.Live.WorkflowsLive, :index
-          live "/workflows/:name", DurableDashboard.Live.ExecutionsLive, :show
+          live "/workflows/:name", DurableDashboard.Live.WorkflowDetailLive, :show
+          live "/workflows/:name/runs", DurableDashboard.Live.ExecutionsLive, :show
           live "/executions", DurableDashboard.Live.ExecutionsLive, :index
           live "/executions/:id", DurableDashboard.Live.WorkflowLive, :show
           live "/executions/:id/:tab", DurableDashboard.Live.WorkflowLive, :show
           live "/inputs", DurableDashboard.Live.InputsLive, :index
+          live "/queues", DurableDashboard.Live.QueuesLive, :index
           live "/schedules", DurableDashboard.Live.SchedulesLive, :index
+          live "/schedules/:name", DurableDashboard.Live.SchedulesLive, :show
+          live "/telemetry", DurableDashboard.Live.TelemetryLive, :index
           live "/settings", DurableDashboard.Live.SettingsLive, :index
         end
       end

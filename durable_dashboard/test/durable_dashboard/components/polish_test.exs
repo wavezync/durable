@@ -76,21 +76,21 @@ defmodule DurableDashboard.Components.PolishTest do
       assert html =~ "hidden"
     end
 
-    test "emits all five static routes when filtered with empty query" do
+    test "emits every static route when filtered with empty query" do
       html =
         render_component(CommandPalette,
           id: "cmd-2",
           base_path: "/dashboard"
         )
 
-      for label <- ["Overview", "Workflows", "Pending inputs", "Schedules", "Settings"] do
+      for label <- ~w(Overview Runs Workflows Inbox Queues Schedules Telemetry Settings) do
         assert html =~ label
       end
 
       # Each item is wrapped in a listbox option with a per-row index value
       assert html =~ ~s(role="option")
       assert html =~ ~s(phx-value-index="0")
-      assert html =~ ~s(phx-value-index="4")
+      assert html =~ ~s(phx-value-index="7")
     end
   end
 

@@ -6,67 +6,72 @@
 @custom-variant dark (&:is(.dark *));
 
 /* ============================================================================
- * Durable design system — cool neutral grays + restrained blue accent
+ * Durable design system — "control room"
  * ---------------------------------------------------------------------------
- * Workflow-engine console aesthetic. Inspired by Temporal (data density) and
- * Inngest (polish). Dark by default; light theme keeps fidelity for ops on
- * bright monitors.
- *
- * Accent: blue (hue 250) — used sparingly for primary actions, focus rings,
- * active nav items. Semantic colors carry status meaning.
+ * Ink grounds, hairline structure, one live accent. Status reads as shape +
+ * color + label (DESIGN.md §4): completed teal, failed red-orange, running the
+ * live blue, waiting amber, rolled back violet. Teal/red-orange replaced
+ * green/red because the old pair failed color-blind separation checks.
+ * Every text color below clears WCAG AA on its own 13% tint.
  * ========================================================================= */
 
 :root {
+  color-scheme: light;
+
   /* Typography */
-  --font-sans:
-    "Inter Variable", "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
-  --font-mono: "JetBrains Mono Variable", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --font-sans: "IBM Plex Sans", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 
-  /* Light theme — operators on bright monitors. Off-white canvas (a hair of
-     violet) so pure-white cards lift on top of it; same richer indigo accent
-     as dark for a consistent brand read. */
-  --background: oklch(0.995 0.002 285);
-  --foreground: oklch(0.2 0.01 285);
+  /* Light theme */
+  --background: #f5f6f8;
+  --foreground: #0f1217;
 
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.2 0.01 285);
+  --card: #ffffff;
+  --card-foreground: #0f1217;
 
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.2 0.01 285);
+  --popover: #ffffff;
+  --popover-foreground: #0f1217;
 
-  --primary: oklch(0.52 0.21 274);
-  --primary-foreground: oklch(0.99 0 0);
+  /* The live accent: running, links, focus, "you are here". */
+  --primary: #1a5fd0;
+  --primary-foreground: #ffffff;
 
-  --secondary: oklch(0.965 0.003 285);
-  --secondary-foreground: oklch(0.24 0.01 285);
+  --secondary: #eef0f3;
+  --secondary-foreground: #0f1217;
 
-  --muted: oklch(0.965 0.003 285);
-  --muted-foreground: oklch(0.5 0.01 285);
+  --muted: #eef0f3;
+  --muted-foreground: #646c78;
+  --subtle-foreground: #4a5260;
 
-  --accent: oklch(0.955 0.004 285);
-  --accent-foreground: oklch(0.24 0.01 285);
+  --accent: #f0f2f5;
+  --accent-foreground: #0f1217;
 
-  --destructive: oklch(0.55 0.22 22);
-  --destructive-foreground: oklch(0.99 0 0);
+  --destructive: #b33a25;
+  --destructive-foreground: #ffffff;
 
-  --success: oklch(0.55 0.18 155);
-  --warning: oklch(0.65 0.18 75);
-  --info: oklch(0.55 0.16 230);
+  --success: #00766a;
+  --warning: #8a5800;
+  --info: #1a5fd0;
+  --comp: #5e45c8;
+  --off: #8a929c;
 
-  --border: oklch(0.915 0.004 285);
-  --input: oklch(0.94 0.004 285);
-  --ring: oklch(0.52 0.21 274 / 0.4);
+  --border: #e3e6ea;
+  --input: #d2d7dd;
+  --ring: color-mix(in srgb, #1a5fd0 45%, transparent);
 
-  --chart-1: oklch(0.5 0.2 250);
-  --chart-2: oklch(0.55 0.16 230);
-  --chart-3: oklch(0.55 0.18 155);
-  --chart-4: oklch(0.65 0.18 75);
-  --chart-5: oklch(0.55 0.22 22);
+  /* Chart marks (validated with the dataviz CVD checker). */
+  --chart-ok: #00897b;
+  --chart-fail: #d4462e;
+  --chart-1: #2a78d6;
+  --chart-2: #eb6834;
+  --chart-3: #1baf7a;
+  --chart-4: #eda100;
+  --chart-5: #d4462e;
 
-  --radius: 0.375rem;
-  --radius-sm: 2px;
-  --radius-md: 4px;
-  --radius-lg: 6px;
+  --radius: 0.5rem;
+  --radius-sm: 4px;
+  --radius-md: 7px;
+  --radius-lg: 9px;
   --radius-xl: 10px;
   --radius-2xl: 14px;
   --radius-3xl: 20px;
@@ -74,49 +79,51 @@
 }
 
 .dark {
-  /* Dark surfaces with a whisper of violet (hue 285, very low chroma) so the
-     console reads warm + modern rather than flat-neutral. Surfaces step up in
-     lightness — background → card → popover — so cards visibly lift off the
-     canvas (the old 0.145→0.185 step was too subtle to read as elevation). */
-  --background: oklch(0.165 0.006 285);
-  --foreground: oklch(0.98 0.003 285);
+  /* Native controls (checkboxes, scrollbars, date inputs) follow the theme. */
+  color-scheme: dark;
 
-  --card: oklch(0.215 0.007 285);
-  --card-foreground: oklch(0.98 0.003 285);
+  --background: #0b0d10;
+  --foreground: #e6e8eb;
 
-  --popover: oklch(0.245 0.008 285);
-  --popover-foreground: oklch(0.98 0.003 285);
+  --card: #111418;
+  --card-foreground: #e6e8eb;
 
-  /* Richer indigo accent — more saturated + a hair more violet than the old
-     flat blue, the single brand hue Inngest-style consoles lean on. */
-  --primary: oklch(0.7 0.19 274);
-  --primary-foreground: oklch(0.16 0 0);
+  --popover: #181c22;
+  --popover-foreground: #e6e8eb;
 
-  --secondary: oklch(0.245 0.006 285);
-  --secondary-foreground: oklch(0.98 0.003 285);
+  --primary: #4c8dff;
+  --primary-foreground: #0b0d10;
 
-  --muted: oklch(0.225 0.006 285);
-  --muted-foreground: oklch(0.66 0.01 285);
+  --secondary: #181c22;
+  --secondary-foreground: #e6e8eb;
 
-  --accent: oklch(0.275 0.008 285);
-  --accent-foreground: oklch(0.98 0.003 285);
+  --muted: #161a20;
+  --muted-foreground: #8b939e;
+  --subtle-foreground: #a6adb7;
 
-  --destructive: oklch(0.72 0.2 22);
-  --destructive-foreground: oklch(0.99 0 0);
+  --accent: #1a1f26;
+  --accent-foreground: #e6e8eb;
 
-  --success: oklch(0.78 0.16 155);
-  --warning: oklch(0.82 0.16 80);
-  --info: oklch(0.78 0.13 230);
+  --destructive: #f2785b;
+  --destructive-foreground: #0b0d10;
 
-  --border: oklch(0.3 0.008 285);
-  --input: oklch(1 0 0 / 8%);
-  --ring: oklch(0.7 0.19 274 / 0.55);
+  --success: #2bb3a3;
+  --warning: #e9b458;
+  --info: #7aaaff;
+  --comp: #b3a6f5;
+  --off: #6b7380;
 
-  --chart-1: oklch(0.72 0.16 250);
-  --chart-2: oklch(0.78 0.13 230);
-  --chart-3: oklch(0.78 0.16 155);
-  --chart-4: oklch(0.82 0.16 80);
-  --chart-5: oklch(0.72 0.2 22);
+  --border: #22272e;
+  --input: #2e343c;
+  --ring: color-mix(in srgb, #4c8dff 55%, transparent);
+
+  --chart-ok: #23a094;
+  --chart-fail: #e8603f;
+  --chart-1: #3987e5;
+  --chart-2: #d95926;
+  --chart-3: #199e70;
+  --chart-4: #c98500;
+  --chart-5: #e8603f;
 }
 
 @theme inline {
@@ -139,6 +146,11 @@
   --color-success: var(--success);
   --color-warning: var(--warning);
   --color-info: var(--info);
+  --color-comp: var(--comp);
+  --color-off: var(--off);
+  --color-subtle-foreground: var(--subtle-foreground);
+  --color-chart-ok: var(--chart-ok);
+  --color-chart-fail: var(--chart-fail);
   --color-border: var(--border);
   --color-input: var(--input);
   --color-ring: var(--ring);
@@ -151,8 +163,10 @@
   /* Elevation. Soft, layered shadows give surfaces depth (the old "no chrome /
      elevation via background contrast only" rule read as flat/dull). Tuned to
      stay subtle on dark and crisp on light. */
-  --shadow-card: 0 1px 2px -1px oklch(0 0 0 / 0.35), 0 8px 20px -8px oklch(0 0 0 / 0.28);
-  --shadow-card-hover: 0 2px 4px -1px oklch(0 0 0 / 0.4), 0 16px 32px -10px oklch(0 0 0 / 0.36);
+  /* Elevation comes from hairlines and surface steps, not blur. Popovers keep
+     a real shadow because they float over content. */
+  --shadow-card: none;
+  --shadow-card-hover: none;
   --shadow-pop: 0 4px 12px -2px oklch(0 0 0 / 0.3), 0 20px 40px -12px oklch(0 0 0 / 0.4);
 
   --font-sans: var(--font-sans);
@@ -167,7 +181,8 @@
   html,
   body {
     font-family: var(--font-sans);
-    font-feature-settings: "cv11";
+    font-size: 13px;
+    line-height: 1.45;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
   }
@@ -180,9 +195,7 @@
   pre,
   .font-mono {
     font-family: var(--font-mono);
-    font-feature-settings:
-      "liga" off,
-      "calt" off;
+    font-variant-numeric: tabular-nums;
   }
 }
 
@@ -246,12 +259,6 @@
   color: inherit;
 }
 
-.react-flow__minimap {
-  background-color: color-mix(in oklch, var(--card) 85%, transparent);
-  border: 1px solid var(--border);
-  border-radius: 2px;
-}
-
 .react-flow__controls {
   box-shadow: none;
   border: 1px solid var(--border);
@@ -302,6 +309,31 @@
    `Durable.DSL.Step.build_decision/3`). Always dashed and muted so they
    read as "alternative" rather than "fall-through" regardless of run
    status. See DESIGN.md §11. */
+/* Legend swatches (flow_graph.tsx) mirror the edge classes below. */
+.legend-ran,
+.legend-running,
+.legend-untaken,
+.legend-pending {
+  stroke-width: 1.5;
+}
+.legend-ran {
+  stroke: var(--success);
+}
+.legend-running {
+  stroke: var(--primary);
+  stroke-dasharray: 4 3;
+}
+.legend-untaken {
+  stroke: var(--primary);
+  stroke-opacity: 0.55;
+  stroke-dasharray: 5 4;
+}
+.legend-pending {
+  stroke: var(--muted-foreground);
+  stroke-opacity: 0.6;
+  stroke-dasharray: 4 3;
+}
+
 .flow-edge-conditional .react-flow__edge-path {
   stroke: var(--primary);
   stroke-opacity: 0.55;
@@ -359,6 +391,75 @@
 }
 
 /* ============================================================================
+ * Status marks — shape + color, never color alone (DESIGN.md §4).
+ * Completed is a disc, failed a diamond, running a pulsing disc in the live
+ * blue, waiting a hollow ring, pending a dashed ring, cancelled a dash,
+ * compensation violet.
+ * ========================================================================= */
+
+.st-dot {
+  display: inline-block;
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+}
+
+.st-completed,
+.st-alive {
+  background: var(--success);
+}
+.st-running {
+  background: var(--primary);
+  animation: st-beat 1.6s ease-in-out infinite;
+}
+.st-waiting,
+.st-paused {
+  border: 2px solid var(--warning);
+}
+.st-pending,
+.st-idle,
+.st-scheduled {
+  border: 1.5px dashed var(--off);
+}
+.st-cancelled {
+  width: 9px;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--off);
+}
+.st-compensating {
+  background: var(--comp);
+  animation: st-beat 1.6s ease-in-out infinite;
+}
+.st-compensated {
+  background: var(--comp);
+}
+
+.st-failed,
+.st-timeout,
+.st-compensation_failed,
+.st-missing {
+  width: 7px;
+  height: 7px;
+  border-radius: 1.5px;
+  transform: rotate(45deg);
+  background: var(--destructive);
+}
+
+@keyframes st-beat {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, currentColor 0%, transparent);
+    opacity: 1;
+  }
+  60% {
+    box-shadow: 0 0 0 4px color-mix(in srgb, var(--primary) 0%, transparent);
+    opacity: 0.7;
+  }
+}
+
+/* ============================================================================
  * Copy button — the global copy listener (hooks/copy.ts) sets
  * data-copied="true" for ~1.4s after a successful write; swap clipboard ⇄ check.
  * ========================================================================= */
@@ -411,4 +512,105 @@
 [data-slot="sheet-content"] {
   background-color: color-mix(in oklch, var(--card) 96%, transparent);
   backdrop-filter: blur(14px);
+}
+
+/* ---- Tooltip (`tooltip.ts`, DESIGN.md "Tooltips") ------------------------ */
+.dd-tip {
+  position: fixed;
+  z-index: 80;
+  left: 0;
+  top: 0;
+  max-width: 300px;
+  padding: 7px 10px 8px;
+  border: 1px solid var(--input);
+  border-radius: 8px;
+  background: var(--popover);
+  color: var(--popover-foreground);
+  box-shadow: var(--shadow-pop);
+  font-family: var(--font-sans);
+  font-size: 12px;
+  line-height: 1.45;
+  pointer-events: none;
+  visibility: hidden;
+  opacity: 0;
+  transform: translateY(3px);
+  transition:
+    opacity 110ms ease,
+    transform 110ms ease,
+    visibility 0s linear 110ms;
+}
+.dd-tip[data-side="bottom"] {
+  transform: translateY(-3px);
+}
+.dd-tip[data-open] {
+  visibility: visible;
+  opacity: 1;
+  transform: none;
+  transition:
+    opacity 110ms ease,
+    transform 110ms ease;
+}
+.dd-tip-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-weight: 600;
+  color: var(--foreground);
+}
+.dd-tip-body {
+  color: var(--subtle-foreground);
+  white-space: pre-line;
+}
+.dd-tip-title + .dd-tip-body {
+  margin-top: 2px;
+}
+.dd-tip-meta {
+  margin-top: 5px;
+  padding-top: 5px;
+  border-top: 1px solid var(--border);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--muted-foreground);
+  overflow-wrap: anywhere;
+}
+.dd-tip > .dd-tip-meta:first-child {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: 0;
+}
+.dd-tip-kbd {
+  margin-left: auto;
+  padding: 0 4px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 400;
+  color: var(--muted-foreground);
+}
+.dd-tip-arrow {
+  position: absolute;
+  left: calc(var(--arrow-x, 50%) - 4px);
+  width: 8px;
+  height: 8px;
+  background: var(--popover);
+  border: 1px solid var(--input);
+  transform: rotate(45deg);
+}
+.dd-tip[data-side="top"] .dd-tip-arrow {
+  bottom: -5px;
+  border-top: 0;
+  border-left: 0;
+}
+.dd-tip[data-side="bottom"] .dd-tip-arrow {
+  top: -5px;
+  border-bottom: 0;
+  border-right: 0;
+}
+@media (prefers-reduced-motion: reduce) {
+  .dd-tip,
+  .dd-tip[data-open] {
+    transform: none;
+    transition: none;
+  }
 }

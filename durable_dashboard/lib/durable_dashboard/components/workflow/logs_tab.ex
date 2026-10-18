@@ -149,7 +149,11 @@ defmodule DurableDashboard.Components.Workflow.LogsTab do
     ~H"""
     <div class="flex flex-wrap items-center gap-2">
       <form phx-change="filter:level" phx-target={@myself}>
-        <select name="level" class={select_class()}>
+        <select
+          name="level"
+          class={select_class()}
+          data-tip="Show one level · counts are lines at that level"
+        >
           <option :for={level <- @levels} value={level} selected={level == @level_filter}>
             {humanize(level)}{if level != "all", do: " (#{Map.get(@counts, level, 0)})", else: ""}
           </option>
@@ -157,7 +161,7 @@ defmodule DurableDashboard.Components.Workflow.LogsTab do
       </form>
 
       <form phx-change="filter:step" phx-target={@myself}>
-        <select name="step" class={select_class()}>
+        <select name="step" class={select_class()} data-tip="Show the lines one step logged">
           <option :for={step <- @step_options} value={step} selected={step == @step_filter}>
             {humanize(step)}
           </option>
@@ -195,7 +199,8 @@ defmodule DurableDashboard.Components.Workflow.LogsTab do
           "inline-flex h-8 shrink-0 items-center gap-1.5 rounded-md border border-border bg-input/40 px-2.5",
           "font-mono text-[11px] text-muted-foreground transition-colors hover:text-foreground"
         ]}
-        title="Toggle timestamp sort"
+        data-tip-title={if @sort_dir == :asc, do: "Oldest first", else: "Newest first"}
+        data-tip="Click to flip the order"
       >
         Time
         <span class="text-foreground">{if @sort_dir == :asc, do: "↑", else: "↓"}</span>
@@ -248,6 +253,7 @@ defmodule DurableDashboard.Components.Workflow.LogsTab do
           disabled={@page <= 1}
           class={pager_btn(@page <= 1)}
           aria-label="Previous page"
+          data-tip="Previous page"
         >
           <Core.icon name="chevron-left" class="size-4" />
         </button>
@@ -262,6 +268,7 @@ defmodule DurableDashboard.Components.Workflow.LogsTab do
           disabled={@page >= @total_pages}
           class={pager_btn(@page >= @total_pages)}
           aria-label="Next page"
+          data-tip="Next page"
         >
           <Core.icon name="chevron-right" class="size-4" />
         </button>

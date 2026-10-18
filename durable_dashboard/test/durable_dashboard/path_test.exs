@@ -20,9 +20,12 @@ defmodule DurableDashboard.PathTest do
       assert P.workflows(@base) == "/dashboard/workflows"
     end
 
-    test "workflow_executions list (executions for one workflow)" do
-      assert P.workflow_executions(@base, "drip_email_campaign") ==
+    test "workflow page and its runs" do
+      assert P.workflow_detail(@base, "drip_email_campaign") ==
                "/dashboard/workflows/drip_email_campaign"
+
+      assert P.workflow_executions(@base, "drip_email_campaign") ==
+               "/dashboard/workflows/drip_email_campaign/runs"
     end
 
     test "executions list (all)" do
@@ -35,14 +38,6 @@ defmodule DurableDashboard.PathTest do
 
     test "execution tab" do
       assert P.execution_tab(@base, "abc-123", "logs") == "/dashboard/executions/abc-123/logs"
-    end
-
-    test "deprecated workflow/2 still returns the new execution path" do
-      assert P.workflow(@base, "abc-123") == "/dashboard/executions/abc-123"
-    end
-
-    test "deprecated workflow_tab/3 still returns the new execution path" do
-      assert P.workflow_tab(@base, "abc-123", "logs") == "/dashboard/executions/abc-123/logs"
     end
 
     test "inputs / schedules / settings" do

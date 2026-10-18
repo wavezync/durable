@@ -31,9 +31,14 @@ defmodule DurableDashboard.Path do
   @spec workflows(String.t()) :: String.t()
   def workflows(base_path), do: prefix(base_path, "/workflows")
 
+  @doc "A workflow's page: its health, steps and errors."
+  @spec workflow_detail(String.t(), String.t()) :: String.t()
+  def workflow_detail(base_path, name), do: prefix(base_path, "/workflows/#{URI.encode(name)}")
+
+  @doc "The runs of one workflow."
   @spec workflow_executions(String.t(), String.t()) :: String.t()
   def workflow_executions(base_path, name),
-    do: prefix(base_path, "/workflows/#{URI.encode(name)}")
+    do: prefix(base_path, "/workflows/#{URI.encode(name)}/runs")
 
   @spec executions(String.t()) :: String.t()
   def executions(base_path), do: prefix(base_path, "/executions")
@@ -45,22 +50,21 @@ defmodule DurableDashboard.Path do
   def execution_tab(base_path, id, tab),
     do: prefix(base_path, "/executions/#{id}/#{tab}")
 
-  # Deprecated — kept so external callers don't break in this release.
-  # New code should use `execution/2` / `execution_tab/3` to match the
-  # IA noun. Both delegate to the new path; the URL is the same.
-  @doc deprecated: "Use execution/2 instead"
-  @spec workflow(String.t(), String.t()) :: String.t()
-  def workflow(base_path, id), do: execution(base_path, id)
-
-  @doc deprecated: "Use execution_tab/3 instead"
-  @spec workflow_tab(String.t(), String.t(), String.t() | atom()) :: String.t()
-  def workflow_tab(base_path, id, tab), do: execution_tab(base_path, id, tab)
-
   @spec inputs(String.t()) :: String.t()
   def inputs(base_path), do: prefix(base_path, "/inputs")
 
+  @spec queues(String.t()) :: String.t()
+  def queues(base_path), do: prefix(base_path, "/queues")
+
   @spec schedules(String.t()) :: String.t()
   def schedules(base_path), do: prefix(base_path, "/schedules")
+
+  @doc "One schedule's page: its runs, next fires and input."
+  @spec schedule(String.t(), String.t()) :: String.t()
+  def schedule(base_path, name), do: prefix(base_path, "/schedules/#{URI.encode(name)}")
+
+  @spec telemetry(String.t()) :: String.t()
+  def telemetry(base_path), do: prefix(base_path, "/telemetry")
 
   @spec settings(String.t()) :: String.t()
   def settings(base_path), do: prefix(base_path, "/settings")

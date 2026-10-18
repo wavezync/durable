@@ -8,14 +8,17 @@ defmodule DurableDashboard.Components.Command.CommandPalette do
 
   The palette searches the **nouns of the console**, grouped:
 
-  - **Go to** — the static page routes (Overview, Workflows, Executions,
-    Inputs, Schedules, Settings).
+  - **Go to** — the pages, with the sidebar's icons; a typed word also
+    offers the saved Runs views ("failed" → Failed runs).
   - **Workflows** — live workflow definitions (`Durable.Query.list_workflows`),
-    each jumping to that workflow's executions list.
-  - **Recent runs** — the latest executions, each jumping to its detail page.
+    each jumping to that workflow's page.
+  - **Schedules** — each jumping to its schedule page.
+  - **Runs** — the latest runs when empty, filtered by workflow name as you
+    type; a run id (4+ hex characters) is looked up in the database, so any
+    run is found, not just the recent ones.
 
-  Live data is **snapshotted on open** (one query pass) and filtered
-  in-memory on every keystroke — so typing never hits the database.
+  Workflows, schedules and recent runs are **snapshotted on open** and
+  filtered in memory; only an id-shaped query hits the database.
 
   ## Events
 
@@ -35,20 +38,33 @@ defmodule DurableDashboard.Components.Command.CommandPalette do
 
   use Phoenix.LiveComponent
 
+  alias DurableDashboard.Format
   alias DurableDashboard.Components.Core
   alias DurableDashboard.Path, as: DPath
   alias Phoenix.LiveView.JS
 
   @recent_limit 6
+  @id_like ~r/^[0-9a-f-]{4,36}$/
 
-  # Static page routes. `path` is resolved against `base_path` at build time.
+  # Static page routes, with the sidebar's icons. `path` is resolved against
+  # `base_path` at build time.
   @pages [
-    %{label: "Overview", icon: "home", path: :overview},
-    %{label: "Workflows", icon: "queue", path: :workflows},
-    %{label: "Executions", icon: "play", path: :executions},
-    %{label: "Pending inputs", icon: "inbox", path: :inputs},
-    %{label: "Schedules", icon: "calendar", path: :schedules},
-    %{label: "Settings", icon: "settings", path: :settings}
+    %{label: "Overview", icon: "nav-overview", path: :overview},
+    %{label: "Runs", icon: "nav-runs", path: :executions},
+    %{label: "Workflows", icon: "nav-workflows", path: :workflows},
+    %{label: "Inbox", icon: "nav-inbox", path: :inputs},
+    %{label: "Queues & nodes", icon: "nav-queues", path: :queues},
+    %{label: "Schedules", icon: "nav-schedules", path: :schedules},
+    %{label: "Telemetry", icon: "nav-telemetry", path: :telemetry},
+    %{label: "Settings", icon: "nav-settings", path: :settings}
+  ]
+
+  # The Runs page's saved views, offered once you type.
+  @views [
+    %{label: "Failed runs", query: "status=failed,compensated,compensation_failed"},
+    %{label: "Running runs", query: "status=running,pending"},
+    %{label: "Waiting runs", query: "status=waiting"},
+    %{label: "Cancelled runs", query: "status=cancelled"}
   ]
 
   @impl true
@@ -61,6 +77,7 @@ defmodule DurableDashboard.Components.Command.CommandPalette do
        results: [],
        groups: [],
        workflows: [],
+       schedules: [],
        recent: []
      )}
   end
@@ -160,7 +177,8 @@ defmodule DurableDashboard.Components.Command.CommandPalette do
               type="text"
               name="value"
               value={@query}
-              placeholder="Jump to a page, workflow, or run…"
+              placeholder="Jump to a page, workflow, schedule, or run id…"
+              phx-debounce="100"
               autocomplete="off"
               spellcheck="false"
               data-palette-input
@@ -181,8 +199,8 @@ defmodule DurableDashboard.Components.Command.CommandPalette do
         >
           <div :if={@results == []} class="px-4 py-12 text-center text-[13px] text-muted-foreground">
             No matches for <span class="font-mono text-foreground">"{@query}"</span>
-            <div class="mt-1 text-[11px] text-muted-foreground/70">
-              Try a page name, a workflow, or a run id.
+            <div class="mt-1 text-[11px] text-muted-foreground">
+              Try a page, a workflow, a schedule, or the start of a run id.
             </div>
           </div>
 
@@ -261,8 +279,12 @@ defmodule DurableDashboard.Components.Command.CommandPalette do
   defp row_meta(%{item: %{type: :workflow}} = assigns) do
     ~H"""
     <span class="flex items-center gap-2 shrink-0">
-      <span class="text-numeric text-[11px] text-muted-foreground/70">{@item.runs} runs</span>
-      <Core.status_pill :if={@item.status} status={@item.status} />
+      <span class="text-numeric text-[11px] text-muted-foreground">{Format.count(@item.runs, "run")}</span>
+      <Core.status_pill
+        :if={@item.status}
+        status={@item.status}
+        tip={"Its latest run · " <> (Core.status_help(@item.status) || "")}
+      />
     </span>
     """
   end
@@ -270,8 +292,21 @@ defmodule DurableDashboard.Components.Command.CommandPalette do
   defp row_meta(%{item: %{type: :run}} = assigns) do
     ~H"""
     <span class="flex items-center gap-2 shrink-0">
-      <Core.code>{@item.short_id}</Core.code>
+      <span data-tip="Run id" data-tip-meta={@item.id}><Core.code>{@item.short_id}</Core.code></span>
       <Core.status_pill status={@item.status} />
+    </span>
+    """
+  end
+
+  defp row_meta(%{item: %{type: :schedule}} = assigns) do
+    ~H"""
+    <span class="flex min-w-0 items-center gap-2 shrink-0">
+      <span class="truncate text-[11px] text-muted-foreground">{@item.cadence}</span>
+      <Core.status_pill
+        status={if @item.enabled, do: :completed, else: :idle}
+        label={if @item.enabled, do: "On", else: "Off"}
+        tip={false}
+      />
     </span>
     """
   end
@@ -284,7 +319,30 @@ defmodule DurableDashboard.Components.Command.CommandPalette do
 
   defp load_snapshot(socket) do
     durable = socket.assigns[:durable]
-    assign(socket, workflows: safe_workflows(durable), recent: safe_recent(durable))
+
+    assign(socket,
+      workflows: safe_workflows(durable),
+      schedules: safe_schedules(durable),
+      recent: safe_recent(durable)
+    )
+  end
+
+  defp safe_schedules(nil), do: []
+
+  defp safe_schedules(durable) do
+    Durable.list_schedules(durable: durable)
+  rescue
+    _ -> []
+  end
+
+  # Any run whose id starts with the query — the snapshot only holds the
+  # newest few.
+  defp runs_by_id(nil, _q), do: []
+
+  defp runs_by_id(durable, q) do
+    Durable.Query.list_executions(durable: durable, id_prefix: q, limit: @recent_limit)
+  rescue
+    _ -> []
   end
 
   defp safe_workflows(nil), do: []
@@ -325,11 +383,45 @@ defmodule DurableDashboard.Components.Command.CommandPalette do
     pages = page_results(base, q)
 
     if q == "" do
-      pages ++ run_results(base, assigns.recent)
+      pages ++ run_results(base, assigns.recent, "Recent runs")
     else
       pages ++
+        view_results(base, q) ++
         workflow_results(base, assigns.workflows, q) ++
-        run_results(base, filter_runs(assigns.recent, q))
+        schedule_results(base, assigns[:schedules] || [], q) ++
+        run_results(base, matching_runs(assigns, q), "Runs")
+    end
+  end
+
+  defp matching_runs(assigns, q) do
+    if Regex.match?(@id_like, downcase(q)),
+      do: runs_by_id(assigns[:durable], downcase(q)),
+      else: filter_runs(assigns.recent, q)
+  end
+
+  defp view_results(base, q) do
+    for v <- @views, matches?(v.label, q) do
+      %{
+        group: "Go to",
+        type: :page,
+        label: v.label,
+        icon: "nav-runs",
+        href: DPath.executions(base) <> "?" <> v.query
+      }
+    end
+  end
+
+  defp schedule_results(base, schedules, q) do
+    for s <- schedules, matches?(s.name, q) do
+      %{
+        group: "Schedules",
+        type: :schedule,
+        label: s.name,
+        icon: "nav-schedules",
+        href: DPath.schedule(base, s.name),
+        cadence: DurableDashboard.Cron.describe(s.cron_expression) || s.cron_expression,
+        enabled: s.enabled
+      }
     end
   end
 
@@ -349,22 +441,23 @@ defmodule DurableDashboard.Components.Command.CommandPalette do
         group: "Workflows",
         type: :workflow,
         label: w.workflow_name,
-        icon: "queue",
-        href: DPath.workflow_executions(base, w.workflow_name),
+        icon: "nav-workflows",
+        href: DPath.workflow_detail(base, w.workflow_name),
         runs: w.total_runs,
         status: w.last_status
       }
     end)
   end
 
-  defp run_results(base, runs) do
+  defp run_results(base, runs, group) do
     Enum.map(runs, fn r ->
       %{
-        group: "Recent runs",
+        group: group,
         type: :run,
         label: r.workflow_name,
-        icon: "play",
+        icon: "nav-runs",
         href: DPath.execution(base, r.id),
+        id: r.id,
         short_id: short_id(r.id),
         status: r.status
       }
@@ -388,7 +481,9 @@ defmodule DurableDashboard.Components.Command.CommandPalette do
   defp page_href(base, :workflows), do: DPath.workflows(base)
   defp page_href(base, :executions), do: DPath.executions(base)
   defp page_href(base, :inputs), do: DPath.inputs(base)
+  defp page_href(base, :queues), do: DPath.queues(base)
   defp page_href(base, :schedules), do: DPath.schedules(base)
+  defp page_href(base, :telemetry), do: DPath.telemetry(base)
   defp page_href(base, :settings), do: DPath.settings(base)
 
   defp matches?(value, q), do: String.contains?(downcase(value), downcase(q))

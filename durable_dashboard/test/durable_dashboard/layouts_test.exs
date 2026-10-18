@@ -48,6 +48,19 @@ defmodule DurableDashboard.LayoutsTest do
     refute html =~ ~s(<a href="/dashboard/workflows" class=)
   end
 
+  test "sidebar shows how many inputs are waiting, and nothing when none are" do
+    badge = fn count ->
+      render_component(&Sidebar.sidebar/1,
+        base_path: "/dashboard",
+        current_path: "/dashboard",
+        inbox_count: count
+      )
+    end
+
+    assert badge.(7) =~ ~s(aria-label="7 waiting")
+    refute badge.(0) =~ "waiting\""
+  end
+
   test "breadcrumb links use LiveView navigation" do
     html =
       render_component(&Breadcrumb.breadcrumb/1,

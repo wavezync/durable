@@ -5,7 +5,7 @@
  * `2026-06-23T11:39:40.328499Z` is ambiguous and hard to read. The server
  * renders `<time data-ts="<iso>" data-format="...">` with a UTC fallback as
  * its text (legible even without JS); these helpers rewrite the text to the
- * browser's locale + timezone and add a full-detail tooltip.
+ * browser's locale + timezone. `tooltip.ts` gives every one the full detail.
  *
  * Wired through LiveSocket's `dom` callbacks in `main.ts` rather than a
  * per-element hook, so timestamps inside lists don't each need a unique id:
@@ -28,16 +28,11 @@ export function localizeTime(el: HTMLElement): void {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return;
 
-  // Relative elements ("2m ago" / "in 2h") keep their server-computed text;
-  // only the hover tooltip is localized to the viewer's timezone so the exact
-  // moment is legible without exposing a confusing UTC string.
-  if (el.dataset.rel) {
-    el.setAttribute("title", format(d, "datetime"));
-    return;
-  }
+  // Relative elements ("2m ago" / "in 2h") keep their server-computed text.
+  // Either way the tooltip (`tooltip.ts`) shows the exact moment.
+  if (el.dataset.rel) return;
 
   el.textContent = format(d, (el.dataset.format as Fmt) || "datetime");
-  el.setAttribute("title", d.toString());
 }
 
 /** Localize every `<time data-ts>` under (and including) `root`. */
