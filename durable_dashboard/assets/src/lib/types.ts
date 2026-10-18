@@ -5,17 +5,19 @@
 // extra would imply the React side is taking on responsibilities the
 // LiveView already owns.
 
-export type StepStatus = "pending" | "running" | "completed" | "failed" | "waiting";
+export type StepStatus = "pending" | "running" | "completed" | "failed" | "waiting" | "cancelled";
 
-// Types the server (`graph_builder.ex`) currently emits. `start`/`end` are
-// synthesized client-side in `graph-layout.ts`; `child_workflow` is the wider
-// n8n-style card for parallel/sub-workflow children. The `*_fork`/`*_join`
-// markers are no longer emitted (fan-out/in is pure edge geometry) but remain
-// in the union as a documented stale-BEAM fallback (mapped to HiddenNode).
+// Types the server (`graph_builder.ex`) emits. `start`/`end` are synthesized
+// client-side in `graph-layout.ts`; `child_workflow` is a step that ran as
+// its own run; `join` closes a parallel block and `branch` is a branch's
+// gateway. The `*_fork`/`*_join` markers are a stale-BEAM fallback (mapped to
+// HiddenNode).
 export type NodeType =
   | "step"
   | "decision"
   | "child_workflow"
+  | "join"
+  | "branch"
   | "start"
   | "end"
   | "branch_fork"
@@ -41,7 +43,6 @@ export interface GraphNode {
     completed_at?: string;
     step_execution_id?: string;
     workflow_execution_id?: string;
-    is_current?: boolean;
     /** Truncated 1-line JSON previews of step input/output, suitable for
      * rendering in an n8n-style card. The full payload is fetched on
      * demand when the user opens the side drawer — keeping the graph
@@ -49,6 +50,20 @@ export interface GraphNode {
     input_preview?: string;
     output_preview?: string;
     has_error?: boolean;
+    /** "Type: message" of the step's error, for its tooltip. */
+    error?: string;
+    /** The step's retry budget from its definition. */
+    max_attempts?: number;
+    /** The step open in the run page's inspector. */
+    selected?: boolean;
+    /** Set in a finished run on steps that never executed. */
+    not_run?: boolean;
+    /** `join`: the parallel children it waits for, and how many are done. */
+    members?: string[];
+    done?: number;
+    /** `branch`: each clause and its first step; `taken` once one ran. */
+    paths?: { clause: string; first: string | null }[];
+    taken?: string | null;
     /** Set when this step represents a parallel child running in its own
      * `WorkflowExecution`. The card surfaces an expand/drill-in
      * affordance and the LV translates the click into a navigate. */

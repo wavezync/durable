@@ -82,35 +82,92 @@ defmodule DurableDashboard.Components.FlowGraphTest do
       ids = Enum.map(nodes, & &1.id)
       assert ids == Enum.uniq(ids), "node ids must be unique; got #{inspect(ids)}"
 
-      child_ids = Enum.filter(ids, &String.starts_with?(&1, "parallel_100__"))
+      child_ids =
+        nodes
+        |> Enum.filter(&(&1.type == "step" and String.starts_with?(&1.id, "parallel_100__")))
+        |> Enum.map(& &1.id)
+
       assert length(child_ids) == 2
 
       escaped_edges =
         Enum.filter(edges, fn e ->
-          String.starts_with?(e.source, "parallel_100__") and
-            not String.contains?(e.target, "parallel_100")
+          e.source in child_ids and e.target != "parallel_100__join"
         end)
 
-      assert escaped_edges == [],
-             "no edge should leave a parallel child to a sibling outside the block"
+      assert escaped_edges == [], "a parallel child's only way out is the block's join"
     end
   end
 
-  describe "GraphBuilder.build/1 — no fork/join marker nodes" do
-    test "parallel emits no fork or join nodes; fan-out is via edges only" do
+  describe "GraphBuilder.build/1 — a parallel block closes in a join" do
+    test "children meet in one join node, which leads on" do
       definition = parallel_followed_by_step(parallel_id: 100)
       %{nodes: nodes, edges: edges} = GraphBuilder.build(definition)
 
-      types = Enum.map(nodes, & &1.type) |> Enum.uniq()
-      refute "parallel_fork" in types, "parallel_fork node must not be emitted"
-      refute "parallel_join" in types, "parallel_join node must not be emitted"
+      assert %{type: "join", data: %{members: ["parallel_100__do_a", "parallel_100__do_b"]}} =
+               Enum.find(nodes, &(&1.id == "parallel_100__join"))
 
-      # `next` step has one inbound edge per parallel child.
-      next_inbound = Enum.filter(edges, &(&1.target == "next"))
-      assert length(next_inbound) == 2
+      assert edges |> Enum.filter(&(&1.target == "parallel_100__join")) |> length() == 2
+      assert [%{source: "parallel_100__join"}] = Enum.filter(edges, &(&1.target == "next"))
+    end
 
-      assert Enum.map(next_inbound, & &1.source) |> Enum.sort() ==
-               ["parallel_100__do_a", "parallel_100__do_b"] |> Enum.sort()
+    test "a join is done when every member is" do
+      graph = 100 |> then(&parallel_followed_by_step(parallel_id: &1)) |> GraphBuilder.build()
+
+      partly =
+        GraphBuilder.overlay_status(graph, [
+          step_execution(name: "parallel_100__do_a", status: :completed)
+        ])
+
+      assert %{status: "pending", done: 1} = node_data(partly.nodes, "parallel_100__join")
+
+      all =
+        GraphBuilder.overlay_status(graph, [
+          step_execution(name: "parallel_100__do_a", status: :completed),
+          step_execution(name: "parallel_100__do_b", status: :completed)
+        ])
+
+      assert %{status: "completed", done: 2} = node_data(all.nodes, "parallel_100__join")
+    end
+  end
+
+  describe "GraphBuilder — a branch is a gateway with one edge per clause" do
+    test "clauses in written order, dashed and labelled; the taken one is marked" do
+      graph = GraphBuilder.build(branch_workflow())
+
+      assert %{type: "branch", data: %{paths: paths}} =
+               Enum.find(graph.nodes, &(&1.id == "branch_7"))
+
+      assert Enum.map(paths, & &1.clause) == ["high", "low", "otherwise"]
+
+      out = Enum.filter(graph.edges, &(&1.source == "branch_7"))
+      assert Enum.map(out, & &1.label) |> Enum.sort() == ["high", "low", "otherwise"]
+      assert Enum.all?(out, &(&1.className == "flow-edge-conditional"))
+      assert [_] = Enum.filter(graph.edges, &(&1.target == "branch_7"))
+
+      %{nodes: nodes, edges: edges} =
+        GraphBuilder.overlay_status(
+          graph,
+          [
+            step_execution(name: "ingest", status: :completed),
+            step_execution(name: "branch_7__low__approve", status: :completed)
+          ],
+          run_status: :completed
+        )
+
+      assert %{status: "completed", taken: "low"} = node_data(nodes, "branch_7")
+      assert %{not_run: true} = node_data(nodes, "branch_7__high__remove")
+      refute node_data(nodes, "branch_7__low__approve")[:not_run]
+
+      taken = Enum.find(edges, &(&1.target == "branch_7__low__approve"))
+      untaken = Enum.find(edges, &(&1.target == "branch_7__high__remove"))
+      assert taken.className == "flow-edge-completed"
+      assert untaken.className == "flow-edge-conditional"
+    end
+
+    test "steps aren't marked not run while the run is still going" do
+      graph = GraphBuilder.build(branch_workflow())
+      %{nodes: nodes} = GraphBuilder.overlay_status(graph, [], run_status: :running)
+      refute Enum.any?(nodes, & &1.data[:not_run])
     end
   end
 
@@ -144,14 +201,9 @@ defmodule DurableDashboard.Components.FlowGraphTest do
       definition = onboarding_shape()
       %{nodes: nodes, edges: edges} = GraphBuilder.build(definition)
 
-      # 5 top-level steps + 1 parallel block (4 children) = 9 nodes.
+      # 5 top-level steps + 4 parallel children + the block's join = 10.
       # The flat parallel-children entries are deduped by graph_builder.
-      assert length(nodes) == 9
-
-      # No marker nodes anywhere.
-      types = Enum.map(nodes, & &1.type) |> Enum.uniq()
-      refute "parallel_fork" in types
-      refute "parallel_join" in types
+      assert length(nodes) == 10
 
       # collect_equipment_preferences fans out to every parallel child.
       collect_outbound =
@@ -159,9 +211,11 @@ defmodule DurableDashboard.Components.FlowGraphTest do
 
       assert length(collect_outbound) == 4
 
-      # Every parallel child fans into manager_review.
-      manager_inbound = Enum.filter(edges, &(&1.target == "manager_review"))
-      assert length(manager_inbound) == 4
+      # The children join, and the join leads to manager_review.
+      assert edges |> Enum.filter(&(&1.target == "provision_parallel__join")) |> length() == 4
+
+      assert [%{source: "provision_parallel__join"}] =
+               Enum.filter(edges, &(&1.target == "manager_review"))
 
       # Terminal chain stays linear.
       assert edge_exists?(edges, "manager_review", "schedule_orientation")
@@ -219,6 +273,20 @@ defmodule DurableDashboard.Components.FlowGraphTest do
 
       assert node.type == "child_workflow"
       assert node.data.child_workflow_id == "child-abc"
+    end
+
+    test "a step whose execution belongs to another run opens that run" do
+      graph = GraphBuilder.build(simple_workflow())
+
+      execs = [
+        step_execution(name: "register", status: :completed) |> Map.put(:workflow_id, "child-run")
+      ]
+
+      %{nodes: nodes} = GraphBuilder.overlay_status(graph, execs, current_workflow_id: "parent")
+      node = Enum.find(nodes, &(&1.id == "register"))
+
+      assert node.type == "child_workflow"
+      assert node.data.child_workflow_id == "child-run"
     end
 
     test "top-level step names continue to match by id" do
@@ -440,6 +508,33 @@ defmodule DurableDashboard.Components.FlowGraphTest do
         %Definition.Step{name: :schedule_orientation, type: :step, module: __MODULE__, opts: %{}},
         %Definition.Step{name: :send_welcome_package, type: :step, module: __MODULE__, opts: %{}}
       ]
+    }
+  end
+
+  defp branch_workflow do
+    clauses = %{
+      {:high, 0} => [:branch_7__high__remove],
+      {:low, 1} => [:branch_7__low__approve],
+      {:default, 2} => [:branch_7__default__review]
+    }
+
+    branch_children =
+      for name <- List.flatten(Map.values(clauses)),
+          do: %Definition.Step{name: name, type: :step, module: __MODULE__, opts: %{branch_id: 7}}
+
+    %Definition.Workflow{
+      name: "branch_test",
+      module: __MODULE__,
+      steps:
+        [
+          %Definition.Step{name: :ingest, type: :step, module: __MODULE__, opts: %{}},
+          %Definition.Step{
+            name: :branch_7,
+            type: :branch,
+            module: __MODULE__,
+            opts: %{clauses: clauses}
+          }
+        ] ++ branch_children
     }
   end
 

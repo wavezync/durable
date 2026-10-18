@@ -23,7 +23,7 @@ function AnimatedFlowEdgeComponent({
   label,
   markerEnd,
 }: EdgeProps) {
-  const [path, labelX, labelY] = getSmoothStepPath({
+  const [path, midX, midY] = getSmoothStepPath({
     sourceX,
     sourceY,
     targetX,
@@ -36,6 +36,13 @@ function AnimatedFlowEdgeComponent({
     offset: 20,
   });
 
+  // Labels sit on the edge's last run into its target, where each target has
+  // its own row, rather than at the midpoint, where a gateway's edges share
+  // one vertical trunk and their labels would stack.
+  const forward = targetX > sourceX;
+  const labelX = forward ? targetX - Math.max(28, (targetX - sourceX) / 4) : midX;
+  const labelY = forward ? targetY : midY;
+
   return (
     <>
       <BaseEdge id={id} path={path} markerEnd={markerEnd} />
@@ -45,8 +52,8 @@ function AnimatedFlowEdgeComponent({
           <div
             className={[
               "nodrag nopan absolute pointer-events-none",
-              "rounded-sm border border-border bg-muted px-1.5 py-0.5",
-              "font-mono text-[10px] uppercase tracking-wider text-foreground/80",
+              "rounded-[4px] border border-border bg-card px-1.5 py-px",
+              "font-mono text-[10px] text-subtle-foreground",
             ].join(" ")}
             style={{
               transform: `translate(-50%, -50%) translate(${labelX}px, ${labelY}px)`,
