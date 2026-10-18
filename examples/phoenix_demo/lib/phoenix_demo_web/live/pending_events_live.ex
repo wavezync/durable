@@ -117,7 +117,6 @@ defmodule PhoenixDemoWeb.PendingEventsLive do
   defp short_module(nil), do: "-"
   defp short_module(mod), do: mod |> String.split(".") |> List.last()
 
-  defp format_time(nil), do: "-"
   defp format_time(dt), do: Calendar.strftime(dt, "%Y-%m-%d %H:%M:%S")
 
   @impl true
@@ -135,10 +134,15 @@ defmodule PhoenixDemoWeb.PendingEventsLive do
         </p>
       </div>
 
-      <div :if={@pending == []} class="text-center py-12 bg-base-100 border border-base-300 rounded-md">
+      <div
+        :if={@pending == []}
+        class="text-center py-12 bg-base-100 border border-base-300 rounded-md"
+      >
         <.icon name="hero-bolt" class="size-12 mx-auto text-base-content/30" />
         <h3 class="mt-3 font-semibold">No workflows waiting on events</h3>
-        <p class="text-sm text-base-content/60">Trigger Payment Reconciliation from the home page to populate this list.</p>
+        <p class="text-sm text-base-content/60">
+          Trigger Payment Reconciliation from the home page to populate this list.
+        </p>
       </div>
 
       <div class="grid gap-4 md:grid-cols-2">

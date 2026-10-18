@@ -159,7 +159,6 @@ defmodule PhoenixDemoWeb.PendingInputsLive do
   defp short_module(nil), do: "-"
   defp short_module(mod), do: mod |> String.split(".") |> List.last()
 
-  defp format_time(nil), do: "-"
   defp format_time(dt), do: Calendar.strftime(dt, "%Y-%m-%d %H:%M:%S")
 
   defp type_label(:approval), do: "Approval"
@@ -183,17 +182,42 @@ defmodule PhoenixDemoWeb.PendingInputsLive do
       </div>
 
       <div role="tablist" class="tabs tabs-bordered mb-4">
-        <.link patch={~p"/pending-inputs"} role="tab" class={["tab", @type_filter == :all && "tab-active"]}>All</.link>
-        <.link patch={~p"/pending-inputs?type=approval"} role="tab" class={["tab", @type_filter == :approval && "tab-active"]}>Approvals</.link>
-        <.link patch={~p"/pending-inputs?type=form"} role="tab" class={["tab", @type_filter == :form && "tab-active"]}>Forms</.link>
-        <.link patch={~p"/pending-inputs?type=single_choice"} role="tab" class={["tab", @type_filter == :single_choice && "tab-active"]}>Choices</.link>
-        <.link patch={~p"/pending-inputs?type=free_text"} role="tab" class={["tab", @type_filter == :free_text && "tab-active"]}>Text</.link>
+        <.link
+          patch={~p"/pending-inputs"}
+          role="tab"
+          class={["tab", @type_filter == :all && "tab-active"]}
+        >All</.link>
+        <.link
+          patch={~p"/pending-inputs?type=approval"}
+          role="tab"
+          class={["tab", @type_filter == :approval && "tab-active"]}
+        >Approvals</.link>
+        <.link
+          patch={~p"/pending-inputs?type=form"}
+          role="tab"
+          class={["tab", @type_filter == :form && "tab-active"]}
+        >Forms</.link>
+        <.link
+          patch={~p"/pending-inputs?type=single_choice"}
+          role="tab"
+          class={["tab", @type_filter == :single_choice && "tab-active"]}
+        >Choices</.link>
+        <.link
+          patch={~p"/pending-inputs?type=free_text"}
+          role="tab"
+          class={["tab", @type_filter == :free_text && "tab-active"]}
+        >Text</.link>
       </div>
 
-      <div :if={@pending == []} class="text-center py-12 bg-base-100 border border-base-300 rounded-md">
+      <div
+        :if={@pending == []}
+        class="text-center py-12 bg-base-100 border border-base-300 rounded-md"
+      >
         <.icon name="hero-inbox" class="size-12 mx-auto text-base-content/30" />
         <h3 class="mt-3 font-semibold">No pending inputs</h3>
-        <p class="text-sm text-base-content/60">Trigger a workflow that waits for input to populate this list.</p>
+        <p class="text-sm text-base-content/60">
+          Trigger a workflow that waits for input to populate this list.
+        </p>
       </div>
 
       <div class="grid gap-4 md:grid-cols-2">
@@ -247,12 +271,14 @@ defmodule PhoenixDemoWeb.PendingInputsLive do
                     </button>
                   </div>
                 </form>
-
               <% :single_choice -> %>
                 <form phx-submit="submit_choice" class="space-y-2">
                   <input type="hidden" name="_id" value={p.id} />
                   <div class="flex flex-col gap-1">
-                    <label :for={choice <- normalize_fields(p.fields)} class="flex items-center gap-2 cursor-pointer">
+                    <label
+                      :for={choice <- normalize_fields(p.fields)}
+                      class="flex items-center gap-2 cursor-pointer"
+                    >
                       <input
                         type="radio"
                         name="fields[value]"
@@ -267,7 +293,6 @@ defmodule PhoenixDemoWeb.PendingInputsLive do
                     <button type="submit" class="btn btn-sm btn-primary">Submit</button>
                   </div>
                 </form>
-
               <% :free_text -> %>
                 <form phx-submit="submit_text" class="space-y-2">
                   <input type="hidden" name="_id" value={p.id} />
@@ -281,7 +306,6 @@ defmodule PhoenixDemoWeb.PendingInputsLive do
                     <button type="submit" class="btn btn-sm btn-primary">Submit</button>
                   </div>
                 </form>
-
               <% :form -> %>
                 <form phx-submit="submit_form" class="space-y-2">
                   <input type="hidden" name="_id" value={p.id} />
@@ -290,7 +314,6 @@ defmodule PhoenixDemoWeb.PendingInputsLive do
                     <button type="submit" class="btn btn-sm btn-primary">Submit</button>
                   </div>
                 </form>
-
               <% _ -> %>
                 <p class="text-xs text-base-content/60">Unsupported input type: {p.input_type}</p>
             <% end %>
@@ -313,9 +336,15 @@ defmodule PhoenixDemoWeb.PendingInputsLive do
         </span>
         <%= case field_type(f) do %>
           <% "select" -> %>
-            <select name={"fields[#{field_name(f)}]"} class="select select-bordered select-sm w-full" required={field_required?(f)}>
+            <select
+              name={"fields[#{field_name(f)}]"}
+              class="select select-bordered select-sm w-full"
+              required={field_required?(f)}
+            >
               <option value="">— Select —</option>
-              <option :for={opt <- field_options(f)} value={choice_value(opt)}>{choice_label(opt)}</option>
+              <option :for={opt <- field_options(f)} value={choice_value(opt)}>
+                {choice_label(opt)}
+              </option>
             </select>
           <% "number" -> %>
             <input
@@ -326,7 +355,12 @@ defmodule PhoenixDemoWeb.PendingInputsLive do
               step="any"
             />
           <% "textarea" -> %>
-            <textarea name={"fields[#{field_name(f)}]"} class="textarea textarea-bordered textarea-sm w-full" rows="2" required={field_required?(f)}></textarea>
+            <textarea
+              name={"fields[#{field_name(f)}]"}
+              class="textarea textarea-bordered textarea-sm w-full"
+              rows="2"
+              required={field_required?(f)}
+            ></textarea>
           <% _ -> %>
             <input
               type="text"

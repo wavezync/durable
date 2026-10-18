@@ -21,7 +21,7 @@ defmodule PhoenixDemo.Workflows.ExpenseApprovalWorkflow do
   @dual_approval_threshold 1_000
 
   workflow "expense_approval", timeout: hours(48) do
-    step :collect_expense, fn data ->
+    step(:collect_expense, fn data ->
       employee = data["employee"] || "Anonymous"
       put_context(:employee, employee)
 
@@ -46,24 +46,36 @@ defmodule PhoenixDemo.Workflows.ExpenseApprovalWorkflow do
 
       amount =
         case result["amount"] do
-          n when is_number(n) -> n
-          s when is_binary(s) -> case Float.parse(s) do
-            {n, _} -> n
-            :error -> 0
-          end
-          _ -> 0
+          n when is_number(n) ->
+            n
+
+          s when is_binary(s) ->
+            case Float.parse(s) do
+              {n, _} -> n
+              :error -> 0
+            end
+
+          _ ->
+            0
         end
 
       put_context(:amount, amount)
       put_context(:category, result["category"])
       put_context(:description, result["description"])
 
-      Logger.info("[Expense] Received: $#{amount} #{result["category"]} — #{result["description"]}")
+      Logger.info(
+        "[Expense] Received: $#{amount} #{result["category"]} — #{result["description"]}"
+      )
 
-      {:ok, assign(data, :expense, %{"amount" => amount, "category" => result["category"], "description" => result["description"]})}
-    end
+      {:ok,
+       assign(data, :expense, %{
+         "amount" => amount,
+         "category" => result["category"],
+         "description" => result["description"]
+       })}
+    end)
 
-    decision :route_by_amount, fn data ->
+    decision(:route_by_amount, fn data ->
       amount = get_context(:amount) || 0
 
       if amount > @dual_approval_threshold do
@@ -75,9 +87,9 @@ defmodule PhoenixDemo.Workflows.ExpenseApprovalWorkflow do
         put_context(:approval_path, "single")
         {:goto, :single_approval, data}
       end
-    end
+    end)
 
-    step :dual_approval, fn data ->
+    step(:dual_approval, fn data ->
       employee = get_context(:employee)
       amount = get_context(:amount)
 
@@ -101,9 +113,9 @@ defmodule PhoenixDemo.Workflows.ExpenseApprovalWorkflow do
         Logger.warning("[Expense] Approval denied — manager=#{manager_ok} cfo=#{cfo_ok}")
         {:ok, assign(data, :approved, false)}
       end
-    end
+    end)
 
-    step :single_approval, fn data ->
+    step(:single_approval, fn data ->
       employee = get_context(:employee)
       amount = get_context(:amount)
       category = get_context(:category)
@@ -127,9 +139,9 @@ defmodule PhoenixDemo.Workflows.ExpenseApprovalWorkflow do
 
       Logger.info("[Expense] Single approval result: #{approved}")
       {:ok, assign(data, :approved, approved)}
-    end
+    end)
 
-    step :record_expense, fn data ->
+    step(:record_expense, fn data ->
       employee = get_context(:employee)
       amount = get_context(:amount)
       category = get_context(:category)
@@ -137,7 +149,10 @@ defmodule PhoenixDemo.Workflows.ExpenseApprovalWorkflow do
       path = get_context(:approval_path)
 
       status = if approved, do: "recorded", else: "denied"
-      Logger.info("[Expense] $#{amount} #{category} for #{employee} — #{status} (#{path} approval)")
+
+      Logger.info(
+        "[Expense] $#{amount} #{category} for #{employee} — #{status} (#{path} approval)"
+      )
 
       {:ok,
        %{
@@ -148,7 +163,7 @@ defmodule PhoenixDemo.Workflows.ExpenseApprovalWorkflow do
          "status" => status,
          "recorded_at" => DateTime.utc_now() |> DateTime.to_iso8601()
        }}
-    end
+    end)
   end
 
   defp approved?(:approved), do: true

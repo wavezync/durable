@@ -86,7 +86,11 @@ defmodule PhoenixDemoWeb.WorkflowForm do
             required={@required}
           >
             <option value="">— Select —</option>
-            <option :for={opt <- @options} value={option_value(opt)} selected={option_value(opt) == to_string(@default)}>
+            <option
+              :for={opt <- @options}
+              value={option_value(opt)}
+              selected={option_value(opt) == to_string(@default)}
+            >
               {option_label(opt)}
             </option>
           </select>

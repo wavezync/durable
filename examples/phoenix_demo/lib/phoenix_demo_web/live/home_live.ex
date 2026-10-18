@@ -184,6 +184,7 @@ defmodule PhoenixDemoWeb.HomeLive do
   end
 
   defp coerce("number", v) when is_number(v), do: v
+
   defp coerce("number", v) when is_binary(v) do
     case Float.parse(v) do
       {n, _} -> n
@@ -204,8 +205,10 @@ defmodule PhoenixDemoWeb.HomeLive do
       <div class="mb-6">
         <h1 class="text-2xl font-bold">Workflow Showcase</h1>
         <p class="text-sm text-base-content/70 mt-1">
-          Each card runs a workflow that demonstrates a specific Durable feature. Click <strong>Run demo</strong>
-          to trigger one with simulated input. Crons fire automatically — open <.link navigate={~p"/schedules"} class="link link-primary">/schedules</.link>
+          Each card runs a workflow that demonstrates a specific Durable feature. Click
+          <strong>Run demo</strong>
+          to trigger one with simulated input. Crons fire automatically — open
+          <.link navigate={~p"/schedules"} class="link link-primary">/schedules</.link>
           to watch them tick.
         </p>
       </div>

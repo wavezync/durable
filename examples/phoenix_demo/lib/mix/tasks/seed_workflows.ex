@@ -45,7 +45,12 @@ defmodule Mix.Tasks.SeedWorkflows do
 
     # 1. Successful text file
     txt_path = Path.join(dir, "report.txt")
-    File.write!(txt_path, "This is a quarterly report.\nIt contains important data.\nTotal revenue: $1.2M")
+
+    File.write!(
+      txt_path,
+      "This is a quarterly report.\nIt contains important data.\nTotal revenue: $1.2M"
+    )
+
     start("Document (text)", DocumentWorkflow, %{
       "filename" => "report.txt",
       "path" => txt_path,
@@ -55,6 +60,7 @@ defmodule Mix.Tasks.SeedWorkflows do
     # 2. Successful JSON file
     json_path = Path.join(dir, "config.json")
     File.write!(json_path, Jason.encode!(%{version: "2.0", features: ["auth", "billing", "api"]}))
+
     start("Document (json)", DocumentWorkflow, %{
       "filename" => "config.json",
       "path" => json_path,
@@ -64,6 +70,7 @@ defmodule Mix.Tasks.SeedWorkflows do
     # 3. PDF requiring approval (will wait for input)
     pdf_path = Path.join(dir, "contract.pdf")
     File.write!(pdf_path, "%PDF-1.4 fake pdf content for testing")
+
     start("Document (pdf, needs approval)", DocumentWorkflow, %{
       "filename" => "contract.pdf",
       "path" => pdf_path,

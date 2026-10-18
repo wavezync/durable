@@ -50,10 +50,30 @@ defmodule PhoenixDemoWeb.Layouts do
 
           <ul class="menu menu-sm gap-1 p-3">
             <.nav_item icon="hero-home" label="Home" path="/" active={@active_nav == :home} />
-            <.nav_item icon="hero-queue-list" label="Executions" path="/executions" active={@active_nav == :executions} />
-            <.nav_item icon="hero-hand-raised" label="Pending Inputs" path="/pending-inputs" active={@active_nav == :pending_inputs} />
-            <.nav_item icon="hero-bolt" label="Pending Events" path="/pending-events" active={@active_nav == :pending_events} />
-            <.nav_item icon="hero-clock" label="Schedules" path="/schedules" active={@active_nav == :schedules} />
+            <.nav_item
+              icon="hero-queue-list"
+              label="Executions"
+              path="/executions"
+              active={@active_nav == :executions}
+            />
+            <.nav_item
+              icon="hero-hand-raised"
+              label="Pending Inputs"
+              path="/pending-inputs"
+              active={@active_nav == :pending_inputs}
+            />
+            <.nav_item
+              icon="hero-bolt"
+              label="Pending Events"
+              path="/pending-events"
+              active={@active_nav == :pending_events}
+            />
+            <.nav_item
+              icon="hero-clock"
+              label="Schedules"
+              path="/schedules"
+              active={@active_nav == :schedules}
+            />
 
             <li class="menu-title pt-4 pb-1 text-xs uppercase tracking-wide">Tools</li>
             <li>

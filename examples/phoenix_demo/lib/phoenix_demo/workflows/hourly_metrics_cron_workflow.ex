@@ -21,7 +21,7 @@ defmodule PhoenixDemo.Workflows.HourlyMetricsCronWorkflow do
 
   @schedule cron: "* * * * *"
   workflow "hourly_metrics", timeout: minutes(1) do
-    step :gather, fn _data ->
+    step(:gather, fn _data ->
       metrics = %{
         "active_users" => :rand.uniform(1_000),
         "requests_per_min" => :rand.uniform(10_000),
@@ -33,11 +33,11 @@ defmodule PhoenixDemo.Workflows.HourlyMetricsCronWorkflow do
       Logger.info("[Cron] Metrics gathered: #{inspect(metrics)}")
       put_context(:metrics, metrics)
       {:ok, metrics}
-    end
+    end)
 
-    step :persist, fn data ->
+    step(:persist, fn data ->
       Logger.info("[Cron] Persisted metrics snapshot")
       {:ok, Map.put(data, "persisted_at", DateTime.utc_now() |> DateTime.to_iso8601())}
-    end
+    end)
   end
 end
