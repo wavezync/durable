@@ -294,11 +294,15 @@ defmodule Durable.LogCapture do
       _ ->
         Process.put(@warn_flag, true)
 
+        # `durable_internal` keeps this line out of the step's own logs; it's a
+        # filter, not something to print, so it isn't in the formatter config.
+        # credo:disable-for-next-line Credo.Check.Warning.MissedMetadataKeyInLoggerConfig
         Logger.warning(
           "[Durable.LogCapture] non-JSON-safe metadata value stringified " <>
             "to inspect/1 form: #{inspect(v, limit: 80)}. To preserve " <>
             "structured data, only pass binaries, atoms, numbers, booleans, " <>
-            "or nil in Logger metadata."
+            "or nil in Logger metadata.",
+          durable_internal: true
         )
     end
   end

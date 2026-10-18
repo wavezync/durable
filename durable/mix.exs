@@ -68,11 +68,13 @@ defmodule Durable.MixProject do
       {:crontab, "~> 1.1"},
       {:igniter, "~> 0.6", optional: true},
       {:phoenix_pubsub, "~> 2.1", optional: true},
+      {:telemetry_metrics, "~> 1.0", optional: true},
 
       # Dev/Test
       {:ex_doc, "~> 0.34", only: :dev, runtime: false},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
-      {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false}
+      {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false},
+      {:stream_data, "~> 1.1", only: [:dev, :test]}
     ]
   end
 

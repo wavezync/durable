@@ -98,8 +98,9 @@ defmodule Durable.LogCapture.Handler do
 
   @doc false
   def log(%{level: level, msg: msg, meta: meta}, _config) do
-    # Only capture logs when in workflow context
-    if Durable.LogCapture.in_workflow_context?() do
+    # Only capture logs when in workflow context, and not Durable's own lines
+    # (its default telemetry logger runs in the step's process).
+    if Durable.LogCapture.in_workflow_context?() and not Map.get(meta, :durable_internal, false) do
       formatted_message = format_message(msg)
       metadata = format_metadata(meta)
       Durable.LogCapture.add_log(level, formatted_message, metadata)
@@ -136,7 +137,7 @@ defmodule Durable.LogCapture.Handler do
 
   # Metadata formatting
 
-  defp format_metadata(meta) when is_map(meta) do
+  defp format_metadata(meta) do
     # Convert known keys to atoms for consistent handling
     meta
     |> Map.new(fn
@@ -145,6 +146,4 @@ defmodule Durable.LogCapture.Handler do
       {k, v} -> {k, v}
     end)
   end
-
-  defp format_metadata(_), do: %{}
 end
