@@ -82,32 +82,38 @@ defmodule Durable.Queue.StaleJobRecovery do
     adapter = Adapter.default_adapter()
 
     stale_result = adapter.recover_stale_locks(config, config.stale_lock_timeout)
-    log_recovery(:stale, stale_result, config.name)
+    log_recovery(:stale, stale_result, config)
 
     # Zombie recovery is an optional adapter capability. Skip if not implemented.
     if function_exported?(adapter, :recover_zombie_workflows, 2) do
       zombie_result = adapter.recover_zombie_workflows(config, config.stale_lock_timeout)
-      log_recovery(:zombie, zombie_result, config.name)
+      log_recovery(:zombie, zombie_result, config)
     end
 
     # Preserve the return shape expected by `recover_now/1` callers.
     stale_result
   end
 
-  defp log_recovery(_kind, {:ok, 0}, _name), do: :ok
+  defp log_recovery(_kind, {:ok, 0}, _config), do: :ok
 
-  defp log_recovery(:stale, {:ok, count}, name) do
-    Logger.info("Recovered #{count} stale job(s) for #{inspect(name)}")
-    emit_telemetry(count, name)
+  defp log_recovery(:stale, {:ok, count}, config) do
+    Logger.info("Recovered #{count} stale job(s) for #{inspect(config.name)}")
+    emit_telemetry(count, config.name)
+
+    Durable.Activity.record(config, "stale_recovered",
+      count: count,
+      details: %{after_s: config.stale_lock_timeout}
+    )
   end
 
-  defp log_recovery(:zombie, {:ok, count}, name) do
-    Logger.warning("Marked #{count} zombie workflow(s) as failed for #{inspect(name)}")
-    emit_zombie_telemetry(count, name)
+  defp log_recovery(:zombie, {:ok, count}, config) do
+    Logger.warning("Marked #{count} zombie workflow(s) as failed for #{inspect(config.name)}")
+    emit_zombie_telemetry(count, config.name)
+    Durable.Activity.record(config, "zombie_recovered", count: count)
   end
 
-  defp log_recovery(kind, {:error, reason}, name) do
-    Logger.error("Failed #{kind} recovery for #{inspect(name)}: #{inspect(reason)}")
+  defp log_recovery(kind, {:error, reason}, config) do
+    Logger.error("Failed #{kind} recovery for #{inspect(config.name)}: #{inspect(reason)}")
   end
 
   defp schedule_recovery(interval) do

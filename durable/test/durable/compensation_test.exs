@@ -155,8 +155,10 @@ defmodule Durable.CompensationTest do
       {:ok, execution} = create_and_execute_workflow(BookTripWorkflow, %{})
       workflow_id = execution.id
 
-      # Workflow should be in compensated state
+      # Workflow should be in compensated state, finished like any other
+      # terminal run
       assert execution.status == :compensated
+      assert execution.completed_at != nil
 
       # Check compensation results
       results = execution.compensation_results
@@ -190,6 +192,7 @@ defmodule Durable.CompensationTest do
       {:ok, execution} = create_and_execute_workflow(FailingCompensationWorkflow, %{})
 
       assert execution.status == :compensation_failed
+      assert execution.completed_at != nil
 
       # Should have the original error
       assert execution.error["message"] == "Step failed"

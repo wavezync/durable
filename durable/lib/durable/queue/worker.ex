@@ -147,6 +147,11 @@ defmodule Durable.Queue.Worker do
         # Workflow is waiting for sleep/event/input - not an error
         :waiting
 
+      {:error, :superseded} ->
+        # Cancelled or reclaimed while we ran: the row's status is someone
+        # else's now, so the poller must neither ack nor nack it.
+        :fenced
+
       {:error, error} ->
         {:error, error}
     end
@@ -164,13 +169,12 @@ defmodule Durable.Queue.Worker do
        }}
   catch
     kind, reason ->
-      Logger.error("Worker caught #{kind} executing job #{job.id}: #{inspect(reason)}")
+      Logger.error(
+        "Worker caught #{kind} executing job #{job.id}: " <>
+          Exception.format(kind, reason, __STACKTRACE__)
+      )
 
-      {:error,
-       %{
-         type: "#{kind}",
-         message: inspect(reason)
-       }}
+      {:error, Durable.Executor.caught_error(kind, reason, __STACKTRACE__)}
   end
 
   # We've been fenced: stale-lock recovery released our claim and another worker
@@ -191,8 +195,13 @@ defmodule Durable.Queue.Worker do
 
     :telemetry.execute(
       [:durable, :queue, :worker_fenced],
-      %{count: 1, duration_ms: duration_ms},
+      %{count: 1, duration: System.convert_time_unit(duration_ms, :millisecond, :native)},
       %{job_id: state.job.id, queue: state.job.queue}
+    )
+
+    Durable.Activity.record(state.config, "worker_fenced",
+      queue: state.job.queue,
+      workflow_id: state.job.id
     )
 
     send(state.poller_pid, {:job_complete, state.job.id, :fenced, duration_ms})
@@ -212,12 +221,13 @@ defmodule Durable.Queue.Worker do
       case result do
         :ok -> :completed
         :waiting -> :waiting
+        :fenced -> :superseded
         {:error, _} -> :failed
       end
 
     :telemetry.execute(
       [:durable, :queue, :job_completed],
-      %{duration_ms: duration_ms},
+      %{duration: System.convert_time_unit(duration_ms, :millisecond, :native)},
       %{
         job_id: job.id,
         queue: job.queue,

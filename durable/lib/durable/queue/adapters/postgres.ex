@@ -30,6 +30,9 @@ defmodule Durable.Queue.Adapters.Postgres do
         AND queue = $1
         AND (scheduled_at IS NULL OR scheduled_at <= NOW())
         AND (locked_by IS NULL OR locked_at < NOW() - INTERVAL '#{config.stale_lock_timeout} seconds')
+        AND NOT EXISTS (
+          SELECT 1 FROM #{prefix}.queues q WHERE q.name = $1 AND q.paused_at IS NOT NULL
+        )
       ORDER BY priority DESC, scheduled_at ASC NULLS FIRST, inserted_at ASC
       LIMIT $2
       FOR UPDATE SKIP LOCKED
@@ -109,6 +112,11 @@ defmodule Durable.Queue.Adapters.Postgres do
               inspect(reason)
           )
 
+          Durable.Activity.record(config, "ack_failed",
+            workflow_id: job_id,
+            details: %{attempts: attempt, reason: inspect(reason)}
+          )
+
           {:error, reason}
       end
     end
@@ -129,7 +137,11 @@ defmodule Durable.Queue.Adapters.Postgres do
         {:error, :not_found}
 
       execution ->
-        if fenced?(execution, lock_token) do
+        # Only a run still :running needs failing here — the worker crashed
+        # before the executor could record an outcome. Anything else was
+        # settled by the executor (failed, compensated, cancelled, waiting)
+        # and must not be overwritten.
+        if fenced?(execution, lock_token) or execution.status != :running do
           :ok
         else
           error = normalize_error(reason)

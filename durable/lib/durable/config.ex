@@ -49,6 +49,8 @@ defmodule Durable.Config do
           sleep_waker_batch_size: pos_integer(),
           log_level: false | :debug | :info | :warning | :error,
           pubsub: atom() | nil,
+          prune: keyword() | nil,
+          node_id: String.t() | nil,
           owns_pubsub?: boolean()
         }
 
@@ -66,6 +68,8 @@ defmodule Durable.Config do
     :sleep_waker_batch_size,
     :log_level,
     :pubsub,
+    :prune,
+    :node_id,
     owns_pubsub?: false
   ]
 
@@ -140,8 +144,38 @@ defmodule Durable.Config do
           "Pass an atom like `MyApp.PubSub` to reuse a PubSub started by the host app. " <>
           "Pass `:start` to have Durable start its own (named after the instance). " <>
           "Leave as `nil` to disable broadcasting (default)."
+    ],
+    prune: [
+      type:
+        {:or,
+         [
+           nil,
+           {:keyword_list,
+            [
+              completed: [type: :pos_integer, doc: "Keep completed runs this many ms."],
+              failed: [type: :pos_integer, doc: "Keep failed and rolled-back runs this many ms."],
+              cancelled: [type: :pos_integer, doc: "Keep cancelled runs this many ms."]
+            ]}
+         ]},
+      default: nil,
+      doc:
+        "Delete finished runs (with their steps, inputs and events) once they are older " <>
+          "than the given age in ms, e.g. `[completed: :timer.hours(24 * 14)]`. " <>
+          "Statuses left out are kept forever. Off by default."
     ]
   ]
+
+  # One id per running instance: the Erlang node name when distributed, else
+  # the hostname plus a per-boot suffix. Pollers stamp it into `locked_by`,
+  # and the node registry keys its heartbeat row on it.
+  defp node_id do
+    if node() == :nonode@nohost do
+      {:ok, host} = :inet.gethostname()
+      "#{host}-#{System.unique_integer([:positive])}"
+    else
+      Atom.to_string(node())
+    end
+  end
 
   @doc """
   Creates a new validated configuration from options.
@@ -160,7 +194,7 @@ defmodule Durable.Config do
     case NimbleOptions.validate(opts, @schema) do
       {:ok, validated} ->
         validated = resolve_pubsub(validated)
-        {:ok, struct(__MODULE__, validated)}
+        {:ok, %{struct(__MODULE__, validated) | node_id: node_id()}}
 
       {:error, %NimbleOptions.ValidationError{}} = error ->
         error

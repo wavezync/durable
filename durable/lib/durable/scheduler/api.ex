@@ -292,7 +292,9 @@ defmodule Durable.Scheduler.API do
       Durable.Executor.start_workflow(module, input,
         workflow: schedule.workflow_name,
         queue: String.to_atom(schedule.queue),
-        durable: durable_name
+        durable: durable_name,
+        trigger: :schedule,
+        trigger_ref: schedule.name
       )
     end
   end
@@ -427,6 +429,29 @@ defmodule Durable.Scheduler.API do
     end
   end
 
+  @doc """
+  The next `count` times a schedule fires, in UTC, from its cron expression
+  and time zone — whether or not it's enabled.
+
+      [~U[2026-10-17 09:00:00.000000Z], ~U[2026-10-18 09:00:00.000000Z], ...]
+  """
+  @spec upcoming_runs(ScheduledWorkflow.t(), pos_integer()) :: [DateTime.t()]
+  def upcoming_runs(%ScheduledWorkflow{} = schedule, count \\ 5) do
+    with {:ok, cron} <- CronParser.parse(schedule.cron_expression),
+         {:ok, now} <- get_local_time(schedule.timezone) do
+      cron
+      |> Scheduler.get_next_run_dates(now)
+      |> Stream.map(&local_to_utc(&1, schedule.timezone))
+      |> Stream.flat_map(fn
+        {:ok, utc} -> [utc]
+        _ -> []
+      end)
+      |> Enum.take(count)
+    else
+      _ -> []
+    end
+  end
+
   defp get_local_time("UTC"), do: {:ok, NaiveDateTime.utc_now()}
   defp get_local_time("Etc/UTC"), do: {:ok, NaiveDateTime.utc_now()}
 
@@ -437,12 +462,15 @@ defmodule Durable.Scheduler.API do
     end
   end
 
+  # Next-run times go into `:utc_datetime_usec` columns, some through
+  # `put_change` (no cast), so they must carry microsecond precision — cron
+  # math returns whole seconds.
   defp local_to_utc(naive_datetime, "UTC") do
-    {:ok, DateTime.from_naive!(naive_datetime, "Etc/UTC")}
+    {:ok, naive_datetime |> DateTime.from_naive!("Etc/UTC") |> usec()}
   end
 
   defp local_to_utc(naive_datetime, "Etc/UTC") do
-    {:ok, DateTime.from_naive!(naive_datetime, "Etc/UTC")}
+    {:ok, naive_datetime |> DateTime.from_naive!("Etc/UTC") |> usec()}
   end
 
   defp local_to_utc(naive_datetime, timezone) do
@@ -454,9 +482,11 @@ defmodule Durable.Scheduler.API do
     end
   end
 
+  defp usec(%DateTime{microsecond: {us, _}} = dt), do: %{dt | microsecond: {us, 6}}
+
   defp shift_to_utc(datetime, timezone) do
     case DateTime.shift_zone(datetime, "Etc/UTC") do
-      {:ok, utc} -> {:ok, utc}
+      {:ok, utc} -> {:ok, usec(utc)}
       {:error, reason} -> {:error, {:timezone_error, timezone, reason}}
     end
   end

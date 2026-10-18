@@ -225,7 +225,8 @@ defmodule Durable.Orchestration do
       priority: Keyword.get(opts, :priority, 0),
       input: input,
       context: %{},
-      parent_workflow_id: parent_id
+      parent_workflow_id: parent_id,
+      trigger: :parent
     }
 
     {:ok, execution} =

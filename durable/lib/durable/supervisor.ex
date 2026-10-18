@@ -103,7 +103,14 @@ defmodule Durable.Supervisor do
         []
       end
 
-    base_children = pubsub_children ++ [{Task.Supervisor, name: task_sup_name}]
+    base_children =
+      pubsub_children ++
+        [
+          {Task.Supervisor, name: task_sup_name},
+          {Durable.NodeRegistry, config: config},
+          {Durable.Queue.Sampler, config: config}
+        ] ++
+        if(config.prune, do: [{Durable.Pruner, config: config}], else: [])
 
     children =
       if config.queue_enabled do

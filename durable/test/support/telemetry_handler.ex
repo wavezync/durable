@@ -13,7 +13,7 @@ defmodule Durable.TelemetryHandler do
 
       # run code that emits [:durable, :queue, :job_completed]
 
-      assert_receive {:event, :job_completed, %{duration_ms: _}, %{status: :completed}}
+      assert_receive {:event, :job_completed, %{duration: _}, %{status: :completed}}
   """
 
   import ExUnit.Callbacks, only: [on_exit: 1]

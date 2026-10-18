@@ -116,8 +116,7 @@ defmodule Durable.Definition do
             compensations: %{atom() => Compensation.t()},
             opts: %{
               optional(:timeout) => pos_integer(),
-              optional(:max_retries) => pos_integer(),
-              optional(:queue) => atom()
+              optional(:queue) => atom() | String.t()
             }
           }
 

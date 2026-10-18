@@ -15,6 +15,7 @@ defmodule Durable.Executor.StepRunner do
   alias Durable.PubSub, as: DurablePubSub
   alias Durable.Repo
   alias Durable.Storage.Schemas.StepExecution
+  alias Durable.Storage.Schemas.WorkflowExecution
 
   import Ecto.Query, only: [from: 2]
 
@@ -63,12 +64,17 @@ defmodule Durable.Executor.StepRunner do
   defp next_attempt(config, workflow_id, %Step{name: name}) do
     step_name = Atom.to_string(name)
 
+    # Only failures since the last Durable.retry/2 count: an operator retry
+    # hands the step a fresh max_attempts budget.
     failed_count =
       Repo.one(
         config,
         from(s in StepExecution,
+          join: w in WorkflowExecution,
+          on: w.id == s.workflow_id,
           where:
             s.workflow_id == ^workflow_id and s.step_name == ^step_name and s.status == :failed,
+          where: is_nil(w.retried_at) or s.inserted_at > w.retried_at,
           select: count(s.id)
         )
       )
@@ -97,25 +103,13 @@ defmodule Durable.Executor.StepRunner do
 
     # Execute the step body
     start_time = System.monotonic_time(:millisecond)
+    span_meta = step_span_meta(config, workflow_id, step, attempt, max_attempts)
 
     result =
-      try do
-        Step.execute(step, data)
-      rescue
-        e ->
-          {:error,
-           %{
-             type: inspect(e.__struct__),
-             message: Exception.message(e),
-             stacktrace: Exception.format_stacktrace(__STACKTRACE__)
-           }}
-      catch
-        :throw, value ->
-          {:throw, value}
-
-        kind, reason ->
-          {:error, %{type: "#{kind}", message: inspect(reason)}}
-      end
+      :telemetry.span([:durable, :step], span_meta, fn ->
+        result = run_body(step, data)
+        {result, Map.merge(span_meta, step_outcome(result))}
+      end)
 
     end_time = System.monotonic_time(:millisecond)
     duration_ms = end_time - start_time
@@ -137,6 +131,45 @@ defmodule Durable.Executor.StepRunner do
 
     handle_result(result, result_ctx)
   end
+
+  defp run_body(step, data) do
+    Step.execute(step, data)
+  catch
+    :throw, value -> {:throw, value}
+    kind, reason -> {:error, Durable.Executor.caught_error(kind, reason, __STACKTRACE__)}
+  end
+
+  defp step_span_meta(config, workflow_id, step, attempt, max_attempts) do
+    %{
+      durable: config.name,
+      workflow_id: workflow_id,
+      workflow: Map.get(Durable.Telemetry.run_meta(), :workflow),
+      step: step.name,
+      step_type: step.type,
+      attempt: attempt,
+      max_attempts: max_attempts
+    }
+  end
+
+  @suspending [
+    :sleep,
+    :wait_for_event,
+    :wait_for_input,
+    :wait_for_any,
+    :wait_for_all,
+    :call_workflow
+  ]
+
+  defp step_outcome({:ok, data}) when is_map(data), do: %{result: :ok}
+  defp step_outcome({:goto, _target, _data}), do: %{result: :ok}
+  defp step_outcome({:throw, {kind, _opts}}) when kind in @suspending, do: %{result: :suspended}
+  defp step_outcome({:error, error}), do: %{result: :error, error: error_summary(error)}
+
+  defp step_outcome(_other),
+    do: %{result: :error, error: %{type: "invalid_return", message: "unexpected step result"}}
+
+  defp error_summary(%{type: type, message: message}), do: %{type: type, message: message}
+  defp error_summary(error), do: %{type: "error", message: inspect(error)}
 
   # Handle step result from pipeline model
   defp handle_result({:ok, new_data}, ctx) when is_map(new_data) do
@@ -212,7 +245,17 @@ defmodule Durable.Executor.StepRunner do
 
       retry_opts = get_retry_opts(step)
       backoff_strategy = Map.get(retry_opts, :backoff, :exponential)
-      Backoff.sleep(backoff_strategy, attempt, retry_opts)
+      backoff_ms = Backoff.calculate_with_jitter(backoff_strategy, attempt, retry_opts)
+
+      :telemetry.execute(
+        [:durable, :step, :retry],
+        %{backoff_ms: backoff_ms},
+        config
+        |> step_span_meta(step_exec.workflow_id, step, attempt, max_attempts)
+        |> Map.put(:error, error_summary(error))
+      )
+
+      Process.sleep(backoff_ms)
 
       execute_with_retry(step, data, step_exec.workflow_id, attempt + 1, max_attempts, config)
     else
