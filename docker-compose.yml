@@ -7,7 +7,10 @@ services:
     ports:
       - "54321:5432"
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      # Postgres 18+ images keep data under /var/lib/postgresql/<major>/, so the
+      # volume mounts one level up. A new volume name keeps older-major data
+      # (the old `postgres_data`) from blocking startup.
+      - postgres18_data:/var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 5s
@@ -15,4 +18,4 @@ services:
       retries: 5
 
 volumes:
-  postgres_data:
+  postgres18_data:
