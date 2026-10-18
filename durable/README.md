@@ -483,6 +483,37 @@ parallel do
 end
 ```
 
+### Workflow Options
+
+```elixir
+workflow "process_order", timeout: hours(2), queue: :orders do
+```
+
+- `:timeout` — how long a run may take from when it's due to start, waits and
+  sleeps included. A run past it fails with a `"timeout"` error before its next
+  step and runs its compensations; a waiting run is woken to do so (within the
+  timeout worker's one-minute sweep). It can't interrupt a step that's running.
+- `:queue` — the queue runs start on unless `Durable.start/3` names one.
+
+Unknown options fail the compile.
+
+### Errors
+
+When a step fails, its execution keeps what went wrong as `error`:
+
+- **Raised** (`raise`, a crash in a library) — `type` (the exception
+  module), `message`, and `stacktrace`: one frame per line with the app,
+  file and line, e.g. `(my_app 0.1.0) lib/my_app/orders.ex:28: ...`.
+- **Exited** (a `GenServer.call` timeout, a linked process going down) —
+  `type: "exit"`, a readable `message` (`Exception.format_exit/1`) and the
+  `stacktrace`. Throws are kept the same way.
+- **Returned** — `{:error, reason}` from the step: `reason` itself (a map is
+  stored as-is), with no stack, because nothing was raised.
+
+The same applies to compensations and to a branch's `on:` function. A
+failed run's `error` is its failing step's. The stack is as deep as the
+VM's `:backtrace_depth` (8 frames by default; Phoenix dev raises it to 20).
+
 ### API
 
 ```elixir
@@ -494,7 +525,22 @@ Durable.cancel(id, "reason")
 Durable.send_event(id, "event", payload)
 Durable.provide_input(id, "input_name", data)
 Durable.list_children(parent_id)
+
+# Operating
+Durable.retry(id)                        # failed run: resume from the failed step
+Durable.rerun(id, input: new_input)      # finished run: start a fresh copy
+Durable.pause_queue(:default, by: user)  # on every node, until resume_queue/2
+Durable.list_nodes()                     # heartbeating instances and what they run
+Durable.prune()                          # apply the :prune retention now
+
+# Observing
+Durable.Stats.overview(since: dt)        # also timeline/1, workflows/1, step_performance/1,
+                                         # queues/1, queue_history/1, error_groups/1
+Durable.Activity.list()                  # recovered runs, fenced workers, queue pauses…
 ```
+
+Telemetry events and `Telemetry.Metrics` definitions are documented in
+`Durable.Telemetry`.
 
 ## Mix Tasks
 
