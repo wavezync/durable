@@ -252,6 +252,7 @@ defmodule DurableDashboard.Live.WorkflowLive do
         <.run_header
           workflow={@workflow}
           family={@family}
+          steps={@steps}
           base_path={@base_path}
           access={@access}
           failed_row={@failed_row}
@@ -311,12 +312,13 @@ defmodule DurableDashboard.Live.WorkflowLive do
   attr :access, :atom, required: true
   attr :failed_row, :map, default: nil
   attr :action_error, :string, default: nil
+  attr :steps, :list, default: []
 
   defp run_header(assigns) do
     assigns =
       assign(assigns,
         can_operate?: Access.allowed?(assigns.access, :operator),
-        parent_step_lookup: parent_step_lookup(assigns.family)
+        parent_step_lookup: ChildrenTab.step_lookup(assigns.family, assigns.steps)
       )
 
     ~H"""
@@ -1386,18 +1388,6 @@ defmodule DurableDashboard.Live.WorkflowLive do
     from = w.scheduled_at || w.inserted_at
     Trace.format_ms(max(DateTime.diff(started, from, :millisecond), 0))
   end
-
-  defp parent_step_lookup(%{root: root}) when is_map(root) do
-    case get_in(root.context || %{}, ["__parallel_children"]) do
-      m when is_map(m) ->
-        Map.new(m, fn {id, meta} -> {id, meta["step_name"] || meta[:step_name]} end)
-
-      _ ->
-        %{}
-    end
-  end
-
-  defp parent_step_lookup(_family), do: %{}
 
   defp family_visible?(%{parent: parent, all_descendants: descs}),
     do: !is_nil(parent) or (is_list(descs) and descs != [])

@@ -90,6 +90,16 @@ defmodule Durable.WorkflowTimeoutTest do
     assert %{status: :failed, error: %{"type" => "timeout"}} = run(id)
   end
 
+  test "a resumed run keeps its first start time" do
+    {:ok, id} = Executor.start_workflow(Approval, %{}, inline: true)
+    %{status: :waiting, started_at: %DateTime{} = first} = run(id)
+
+    :ok = Durable.provide_input(id, "manager", %{"approved" => true})
+    Executor.execute_workflow(id, Config.get(Durable))
+
+    assert %{status: :completed, started_at: ^first} = run(id)
+  end
+
   test "a retried run gets its full timeout again" do
     {:ok, id} = Executor.start_workflow(SlowSaga, %{}, inline: true)
     repo().update_all(from(w in WorkflowExecution, where: w.id == ^id), set: [status: :failed])

@@ -368,7 +368,7 @@ defmodule DurableDashboard.Live.OverviewLive do
         spark: Enum.map(t, & &1.started),
         spark_tone: "text-subtle-foreground",
         spark_format: &"#{Format.int(&1)} started",
-        tip: "Runs created in the window · child runs included",
+        tip: "Runs created in the window · top-level only; a child run counts with its parent",
         tip_meta: "#{Format.int(p.started)} in the window before"
       },
       %{

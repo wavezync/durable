@@ -563,7 +563,8 @@ where it is (current step), steps, retries, trigger, node, age.
 bottom of the viewport (sticky, `bg-popover` + `shadow-lg`) rather than pushing
 the table down, with "Retry N from failed step", "Rerun N", "Cancel N"
 (confirmed), each counting only the selected runs it fits and shown only when
-N > 0. More than 100 runs needs admin. The result is one sentence ("Retried 12
+N > 0. A selection is the rows on screen: a new page, view or filter starts it
+over. More than 100 runs needs admin. The result is one sentence ("Retried 12
 of 12 runs.") in the same floating spot, dismissable.
 
 ### Charts (`Components.Charts`)

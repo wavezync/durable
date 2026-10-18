@@ -200,8 +200,8 @@ defmodule DurableDashboard.Live.WorkflowDetailLive do
           <.kpi
             label="Duration p50"
             value={Format.ms(@summary.p50_ms)}
-            note="active time"
-            tip="Half of completed runs took less · first step to last"
+            note="start to finish"
+            tip="Half of completed runs took less · from first start to finish, waits included"
           />
           <.kpi
             label="Duration p95"
@@ -241,7 +241,7 @@ defmodule DurableDashboard.Live.WorkflowDetailLive do
             </:legend>
             <Charts.stacked_bars timeline={@timeline} />
           </Charts.panel>
-          <Charts.panel title="Duration" sub="active time of completed runs" class="flex-[1_1_420px]">
+          <Charts.panel title="Duration" sub="start to finish of completed runs, waits included" class="flex-[1_1_420px]">
             <:legend>
               <Charts.swatch class="bg-chart-1" line>p50</Charts.swatch>
               <Charts.swatch class="bg-chart-2" line>p95</Charts.swatch>

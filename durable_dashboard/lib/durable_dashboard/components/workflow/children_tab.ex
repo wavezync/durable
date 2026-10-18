@@ -195,10 +195,13 @@ defmodule DurableDashboard.Components.Workflow.ChildrenTab do
   # Helpers
   # ----------------------------------------------------------------------
 
-  # Which step each child ran: the parent step that started it (from the
-  # root's context) or, since a finished parallel block drops its key, the
-  # first step the child executed itself.
-  defp step_lookup(family, steps) do
+  @doc """
+  Which step each child ran, by child run id: the parent step that started
+  it (from the root's context) or, since a finished parallel block drops its
+  key, the first step the child executed itself. Also feeds the header's
+  children menu.
+  """
+  def step_lookup(family, steps) do
     ran =
       steps
       |> Enum.sort_by(& &1.inserted_at, DateTime)

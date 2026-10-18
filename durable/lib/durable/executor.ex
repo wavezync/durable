@@ -452,9 +452,14 @@ defmodule Durable.Executor do
     end
   end
 
+  # started_at is the first start: a run resumed after a wait keeps it, so
+  # queue wait (ready → started) and run duration (started → finished) aren't
+  # measured from the last resume.
   defp mark_running(config, execution) do
+    started_at = execution.started_at || DateTime.utc_now()
+
     case execution
-         |> WorkflowExecution.status_changeset(:running, %{started_at: DateTime.utc_now()})
+         |> WorkflowExecution.status_changeset(:running, %{started_at: started_at})
          |> cas_update(config) do
       {:ok, running} = ok ->
         DurablePubSub.broadcast_workflow(config, :workflow_resumed, workflow_event(running))

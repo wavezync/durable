@@ -113,7 +113,11 @@ defmodule DurableDashboard.Live.ExecutionsLive do
 
     {:noreply,
      socket
+     # A selection belongs to the rows on screen: bulk actions act on those, so
+     # a new page or filter starts it over rather than counting runs it can't
+     # reach.
      |> assign(
+       selected: MapSet.new(),
        current_path: URI.parse(uri).path,
        breadcrumbs: breadcrumbs,
        query: query,
