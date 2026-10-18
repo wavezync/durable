@@ -29,7 +29,22 @@ defmodule PhoenixDemoWeb.Router do
     live "/workflows/:id", WorkflowDetailLive, :show
   end
 
+  # Phoenix LiveDashboard at /dev/dashboard, reporting PhoenixDemoWeb.Telemetry
+  # metrics — Durable's included, under the "Durable" tab.
+  if Application.compile_env(:phoenix_demo, :dev_routes) do
+    import Phoenix.LiveDashboard.Router
+
+    scope "/dev" do
+      pipe_through :browser
+
+      live_dashboard "/dashboard", metrics: PhoenixDemoWeb.Telemetry
+    end
+  end
+
   # Durable Dashboard — one line, mounts at /dashboard with its own
   # pipelines (asset routes skip CSRF for cross-origin script-tag fetches).
-  use DurableDashboard.Router, mount: "/dashboard", durable: Durable
+  use DurableDashboard.Router,
+    mount: "/dashboard",
+    durable: Durable,
+    resolver: PhoenixDemoWeb.DurableResolver
 end
