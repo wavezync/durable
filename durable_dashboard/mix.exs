@@ -16,7 +16,7 @@ defmodule DurableDashboard.MixProject do
   {shared, _bindings} = Code.eval_file(shared_dst)
 
   # Versioned independently of durable.
-  @version "0.1.0-rc"
+  @version "1.0.0"
 
   @elixir_requirement Keyword.fetch!(shared, :elixir)
   @source_url Keyword.fetch!(shared, :source_url)
