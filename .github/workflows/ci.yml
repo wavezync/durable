@@ -122,6 +122,10 @@ jobs:
           --health-timeout=5s
           --health-retries=5
 
+    # Test against the durable in this checkout, not the one on Hex.
+    env:
+      DURABLE_PATH: ../durable
+
     defaults:
       run:
         working-directory: durable_dashboard

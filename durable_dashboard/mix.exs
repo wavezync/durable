@@ -59,13 +59,7 @@ defmodule DurableDashboard.MixProject do
 
   defp deps do
     [
-      # The Hex version is the committed default, so a plain `mix deps.get` and
-      # `mix hex.publish` resolve durable from Hex with no special steps. For
-      # monorepo co-development, comment it and uncomment the path dep below.
-      # Bump the requirement to the durable release this dashboard targets.
-      # (Same toggle pattern as elixir-nx/nx's torchx.)
-      # {:durable, "~> 1.0"},
-      {:durable, path: "../durable"},
+      durable_dep(),
       {:phoenix_live_view, "~> 1.1"},
       {:phoenix, "~> 1.8"},
       {:jason, "~> 1.4"},
@@ -73,6 +67,17 @@ defmodule DurableDashboard.MixProject do
       {:stream_data, "~> 1.1", only: :test},
       {:ex_doc, "~> 0.34", only: :dev, runtime: false}
     ]
+  end
+
+  # durable comes from Hex, as it ships, so `mix hex.publish` needs nothing
+  # special. DURABLE_PATH=../durable builds against a local checkout instead;
+  # CI and the workspace root set it, so the dashboard is always tested with
+  # the durable beside it.
+  defp durable_dep do
+    case System.get_env("DURABLE_PATH") do
+      nil -> {:durable, "~> 1.0"}
+      path -> {:durable, path: path}
+    end
   end
 
   defp aliases do
@@ -108,8 +113,8 @@ defmodule DurableDashboard.MixProject do
     [
       main: "readme",
       source_url: @source_url,
-      source_ref: "v#{@version}",
-      extras: ["README.md"]
+      source_ref: "durable_dashboard-v#{@version}",
+      extras: ["README.md", "CHANGELOG.md"]
     ]
   end
 
@@ -118,7 +123,7 @@ defmodule DurableDashboard.MixProject do
       maintainers: @maintainers,
       licenses: @licenses,
       links: %{"GitHub" => @source_url, "Homepage" => @homepage_url},
-      files: ~w(lib priv .formatter.exs mix.exs README.md LICENSE shared.exs)
+      files: ~w(lib priv .formatter.exs mix.exs README.md CHANGELOG.md LICENSE shared.exs)
     ]
   end
 end

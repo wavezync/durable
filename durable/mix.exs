@@ -92,9 +92,10 @@ defmodule Durable.MixProject do
     [
       main: "readme",
       source_url: @source_url,
-      source_ref: "v#{@version}",
+      source_ref: "durable-v#{@version}",
       extras: [
         "README.md",
+        "CHANGELOG.md",
         "guides/ai_workflows.md",
         "guides/branching.md",
         "guides/compensations.md",
@@ -121,7 +122,7 @@ defmodule Durable.MixProject do
       maintainers: @maintainers,
       licenses: @licenses,
       links: %{"GitHub" => @source_url, "Homepage" => @homepage_url},
-      files: ~w(lib priv .formatter.exs mix.exs README.md LICENSE shared.exs)
+      files: ~w(lib priv .formatter.exs mix.exs README.md CHANGELOG.md LICENSE shared.exs)
     ]
   end
 end

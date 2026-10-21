@@ -37,14 +37,34 @@ commands work: `mix deps.get`, `mix compile`, `mix test`, `mix format`,
 
 ## Cross-package references
 
-Packages link to each other via `path:` deps in dev. To publish, swap the
-`path:` line for the Hex version:
+`durable_dashboard` depends on `{:durable, "~> 1.0"}` from Hex, which is what
+it ships with. To build it against the local checkout, set `DURABLE_PATH`:
 
-```elixir
-# durable_dashboard/mix.exs
-{:durable, path: "../durable"}      # dev
-{:durable, "~> 0.1"}                # release
+```bash
+cd durable_dashboard && DURABLE_PATH=../durable mix test
 ```
+
+The workspace commands and CI set it for you.
+
+## Releasing
+
+Each package is released on its own from GitHub Actions: **Actions → Release →
+Run workflow**, then pick the package. Leave the version blank to take the
+next one [git-cliff](https://git-cliff.org) derives from the package's
+conventional commits since its last tag, or enter one. The workflow:
+
+1. bumps `@version`, regenerates the package's `CHANGELOG.md` (config in
+   [`cliff.toml`](cliff.toml)), commits both to `main`, and tags
+   `durable-v<version>` or `durable_dashboard-v<version>`;
+2. publishes to Hex with the `HEX_API_KEY` repository secret;
+3. creates the GitHub release, with that version's changelog as its notes.
+
+If publishing fails, "Re-run failed jobs" retries it for the same tag. Release
+`durable` first when the dashboard needs its changes: the dashboard is
+published against durable from Hex.
+
+Preview a changelog locally with
+`git cliff --include-path "durable/**" --tag-pattern "^durable-v" --unreleased`.
 
 ## Database
 
