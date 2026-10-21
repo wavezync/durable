@@ -1,0 +1,51 @@
+# git-cliff config (https://git-cliff.org/docs/configuration).
+#
+# Each package has its own CHANGELOG.md and tags (`durable-v1.2.3`,
+# `durable_dashboard-v1.2.3`), so every run is scoped to one package:
+#
+#   git cliff --include-path "durable/**" --tag-pattern "^durable-v"
+#
+# The release workflow (.github/workflows/release.yml) does this for you.
+
+[changelog]
+header = """
+# Changelog
+
+All notable changes to this package. Versions follow [Semantic
+Versioning](https://semver.org); entries come from [Conventional
+Commits](https://www.conventionalcommits.org).
+
+"""
+body = """
+{% set v = version | default(value="") | split(pat="-v") | last %}\
+{% if version and previous.version %}\
+    ## [{{ v }}](https://github.com/wavezync/durable/compare/{{ previous.version }}...{{ version }}) - {{ timestamp | date(format="%Y-%m-%d") }}
+{% elif version %}\
+    ## {{ v }} - {{ timestamp | date(format="%Y-%m-%d") }}
+{% else %}\
+    ## Unreleased
+{% endif %}\
+{% for group, commits in commits | group_by(attribute="group") %}
+    ### {{ group | striptags | trim }}
+    {% for commit in commits %}
+        - {% if commit.breaking %}**Breaking:** {% endif %}{{ commit.message | split(pat="\n") | first | upper_first | trim }} ([{{ commit.id | truncate(length=7, end="") }}](https://github.com/wavezync/durable/commit/{{ commit.id }}))\
+    {% endfor %}
+{% endfor %}\n
+"""
+trim = true
+
+[git]
+conventional_commits = true
+filter_unconventional = true
+protect_breaking_commits = true
+sort_commits = "oldest"
+commit_parsers = [
+  { message = "^chore(\\(.+\\))?: (release|bump)", skip = true },
+  { message = "^feat", group = "<!-- 0 -->Features" },
+  { message = "^fix", group = "<!-- 1 -->Bug fixes" },
+  { message = "^perf", group = "<!-- 2 -->Performance" },
+  { message = "^refactor", group = "<!-- 3 -->Refactoring" },
+  { message = "^docs", group = "<!-- 4 -->Documentation" },
+  # chore, ci, build, test, style: not user-facing.
+  { message = ".*", skip = true },
+]

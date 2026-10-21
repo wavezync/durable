@@ -30,7 +30,8 @@ cd assets && pnpm install && pnpm build
 # Type / lint / format checks
 cd assets && pnpm exec tsc --noEmit && pnpm exec biome check src/
 
-# Elixir
+# Elixir (durable comes from Hex unless DURABLE_PATH points at a checkout)
+export DURABLE_PATH=../durable
 mix compile --warnings-as-errors
 mix test
 ```

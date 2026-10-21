@@ -1,0 +1,162 @@
+name: Release
+
+# Actions → Release → Run workflow, pick a package. It:
+#
+#   1. picks the version (the input, or the next one git-cliff derives from
+#      the package's conventional commits since its last tag),
+#   2. bumps @version in mix.exs, regenerates the package's CHANGELOG.md,
+#      commits both to main and tags `<package>-v<version>`,
+#   3. publishes to Hex (needs the HEX_API_KEY secret) and creates the GitHub
+#      release with that version's changelog as its notes.
+#
+# Publish is safe to retry with "Re-run failed jobs": it reuses the tag and
+# skips what already went out. Release durable before a durable_dashboard
+# that needs its changes, since the dashboard resolves durable from Hex.
+
+on:
+  workflow_dispatch:
+    inputs:
+      package:
+        description: Package
+        type: choice
+        options: [durable, durable_dashboard]
+      version:
+        description: "Version, e.g. 1.2.0 (blank: next from conventional commits)"
+        required: false
+
+concurrency: release
+
+env:
+  ELIXIR_VERSION: "1.20"
+  OTP_VERSION: "29"
+  PACKAGE: ${{ inputs.package }}
+
+jobs:
+  tag:
+    name: Tag
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      version: ${{ steps.release.outputs.version }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: git-cliff
+
+      - name: Bump, changelog, commit and tag
+        id: release
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          cliff() { git cliff --include-path "$PACKAGE/**" --tag-pattern "^$PACKAGE-v" "$@"; }
+
+          version=${INPUT_VERSION:-$(cliff --bumped-version)}
+          version=${version#"$PACKAGE-v"}
+          tag="$PACKAGE-v$version"
+
+          if [[ ! $version =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::'$version' is not a semantic version"; exit 1
+          fi
+          if git rev-parse -q --verify "refs/tags/$tag" > /dev/null; then
+            echo "::error::$tag already exists"; exit 1
+          fi
+
+          sed -i -E "s/^([[:space:]]*@version )\"[^\"]+\"/\1\"$version\"/" "$PACKAGE/mix.exs"
+          grep -q "@version \"$version\"" "$PACKAGE/mix.exs"
+          cliff --tag "$tag" --output "$PACKAGE/CHANGELOG.md"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "$PACKAGE/mix.exs" "$PACKAGE/CHANGELOG.md"
+          git commit -m "chore($PACKAGE): release $version"
+          git tag -a "$tag" -m "$PACKAGE $version"
+          git push --atomic origin HEAD:main "$tag"
+
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  publish:
+    name: Publish
+    needs: tag
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ needs.tag.outputs.tag }}
+      VERSION: ${{ needs.tag.outputs.version }}
+    defaults:
+      run:
+        working-directory: ${{ inputs.package }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.tag.outputs.tag }}
+          fetch-depth: 0
+
+      - name: Set up Elixir
+        uses: erlef/setup-beam@v1
+        with:
+          elixir-version: ${{ env.ELIXIR_VERSION }}
+          otp-version: ${{ env.OTP_VERSION }}
+
+      - name: Set up pnpm
+        if: inputs.package == 'durable_dashboard'
+        uses: pnpm/action-setup@v6
+        with:
+          version: 9
+
+      - name: Set up Node
+        if: inputs.package == 'durable_dashboard'
+        uses: actions/setup-node@v6
+        with:
+          node-version: "20"
+          cache: pnpm
+          cache-dependency-path: durable_dashboard/assets/pnpm-lock.yaml
+
+      - name: Install JS dependencies
+        if: inputs.package == 'durable_dashboard'
+        working-directory: durable_dashboard/assets
+        run: pnpm install --frozen-lockfile
+
+      # Against Hex deps, as users get it: catches a dashboard that needs an
+      # unreleased durable.
+      - name: Compile
+        run: |
+          mix deps.get
+          mix compile --warnings-as-errors
+
+      - name: Publish to Hex
+        env:
+          HEX_API_KEY: ${{ secrets.HEX_API_KEY }}
+        run: |
+          if curl -sfo /dev/null "https://hex.pm/api/packages/$PACKAGE/releases/$VERSION"; then
+            echo "$PACKAGE $VERSION is already on Hex"
+          else
+            mix hex.publish --yes
+          fi
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: git-cliff
+
+      - name: GitHub release
+        working-directory: .
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            echo "$TAG is already released"; exit 0
+          fi
+          git cliff --include-path "$PACKAGE/**" --tag-pattern "^$PACKAGE-v" --current --strip all > "$RUNNER_TEMP/notes.md"
+          flags=()
+          if [[ $VERSION == *-* ]]; then flags+=(--prerelease); fi
+          gh release create "$TAG" --verify-tag --title "$PACKAGE $VERSION" --notes-file "$RUNNER_TEMP/notes.md" "${flags[@]}"

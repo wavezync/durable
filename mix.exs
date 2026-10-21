@@ -10,7 +10,8 @@ defmodule DurableWorkspace.MixProject do
       elixir: "~> 1.15",
       deps: [
         # durable_dashboard depends on durable via Hex (its committed default),
-        # so override to resolve the whole workspace against the local checkout.
+        # so override to resolve the whole workspace against the local checkout
+        # (and set DURABLE_PATH for the per-package commands below).
         {:durable, path: "durable", override: true},
         {:durable_dashboard, path: "durable_dashboard"}
       ],
@@ -41,7 +42,8 @@ defmodule DurableWorkspace.MixProject do
         {_, code} =
           System.cmd("elixir", base ++ args,
             into: IO.binstream(:stdio, :line),
-            cd: app
+            cd: app,
+            env: [{"DURABLE_PATH", "../durable"}]
           )
 
         if code > 0, do: System.at_exit(fn _ -> exit({:shutdown, 1}) end)
