@@ -9,8 +9,8 @@ name: Release
 #   3. publishes to Hex (needs the HEX_API_KEY secret) and creates the GitHub
 #      release with that version's changelog as its notes.
 #
-# Publish is safe to retry with "Re-run failed jobs": it reuses the tag and
-# skips what already went out. Release durable before a durable_dashboard
+# If publishing fails, run Release again with the same version: a tag that
+# isn't on Hex yet is reused, and publish skips what already went out. Release durable before a durable_dashboard
 # that needs its changes, since the dashboard resolves durable from Hex.
 
 on:
@@ -67,19 +67,23 @@ jobs:
             echo "::error::'$version' is not a semantic version"; exit 1
           fi
           if git rev-parse -q --verify "refs/tags/$tag" > /dev/null; then
-            echo "::error::$tag already exists"; exit 1
+            if curl -sfo /dev/null "https://hex.pm/api/packages/$PACKAGE/releases/$version"; then
+              echo "::error::$tag is already on Hex"; exit 1
+            fi
+            # Tagged by a run that failed to publish: publish that tag.
+            echo "::notice::$tag exists but isn't on Hex yet, publishing it"
+          else
+            sed -i -E "s/^([[:space:]]*@version )\"[^\"]+\"/\1\"$version\"/" "$PACKAGE/mix.exs"
+            grep -q "@version \"$version\"" "$PACKAGE/mix.exs"
+            cliff --tag "$tag" --output "$PACKAGE/CHANGELOG.md"
+
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add "$PACKAGE/mix.exs" "$PACKAGE/CHANGELOG.md"
+            git commit -m "chore($PACKAGE): release $version"
+            git tag -a "$tag" -m "$PACKAGE $version"
+            git push --atomic origin HEAD:main "$tag"
           fi
-
-          sed -i -E "s/^([[:space:]]*@version )\"[^\"]+\"/\1\"$version\"/" "$PACKAGE/mix.exs"
-          grep -q "@version \"$version\"" "$PACKAGE/mix.exs"
-          cliff --tag "$tag" --output "$PACKAGE/CHANGELOG.md"
-
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add "$PACKAGE/mix.exs" "$PACKAGE/CHANGELOG.md"
-          git commit -m "chore($PACKAGE): release $version"
-          git tag -a "$tag" -m "$PACKAGE $version"
-          git push --atomic origin HEAD:main "$tag"
 
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "version=$version" >> "$GITHUB_OUTPUT"
@@ -108,6 +112,11 @@ jobs:
           elixir-version: ${{ env.ELIXIR_VERSION }}
           otp-version: ${{ env.OTP_VERSION }}
 
+      # Before the JS deps: assets/package.json links phoenix and LiveView
+      # from deps/.
+      - name: Install dependencies
+        run: mix deps.get
+
       - name: Set up pnpm
         if: inputs.package == 'durable_dashboard'
         uses: pnpm/action-setup@v6
@@ -130,9 +139,7 @@ jobs:
       # Against Hex deps, as users get it: catches a dashboard that needs an
       # unreleased durable.
       - name: Compile
-        run: |
-          mix deps.get
-          mix compile --warnings-as-errors
+        run: mix compile --warnings-as-errors
 
       - name: Publish to Hex
         env:

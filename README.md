@@ -59,7 +59,8 @@ conventional commits since its last tag, or enter one. The workflow:
 2. publishes to Hex with the `HEX_API_KEY` repository secret;
 3. creates the GitHub release, with that version's changelog as its notes.
 
-If publishing fails, "Re-run failed jobs" retries it for the same tag. Release
+If publishing fails, run Release again with the same version: it reuses the
+tag and skips whatever already went out. Release
 `durable` first when the dashboard needs its changes: the dashboard is
 published against durable from Hex.
 
