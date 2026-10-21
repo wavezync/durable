@@ -21,7 +21,7 @@ A durable, resumable workflow engine for Elixir. Similar to Temporal/Inngest.
 
 ```elixir
 def deps do
-  [{:durable, "~> 0.1.0-rc"}]
+  [{:durable, "~> 1.0"}]
 end
 ```
 
@@ -599,7 +599,7 @@ in-place — no `forward`, no extra endpoint. You get:
 - Settings view
 - ⌘K command palette — jump to any page, workflow, or recent run
 
-See [`durable_dashboard/README.md`](durable_dashboard/) for the full
+See the [durable_dashboard docs](https://hexdocs.pm/durable_dashboard) for the full
 option list and design notes.
 
 ## Guides
