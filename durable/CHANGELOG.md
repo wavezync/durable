@@ -4,7 +4,7 @@ All notable changes to this package. Versions follow [Semantic
 Versioning](https://semver.org); entries come from [Conventional
 Commits](https://www.conventionalcommits.org).
 
-## Unreleased
+## [1.0.0](https://github.com/wavezync/durable/compare/durable-v0.1.0-rc...durable-v1.0.0) - 2026-10-21
 
 ### Features
 
@@ -20,6 +20,7 @@ Commits](https://www.conventionalcommits.org).
 ### Documentation
 
 - Workflow options, errors, telemetry and the operator API ([0cd4256](https://github.com/wavezync/durable/commit/0cd42560f0cee57acb6e5783d608abfe57251ca8))
+- Install snippets for 1.0 ([b13de21](https://github.com/wavezync/durable/commit/b13de217e22cbc4fc47330d6d18ef959f99a5a68))
 
 ## 0.1.0-rc - 2026-06-24
 
