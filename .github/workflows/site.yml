@@ -1,0 +1,62 @@
+name: Site
+
+# durable.wavezync.com (site/). Builds on PRs; deploys to Cloudflare Workers on
+# main. The site reads the packages' docs, mix.exs and lib/, so changes there
+# rebuild it too. Needs the CLOUDFLARE_API_TOKEN secret ("Edit Cloudflare
+# Workers" token for the WaveZync account).
+
+on:
+  push:
+    branches: [main]
+    paths: &paths
+      - "site/**"
+      - "shared.exs"
+      - "durable/*.md"
+      - "durable/guides/**"
+      - "durable/lib/**"
+      - "durable/mix.exs"
+      - "durable_dashboard/*.md"
+      - "durable_dashboard/mix.exs"
+      - ".github/workflows/site.yml"
+  pull_request:
+    branches: [main]
+    paths: *paths
+  workflow_dispatch:
+
+concurrency:
+  group: site-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  site:
+    name: Build and deploy
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: site
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 10
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: pnpm
+          cache-dependency-path: site/pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm run build
+
+      - name: Deploy to Cloudflare
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: pnpm exec wrangler deploy

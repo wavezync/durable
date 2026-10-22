@@ -1,9 +1,10 @@
 // durable.wavezync.com: the built Astro site (dist/), served as Workers static assets.
 // The site is fully static, so there is no Worker script (`main`) and no ASSETS binding.
-// `pnpm run deploy` builds the site and deploys it.
+// `pnpm run deploy` builds the site and deploys it; CI deploys main (.github/workflows/site.yml).
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "durable",
+  "account_id": "f69696ea6aec9975d75a770144674386",
   "compatibility_date": "2026-10-01",
   "assets": {
     "directory": "./dist",
