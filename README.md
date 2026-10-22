@@ -64,6 +64,10 @@ tag and skips whatever already went out. Release
 `durable` first when the dashboard needs its changes: the dashboard is
 published against durable from Hex.
 
+Releases publish their HexDocs too. To fix docs without a release, run
+**Actions → Docs**: it republishes a package's docs from `main` under its
+current version.
+
 Preview a changelog locally with
 `git cliff --include-path "durable/**" --tag-pattern "^durable-v" --unreleased`.
 

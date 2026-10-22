@@ -113,7 +113,9 @@ defmodule DurableDashboard.MixProject do
     [
       main: "readme",
       source_url: @source_url,
-      source_ref: "durable_dashboard-v#{@version}",
+      # Each package lives in a subdirectory and has its own tags.
+      source_url_pattern:
+        "#{@source_url}/blob/durable_dashboard-v#{@version}/durable_dashboard/%{path}#L%{line}",
       extras: ["README.md", "CHANGELOG.md"]
     ]
   end

@@ -1,0 +1,66 @@
+name: Docs
+
+# Actions → Docs → Run workflow, pick a package. Republishes its HexDocs from
+# main for the version in mix.exs (its latest release), for doc fixes between
+# releases. Releases publish docs on their own. Not run on every push: main
+# can document unreleased APIs, which would show up under the released
+# version.
+
+on:
+  workflow_dispatch:
+    inputs:
+      package:
+        description: Package
+        type: choice
+        options: [durable, durable_dashboard]
+
+env:
+  ELIXIR_VERSION: "1.20"
+  OTP_VERSION: "29"
+
+jobs:
+  docs:
+    name: Publish docs
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ inputs.package }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Elixir
+        uses: erlef/setup-beam@v1
+        with:
+          elixir-version: ${{ env.ELIXIR_VERSION }}
+          otp-version: ${{ env.OTP_VERSION }}
+
+      # Before the JS deps: assets/package.json links phoenix and LiveView
+      # from deps/.
+      - name: Install dependencies
+        run: mix deps.get
+
+      # The dashboard's hex.publish alias builds its assets first.
+      - name: Set up pnpm
+        if: inputs.package == 'durable_dashboard'
+        uses: pnpm/action-setup@v6
+        with:
+          version: 9
+
+      - name: Set up Node
+        if: inputs.package == 'durable_dashboard'
+        uses: actions/setup-node@v6
+        with:
+          node-version: "20"
+          cache: pnpm
+          cache-dependency-path: durable_dashboard/assets/pnpm-lock.yaml
+
+      - name: Install JS dependencies
+        if: inputs.package == 'durable_dashboard'
+        working-directory: durable_dashboard/assets
+        run: pnpm install --frozen-lockfile
+
+      - name: Publish docs to Hex
+        env:
+          HEX_API_KEY: ${{ secrets.HEX_API_KEY }}
+        run: mix hex.publish docs --yes
