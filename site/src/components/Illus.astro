@@ -22,7 +22,7 @@ const label = {
   resumable: 'A run sends a welcome email, sleeps three days without holding a worker, then wakes with its context and sends a reminder.',
 }[kind];
 ---
-<figure class:list={['stage', kind]} data-illus={kind} role="img" aria-label={label}>
+<div class:list={['stage', kind]} data-illus={kind} role="img" aria-label={label}>
   <div class="body" aria-hidden="true">
     {kind === 'durable' && (
       <>
@@ -115,7 +115,7 @@ const label = {
     )}
   </div>
   <figcaption class="foot"><Code code={code} lang="elixir" theme={night} transformers={[macroCalls]} /></figcaption>
-</figure>
+</div>
 
 <script>
   type Run = (at: (ms: number, fn: () => void) => void, q: (sel: string) => HTMLElement) => number;

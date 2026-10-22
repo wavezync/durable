@@ -311,7 +311,7 @@ const faqLd = {
   .badge {
     display: inline-flex; align-items: center; gap: 8px; padding: 7px 10px 7px 14px; border-radius: 999px; margin-bottom: 28px;
     font-size: 14px; color: var(--ink); text-decoration: none; background: rgba(255, 255, 255, 0.06); border: 1px solid rgba(255, 255, 255, 0.12);
-    backdrop-filter: blur(10px); animation: rise 1s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+    backdrop-filter: blur(10px); animation: slide 1s cubic-bezier(0.2, 0.7, 0.2, 1) both;
   }
   .badge :global(svg:first-child) { color: var(--amber); }
   .badge :global(svg:last-child) { color: var(--dim); transition: transform 0.2s; }
@@ -323,8 +323,8 @@ const faqLd = {
     animation-delay: 0.08s; background: var(--dawn); -webkit-background-clip: text; background-clip: text; color: transparent;
     padding-bottom: 0.08em;
   }
-  .lede { margin: clamp(20px, 2.6vw, 28px) 0 0; max-width: 46ch; color: var(--mist); font-size: clamp(17px, 1.5vw, 19px); animation: rise 1s 0.28s cubic-bezier(0.2, 0.7, 0.2, 1) both; }
-  .cta { display: flex; flex-wrap: wrap; gap: 12px; justify-content: center; margin-top: 32px; animation: rise 1s 0.38s cubic-bezier(0.2, 0.7, 0.2, 1) both; }
+  .lede { margin: clamp(20px, 2.6vw, 28px) 0 0; max-width: 46ch; color: var(--mist); font-size: clamp(17px, 1.5vw, 19px); animation: slide 1s 0.28s cubic-bezier(0.2, 0.7, 0.2, 1) both; }
+  .cta { display: flex; flex-wrap: wrap; gap: 12px; justify-content: center; margin-top: 32px; animation: slide 1s 0.38s cubic-bezier(0.2, 0.7, 0.2, 1) both; }
   .dep {
     display: inline-flex; align-items: center; gap: 14px; height: 50px; padding: 0 22px; border-radius: 999px; cursor: pointer;
     border: 1px solid rgba(255, 255, 255, 0.16); background: rgba(255, 255, 255, 0.05); color: var(--ink); font: inherit; backdrop-filter: blur(10px);
@@ -332,14 +332,14 @@ const faqLd = {
   .dep code { font-size: 14px; }
   .dep span { font-size: 13px; color: var(--dim); }
   .dep:hover { border-color: rgba(255, 255, 255, 0.32); }
-  .facts { list-style: none; margin: 26px 0 0; padding: 0; display: flex; flex-wrap: wrap; justify-content: center; gap: 10px 22px; color: var(--dim); font-size: 14px; animation: rise 1s 0.48s cubic-bezier(0.2, 0.7, 0.2, 1) both; }
+  .facts { list-style: none; margin: 26px 0 0; padding: 0; display: flex; flex-wrap: wrap; justify-content: center; gap: 10px 22px; color: var(--dim); font-size: 14px; animation: slide 1s 0.48s cubic-bezier(0.2, 0.7, 0.2, 1) both; }
   .facts li { display: inline-flex; align-items: center; gap: 7px; }
   .facts :global(svg) { color: var(--amber); opacity: 0.85; }
 
   /* The run, flat and readable from the first frame. */
-  .stage { margin-top: clamp(48px, 7vw, 88px); animation: rise 1.2s 0.5s cubic-bezier(0.2, 0.7, 0.2, 1) both; }
-  @keyframes rise { from { opacity: 0; transform: translateY(22px); } }
-  /* The headline only slides: it's visible from the first frame (it's the largest paint). */
+  .stage { margin-top: clamp(48px, 7vw, 88px); animation: slide 1.2s 0.5s cubic-bezier(0.2, 0.7, 0.2, 1) both; }
+  /* The hero only slides, never fades: everything is visible from the first frame,
+     so the headline paints as the largest element and the view fills in at once. */
   @keyframes slide { from { transform: translateY(18px); } }
 
   .ico {
