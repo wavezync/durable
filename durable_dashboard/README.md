@@ -1,5 +1,14 @@
 # DurableDashboard
 
+[![CI](https://github.com/wavezync/durable/actions/workflows/ci.yml/badge.svg)](https://github.com/wavezync/durable/actions/workflows/ci.yml)
+[![Hex.pm](https://img.shields.io/hexpm/v/durable_dashboard.svg)](https://hex.pm/packages/durable_dashboard)
+[![HexDocs](https://img.shields.io/badge/hex-docs-8f75f0.svg)](https://hexdocs.pm/durable_dashboard)
+[![License](https://img.shields.io/hexpm/l/durable_dashboard.svg)](https://github.com/wavezync/durable/blob/main/LICENSE)
+
+**Docs:** [durable.wavezync.com](https://durable.wavezync.com/docs/dashboard/) ·
+**Engine:** [`durable`](https://hex.pm/packages/durable) ·
+**API:** [HexDocs](https://hexdocs.pm/durable_dashboard)
+
 LiveView-first web console for the [Durable](https://hex.pm/packages/durable)
 workflow engine.
 

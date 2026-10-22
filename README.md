@@ -1,4 +1,19 @@
-# Durable workspace
+# Durable
+
+[![CI](https://github.com/wavezync/durable/actions/workflows/ci.yml/badge.svg)](https://github.com/wavezync/durable/actions/workflows/ci.yml)
+[![durable on Hex](https://img.shields.io/hexpm/v/durable.svg?label=durable)](https://hex.pm/packages/durable)
+[![durable_dashboard on Hex](https://img.shields.io/hexpm/v/durable_dashboard.svg?label=durable_dashboard)](https://hex.pm/packages/durable_dashboard)
+[![Docs](https://img.shields.io/badge/docs-durable.wavezync.com-ffc27a)](https://durable.wavezync.com/docs/)
+[![License](https://img.shields.io/hexpm/l/durable.svg)](LICENSE)
+
+Durable, reliable, resumable workflows for Elixir. Write workflows as plain
+steps; every step is saved, so runs resume after crashes, deploys and long
+waits.
+
+- **Docs, guides and interactive examples:** [durable.wavezync.com](https://durable.wavezync.com)
+- **API reference:** [durable](https://hexdocs.pm/durable) and [durable_dashboard](https://hexdocs.pm/durable_dashboard) on HexDocs
+
+## Workspace
 
 This is a path-dep monorepo (pnpm-workspaces style) containing the Durable
 workflow engine and its surrounding packages. Each subdirectory is an
@@ -7,11 +22,12 @@ publishing pipeline.
 
 ## Packages
 
-| Path | Package | Description |
-| --- | --- | --- |
-| [`durable/`](durable/) | `:durable` | Core workflow engine — resumable, reliable workflows with PostgreSQL persistence. |
-| [`durable_dashboard/`](durable_dashboard/) | `:durable_dashboard` | LiveView-first web dashboard for monitoring and managing Durable workflows. |
-| [`examples/phoenix_demo/`](examples/phoenix_demo/) | (unpublished) | Reference Phoenix app wiring up `:durable` and `:durable_dashboard`. |
+| Path | Package | Version | Docs | Description |
+| --- | --- | --- | --- | --- |
+| [`durable/`](durable/) | `:durable` | [![Hex](https://img.shields.io/hexpm/v/durable.svg)](https://hex.pm/packages/durable) | [HexDocs](https://hexdocs.pm/durable) | Core workflow engine — resumable, reliable workflows with PostgreSQL persistence. |
+| [`durable_dashboard/`](durable_dashboard/) | `:durable_dashboard` | [![Hex](https://img.shields.io/hexpm/v/durable_dashboard.svg)](https://hex.pm/packages/durable_dashboard) | [HexDocs](https://hexdocs.pm/durable_dashboard) | LiveView-first web dashboard for monitoring and managing Durable workflows. |
+| [`examples/phoenix_demo/`](examples/phoenix_demo/) | (unpublished) | | | Reference Phoenix app wiring up `:durable` and `:durable_dashboard`. |
+| [`site/`](site/) | (unpublished) | | [durable.wavezync.com](https://durable.wavezync.com) | [durable.wavezync.com](https://durable.wavezync.com): Astro site. Its docs are the packages' own markdown, read in place (`site/src/docs.ts`). `cd site && pnpm install && pnpm dev` |
 
 ## Workspace commands
 
