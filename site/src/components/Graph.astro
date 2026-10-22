@@ -1,0 +1,163 @@
+---
+// The hero graphic: an order workflow unfolding as a graph. Steps light up as
+// they run, fan out into parallel steps, join, wait for an approval, finish.
+const nodes = [
+  { id: 'validate', x: 100, y: 170 },
+  { id: 'charge', x: 285, y: 170 },
+  { id: 'send_receipt', x: 505, y: 70 },
+  { id: 'create_invoice', x: 505, y: 170 },
+  { id: 'reserve_stock', x: 505, y: 270 },
+  { id: 'await_approval', x: 745, y: 170, kind: 'wait' },
+  { id: 'ship', x: 945, y: 170 },
+  { id: 'done', x: 1105, y: 170, kind: 'end' },
+].map((n) => ({ ...n, w: n.id.length * 9 + 46 }));
+const at = Object.fromEntries(nodes.map((n) => [n.id, n]));
+const edges = [
+  ['validate', 'charge'], ['charge', 'send_receipt'], ['charge', 'create_invoice'], ['charge', 'reserve_stock'],
+  ['send_receipt', 'await_approval'], ['create_invoice', 'await_approval'], ['reserve_stock', 'await_approval'],
+  ['await_approval', 'ship'], ['ship', 'done'],
+].map(([from, to]) => {
+  const a = at[from], b = at[to];
+  const sx = a.x + a.w / 2, tx = b.x - b.w / 2, mx = (sx + tx) / 2;
+  return { from, to, d: `M${sx} ${a.y} C${mx} ${a.y} ${mx} ${b.y} ${tx} ${b.y}` };
+});
+---
+<figure class="graph" data-state="running" aria-label="A workflow graph: validate, charge, three steps in parallel, wait for approval, ship, done.">
+  <div class="bar" aria-hidden="true">
+    <i></i><i></i><i></i>
+    <code>process_order</code>
+    <span class="state"><b></b><span class="running">Running</span><span class="waiting">Waiting for approval</span><span class="completed">Completed</span></span>
+  </div>
+  <svg viewBox="0 0 1200 340" aria-hidden="true">
+    <defs>
+      <linearGradient id="g-dawn" gradientUnits="userSpaceOnUse" x1="40" x2="1160" y1="0" y2="0">
+        <stop offset="0" stop-color="#8fb0ff" />
+        <stop offset="0.55" stop-color="#d6a6ff" />
+        <stop offset="1" stop-color="#ffb69a" />
+      </linearGradient>
+      <radialGradient id="g-sun">
+        <stop offset="0" stop-color="#ffc27a" stop-opacity="0.5" />
+        <stop offset="1" stop-color="#ffc27a" stop-opacity="0" />
+      </radialGradient>
+      <filter id="g-blur" x="-20%" y="-50%" width="140%" height="200%"><feGaussianBlur stdDeviation="5" /></filter>
+    </defs>
+    <circle class="sun" cx="1105" cy="170" r="130" fill="url(#g-sun)" />
+    {edges.map((e) => (
+      <g class="edge" data-from={e.from} data-to={e.to}>
+        <path class="rail" d={e.d} />
+        <path class="glow" d={e.d} pathLength="1" filter="url(#g-blur)" />
+        <path class="ink" d={e.d} pathLength="1" />
+      </g>
+    ))}
+    {nodes.map((n) => (
+      <g class:list={['step', n.kind]} data-id={n.id} transform={`translate(${n.x} ${n.y})`}>
+        <rect x={-n.w / 2} y="-22" width={n.w} height="44" rx="22" />
+        <circle class="dot" cx={-n.w / 2 + 22} cy="0" r="5" />
+        <text x={-n.w / 2 + 36} y="5">{n.id}</text>
+      </g>
+    ))}
+  </svg>
+</figure>
+
+<script>
+  // [ms, step ids that start, step ids that finish, run state]: the run's timeline, then it loops.
+  const PLAN: [number, string[], string[], string?][] = [
+    [300, ['validate'], [], 'running'],
+    [1000, ['charge'], ['validate']],
+    [1700, ['send_receipt', 'create_invoice', 'reserve_stock'], ['charge']],
+    [2300, [], ['create_invoice']],
+    [2600, [], ['send_receipt']],
+    [3000, ['await_approval'], ['reserve_stock'], 'waiting'],
+    [4800, ['ship'], ['await_approval'], 'running'],
+    [5500, ['done'], ['ship']],
+    [5700, [], ['done'], 'completed'],
+  ];
+  const LOOP = 9000;
+
+  for (const fig of document.querySelectorAll<HTMLElement>('.graph')) {
+    const step = (id: string) => fig.querySelector<SVGGElement>(`.step[data-id="${id}"]`)!;
+    const edgesInto = (id: string) => fig.querySelectorAll<SVGGElement>(`.edge[data-to="${id}"]`);
+    const reset = () => fig.querySelectorAll('.on, .done, .drawn').forEach((el) => el.classList.remove('on', 'done', 'drawn'));
+
+    if (matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      fig.querySelectorAll('.step').forEach((el) => el.classList.add('done'));
+      fig.querySelectorAll('.edge').forEach((el) => el.classList.add('drawn'));
+      fig.classList.add('finished');
+      fig.dataset.state = 'completed';
+      continue;
+    }
+
+    const run = () => {
+      for (const [ms, starts, ends, state] of PLAN) {
+        setTimeout(() => {
+          if (state) fig.dataset.state = state;
+          for (const id of ends) step(id).classList.replace('on', 'done') || step(id).classList.add('done');
+          for (const id of starts) {
+            edgesInto(id).forEach((e) => e.classList.add('drawn'));
+            step(id).classList.add('on');
+          }
+          if (ends.includes('done')) fig.classList.add('finished');
+        }, ms);
+      }
+      // Wind down instead of blanking: lines retract and steps dim, then it plays again.
+      setTimeout(() => {
+        fig.classList.remove('finished');
+        reset();
+      }, LOOP - 900);
+      setTimeout(run, LOOP);
+    };
+    run();
+  }
+</script>
+
+<style>
+  /* A product-style window around the graph. */
+  .graph {
+    margin: 0; border-radius: 22px; overflow: hidden; border: 1px solid rgba(255, 255, 255, 0.1);
+    background: linear-gradient(180deg, rgba(19, 28, 48, 0.92), rgba(11, 18, 32, 0.92));
+    box-shadow: 0 1px 0 rgba(255, 255, 255, 0.08) inset, 0 60px 160px -40px rgba(214, 166, 255, 0.45), 0 40px 100px -50px rgba(92, 144, 255, 0.5);
+  }
+  .bar { display: flex; align-items: center; gap: 8px; height: 50px; padding: 0 20px; border-bottom: 1px solid rgba(255, 255, 255, 0.07); }
+  .bar i { width: 11px; height: 11px; border-radius: 50%; background: rgba(255, 255, 255, 0.12); }
+  .bar code { margin-left: 12px; font: 13px 'Geist Mono', ui-monospace, monospace; color: #acb4c6; }
+  .state { margin-left: auto; display: inline-flex; align-items: center; gap: 8px; padding: 5px 12px; border-radius: 999px; font: 500 13px var(--sl-font, sans-serif); transition: background 0.3s, color 0.3s; }
+  .state b { width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
+  .state > span { display: none; }
+  .graph[data-state='running'] .state { color: #a9c1ff; background: rgba(176, 201, 255, 0.12); }
+  .graph[data-state='running'] .state b { animation: beat 1.2s ease-in-out infinite; }
+  .graph[data-state='waiting'] .state { color: #ffc27a; background: rgba(255, 194, 122, 0.12); }
+  .graph[data-state='completed'] .state { color: #5fd4c4; background: rgba(43, 179, 163, 0.14); }
+  .graph[data-state='running'] .running, .graph[data-state='waiting'] .waiting, .graph[data-state='completed'] .completed { display: inline; }
+  svg { display: block; width: 100%; height: auto; padding: 28px 24px 36px; box-sizing: border-box; overflow: visible; }
+
+  .rail { fill: none; stroke: rgba(255, 255, 255, 0.08); stroke-width: 1.5; }
+  .ink, .glow { fill: none; stroke: url(#g-dawn); stroke-dasharray: 1; stroke-dashoffset: 1; transition: stroke-dashoffset 0.6s cubic-bezier(0.4, 0, 0.2, 1); }
+  .ink { stroke-width: 2.5; }
+  .glow { stroke-width: 9; opacity: 0.45; }
+  .edge.drawn .ink, .edge.drawn .glow { stroke-dashoffset: 0; }
+
+  .step rect { fill: rgba(17, 25, 44, 0.85); stroke: rgba(255, 255, 255, 0.1); stroke-width: 1.5; transition: stroke 0.4s, fill 0.4s; }
+  .step text { font: 15px 'Geist Mono', ui-monospace, monospace; fill: #65718b; transition: fill 0.4s; }
+  .step .dot { fill: none; stroke: #65718b; stroke-width: 1.5; stroke-dasharray: 2.5 2.5; transition: fill 0.3s, stroke 0.3s; }
+
+  .step.on rect, .step.done rect { stroke: url(#g-dawn); }
+  .step.on text, .step.done text { fill: #f3eef3; }
+  .step.on .dot { fill: #a9c1ff; stroke: #a9c1ff; stroke-dasharray: none; animation: beat 1.2s ease-in-out infinite; transform-box: fill-box; transform-origin: center; }
+  .step.wait.on .dot { fill: none; stroke: #ffc27a; stroke-width: 2; stroke-dasharray: 3 3; animation: spin 2.4s linear infinite; }
+  .step.done .dot { fill: #2bb3a3; stroke: #2bb3a3; stroke-dasharray: none; animation: none; }
+  .step.end.done rect { fill: #ffc27a; stroke: #ffc27a; }
+  .step.end.done text { fill: #2a1424; }
+  .step.end.done .dot { fill: #2a1424; stroke: #2a1424; }
+
+  .sun { opacity: 0; transition: opacity 1.2s; }
+  .graph.finished .sun { opacity: 1; }
+
+  @keyframes beat { 50% { transform: scale(1.5); opacity: 0.6; } }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* On a phone the graph keeps a readable size and scrolls sideways in its window. */
+  @media (max-width: 640px) {
+    .graph { overflow-x: auto; scrollbar-width: none; }
+    svg { min-width: 760px; }
+  }
+</style>

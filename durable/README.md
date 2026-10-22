@@ -1,9 +1,16 @@
 # Durable
 
-[![Build Status](https://github.com/wavezync/durable/actions/workflows/ci.yml/badge.svg)](https://github.com/wavezync/durable/actions/workflows/ci.yml)
+[![CI](https://github.com/wavezync/durable/actions/workflows/ci.yml/badge.svg)](https://github.com/wavezync/durable/actions/workflows/ci.yml)
 [![Hex.pm](https://img.shields.io/hexpm/v/durable.svg)](https://hex.pm/packages/durable)
+[![HexDocs](https://img.shields.io/badge/hex-docs-8f75f0.svg)](https://hexdocs.pm/durable)
+[![Downloads](https://img.shields.io/hexpm/dt/durable.svg)](https://hex.pm/packages/durable)
+[![License](https://img.shields.io/hexpm/l/durable.svg)](https://github.com/wavezync/durable/blob/main/LICENSE)
 
 A durable, resumable workflow engine for Elixir. Similar to Temporal/Inngest.
+
+**Docs:** [durable.wavezync.com](https://durable.wavezync.com/docs/) ·
+**Dashboard:** [`durable_dashboard`](https://hex.pm/packages/durable_dashboard) ·
+**API:** [HexDocs](https://hexdocs.pm/durable)
 
 ## Features
 
@@ -572,6 +579,9 @@ mix durable.cleanup --older-than 24h --dry-run           # preview what would be
 ```
 
 ## Dashboard
+
+[![Hex.pm](https://img.shields.io/hexpm/v/durable_dashboard.svg)](https://hex.pm/packages/durable_dashboard)
+[![HexDocs](https://img.shields.io/badge/hex-docs-8f75f0.svg)](https://hexdocs.pm/durable_dashboard)
 
 `durable_dashboard` is a LiveView-first console for monitoring and managing
 running workflows. Mount it into your Phoenix router with one line:

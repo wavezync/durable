@@ -1,0 +1,29 @@
+---
+import StarlightPage from '@astrojs/starlight/components/StarlightPage.astro';
+import { getEntry } from 'astro:content';
+import Sim from '../../components/Sim.astro';
+import { EXAMPLES, examples } from '../../examples';
+import { DOCS, docHref } from '../../docs';
+
+export function getStaticPaths() {
+  return EXAMPLES.map((e) => ({ params: { slug: e.slug } }));
+}
+const all = examples((await getEntry('docs', 'docs'))!.body!);
+const e = all.find((x) => x.slug === Astro.params.slug)!;
+const guide = DOCS.find((d) => d.id === `docs/${e.guide}`);
+const anchor = e.heading.toLowerCase().replace(/[^\w\s-]/g, '').replace(/\s/g, '-');
+---
+<StarlightPage frontmatter={{ title: e.heading, description: `${e.intro} A Durable workflow for Elixir you can run in the browser.`, tableOfContents: false }}>
+  <p>{e.intro}</p>
+  <Sim code={e.code} spec={e.spec} file={e.file} />
+  <p>
+    The code is the <a href={`${docHref('docs')}#${anchor}`}>README example</a>. The run is simulated in your browser,
+    with time sped up.
+    {guide && <> For the details, read the <a href={docHref(guide.id)}>{guide.label.toLowerCase()} guide</a>.</>}
+  </p>
+</StarlightPage>
+
+<style is:global>
+  /* Example pages have no table of contents, so the graph can use more width. */
+  :root { --sl-content-width: 62rem; }
+</style>

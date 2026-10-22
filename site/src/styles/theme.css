@@ -1,0 +1,165 @@
+/* Blue hour: Starlight's tokens set to the landing page's palette.
+   Dark is the main look; light mirrors it for people who choose it. */
+:root {
+  --sl-font: 'Sora Variable', system-ui, sans-serif;
+  --sl-font-mono: 'Geist Mono', ui-monospace, monospace;
+
+  --sl-color-accent-low: #1d2f55;
+  --sl-color-accent: #6997fc;
+  --sl-color-accent-high: #a9c1ff;
+  --sl-color-white: #eaeff9;
+  --sl-color-gray-1: #d6def0;
+  --sl-color-gray-2: #b2bdd6;
+  --sl-color-gray-3: #9ca8c2;
+  --sl-color-gray-4: #637294;
+  --sl-color-gray-5: #22304a;
+  --sl-color-gray-6: #111a2e;
+  --sl-color-black: #0a0f1e;
+}
+
+:root[data-theme='light'] {
+  --sl-color-accent-low: #e0eaff;
+  --sl-color-accent: #3a6ad8;
+  --sl-color-accent-high: #21438e;
+  --sl-color-white: #0e182d;
+  --sl-color-gray-1: #1d2840;
+  --sl-color-gray-2: #323f5a;
+  --sl-color-gray-3: #4e5d7e;
+  --sl-color-gray-4: #8793ae;
+  --sl-color-gray-5: #d1d8e8;
+  --sl-color-gray-6: #eaeef8;
+  --sl-color-gray-7: #f4f7fd;
+  --sl-color-black: #ffffff;
+}
+
+/* Headings: tight, like the concept. */
+.sl-markdown-content :is(h1, h2, h3) { letter-spacing: -0.02em; }
+h1#_top { letter-spacing: -0.035em; }
+
+/* Starlight's pill-shaped primary links match the concept's buttons. */
+.sl-link-button { border-radius: 999px; }
+
+/* Wordmark in ink, not the accent. */
+.site-title { color: var(--sl-color-white); font-weight: 600; letter-spacing: -0.02em; }
+
+/* Page-to-page navigation without the blink: the browser cross-fades the
+   content and keeps the header and sidebar where they are. Browsers without
+   cross-document view transitions just navigate as before. */
+@view-transition { navigation: auto; }
+/* Always reserve the scrollbar's space, so nothing slides sideways when a long
+   page grows a scrollbar mid-load or when moving between short and long pages. */
+html { scrollbar-gutter: stable; }
+header.header { view-transition-name: sl-header; }
+/* The visible sidebar is the fixed pane; nav.sidebar itself is 0px tall, so naming it captured nothing. */
+.sidebar-pane { view-transition-name: sl-sidebar; }
+::view-transition-old(root), ::view-transition-new(root) { animation-duration: 180ms; }
+@media (prefers-reduced-motion: reduce) {
+  @view-transition { navigation: none; }
+}
+
+/* README badges sit on one line, with their height reserved before they load. */
+.sl-markdown-content p:has(> a > img[src*='shields.io'], > a > img[src*='badge.svg']) { display: flex; flex-wrap: wrap; gap: 6px; }
+.sl-markdown-content a > img[src*='shields.io'], .sl-markdown-content a > img[src*='badge.svg'] { display: block; height: 20px; width: auto; margin: 0; }
+
+/* Changelog: a release timeline (the markup comes from src/changelog.ts).
+   Each version heading carries a dot on the rail and draws the rail down from it;
+   the next dot paints over the line, and the content box clips the last one. */
+.sl-markdown-content:has(.cl-meta) {
+  --cl-x: 2rem;
+  --cl-dot: 0.8rem;
+  --cl-feat: var(--sl-color-accent-high);
+  --cl-fix: #ff8fa6;
+  --cl-perf: #ffc27a;
+  --cl-refactor: #7cc4ff;
+  --cl-docs: #5fd4c4;
+  padding-left: var(--cl-x);
+  overflow-y: clip;
+}
+:root[data-theme='light'] .sl-markdown-content:has(.cl-meta) {
+  --cl-fix: #c2264b;
+  --cl-perf: #9a5200;
+  --cl-refactor: #1d6aae;
+  --cl-docs: #0b7468;
+}
+.sl-markdown-content:has(.cl-meta) > p:first-child { color: var(--sl-color-gray-3); font-size: var(--sl-text-sm); }
+.sl-markdown-content .cl-version {
+  position: relative; margin-top: 3.5rem;
+  font: 600 1.9rem/1.2 var(--sl-font); letter-spacing: -0.03em; font-variant-numeric: tabular-nums;
+}
+.sl-markdown-content p + .cl-version { margin-top: 2.25rem; }
+.cl-version::before, .cl-version::after { content: ''; position: absolute; left: calc(-1 * var(--cl-x) + 0.1rem); }
+.cl-version::before {
+  z-index: 1; top: 0.32em; width: var(--cl-dot); height: var(--cl-dot); box-sizing: border-box; border-radius: 50%;
+  background: var(--sl-color-black); border: 2px solid var(--sl-color-gray-4);
+}
+.cl-version::after {
+  top: calc(0.32em + var(--cl-dot)); height: 100000px; width: 2px;
+  margin-left: calc(var(--cl-dot) / 2 - 1px); background: var(--sl-color-gray-5);
+}
+.cl-version:has(+ .cl-meta .cl-latest)::before {
+  background: var(--sl-color-accent); border-color: var(--sl-color-accent-high);
+  box-shadow: 0 0 0 4px var(--sl-color-accent-low);
+}
+.sl-markdown-content .cl-meta {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem 0.9rem; margin-top: 0.5rem;
+  font-size: var(--sl-text-sm); color: var(--sl-color-gray-3);
+}
+.cl-badge {
+  display: inline-flex; align-items: center; height: 1.35rem; padding: 0 0.55rem; border-radius: 999px;
+  font-size: 0.75rem; font-weight: 600; line-height: 1;
+}
+.cl-latest { background: var(--sl-color-accent-low); color: var(--sl-color-accent-high); }
+.cl-pre { border: 1px solid var(--sl-color-gray-5); color: var(--sl-color-gray-3); }
+.cl-breaking { margin-right: 0.35rem; vertical-align: 0.1em; color: var(--cl-fix); background: color-mix(in srgb, var(--cl-fix) 15%, transparent); }
+.sl-markdown-content a.cl-compare { display: inline-flex; align-items: center; gap: 0.4rem; color: var(--sl-color-accent-high); text-decoration: none; }
+.sl-markdown-content a.cl-compare:hover { text-decoration: underline; }
+.cl-compare::before, .cl-group::before {
+  content: ''; flex: none; width: 1rem; height: 1rem; background: currentColor;
+  mask: var(--cl-icon) center / contain no-repeat;
+}
+.cl-compare { --cl-icon: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><circle cx='18' cy='18' r='3'/><circle cx='6' cy='6' r='3'/><path d='M13 6h3a2 2 0 0 1 2 2v7'/><path d='M11 18H8a2 2 0 0 1-2-2V9'/></svg>"); }
+
+/* Groups: a colored label with its icon, entries aligned under the label text. */
+.sl-markdown-content .cl-group {
+  display: flex; align-items: center; gap: 0.55rem; margin-top: 1.75rem;
+  font-size: 1rem; font-weight: 600; letter-spacing: -0.01em; color: var(--cl-c);
+}
+.sl-markdown-content .cl-group + ul { list-style: none; padding-left: 1.55rem; margin-top: 0.55rem; }
+.sl-markdown-content .cl-group + ul > li { position: relative; margin-top: 0.4rem; }
+.cl-group + ul > li::before {
+  content: ''; position: absolute; left: -1.1rem; top: 0.68em; width: 5px; height: 5px; border-radius: 50%;
+  background: var(--cl-c); opacity: 0.7;
+}
+.cl-feat, .cl-feat + ul {
+  --cl-c: var(--cl-feat);
+  --cl-icon: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .963 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.581a.5.5 0 0 1 0 .964L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.963 0z'/><path d='M20 3v4'/><path d='M22 5h-4'/><path d='M4 17v2'/><path d='M5 18H3'/></svg>");
+}
+.cl-fix, .cl-fix + ul {
+  --cl-c: var(--cl-fix);
+  --cl-icon: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='m8 2 1.88 1.88'/><path d='M14.12 3.88 16 2'/><path d='M9 7.13v-1a3.003 3.003 0 1 1 6 0v1'/><path d='M12 20c-3.3 0-6-2.7-6-6v-3a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v3c0 3.3-2.7 6-6 6'/><path d='M12 20v-9'/><path d='M6.53 9C4.6 8.8 3 7.1 3 5'/><path d='M6 13H2'/><path d='M3 21c0-2.1 1.7-3.9 3.8-4'/><path d='M20.97 5c0 2.1-1.6 3.8-3.5 4'/><path d='M22 13h-4'/><path d='M17.2 17c2.1.1 3.8 1.9 3.8 4'/></svg>");
+}
+.cl-perf, .cl-perf + ul {
+  --cl-c: var(--cl-perf);
+  --cl-icon: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M4 14a1 1 0 0 1-.78-1.63l9.9-10.2a.5.5 0 0 1 .86.46l-1.92 6.02A1 1 0 0 0 13 10h7a1 1 0 0 1 .78 1.63l-9.9 10.2a.5.5 0 0 1-.86-.46l1.92-6.02A1 1 0 0 0 11 14z'/></svg>");
+}
+.cl-refactor, .cl-refactor + ul {
+  --cl-c: var(--cl-refactor);
+  --cl-icon: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z'/></svg>");
+}
+.cl-docs, .cl-docs + ul {
+  --cl-c: var(--cl-docs);
+  --cl-icon: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M12 7v14'/><path d='M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z'/></svg>");
+}
+
+/* Commit hashes: a quiet chip at the end of each entry. */
+.sl-markdown-content a.cl-commit {
+  display: inline-block; margin-left: 0.15rem; padding: 0 0.4rem; border-radius: 0.35rem;
+  border: 1px solid var(--sl-color-gray-5); vertical-align: 0.08em;
+  font: 500 0.72rem/1.55 var(--sl-font-mono); color: var(--sl-color-gray-3); text-decoration: none; white-space: nowrap;
+}
+.sl-markdown-content a.cl-commit:hover { color: var(--sl-color-accent-high); border-color: var(--sl-color-accent); }
+
+@media (max-width: 50rem) {
+  .sl-markdown-content:has(.cl-meta) { --cl-x: 1.5rem; }
+  .sl-markdown-content .cl-version { font-size: 1.45rem; }
+}

@@ -1,0 +1,59 @@
+---
+// Operations: the same controls from code and from the terminal, as two tabs in
+// one window. Both snippets come from the README, so they stay in step with the docs.
+import { Code } from 'astro:components';
+import { Terminal, CodeXml } from '@lucide/astro';
+import { macroCalls, night } from '../code-theme';
+
+interface Props { api: string; mix: string }
+const { api, mix } = Astro.props;
+---
+<div class="ops" data-ops>
+  <div class="bar" role="tablist" aria-label="Operate Durable">
+    <i></i><i></i><i></i>
+    <button type="button" role="tab" aria-selected="true" aria-controls="ops-code" data-tab="code"><CodeXml size={14} />From your code</button>
+    <button type="button" role="tab" aria-selected="false" aria-controls="ops-cli" data-tab="cli"><Terminal size={14} />From the terminal</button>
+  </div>
+  <!-- Both panes share one grid cell, so switching never changes the height. -->
+  <div class="panes">
+    <div class="pane on" id="ops-code" role="tabpanel" data-pane="code"><Code code={api} lang="elixir" theme={night} transformers={[macroCalls]} /></div>
+    <div class="pane" id="ops-cli" role="tabpanel" data-pane="cli"><Code code={mix} lang="bash" theme={night} /></div>
+  </div>
+</div>
+
+<script>
+  for (const root of document.querySelectorAll<HTMLElement>('[data-ops]')) {
+    const tabs = [...root.querySelectorAll<HTMLButtonElement>('[data-tab]')];
+    tabs.forEach((t) =>
+      t.addEventListener('click', () => {
+        tabs.forEach((x) => x.setAttribute('aria-selected', String(x === t)));
+        root.querySelectorAll<HTMLElement>('.pane').forEach((p) => p.classList.toggle('on', p.dataset.pane === t.dataset.tab));
+      }),
+    );
+  }
+</script>
+
+<style>
+  .ops {
+    border-radius: 20px; overflow: hidden; border: 1px solid rgba(255, 255, 255, 0.1);
+    background: linear-gradient(180deg, rgba(19, 28, 48, 0.92), rgba(11, 18, 32, 0.92));
+    box-shadow: 0 60px 140px -60px rgba(92, 144, 255, 0.4);
+  }
+  .bar { display: flex; align-items: center; gap: 7px; height: 50px; padding: 0 16px; border-bottom: 1px solid var(--rule); }
+  .bar i { width: 10px; height: 10px; border-radius: 50%; background: rgba(255, 255, 255, 0.12); }
+  .bar i:nth-of-type(3) { margin-right: 10px; }
+  [role='tab'] {
+    display: inline-flex; align-items: center; gap: 7px; height: 32px; padding: 0 12px; border-radius: 9px; border: 0; cursor: pointer;
+    background: none; color: var(--dim); font: 500 13.5px var(--sl-font); transition: background 0.2s, color 0.2s;
+  }
+  [role='tab']:hover { color: var(--ink); }
+  [role='tab'][aria-selected='true'] { background: rgba(255, 194, 122, 0.1); color: var(--ink); }
+  [role='tab'] :global(svg) { color: var(--amber); }
+  .panes { display: grid; }
+  .pane { grid-area: 1 / 1; opacity: 0; visibility: hidden; transition: opacity 0.25s, visibility 0.25s; }
+  .pane.on { opacity: 1; visibility: visible; }
+  .pane :global(pre) {
+    margin: 0; padding: 18px 22px 22px; background: transparent !important; font: 13px/1.75 var(--sl-font-mono);
+    overflow-x: auto; scrollbar-width: thin; scrollbar-color: var(--rule) transparent;
+  }
+</style>

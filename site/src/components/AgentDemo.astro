@@ -1,0 +1,428 @@
+---
+// "Ship agents that finish the job": each outcome is a tab that plays a short,
+// scripted run of the agent below, so the claim is shown rather than told.
+import { Code } from 'astro:components';
+import { PiggyBank, UserCheck, RefreshCw, Eye, Lightbulb, FileDiff, FlaskConical, GitMerge, Sparkles, Check, Zap } from '@lucide/astro';
+import { macroCalls, night } from '../code-theme';
+
+// Written for this page; every call in it is real API.
+const code = `workflow "fix_issue", timeout: days(14) do
+  step :plan, [retry: [max_attempts: 3, backoff: :exponential]], fn ctx ->
+    plan = ReqLLM.generate_text!(@model, "Plan a fix for: #{ctx["issue"]}")
+    {:ok, assign(ctx, :plan, plan)}
+  end
+
+  step :write_patch, [retry: [max_attempts: 3]], fn ctx ->
+    patch = ReqLLM.generate_text!(@model, ctx.plan)
+    {:ok, assign(ctx, :patch, patch)}
+  end
+
+  step :run_tests, [retry: [max_attempts: 5]], fn ctx ->
+    {:ok, run} = CI.run(ctx["repo"], ctx.patch)
+    {:ok, assign(ctx, :ci_url, run.url)}
+  end
+
+  step :await_review, fn ctx ->
+    decision = wait_for_approval("maintainer", timeout: days(7))
+    {:ok, assign(ctx, :decision, decision)}
+  end
+
+  step :merge, fn ctx ->
+    GitHub.merge(ctx["repo"], ctx.patch)
+    {:ok, ctx}
+  end
+end`;
+
+const outcomes = [
+  { id: 'crash', icon: PiggyBank, title: 'Crashes cost nothing', text: 'Each LLM and tool call is a step whose result is saved. After a crash or a deploy, the agent resumes at the next step and never pays for a finished call twice.' },
+  { id: 'approval', icon: UserCheck, title: 'Approvals can take a week', text: 'The agent waits on a person with wait_for_approval/2. It holds no process while it waits, then carries on with its full context.' },
+  { id: 'flaky', icon: RefreshCw, title: 'Flaky tools stop being your problem', text: 'Rate limits and timeouts are retried with backoff, step by step, without restarting the whole run.' },
+  { id: 'inspect', icon: Eye, title: 'You can see every move', text: "The dashboard shows each step's input, output and timing, so you know exactly what the agent did and why." },
+];
+// The workflow's graph. `llm` marks the steps that call a model (and cost money).
+const steps = [
+  { id: 'plan', icon: Lightbulb, llm: true },
+  { id: 'write_patch', icon: FileDiff, llm: true },
+  { id: 'run_tests', icon: FlaskConical },
+  { id: 'await_review', icon: UserCheck },
+  { id: 'merge', icon: GitMerge },
+];
+---
+<div class="demo" data-demo>
+  <div class="left">
+  <div class="tabs" role="tablist" aria-label="What durable execution gives an agent">
+    {outcomes.map((o, i) => (
+      <button class="tab" role="tab" type="button" id={`tab-${o.id}`} data-scenario={o.id} aria-selected={i === 0 ? 'true' : 'false'} aria-controls="agent-run">
+        <span class="ico"><o.icon size={20} /></span>
+        <span class="copy"><strong>{o.title}</strong><span>{o.text}</span></span>
+        <i class="timer" aria-hidden="true"></i>
+      </button>
+    ))}
+  </div>
+  <p class="more"><a href="/docs/ai-workflows/">Build an AI workflow</a>, step by step, in the guide.</p>
+  </div>
+
+  <div class="card" id="agent-run" role="tabpanel" aria-live="polite">
+    <div class="bar">
+      <i></i><i></i><i></i>
+      <span class="file">issue_agent.ex</span>
+      <span class="cost" title="LLM spend for this run">LLM cost <b data-cost>$0.00</b></span>
+    </div>
+    <div class="run">
+      <ol class="flow" aria-label="The agent's steps, in order">
+        {steps.map((s, i) => (
+          <li class="node pending" data-step={s.id}>
+            {i > 0 && <span class="edge" aria-hidden="true"><i></i></span>}
+            <span class="orb" aria-hidden="true">
+              <s.icon size={19} />
+              <svg class="loop" viewBox="0 0 36 14"><path d="M27 13C27 1 9 1 9 13M5.5 9.5 9 13.5l3.5-4" /></svg>
+              {s.llm && <span class="tag" title="Calls a model"><Sparkles size={11} stroke-width={2.4} /></span>}
+              <span class="ok"><Check size={10} stroke-width={3.5} /></span>
+              <span class="bad"><Zap size={10} stroke-width={2.8} /></span>
+            </span>
+            {/* Narrow cards wrap names at the underscore. */}
+            <code>{s.id.split('_').map((part, j, all) => (j < all.length - 1 ? <>{part}_<wbr /></> : part))}</code>
+            <small data-meta></small>
+          </li>
+        ))}
+      </ol>
+      <div class="note pending" data-note aria-live="polite"></div>
+    </div>
+    <div class="code"><Code code={code} lang="elixir" theme={night} transformers={[macroCalls]} /></div>
+  </div>
+</div>
+
+<script>
+  type State = 'pending' | 'running' | 'done' | 'waiting' | 'failed' | 'lost';
+  type Note = { on: string; title: string; body: string };
+  type Inspect = { step: string; input: string; output: string; took: string };
+  type Patch = {
+    steps?: Record<string, [State, string?]>;
+    note?: Note;
+    crash?: boolean;
+    cost?: string;
+    lines?: string[];
+    inspect?: Inspect | null;
+  };
+  const STEPS = ['plan', 'write_patch', 'run_tests', 'await_review', 'merge'];
+  const all = (state: State, meta = '') => Object.fromEntries(STEPS.map((s) => [s, [state, meta]])) as Patch['steps'];
+  const saved = (meta = 'saved') => ({ plan: ['done', meta], write_patch: ['done', meta] }) as Patch['steps'];
+
+  // Each scenario is a timeline of [ms, patch]. A note is pinned to the step it talks about.
+  const SCENARIOS: Record<string, [number, Patch][]> = {
+    crash: [
+      [0, { steps: all('pending'), cost: '$0.00', lines: ['plan'], crash: false, inspect: null, note: { on: 'plan', title: 'A worker picks up the run', body: 'Each step saves its result before the next one starts.' } }],
+      [300, { steps: { plan: ['running', 'calling model'] }, note: { on: 'plan', title: 'Planning with the model', body: '`plan` asks the model how to fix the issue.' } }],
+      [1200, { steps: { plan: ['done', 'saved'] }, cost: '$0.12', note: { on: 'plan', title: 'Plan saved', body: 'The answer is stored with the step, so the model is never asked twice.' } }],
+      [1500, { steps: { write_patch: ['running', 'calling model'] }, lines: ['write_patch'], note: { on: 'write_patch', title: 'Writing the patch', body: 'The expensive call: a full diff from the model.' } }],
+      [2500, { steps: { write_patch: ['done', 'saved'] }, cost: '$0.42', note: { on: 'write_patch', title: 'Patch saved', body: 'All $0.42 of model output is now part of the run.' } }],
+      [2800, { steps: { run_tests: ['running', 'CI running'] }, lines: ['run_tests'], note: { on: 'run_tests', title: 'Running the tests', body: 'CI is checking the patch.' } }],
+      [3500, { steps: { run_tests: ['lost', 'worker lost'] }, crash: true, note: { on: 'run_tests', title: 'A deploy restarted the worker', body: '`run_tests` was mid-flight. The process is gone; the run and its saved steps are not.' } }],
+      [5000, { steps: { ...saved('from saved'), run_tests: ['running', 'restarted'] }, crash: false, lines: ['run_tests'], note: { on: 'run_tests', title: 'Resumed on another worker', body: '`plan` and `write_patch` came back from saved results. Only `run_tests` runs again.' } }],
+      [6200, { steps: { run_tests: ['done', 'passed'] }, note: { on: 'run_tests', title: 'Still $0.42', body: 'The crash cost a CI run, not a single model call.' } }],
+    ],
+    approval: [
+      [0, { steps: { ...saved(), run_tests: ['done', 'passed'], await_review: ['pending'], merge: ['pending'] }, cost: '$0.42', lines: ['await_review'], crash: false, inspect: null, note: { on: 'await_review', title: 'Tests passed', body: 'The agent needs a maintainer to sign off before it merges.' } }],
+      [300, { steps: { await_review: ['waiting', '0d 0h'] }, note: { on: 'await_review', title: 'Parked until someone approves', body: '`wait_for_approval/2` frees the worker. Nothing runs while the run waits.' } }],
+      ...Array.from({ length: 12 }, (_, i): [number, Patch] => {
+        const h = Math.round(((i + 1) / 12) * 148);
+        return [500 + i * 190, { steps: { await_review: ['waiting', `${Math.floor(h / 24)}d ${h % 24}h`] } }];
+      }),
+      [2900, { steps: { await_review: ['done', 'approved'] }, note: { on: 'await_review', title: 'Approved, 6 days later', body: 'The run wakes up with its plan, patch and test results intact.' } }],
+      [3400, { steps: { merge: ['running'] }, lines: ['merge'], note: { on: 'merge', title: 'Merging', body: '`GitHub.merge/2` lands the patch from last week.' } }],
+      [4100, { steps: { merge: ['done', 'merged'] }, note: { on: 'merge', title: 'Merged', body: 'One run, six days, and no process held open while it waited.' } }],
+    ],
+    flaky: [
+      [0, { steps: { ...saved(), run_tests: ['pending'], await_review: ['pending'], merge: ['pending'] }, cost: '$0.42', lines: ['run_tests'], crash: false, inspect: null, note: { on: 'run_tests', title: 'Running the tests', body: 'CI is having a bad day.' } }],
+      [300, { steps: { run_tests: ['running', 'attempt 1'] } }],
+      [1000, { steps: { run_tests: ['failed', 'timed out'] }, note: { on: 'run_tests', title: 'Attempt 1 timed out', body: 'Retrying `run_tests` in 1s. The steps before it stay as they are.' } }],
+      [1800, { steps: { run_tests: ['running', 'attempt 2'] } }],
+      [2400, { steps: { run_tests: ['failed', 'GitHub 502'] }, note: { on: 'run_tests', title: 'Attempt 2 got a 502 from GitHub', body: 'Backing off for 2s before the next try.' } }],
+      [3400, { steps: { run_tests: ['running', 'attempt 3'] } }],
+      [4000, { steps: { run_tests: ['done', 'passed on #3'] }, note: { on: 'run_tests', title: 'Passed on attempt 3', body: 'Only this step was retried. The model was never called again.' } }],
+    ],
+    inspect: [
+      [0, { steps: all('done', 'saved'), cost: '$0.42', crash: false }],
+      [100, { lines: ['plan'], inspect: { step: 'plan', input: '%{"issue" => "N+1 query in Orders.list/1"}', output: '%{plan: "Preload :items in the query…"}', took: '2.1s, attempt 1' } }],
+      [1300, { lines: ['write_patch'], inspect: { step: 'write_patch', input: '%{plan: "Preload :items…"}', output: '%{patch: "diff --git a/lib/orders.ex…"}', took: '6.4s, attempt 1' } }],
+      [2500, { lines: ['run_tests'], inspect: { step: 'run_tests', input: '%{"repo" => "acme/shop"}', output: '%{ci_url: "…/runs/8812"}', took: '3m 12s, attempt 3' } }],
+      [3700, { lines: ['await_review'], inspect: { step: 'await_review', input: '%{patch: "diff --git…"}', output: '%{decision: :approved}', took: '6d 4h waiting' } }],
+      [4900, { lines: ['merge'], inspect: { step: 'merge', input: '%{"repo" => "acme/shop"}', output: '%{}', took: '640ms, attempt 1' } }],
+    ],
+  };
+  const ORDER = ['crash', 'approval', 'flaky', 'inspect'];
+  const STATES: string[] = ['pending', 'running', 'done', 'waiting', 'failed', 'lost', 'sel'];
+  const HOLD = 1600;
+
+  const el = (tag: string, cls?: string, text?: string) => Object.assign(document.createElement(tag), cls ? { className: cls } : {}, text ? { textContent: text } : {});
+  const rich = (text: string) =>
+    text.split('`').map((part, i) => (i % 2 ? el('code', undefined, part) : document.createTextNode(part)));
+
+  for (const root of document.querySelectorAll<HTMLElement>('[data-demo]')) {
+    const tabs = [...root.querySelectorAll<HTMLButtonElement>('.tab')];
+    const cost = root.querySelector<HTMLElement>('[data-cost]')!;
+    const panel = root.querySelector<HTMLElement>('[data-note]')!;
+    const nodes = STEPS.map((s) => root.querySelector<HTMLElement>(`.node[data-step="${s}"]`)!);
+    const node = (s: string) => nodes[STEPS.indexOf(s)];
+    let pinned = 'plan';
+
+    // Each step's block in the code: from `step :name` to its `end`.
+    const lines = [...root.querySelectorAll<HTMLElement>('.code .line')];
+    const blocks = new Map<string, HTMLElement[]>();
+    lines.forEach((line, i) => {
+      const m = /^(\s*)step :(\w+)/.exec(line.textContent ?? '');
+      if (!m) return;
+      let j = i;
+      while (j < lines.length - 1 && !lines[++j].textContent!.startsWith(`${m[1]}end`));
+      blocks.set(m[2], lines.slice(i, j + 1));
+    });
+
+    // Toggle state classes only: replacing className would drop Astro's scoping class.
+    const setState = (target: HTMLElement, state: string) => {
+      target.classList.remove(...STATES);
+      target.classList.add(state);
+    };
+    // The callout takes the colour of the step it points at, and its notch slides to that step.
+    const pin = (step: string, msg: HTMLElement) => {
+      pinned = step;
+      panel.style.setProperty('--i', String(STEPS.indexOf(step)));
+      panel.replaceChildren(msg);
+    };
+
+    const apply = (p: Patch) => {
+      for (const [s, [state, meta = '']] of Object.entries(p.steps ?? {})) {
+        const n = node(s);
+        setState(n, state);
+        n.classList.toggle('retry', state === 'failed' || /attempt [2-9]/.test(meta));
+        n.classList.toggle('restored', meta === 'from saved');
+        n.querySelector('[data-meta]')!.textContent = meta;
+      }
+      // The edge into a step lights up once the step before it finished and this one ran.
+      if (p.steps) nodes.forEach((n, i) => i && n.classList.toggle('fed', nodes[i - 1].classList.contains('done') && !n.classList.contains('pending')));
+      if (p.cost) cost.textContent = p.cost;
+      if (p.crash !== undefined) root.classList.toggle('crashed', p.crash);
+      if (p.lines) {
+        lines.forEach((l) => l.classList.remove('hl'));
+        p.lines.forEach((s) => blocks.get(s)?.forEach((l) => l.classList.add('hl')));
+      }
+      if (p.note) {
+        const msg = el('div', 'msg');
+        const title = el('p', 'title');
+        title.append(el('i', 'dot'), p.note.title);
+        const body = el('p', 'body');
+        body.append(...rich(p.note.body));
+        msg.append(title, body);
+        pin(p.note.on, msg);
+      }
+      if (p.inspect !== undefined) {
+        nodes.forEach((n) => n.classList.toggle('sel', n.dataset.step === p.inspect?.step));
+        if (p.inspect) {
+          const msg = el('div', 'msg');
+          const title = el('p', 'title');
+          title.append(el('i', 'dot'), el('code', undefined, p.inspect.step), el('span', 'took', p.inspect.took));
+          const dl = el('dl');
+          for (const k of ['input', 'output'] as const) dl.append(el('dt', undefined, k === 'input' ? 'Input' : 'Output'), el('dd', undefined, p.inspect[k]));
+          msg.append(title, dl);
+          pin(p.inspect.step, msg);
+        }
+      }
+      setState(panel, root.classList.contains('crashed') ? 'lost' : node(pinned).classList.contains('sel') ? 'sel' : STATES.find((c) => node(pinned).classList.contains(c)) ?? 'pending');
+    };
+
+    let timers: number[] = [];
+    let auto = !matchMedia('(prefers-reduced-motion: reduce)').matches;
+    let current = 0;
+
+    const play = (index: number) => {
+      timers.forEach(clearTimeout);
+      timers = [];
+      current = index;
+      const id = ORDER[index];
+      tabs.forEach((t) => t.setAttribute('aria-selected', String(t.dataset.scenario === id)));
+      root.style.setProperty('--dur', '0ms');
+      const frames = SCENARIOS[id];
+      for (const [ms, patch] of frames) timers.push(window.setTimeout(() => apply(patch), ms));
+      const length = frames.at(-1)![0] + HOLD;
+      root.classList.toggle('auto', auto);
+      requestAnimationFrame(() => root.style.setProperty('--dur', `${length}ms`));
+      if (auto) timers.push(window.setTimeout(() => play((index + 1) % ORDER.length), length));
+    };
+
+    tabs.forEach((t, i) =>
+      t.addEventListener('click', () => {
+        auto = false;
+        play(i);
+      }),
+    );
+
+    // Start when the section is on screen.
+    let started = false;
+    new IntersectionObserver(([e]) => {
+      if (e.isIntersecting && !started) {
+        started = true;
+        play(current);
+      }
+    }, { threshold: 0.35 }).observe(root);
+  }
+</script>
+
+<style>
+  .demo { display: grid; grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr); gap: 40px 48px; align-items: start; }
+  .left { display: flex; flex-direction: column; gap: 24px; }
+  .more { margin: 0 0 0 18px; color: var(--mist); font-size: 16px; }
+
+  /* Outcomes as tabs */
+  .tabs { display: flex; flex-direction: column; gap: 6px; }
+  .tab {
+    position: relative; display: flex; gap: 18px; align-items: flex-start; text-align: left; width: 100%;
+    padding: 18px 18px 20px; border-radius: 18px; border: 1px solid transparent; background: none; color: inherit; font: inherit; cursor: pointer;
+    transition: background 0.3s, border-color 0.3s;
+  }
+  .tab:hover { background: rgba(255, 255, 255, 0.025); }
+  .tab[aria-selected='true'] { background: rgba(17, 25, 44, 0.8); border-color: rgba(255, 255, 255, 0.1); }
+  .ico {
+    flex: none; width: 44px; height: 44px; display: grid; place-items: center; border-radius: 13px; color: #ffb98a;
+    background: linear-gradient(135deg, rgba(176, 201, 255, 0.16), rgba(255, 194, 122, 0.1)); border: 1px solid var(--rule);
+    transition: transform 0.3s;
+  }
+  .tab[aria-selected='true'] .ico { transform: scale(1.06); border-color: rgba(255, 194, 122, 0.4); }
+  .copy { display: flex; flex-direction: column; gap: 6px; }
+  .copy strong {
+    font-size: 20px; letter-spacing: -0.025em; font-weight: 600; width: fit-content; color: var(--mist); transition: color 0.3s;
+  }
+  .tab[aria-selected='true'] strong { background: var(--dawn); -webkit-background-clip: text; background-clip: text; color: transparent; }
+  .copy span { color: var(--dim); font-size: 15.5px; line-height: 1.6; transition: color 0.3s; }
+  .tab[aria-selected='true'] .copy span { color: var(--mist); }
+  /* Auto-play progress under the active tab */
+  .timer { position: absolute; left: 18px; right: 18px; bottom: 8px; height: 2px; border-radius: 2px; background: var(--dawn); transform: scaleX(0); transform-origin: left; opacity: 0; }
+  .demo.auto .tab[aria-selected='true'] .timer { opacity: 0.8; transform: scaleX(1); transition: transform var(--dur, 0ms) linear; }
+
+  /* The agent card */
+  .card {
+    border-radius: 20px; overflow: hidden; background: rgba(17, 25, 44, 0.78); border: 1px solid var(--rule);
+    box-shadow: 0 50px 120px -50px rgba(214, 166, 255, 0.45), 0 30px 80px -40px rgba(255, 182, 154, 0.3);
+    transition: border-color 0.3s, box-shadow 0.3s;
+  }
+  .demo.crashed .card { border-color: rgba(240, 113, 138, 0.6); box-shadow: 0 0 0 3px rgba(240, 113, 138, 0.12), 0 50px 120px -50px rgba(240, 113, 138, 0.7); }
+  .bar { display: flex; align-items: center; gap: 7px; height: 44px; padding: 0 16px; border-bottom: 1px solid var(--rule); font: 12.5px var(--sl-font-mono); color: var(--dim); }
+  .bar i { width: 10px; height: 10px; border-radius: 50%; background: rgba(255, 255, 255, 0.14); }
+  .file { margin-left: 10px; }
+  .bar { position: relative; }
+  .cost { margin-left: auto; font-family: var(--sl-font); font-size: 12.5px; white-space: nowrap; }
+  .cost b { display: inline-block; min-width: 5ch; text-align: right; font-variant-numeric: tabular-nums; }
+  .cost b { font: 500 13px var(--sl-font-mono); color: var(--amber); margin-left: 4px; }
+  .code :global(pre) {
+    margin: 0; padding: 14px 0 16px; background: transparent !important; font: 12.5px/1.7 var(--sl-font-mono);
+    overflow-x: auto; scrollbar-width: thin; scrollbar-color: var(--rule) transparent;
+  }
+  .code :global(.line) { display: inline-block; min-width: 100%; padding: 0 20px; box-sizing: border-box; transition: background-color 0.35s, box-shadow 0.35s, opacity 0.35s; }
+  .code :global(.line.hl) { background: rgba(255, 194, 122, 0.08); box-shadow: inset 3px 0 #ffc27a; }
+
+  .run { border-bottom: 1px solid var(--rule); padding: 16px 20px; display: flex; flex-direction: column; gap: 12px; background: rgba(11, 16, 27, 0.5); }
+  /* The workflow graph: one node per step, joined by edges that ink in as the run moves. */
+  .flow { list-style: none; margin: 0; padding: 16px 0 0; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); }
+  .node { --c: #65718b; position: relative; display: flex; flex-direction: column; align-items: center; gap: 3px; min-width: 0; }
+  .orb {
+    position: relative; z-index: 1; width: 46px; height: 46px; margin-bottom: 5px; border-radius: 50%; display: grid; place-items: center;
+    color: color-mix(in srgb, var(--c) 65%, var(--ink)); background: color-mix(in srgb, var(--c) 13%, #111a2e);
+    border: 1.5px solid color-mix(in srgb, var(--c) 60%, transparent); transition: color 0.3s, background 0.3s, border-color 0.3s, outline-color 0.3s;
+    outline: 2px solid transparent; outline-offset: 4px;
+  }
+  .node code { font-size: 12px; color: var(--ink); white-space: nowrap; transition: color 0.3s; }
+  /* Fixed height, so status text appearing never moves anything. */
+  .node small { height: 18px; line-height: 18px; font-size: 11.5px; color: var(--dim); white-space: nowrap; }
+  .edge { position: absolute; top: 23px; right: 50%; width: 100%; height: 2px; background: rgba(255, 255, 255, 0.08); }
+  .edge i { position: absolute; inset: 0; background: linear-gradient(90deg, #8fb0ff, #d6a6ff 60%, #ffb69a); transform: scaleX(0); transform-origin: left; transition: transform 0.5s cubic-bezier(0.4, 0, 0.2, 1); }
+  .edge::after {
+    content: ''; position: absolute; top: 50%; left: 0; width: 8px; height: 8px; margin: -4px 0 0 -4px; border-radius: 50%;
+    background: var(--cream); box-shadow: 0 0 12px 3px rgba(255, 194, 122, 0.75); opacity: 0;
+  }
+  .node.fed .edge i { transform: scaleX(1); }
+  .node.fed .edge::after { animation: spark 0.55s cubic-bezier(0.4, 0, 0.2, 1); }
+  @keyframes spark { 15%, 85% { opacity: 1; } to { left: 100%; opacity: 0; } }
+
+  .loop { position: absolute; left: 50%; top: -17px; width: 36px; height: 14px; translate: -50% 0; fill: none; stroke: var(--c); stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; opacity: 0; transition: opacity 0.3s; }
+  .node.retry .loop { opacity: 1; }
+  .node.retry.running .loop { animation: nudge 0.8s ease-in-out infinite; }
+  .tag, .ok, .bad { position: absolute; display: grid; place-items: center; width: 17px; height: 17px; border-radius: 50%; }
+  .tag { top: -5px; right: -7px; width: 19px; height: 19px; color: var(--amber); background: #22304e; border: 1px solid rgba(255, 194, 122, 0.5); }
+  .ok, .bad { bottom: -3px; right: -4px; color: var(--night); transform: scale(0); transition: transform 0.3s cubic-bezier(0.3, 1.6, 0.5, 1); }
+  .ok { background: #2bb3a3; }
+  .bad { background: #f0718a; }
+
+  .node.pending .orb { border-style: dashed; color: var(--dim); }
+  .node.pending code { color: var(--dim); }
+  .node.running { --c: #a9c1ff; }
+  .node.running .orb { animation: ping 1.4s ease-out infinite; }
+  .node.done { --c: #2bb3a3; }
+  .node.done .ok { transform: none; }
+  .node.waiting { --c: #ffc27a; }
+  .node.waiting .orb { border-color: transparent; }
+  .node.waiting .orb::before { content: ''; position: absolute; inset: -1.5px; border-radius: 50%; border: 2px dashed var(--c); animation: spin 6s linear infinite; }
+  .node.failed { --c: #f0718a; }
+  .node.failed .orb { animation: shake 0.4s; }
+  .node.sel .orb { outline-color: var(--amber); }
+  /* A crash: the step loses its worker, the edge into it snaps, and the rest of the graph goes quiet. */
+  .node.lost { --c: #f0718a; }
+  .node.lost .orb { animation: shake 0.45s, ping 1.2s ease-out infinite; }
+  .node.lost .bad { transform: none; }
+  .node.lost .edge { background: repeating-linear-gradient(90deg, rgba(240, 113, 138, 0.75) 0 5px, transparent 5px 10px); }
+  .node.lost .edge i { opacity: 0; }
+  .node { transition: opacity 0.4s, filter 0.4s; }
+  .demo.crashed .node:not(.lost) { opacity: 0.35; filter: saturate(0.2); }
+  /* Steps that come back from their saved result flash once on resume. */
+  .node.restored .orb { animation: restore 0.9s ease-out; }
+  @keyframes restore { from { box-shadow: 0 0 0 0 rgba(43, 179, 163, 0.7); scale: 1.08; } to { box-shadow: 0 0 0 16px transparent; } }
+  .node.sel code { color: var(--amber); }
+  @keyframes ping { from { box-shadow: 0 0 0 0 color-mix(in srgb, var(--c) 55%, transparent); } to { box-shadow: 0 0 0 13px transparent; } }
+  @keyframes shake { 25% { translate: -3px 0; } 75% { translate: 3px 0; } }
+  @keyframes nudge { 50% { translate: -50% -2px; } }
+  /* Narrow cards: smaller nodes and type, same layout. */
+  .card { container-type: inline-size; }
+  @container (max-width: 480px) {
+    .orb { width: 38px; height: 38px; }
+    .orb :global(svg:first-child) { width: 16px; height: 16px; }
+    .edge { top: 19px; }
+    .node code { font-size: 10px; line-height: 1.3; height: 2.6em; white-space: normal; text-align: center; }
+    .node small { font-size: 10px; }
+    .note { height: 112px; }
+  }
+  @keyframes beat { 50% { transform: scale(1.5); opacity: 0.6; } }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* The callout: one message, pinned under the step it is about. Fixed height, so the card never moves. */
+  .note {
+    --c: #65718b; --bg: color-mix(in srgb, var(--c) 8%, #121b2e); --edge: color-mix(in srgb, var(--c) 38%, transparent);
+    position: relative; height: 88px; box-sizing: border-box; padding: 13px 16px; border-radius: 14px;
+    background: var(--bg); border: 1px solid var(--edge); transition: background-color 0.35s, border-color 0.35s;
+  }
+  .note::before {
+    content: ''; position: absolute; top: -6.5px; left: calc((var(--i, 0) + 0.5) * 20%); width: 11px; height: 11px; margin-left: -5.5px;
+    background: var(--bg); border: 1px solid var(--edge); border-right: 0; border-bottom: 0; rotate: 45deg;
+    transition: left 0.45s cubic-bezier(0.4, 0, 0.2, 1), background-color 0.35s, border-color 0.35s;
+  }
+  .note.running { --c: #a9c1ff; }
+  .note.done { --c: #2bb3a3; }
+  .note.waiting, .note.sel { --c: #ffc27a; }
+  .note.failed, .note.lost { --c: #f0718a; }
+  /* The message inside is built by the script, so it is styled through :global(). */
+  .note :global(.msg) { animation: in 0.35s ease-out; }
+  .note :global(p) { margin: 0; }
+  .note :global(.title) { display: flex; align-items: center; gap: 9px; font-size: 14.5px; font-weight: 600; letter-spacing: -0.01em; color: var(--ink); }
+  .note :global(.dot) { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--c); box-shadow: 0 0 0 3px color-mix(in srgb, var(--c) 22%, transparent); }
+  .note :global(.body) { margin-top: 5px; padding-left: 16px; font-size: 13.5px; line-height: 1.5; color: var(--mist); }
+  .note :global(code) { font: 12.5px var(--sl-font-mono); color: var(--amber); }
+  .note :global(.title code) { font-size: 13.5px; color: var(--ink); }
+  .note :global(.took) { margin-left: auto; font: 400 12.5px var(--sl-font); color: var(--dim); white-space: nowrap; }
+  .note :global(dl) { display: grid; grid-template-columns: 56px minmax(0, 1fr); gap: 3px 10px; margin: 7px 0 0; padding-left: 16px; font-size: 13px; }
+  .note :global(dt) { color: var(--dim); }
+  .note :global(dd) { margin: 0; font: 12.5px/1.5 var(--sl-font-mono); color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  @keyframes in { from { opacity: 0; transform: translateY(4px); } }
+
+  @media (max-width: 900px) {
+    .demo { grid-template-columns: minmax(0, 1fr); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .demo * { animation: none !important; transition: none !important; }
+  }
+</style>

@@ -1,0 +1,367 @@
+---
+// The stages for the Resilient / Reliable / Resumable panels. Each is a small run
+// drawn in the same language as the agent graph, playing a short scripted
+// sequence while it is on screen, with the code that does it underneath.
+import { Code } from 'astro:components';
+import { ShieldCheck, CreditCard, Truck, Plane, Hotel, Undo2, Mail, Moon, BellRing, Check, X } from '@lucide/astro';
+import { macroCalls, night } from '../code-theme';
+
+interface Props { kind: 'durable' | 'reliable' | 'resumable'; code: string }
+const { kind, code } = Astro.props;
+
+const icons = {
+  validate: ShieldCheck, charge: CreditCard, ship: Truck,
+  book_flight: Plane, book_hotel: Hotel, cancel_flight: Undo2, cancel_hotel: Undo2,
+  send_welcome: Mail, sleep: Moon, send_reminder: BellRing,
+};
+type Name = keyof typeof icons;
+const saved: [Name, string][] = [['validate', '%{valid: true}'], ['charge', '%{charge_id: "ch_9f2"}'], ['ship', '%{tracking: "1Z84…"}']];
+const label = {
+  durable: 'Three steps run; each result is saved as it finishes. A worker restart only re-runs the step that was in flight.',
+  reliable: 'A step fails twice and succeeds on its third attempt after 1s and 2s backoffs. Then a charge fails for good and the bookings are undone in reverse.',
+  resumable: 'A run sends a welcome email, sleeps three days without holding a worker, then wakes with its context and sends a reminder.',
+}[kind];
+---
+<figure class:list={['stage', kind]} data-illus={kind} role="img" aria-label={label}>
+  <div class="body" aria-hidden="true">
+    {kind === 'durable' && (
+      <>
+        <div class="row">
+          {(['validate', 'charge', 'ship'] as Name[]).map((n, i) => {
+            const Icon = icons[n];
+            return (
+              <>
+                {i > 0 && <i class="e" data-e={n}></i>}
+                <span class="n pending" data-n={n}>
+                  <span class="orb"><Icon size={18} /><span class="b ok"><Check size={10} stroke-width={3.5} /></span></span>
+                  <code>{n}</code>
+                </span>
+              </>
+            );
+          })}
+          <span class="flag">Worker restarted</span>
+        </div>
+        <div>
+          <p class="cap">Saved with the run</p>
+          <ol class="ledger">
+            {saved.map(([n, v]) => (
+              <li data-r={n}><span class="tick"><Check size={11} stroke-width={3} /></span><code>{n}</code><span class="v">{v}</span><span class="t">saved</span></li>
+            ))}
+          </ol>
+        </div>
+      </>
+    )}
+
+    {kind === 'reliable' && (
+      <>
+        <div>
+          <p class="cap">Retry with backoff</p>
+          <div class="tries">
+            <span class="try pending" data-t="1">1</span>
+            <span class="gap" data-g="1"><em>1s</em><i class="arc"></i></span>
+            <span class="try pending" data-t="2">2</span>
+            <span class="gap" data-g="2"><em>2s</em><i class="arc"></i></span>
+            <span class="try pending" data-t="3">3</span>
+          </div>
+        </div>
+        <div>
+          <p class="cap">Undo in reverse</p>
+          <div class="saga">
+            {(['book_flight', 'book_hotel', 'charge', 'cancel_flight', 'cancel_hotel'] as Name[]).map((n) => {
+              const Icon = icons[n];
+              return (
+                <span class:list={['n pending', { comp: n.startsWith('cancel') }]} data-n={n}>
+                  <span class="orb"><Icon size={18} /><span class="b ok"><Check size={10} stroke-width={3.5} /></span><span class="b bad"><X size={10} stroke-width={3.5} /></span></span>
+                  <code>{n}</code>
+                </span>
+              );
+            })}
+            <i class="e" data-e="book_hotel"></i>
+            <i class="e" data-e="charge"></i>
+            <i class="e rev" data-e="cancel_flight"></i>
+          </div>
+        </div>
+      </>
+    )}
+
+    {kind === 'resumable' && (
+      <>
+        <div class="row">
+          {(['send_welcome', 'sleep', 'send_reminder'] as Name[]).map((n, i) => {
+            const Icon = icons[n];
+            return (
+              <>
+                {i > 0 && <i class="e" data-e={n}></i>}
+                <span class:list={['n pending', { sleep: n === 'sleep' }]} data-n={n}>
+                  <span class="orb"><Icon size={18} /><span class="b ok"><Check size={10} stroke-width={3.5} /></span></span>
+                  <code>{n === 'sleep' ? 'sleep(days(3))' : n}</code>
+                  {n === 'sleep' && <small data-days></small>}
+                </span>
+              </>
+            );
+          })}
+        </div>
+        <div class="split">
+          <div>
+            <p class="cap">Workers</p>
+            <div class="slots"><i data-slot></i><i></i><i></i><span data-held></span></div>
+          </div>
+          <div>
+            <p class="cap">Context</p>
+            <div class="ctx"><code>user_id: 42</code><code>plan: "pro"</code></div>
+          </div>
+        </div>
+      </>
+    )}
+  </div>
+  <figcaption class="foot"><Code code={code} lang="elixir" theme={night} transformers={[macroCalls]} /></figcaption>
+</figure>
+
+<script>
+  type Run = (at: (ms: number, fn: () => void) => void, q: (sel: string) => HTMLElement) => number;
+  const STATES = ['pending', 'run', 'ok', 'bad', 'undo', 'wait'];
+
+  // Each stage is a timeline. It returns how long one pass takes, then loops.
+  const RUNS: Record<string, Run> = {
+    durable(at, q) {
+      const set = (s: string, st: string) => { const el = q(`[data-n="${s}"]`); el.classList.remove(...STATES); el.classList.add(st); };
+      const edge = (s: string, on: boolean) => q(`[data-e="${s}"]`).classList.toggle('on', on);
+      const row = (s: string) => q(`[data-r="${s}"]`).classList.add('in');
+      at(300, () => set('validate', 'run'));
+      at(1000, () => { set('validate', 'ok'); row('validate'); });
+      at(1300, () => { edge('charge', true); set('charge', 'run'); });
+      at(2100, () => { set('charge', 'ok'); row('charge'); });
+      at(2400, () => { edge('ship', true); set('ship', 'run'); });
+      // A restart mid-step: only the step in flight is lost; saved rows stay.
+      at(3100, () => { q('').classList.add('hit'); set('ship', 'pending'); edge('ship', false); });
+      at(4500, () => { q('').classList.remove('hit'); edge('ship', true); set('ship', 'run'); });
+      at(5300, () => { set('ship', 'ok'); row('ship'); });
+      return 7600;
+    },
+    reliable(at, q) {
+      const tr = (t: string, st: string) => { const el = q(`[data-t="${t}"]`); el.classList.remove(...STATES); el.classList.add(st); };
+      const set = (s: string, st: string) => { const el = q(`[data-n="${s}"]`); el.classList.remove(...STATES); el.classList.add(st); };
+      const on = (sel: string) => q(sel).classList.add('on');
+      at(200, () => tr('1', 'run'));
+      at(800, () => { tr('1', 'bad'); on('[data-g="1"]'); });
+      at(1700, () => tr('2', 'run'));
+      at(2200, () => { tr('2', 'bad'); on('[data-g="2"]'); });
+      at(3500, () => tr('3', 'run'));
+      at(4000, () => tr('3', 'ok'));
+      at(4600, () => set('book_flight', 'run'));
+      at(5100, () => { set('book_flight', 'ok'); on('[data-e="book_hotel"]'); set('book_hotel', 'run'); });
+      at(5700, () => { set('book_hotel', 'ok'); on('[data-e="charge"]'); set('charge', 'run'); });
+      at(6300, () => set('charge', 'bad'));
+      at(6800, () => set('cancel_hotel', 'run'));
+      // An undone step keeps its check but is struck through.
+      at(7300, () => { set('cancel_hotel', 'undo'); q('[data-n="book_hotel"]').classList.add('rolled'); on('[data-e="cancel_flight"]'); set('cancel_flight', 'run'); });
+      at(7800, () => { set('cancel_flight', 'undo'); q('[data-n="book_flight"]').classList.add('rolled'); });
+      return 10_000;
+    },
+    resumable(at, q) {
+      const set = (s: string, st: string) => { const el = q(`[data-n="${s}"]`); el.classList.remove(...STATES); el.classList.add(st); };
+      const edge = (s: string) => q(`[data-e="${s}"]`).classList.add('on');
+      const slot = (busy: boolean, text: string) => { q('[data-slot]').classList.toggle('busy', busy); q('[data-held]').textContent = text; };
+      const days = (text: string) => (q('[data-days]').textContent = text);
+      at(0, () => { slot(false, 'Idle'); days(''); });
+      at(300, () => { set('send_welcome', 'run'); slot(true, 'Running send_welcome'); });
+      at(1100, () => { set('send_welcome', 'ok'); edge('sleep'); set('sleep', 'wait'); slot(false, 'None held while it sleeps'); days('day 0'); });
+      [1, 2, 3].forEach((d) => at(1100 + d * 800, () => days(d === 3 ? '3 days later' : `day ${d}`)));
+      at(3700, () => { set('sleep', 'ok'); edge('send_reminder'); q('.ctx').classList.add('carry'); });
+      at(4200, () => { set('send_reminder', 'run'); slot(true, 'Woke on a free worker'); });
+      at(5000, () => { set('send_reminder', 'ok'); slot(false, 'Done'); q('.ctx').classList.remove('carry'); });
+      return 7400;
+    },
+  };
+
+  const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  for (const stage of document.querySelectorAll<HTMLElement>('[data-illus]')) {
+    const q = (sel: string) => (sel ? stage.querySelector<HTMLElement>(sel)! : stage);
+    const markup = stage.querySelector('.body')!.innerHTML;
+    let timers: number[] = [];
+
+    const stop = () => { timers.forEach(clearTimeout); timers = []; };
+    const play = () => {
+      stop();
+      // Every pass starts from the markup as rendered: all pending, nothing drawn.
+      stage.querySelector('.body')!.innerHTML = markup;
+      stage.classList.remove('hit');
+      if (reduce) {
+        RUNS[stage.dataset.illus!]((_, fn) => fn(), q);
+        return;
+      }
+      const length = RUNS[stage.dataset.illus!]((ms, fn) => timers.push(window.setTimeout(fn, ms)), q);
+      timers.push(window.setTimeout(play, length));
+    };
+
+    new IntersectionObserver(([e]) => (e.isIntersecting ? play() : stop()), { threshold: 0.45 }).observe(stage);
+  }
+</script>
+
+<style>
+  /* State colours follow the dashboard: lavender running, teal done, rose failed, amber waiting, violet undone. */
+  .stage {
+    --glow: #a9c1ff; position: relative; margin: 0; border-radius: 22px; border: 1px solid var(--rule); overflow: hidden;
+    background:
+      radial-gradient(110% 70% at 50% 0%, color-mix(in srgb, var(--glow) 13%, transparent), transparent 62%),
+      radial-gradient(circle at 1px 1px, rgba(255, 255, 255, 0.05) 1px, transparent 0) 0 0 / 22px 22px,
+      rgba(13, 20, 36, 0.85);
+    box-shadow: 0 40px 100px -60px color-mix(in srgb, var(--glow) 60%, transparent);
+    transition: border-color 0.4s, box-shadow 0.4s;
+  }
+  .durable { --glow: #2bb3a3; }
+  .reliable { --glow: #f0718a; }
+  .resumable { --glow: #ffc27a; }
+  .body { display: flex; flex-direction: column; gap: 22px; padding: 26px 26px 24px; }
+  .cap { margin: 0 0 10px; font-size: 13px; color: var(--dim); }
+
+  .foot { border-top: 1px solid var(--rule); background: rgba(11, 16, 27, 0.6); padding: 12px 22px; }
+  .foot :global(pre) { margin: 0; background: transparent !important; font: 12.5px/1.65 var(--sl-font-mono); overflow-x: auto; scrollbar-width: none; }
+
+  /* Nodes and edges. The markup is re-rendered each pass, so these are :global(). */
+  .body :global(.row) { position: relative; display: flex; align-items: flex-start; }
+  .body :global(.n) { --c: #65718b; position: relative; display: flex; flex-direction: column; align-items: center; gap: 7px; flex: none; min-width: 0; }
+  .body :global(.orb) {
+    position: relative; width: 44px; height: 44px; border-radius: 50%; display: grid; place-items: center;
+    color: color-mix(in srgb, var(--c) 65%, var(--ink)); background: color-mix(in srgb, var(--c) 13%, #111a2e);
+    border: 1.5px solid color-mix(in srgb, var(--c) 60%, transparent); transition: color 0.3s, background-color 0.3s, border-color 0.3s;
+  }
+  .body :global(.n code) { font-size: 12px; color: var(--ink); white-space: nowrap; transition: color 0.3s; }
+  .body :global(.n small) { height: 16px; font-size: 11.5px; color: var(--amber); font-variant-numeric: tabular-nums; }
+  .body :global(.b) {
+    position: absolute; right: -4px; bottom: -3px; width: 17px; height: 17px; border-radius: 50%; display: grid; place-items: center;
+    color: var(--night); transform: scale(0); transition: transform 0.3s cubic-bezier(0.3, 1.6, 0.5, 1);
+  }
+  .body :global(.b.ok) { background: var(--c); }
+  .body :global(.b.bad) { background: #f0718a; }
+  .body :global(.n.pending .orb) { border-style: dashed; color: var(--dim); }
+  .body :global(.n.pending code) { color: var(--dim); }
+  .body :global(.n.run) { --c: #a9c1ff; }
+  .body :global(.n.run .orb), .body :global(.try.run) { animation: ping 1.3s ease-out infinite; }
+  .body :global(.n.ok) { --c: #2bb3a3; }
+  .body :global(.n.undo) { --c: #9ebcfd; }
+  .body :global(.n.ok .b.ok), .body :global(.n.undo .b.ok), .body :global(.n.bad .b.bad) { transform: none; }
+  .body :global(.n.bad) { --c: #f0718a; }
+  .body :global(.n.bad .orb), .body :global(.try.bad) { animation: shake 0.4s; }
+  .body :global(.n.wait) { --c: #ffc27a; }
+
+  .body :global(.e) { position: relative; flex: 1; min-width: 20px; height: 2px; margin: 21px 10px 0; background: rgba(255, 255, 255, 0.09); }
+  .body :global(.e::before) {
+    content: ''; position: absolute; inset: 0; background: linear-gradient(90deg, #8fb0ff, #d6a6ff 60%, #ffb69a);
+    transform: scaleX(0); transform-origin: left; transition: transform 0.5s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+  .body :global(.e::after) {
+    content: ''; position: absolute; top: 50%; left: 0; width: 8px; height: 8px; margin: -4px 0 0 -4px; border-radius: 50%;
+    background: var(--cream); box-shadow: 0 0 12px 3px rgba(255, 194, 122, 0.75); opacity: 0;
+  }
+  .body :global(.e.on::before) { transform: none; }
+  .body :global(.e.on::after) { animation: spark 0.55s cubic-bezier(0.4, 0, 0.2, 1); }
+
+  /* Resilient: a ledger of saved results, with a slot for each step. */
+  .body :global(.flag) {
+    position: absolute; right: 0; top: -14px; padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 500;
+    color: #ff9db0; background: rgba(240, 113, 138, 0.16); opacity: 0; translate: 0 -4px; transition: opacity 0.25s, translate 0.25s;
+  }
+  .stage:global(.hit) { border-color: rgba(240, 113, 138, 0.55); }
+  .stage:global(.hit) :global(.flag) { opacity: 1; translate: none; }
+  .stage:global(.hit) :global(.row .n:not([data-n='ship'])) { opacity: 0.4; }
+  .stage:global(.hit) :global(.ledger li.in) { animation: kept 1.4s ease-in-out; }
+  .body :global(.ledger) { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+  .body :global(.ledger li) {
+    display: grid; grid-template-columns: 18px 84px minmax(0, 1fr) auto; align-items: center; gap: 10px; height: 36px; padding: 0 12px;
+    border-radius: 10px; border: 1px dashed rgba(255, 255, 255, 0.1); font-size: 12.5px; transition: border-color 0.35s, background-color 0.35s;
+  }
+  .body :global(.ledger li > *) { opacity: 0; translate: 0 5px; transition: opacity 0.35s, translate 0.35s; }
+  .body :global(.ledger li.in) { border: 1px solid rgba(43, 179, 163, 0.3); background: rgba(43, 179, 163, 0.07); }
+  .body :global(.ledger li.in > *) { opacity: 1; translate: none; }
+  .body :global(.tick) { display: grid; place-items: center; width: 18px; height: 18px; border-radius: 50%; background: #2bb3a3; color: var(--night); }
+  .body :global(.ledger code) { color: var(--ink); }
+  .body :global(.ledger .v) { font: 12px var(--sl-font-mono); color: var(--amber); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .body :global(.ledger .t) { color: var(--dim); }
+
+  /* Reliable: attempts spaced by their backoff, then a saga rolling back. */
+  .body :global(.tries) { position: relative; display: grid; grid-template-columns: 34px 1fr 34px 2fr 34px; align-items: end; }
+  .body :global(.try) {
+    --c: #65718b; display: grid; place-items: center; width: 34px; height: 34px; border-radius: 50%; font: 500 13px var(--sl-font-mono);
+    color: color-mix(in srgb, var(--c) 60%, var(--ink)); background: color-mix(in srgb, var(--c) 14%, #111a2e);
+    border: 1.5px dashed color-mix(in srgb, var(--c) 60%, transparent); transition: color 0.3s, background-color 0.3s, border-color 0.3s;
+  }
+  .body :global(.try:not(.pending)) { border-style: solid; }
+  .body :global(.try.run) { --c: #a9c1ff; }
+  .body :global(.try.bad) { --c: #f0718a; }
+  .body :global(.try.ok) { --c: #2bb3a3; }
+  .body :global(.gap) { display: flex; flex-direction: column; align-items: center; padding: 0 6px 17px; }
+  .body :global(.gap em) { font: normal 12px var(--sl-font-mono); color: var(--amber); opacity: 0; transition: opacity 0.4s 0.3s; }
+  .body :global(.arc) {
+    display: block; width: 100%; height: 26px; border: 2px dashed rgba(255, 194, 122, 0.7); border-bottom: 0;
+    border-radius: 50% 50% 0 0 / 100% 100% 0 0; clip-path: inset(0 100% 0 0); transition: clip-path 0.8s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+  .body :global(.gap.on em) { opacity: 1; }
+  .body :global(.gap.on .arc) { clip-path: inset(0 0 0 0); }
+  .body :global(.saga) {
+    position: relative; display: grid; grid-template-columns: auto 1fr auto 1fr auto; grid-template-rows: auto auto; row-gap: 18px; align-items: start;
+  }
+  .body :global(.saga [data-n='book_flight']) { grid-area: 1 / 1; }
+  .body :global(.saga [data-n='book_hotel']) { grid-area: 1 / 3; }
+  .body :global(.saga [data-n='charge']) { grid-area: 1 / 5; }
+  .body :global(.saga [data-n='cancel_flight']) { grid-area: 2 / 1; }
+  .body :global(.saga [data-n='cancel_hotel']) { grid-area: 2 / 3; }
+  .body :global(.saga [data-e='book_hotel']) { grid-area: 1 / 2; }
+  .body :global(.saga [data-e='charge']) { grid-area: 1 / 4; }
+  .body :global(.saga [data-e='cancel_flight']) { grid-area: 2 / 2; }
+  .body :global(.n.comp.pending) { opacity: 0.35; }
+  .body :global(.n.rolled) { opacity: 0.5; transition: opacity 0.4s; }
+  .body :global(.n.rolled code) { text-decoration: line-through; text-decoration-color: #9ebcfd; }
+  .body :global(.e.rev::before) { background: #9ebcfd; transform-origin: right; }
+  .body :global(.e.rev::after) { left: 100%; }
+  .body :global(.e.rev.on::after) { animation-name: spark-back; }
+  /* Each undo hangs under the step it undoes. */
+  .body :global(.n.comp::before) {
+    content: ''; position: absolute; bottom: 100%; left: 50%; height: 18px; border-left: 2px dashed rgba(255, 255, 255, 0.12); transition: border-color 0.3s;
+  }
+  .body :global(.n.comp:not(.pending)::before) { border-color: rgba(158, 188, 253, 0.7); }
+
+  /* Resumable: the sleep fills a ring while no worker is held. */
+  .body :global(.n.sleep .orb::before) {
+    content: ''; position: absolute; inset: -6px; border-radius: 50%;
+    background: conic-gradient(var(--amber) var(--p), rgba(255, 255, 255, 0.06) 0);
+    -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 3px), #000 calc(100% - 2.5px));
+    mask: radial-gradient(farthest-side, transparent calc(100% - 3px), #000 calc(100% - 2.5px));
+  }
+  .body :global(.n.sleep.wait .orb::before) { --p: 100%; transition: --p 2.4s linear; }
+  .body :global(.n.sleep.ok .orb::before) { --p: 100%; }
+  .body :global(.split) { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+  .body :global(.slots) { display: flex; align-items: center; gap: 6px; height: 26px; }
+  .body :global(.slots i) { width: 20px; height: 20px; border-radius: 6px; border: 1.5px solid rgba(255, 255, 255, 0.12); transition: background-color 0.3s, border-color 0.3s; }
+  .body :global(.slots i.busy) { background: rgba(176, 201, 255, 0.3); border-color: #a9c1ff; animation: ping 1.3s ease-out infinite; --c: #a9c1ff; }
+  .body :global(.slots span) { margin-left: 8px; font-size: 13px; color: var(--mist); white-space: nowrap; }
+  .body :global(.ctx) { display: flex; flex-wrap: wrap; gap: 6px; }
+  .body :global(.ctx code) { padding: 3px 9px; border-radius: 8px; font-size: 12px; color: var(--amber); background: rgba(255, 194, 122, 0.08); border: 1px solid rgba(255, 194, 122, 0.2); }
+  .body :global(.ctx.carry code) { animation: carry 0.9s ease-out; }
+
+  @keyframes ping { from { box-shadow: 0 0 0 0 color-mix(in srgb, var(--c) 55%, transparent); } to { box-shadow: 0 0 0 12px transparent; } }
+  @keyframes shake { 25% { translate: -3px 0; } 75% { translate: 3px 0; } }
+  @keyframes spark { 15%, 85% { opacity: 1; } to { left: 100%; opacity: 0; } }
+  @keyframes spark-back { 15%, 85% { opacity: 1; } to { left: 0; opacity: 0; } }
+  @keyframes kept { 50% { box-shadow: 0 0 0 3px rgba(43, 179, 163, 0.25); border-color: #2bb3a3; } }
+  @keyframes carry { 40% { translate: 0 -4px; box-shadow: 0 6px 18px -6px rgba(255, 194, 122, 0.7); } }
+
+  @media (max-width: 560px) {
+    .body { padding: 20px 16px; }
+    .body :global(.orb) { width: 38px; height: 38px; }
+    .body :global(.e) { margin: 18px 6px 0; min-width: 10px; }
+    .body :global(.n code) { font-size: 10.5px; }
+    .body :global(.ledger li) { grid-template-columns: 18px 70px minmax(0, 1fr); }
+    .body :global(.ledger .t) { display: none; }
+    .body :global(.split) { grid-template-columns: 1fr; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .stage * { animation: none !important; transition: none !important; }
+  }
+</style>
+
+<style is:global>
+  /* Lets the sleep ring's sweep transition. */
+  @property --p { syntax: '<percentage>'; inherits: false; initial-value: 0%; }
+</style>

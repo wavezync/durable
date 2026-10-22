@@ -1,0 +1,102 @@
+---
+// Every workflow primitive, as a bento grid. Two wide tiles carry a small diagram.
+import { RefreshCw, GitBranch, Split, Undo2, Hourglass, Webhook, UserCheck, CalendarClock, Network, Timer } from '@lucide/astro';
+
+const tiles = [
+  { icon: Split, wide: 'parallel', name: 'Parallel steps', text: 'Fan out, run at the same time, and collect each result as {:ok, _} or {:error, _}.', code: 'parallel do ... end', href: '/docs/parallel/' },
+  { icon: RefreshCw, name: 'Retries with backoff', text: 'Exponential, linear or constant, per step.', code: 'retry: [max_attempts: 3]', href: '/docs/#reference' },
+  { icon: GitBranch, name: 'Branching', text: 'Pattern-match on the context to pick one path.', code: 'branch on: fn ctx -> ... end', href: '/docs/branching/' },
+  { icon: Webhook, name: 'Events', text: 'Resume when your app calls Durable.send_event/3.', code: 'wait_for_event("paid")', href: '/docs/waiting/' },
+  { icon: UserCheck, name: 'Human input', text: 'Approvals, choices, text and forms, with timeouts.', code: 'wait_for_approval("lead")', href: '/docs/waiting/' },
+  { icon: Undo2, wide: 'saga', name: 'Compensations', text: 'Sagas built in: when a step fails for good, finished steps are undone in reverse order.', code: 'step :book, [compensate: :cancel]', href: '/docs/compensations/' },
+  { icon: Hourglass, name: 'Sleep', text: 'Pause for minutes or months. Nothing runs while it waits.', code: 'sleep(days(3))', href: '/docs/waiting/' },
+  { icon: CalendarClock, name: 'Cron schedules', text: 'Recurring workflows, in any timezone.', code: '@schedule cron: "0 9 * * *"', href: '/docs/#scheduled-reports' },
+  { icon: Network, name: 'Child workflows', text: 'Call one and wait for it, or start one and move on.', code: 'call_workflow(Child, input)', href: '/docs/orchestration/' },
+  { icon: Timer, name: 'Deadlines', text: 'A run past its timeout fails and runs its compensations.', code: 'timeout: hours(2)', href: '/docs/#workflow-options' },
+];
+---
+<ul class="bento">
+  {tiles.map((t) => (
+    <li class:list={['tile', { wide: t.wide }]}>
+      <a href={t.href}>
+        <span class="ico"><t.icon size={20} /></span>
+        {t.wide === 'parallel' && (
+          <svg class="art" viewBox="0 0 260 90" aria-hidden="true">
+            <path class="rail" d="M10 45 H60 C80 45 80 15 100 15 H160 C180 15 180 45 200 45 H250 M60 45 H200 M60 45 C80 45 80 75 100 75 H160 C180 75 180 45 200 45" />
+            <path class="flow" d="M10 45 H60 C80 45 80 15 100 15 H160 C180 15 180 45 200 45 H250" />
+            <path class="flow f2" d="M10 45 H200 H250" />
+            <path class="flow f3" d="M10 45 H60 C80 45 80 75 100 75 H160 C180 75 180 45 200 45 H250" />
+            <circle cx="10" cy="45" r="5" class="ok" /><circle cx="130" cy="15" r="5" class="ok" /><circle cx="130" cy="45" r="5" class="ok" />
+            <circle cx="130" cy="75" r="5" class="ok" /><circle cx="250" cy="45" r="5" class="end" />
+          </svg>
+        )}
+        {t.wide === 'saga' && (
+          <svg class="art" viewBox="0 0 260 90" aria-hidden="true">
+            <path class="rail" d="M20 40 H180" />
+            <path class="undo" d="M176 52 C160 78 116 78 100 52" />
+            <path class="undo u2" d="M96 52 C80 78 36 78 20 52" />
+            <circle cx="20" cy="40" r="6" class="comp" /><circle cx="100" cy="40" r="6" class="comp" />
+            <rect x="174" y="34" width="12" height="12" rx="2" transform="rotate(45 180 40)" class="fail" />
+            <text x="20" y="22" text-anchor="middle">flight</text><text x="100" y="22" text-anchor="middle">hotel</text><text x="180" y="22" text-anchor="middle">charge</text>
+          </svg>
+        )}
+        <strong>{t.name}</strong>
+        <span class="text">{t.text}</span>
+        <code>{t.code}</code>
+      </a>
+    </li>
+  ))}
+</ul>
+
+<style>
+  .bento { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+  .tile.wide { grid-column: span 2; }
+  .tile a {
+    position: relative; height: 100%; box-sizing: border-box; display: flex; flex-direction: column; gap: 8px; padding: 22px;
+    border-radius: 20px; text-decoration: none; color: var(--ink); overflow: hidden;
+    background: linear-gradient(180deg, rgba(19, 28, 48, 0.75), rgba(11, 18, 32, 0.75)); border: 1px solid var(--rule);
+    transition: border-color 0.3s, transform 0.3s cubic-bezier(0.2, 0.7, 0.2, 1);
+  }
+  /* A soft dawn glow follows the hovered tile. */
+  .tile a::before {
+    content: ''; position: absolute; inset: -1px; border-radius: inherit; pointer-events: none; opacity: 0; transition: opacity 0.3s;
+    background: radial-gradient(120% 80% at 0% 0%, rgba(214, 166, 255, 0.14), transparent 60%);
+  }
+  .tile a:hover { border-color: rgba(255, 194, 122, 0.35); transform: translateY(-2px); }
+  .tile a:hover::before { opacity: 1; }
+  .ico {
+    width: 42px; height: 42px; display: grid; place-items: center; border-radius: 12px; color: #ffb98a; margin-bottom: 6px;
+    background: linear-gradient(135deg, rgba(176, 201, 255, 0.16), rgba(255, 194, 122, 0.1)); border: 1px solid var(--rule);
+  }
+  strong { font-size: 18px; font-weight: 600; letter-spacing: -0.02em; }
+  .text { color: var(--mist); font-size: 15px; line-height: 1.55; }
+  code { margin-top: auto; padding-top: 6px; font: 12.5px var(--sl-font-mono); color: var(--amber); }
+  .wide .text { max-width: 36ch; }
+
+  .art { position: absolute; right: 18px; top: 18px; width: 52%; max-width: 280px; overflow: visible; }
+  .rail { fill: none; stroke: rgba(255, 255, 255, 0.1); stroke-width: 1.5; }
+  .flow { fill: none; stroke: #ffc27a; stroke-width: 2; stroke-linecap: round; stroke-dasharray: 10 300; animation: travel 2.6s linear infinite; }
+  .flow.f2 { animation-delay: -0.9s; stroke: #f0718a; }
+  .flow.f3 { animation-delay: -1.7s; stroke: #a9c1ff; }
+  @keyframes travel { from { stroke-dashoffset: 310; } to { stroke-dashoffset: 0; } }
+  .ok { fill: #2bb3a3; }
+  .end { fill: #ffc27a; }
+  .comp { fill: #9ebcfd; }
+  .fail { fill: #f0718a; }
+  .undo { fill: none; stroke: #9ebcfd; stroke-width: 1.8; stroke-dasharray: 4 5; animation: back 1.4s linear infinite; }
+  .undo.u2 { animation-delay: -0.7s; }
+  @keyframes back { to { stroke-dashoffset: 18; } }
+  .art text { font: 12px var(--sl-font-mono); fill: #8994ab; }
+
+  @media (max-width: 1000px) {
+    .bento { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  }
+  @media (max-width: 560px) {
+    .bento { grid-template-columns: minmax(0, 1fr); }
+    .tile.wide { grid-column: auto; }
+    .art { position: static; width: 100%; max-width: none; margin: 4px 0; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .flow, .undo { animation: none; }
+  }
+</style>

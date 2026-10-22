@@ -1,0 +1,39 @@
+---
+import StarlightPage from '@astrojs/starlight/components/StarlightPage.astro';
+import { getEntry } from 'astro:content';
+import { examples } from '../../examples';
+
+const list = examples((await getEntry('docs', 'docs'))!.body!);
+---
+<StarlightPage
+  frontmatter={{
+    title: 'Examples',
+    description: 'Durable workflows for Elixir you can run, break and resume in the browser: approvals, sagas, parallel steps, events and sleeps.',
+    tableOfContents: false,
+  }}
+>
+  <p>The workflows from the README, each with a simulated run next to the code. Approve things, decline cards, skip ahead through sleeps, and watch each step of the graph run.</p>
+  <ul class="list not-content">
+    {list.map((e) => (
+      <li>
+        <a href={`/examples/${e.slug}/`}>
+          <strong>{e.heading}</strong>
+          <span>{e.intro}</span>
+          <code>{e.spec.workflow}</code>
+        </a>
+      </li>
+    ))}
+  </ul>
+</StarlightPage>
+
+<style>
+  .list { list-style: none; margin: 1.5rem 0 0; padding: 0; display: flex; flex-direction: column; gap: 0.6rem; }
+  .list a {
+    display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 0.2rem 1rem; padding: 1rem 1.2rem;
+    border-radius: 14px; border: 1px solid var(--sl-color-gray-5); background: var(--sl-color-gray-6); text-decoration: none;
+  }
+  .list a:hover { border-color: var(--sl-color-gray-4); }
+  strong { color: var(--sl-color-white); font-weight: 600; }
+  span { grid-column: 1; color: var(--sl-color-gray-3); font-size: 0.92rem; }
+  code { grid-row: 1; grid-column: 2; font: 0.8rem var(--sl-font-mono); color: var(--sl-color-accent-high); }
+</style>

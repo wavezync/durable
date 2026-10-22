@@ -1,0 +1,197 @@
+---
+// The landing page's own shell. The docs use Starlight's; this page stands apart.
+import '../styles/fonts.css';
+import { Image } from 'astro:assets';
+import { Icon } from '@astrojs/starlight/components';
+import FontPreload from '../components/FontPreload.astro';
+import { REPO } from '../docs';
+import mark from '../assets/wavezync-mark.png';
+import wordmark from '../assets/wavezync-wordmark.png';
+
+interface Props { title: string; description: string }
+const { title, description } = Astro.props;
+const canonical = new URL(Astro.url.pathname, Astro.site);
+const WAVEZYNC = 'https://wavezync.com';
+const LINKEDIN = 'https://www.linkedin.com/company/wavezync';
+const ld = {
+  '@context': 'https://schema.org',
+  '@type': 'SoftwareSourceCode',
+  name: 'Durable',
+  description,
+  url: canonical.href,
+  codeRepository: REPO,
+  programmingLanguage: 'Elixir',
+  license: 'https://opensource.org/licenses/MIT',
+  author: {
+    '@type': 'Organization',
+    name: 'WaveZync',
+    url: WAVEZYNC,
+    sameAs: [LINKEDIN, 'https://github.com/wavezync'],
+  },
+};
+---
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <script is:inline>document.documentElement.classList.add('js');</script>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{title}</title>
+    <meta name="description" content={description} />
+    <link rel="canonical" href={canonical} />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Durable" />
+    <meta property="og:title" content={title} />
+    <meta property="og:description" content={description} />
+    <meta property="og:url" content={canonical} />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta property="og:image" content={new URL('/og.png', Astro.site)} />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content="Resilient, Reliable, Resumable workflows for Elixir" />
+    <meta name="twitter:image" content={new URL('/og.png', Astro.site)} />
+    <meta name="theme-color" content="#0a0f1e" />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <FontPreload />
+    <link rel="sitemap" href="/sitemap-index.xml" />
+    <script type="application/ld+json" set:html={JSON.stringify(ld)} />
+  </head>
+  <body>
+    <header class="top">
+      <a class="brand" href="/" aria-label="Durable home">
+        <img src="/favicon.svg" width="26" height="26" alt="" />Durable
+      </a>
+      <a class="by" href={WAVEZYNC}>
+        by <Image src={mark} alt="" width={18} densities={[1, 2]} loading="eager" /><Image class="word" src={wordmark} alt="WaveZync" height={13} densities={[1, 2]} loading="eager" />
+      </a>
+      <nav aria-label="Main">
+        <a href="/docs/">Docs</a>
+        <a href="/examples/">Examples</a>
+        <a href="/docs/changelog/">Changelog</a>
+        <a href={REPO}>GitHub</a>
+      </nav>
+      <a class="btn small" href="/docs/">Get started</a>
+    </header>
+    <slot />
+    <footer class="foot wrap">
+      <div class="maker">
+        <a class="wz" href={WAVEZYNC} aria-label="WaveZync">
+          <Image src={mark} alt="" width={40} densities={[1, 2]} /><Image class="word" src={wordmark} alt="" height={22} densities={[1, 2]} />
+        </a>
+        <p>Made by WaveZync. Building something ambitious? We'd love to help.</p>
+        <div class="reach">
+          <a class="btn small" href={`${WAVEZYNC}/contact`}>Get in touch</a>
+          <a href={WAVEZYNC}><Icon name="external" size="16px" />wavezync.com</a>
+          <a href={LINKEDIN}><Icon name="linkedin" size="16px" />LinkedIn</a>
+          <a href="https://github.com/wavezync"><Icon name="github" size="16px" />GitHub</a>
+        </div>
+      </div>
+      <div class="brand"><img src="/favicon.svg" width="22" height="22" alt="" />Durable</div>
+      <p>Open source under the MIT license. Built by <a href="https://wavezync.com">WaveZync</a>.</p>
+      <nav aria-label="Footer">
+        <a href="/docs/">Docs</a>
+        <a href="/examples/">Examples</a>
+        <a href="/docs/changelog/">Changelog</a>
+        <a href="https://hexdocs.pm/durable">HexDocs</a>
+        <a href="https://hex.pm/packages/durable">Hex</a>
+        <a href={REPO}>GitHub</a>
+      </nav>
+    </footer>
+  </body>
+</html>
+
+<style is:global>
+  /* Night warming into dawn: the run gets through the night and finishes warm. */
+  :root {
+    --night: #0a0f1e;
+    --plum: #1a2140;
+    --rose: #f0718a;
+    --amber: #ffc27a;
+    --cream: #fff4ea;
+    --ink: #f3eef3;
+    --mist: #acb4c6;
+    --dim: #8994ab;
+    --rule: rgba(255, 255, 255, 0.09);
+    --lilac: #a9c1ff;
+    --dawn: linear-gradient(90deg, #8fb0ff, #d6a6ff 55%, #ffb69a);
+    --wide: 1200px;
+    --gutter: clamp(16px, 4vw, 32px);
+    --sl-font: 'Sora Variable', system-ui, sans-serif;
+    --sl-font-mono: 'Geist Mono', ui-monospace, monospace;
+    color-scheme: dark;
+  }
+  *, *::before, *::after { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; scrollbar-gutter: stable; }
+  /* Cross-fade into the docs and back instead of a hard page swap. */
+  @view-transition { navigation: auto; }
+  body {
+    margin: 0; background: var(--night); color: var(--ink); overflow-x: clip;
+    font: 17px/1.65 var(--sl-font); -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--amber); text-underline-offset: 3px; }
+  :focus-visible { outline: 2px solid var(--amber); outline-offset: 3px; border-radius: 4px; }
+  code { font-family: var(--sl-font-mono); }
+  .wrap { width: 100%; max-width: calc(var(--wide) + 2 * var(--gutter)); margin: 0 auto; padding-inline: var(--gutter); }
+  .btn {
+    display: inline-flex; align-items: center; gap: 10px; height: 50px; padding: 0 24px; border-radius: 999px;
+    background: var(--cream); color: var(--night); font: 600 15.5px var(--sl-font); text-decoration: none; white-space: nowrap;
+    transition: transform 0.2s, box-shadow 0.2s;
+  }
+  .btn:hover { transform: translateY(-1px); box-shadow: 0 10px 40px -10px rgba(255, 194, 122, 0.55); }
+  .btn.small { height: 36px; padding: 0 16px; font-size: 14px; }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
+    @view-transition { navigation: none; }
+  }
+</style>
+
+<style>
+  .top {
+    position: sticky; top: 0; z-index: 10; display: flex; align-items: center; gap: 28px; height: 64px;
+    max-width: none; background: rgba(11, 16, 27, 0.62); backdrop-filter: saturate(160%) blur(18px);
+    -webkit-backdrop-filter: saturate(160%) blur(18px); border-bottom: 1px solid var(--rule);
+    padding-inline: max(var(--gutter), calc((100% - var(--wide)) / 2));
+  }
+  /* Reading progress: a thin dawn line under the header, driven by scroll. */
+  @supports (animation-timeline: scroll()) {
+    .top::after {
+      content: ''; position: absolute; left: 0; right: 0; bottom: -1px; height: 2px; background: var(--dawn);
+      transform-origin: left; animation: progress linear both; animation-timeline: scroll(root);
+    }
+    @keyframes progress { from { transform: scaleX(0); } }
+  }
+  .brand { display: inline-flex; align-items: center; gap: 10px; color: var(--ink); text-decoration: none; font-weight: 600; font-size: 18px; letter-spacing: -0.02em; }
+  .top nav { margin-left: auto; display: flex; gap: 26px; }
+  .top nav a, .foot nav a { color: var(--mist); text-decoration: none; font-size: 14.5px; }
+  .top nav a:hover, .foot nav a:hover { color: var(--ink); }
+  .foot {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 12px 32px; padding-block: 40px 56px;
+    border-top: 1px solid var(--rule); color: var(--dim); font-size: 14px;
+  }
+  .foot p { margin: 0; }
+  /* WaveZync's wordmark is dark grey; the page is dark. */
+  .word { filter: brightness(0) invert(1); opacity: 0.88; }
+  .by { display: inline-flex; align-items: center; gap: 7px; margin-left: -12px; color: var(--dim); font-size: 13px; text-decoration: none; }
+  .by:hover .word { opacity: 1; }
+  .maker {
+    flex-basis: 100%; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 20px 40px;
+    padding-bottom: 36px; margin-bottom: 8px; border-bottom: 1px solid var(--rule);
+  }
+  .wz { display: inline-flex; align-items: center; gap: 12px; }
+  .maker p { max-width: 46ch; color: var(--mist); font-size: 15px; }
+  .reach { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 22px; }
+  .reach .btn { color: var(--night); }
+  .reach a:not(.btn) { display: inline-flex; align-items: center; gap: 7px; color: var(--mist); text-decoration: none; font-size: 14.5px; }
+  .reach a:not(.btn):hover { color: var(--ink); }
+  .foot a { color: var(--mist); }
+  .foot nav { margin-left: auto; display: flex; flex-wrap: wrap; gap: 8px 22px; }
+  @media (max-width: 720px) {
+    .top { gap: 16px; }
+    .top nav a:not(:first-child) { display: none; }
+    .foot nav { margin-left: 0; }
+    .by { display: none; }
+  }
+  @media (max-width: 960px) {
+    .maker { grid-template-columns: minmax(0, 1fr); }
+  }
+</style>

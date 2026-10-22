@@ -1,0 +1,101 @@
+---
+// A workflow drawn as a graph (sim/layout.ts) that runs in the browser (sim/engine.ts),
+// with its code and a log of what happened underneath.
+import { Code } from 'astro:components';
+import { macroCalls, night } from '../code-theme';
+import { layout } from '../sim/layout';
+import type { Spec } from '../sim/engine';
+import '../sim/sim.css';
+
+interface Props { code: string; spec: Spec; file: string }
+const { code, spec, file } = Astro.props;
+const g = layout(spec);
+const gid = `sim-${spec.workflow}`;
+---
+<section class="sim not-content" data-sim data-spec={JSON.stringify(spec)} aria-label={`Simulated run of ${spec.workflow}`}>
+  <div class="head">
+    <span class="wf">{spec.workflow}</span>
+    <span class="runid" data-ui="run"></span>
+    <span class="pill st-pending" data-ui="status"><i class="st"></i>Pending</span>
+    <div class="controls">
+      {spec.toggles?.map((t) => (
+        <label class="toggle"><input type="checkbox" data-toggle={t.step} /> {t.label}</label>
+      ))}
+      <div class="actions" data-ui="actions"></div>
+    </div>
+  </div>
+
+  <div class="graph-wrap">
+    <svg class="graph" viewBox={`0 0 ${g.width} ${g.height}`} style={`--w: ${g.width}px`} role="img" aria-label={`Workflow graph of ${spec.workflow}`}>
+      <defs>
+        <linearGradient id={`${gid}-ink`} gradientUnits="userSpaceOnUse" x1="0" x2={g.width} y1="0" y2="0">
+          <stop offset="0" stop-color="#8fb0ff" /><stop offset="0.55" stop-color="#d6a6ff" /><stop offset="1" stop-color="#ffb69a" />
+        </linearGradient>
+      </defs>
+      {g.edges.map((e) => (
+        <g class:list={['ge', { comp: e.comp }]} data-from={e.from} data-to={e.to}>
+          <path class="rail" d={e.d} />
+          <path class="ink" d={e.d} pathLength="1" stroke={e.comp ? undefined : `url(#${gid}-ink)`} />
+          {e.label && (
+            <g class="elabel" transform={`translate(${e.lx} ${e.ly})`}>
+              <rect x={-(e.label.length * 3.6 + 8)} y="-10" width={e.label.length * 7.2 + 16} height="20" rx="10" />
+              <text y="4" text-anchor="middle">{e.label}</text>
+            </g>
+          )}
+        </g>
+      ))}
+      {g.nodes.map((n) => (
+        <g class:list={['gn', n.kind, 'st-pending']} data-node={n.id} data-kind={n.kind} transform={`translate(${n.x} ${n.y})`}>
+          {n.kind === 'gate' ? (
+            <rect class="shape" x="-15" y="-15" width="30" height="30" rx="5" transform="rotate(45)" />
+          ) : n.kind === 'start' || n.kind === 'end' ? (
+            <circle class="shape" r="13" />
+          ) : (
+            <rect class="shape" x={-n.w / 2} y="-17" width={n.w} height="34" rx="17" />
+          )}
+          {n.kind === 'step' || n.kind === 'comp' ? (
+            <>
+              <circle class="dot" cx={-n.w / 2 + 17} cy="0" r="4.5" />
+              <text class="label" x={-n.w / 2 + 30} y="4.5">{n.label}</text>
+            </>
+          ) : (
+            <text class="label small" y={n.kind === 'gate' ? -28 : 32} text-anchor="middle">{n.label}</text>
+          )}
+          <text class="meta" y={n.kind === 'gate' ? 36 : n.kind === 'start' || n.kind === 'end' ? 48 : 33} x={n.kind === 'step' || n.kind === 'comp' ? -n.w / 2 + 6 : 0} text-anchor={n.kind === 'step' || n.kind === 'comp' ? 'start' : 'middle'}></text>
+        </g>
+      ))}
+    </svg>
+  </div>
+
+  <div class="foot">
+    <div class="code">
+      <div class="file">{file}</div>
+      <Code code={code} lang="elixir" theme={night} transformers={[macroCalls]} />
+    </div>
+    <ol class="log" data-ui="log" aria-live="polite" aria-label="What happened"></ol>
+  </div>
+</section>
+
+<script>
+  import { Sim } from '../sim/engine';
+
+  const seen = new IntersectionObserver(
+    (entries) => {
+      for (const e of entries) {
+        if (!e.isIntersecting) continue;
+        seen.unobserve(e.target);
+        (e.target as HTMLElement & { sim: Sim }).sim.start();
+      }
+    },
+    { threshold: 0.25 },
+  );
+
+  for (const el of document.querySelectorAll<HTMLElement>('[data-sim]')) {
+    const sim = new Sim(el, JSON.parse(el.dataset.spec!));
+    Object.assign(el, { sim });
+    for (const box of el.querySelectorAll<HTMLInputElement>('[data-toggle]')) {
+      box.onchange = () => sim.toggle(box.dataset.toggle!, box.checked);
+    }
+    seen.observe(el);
+  }
+</script>

@@ -1,0 +1,23 @@
+---
+// Starlight has no top navigation; these links sit before the GitHub icon.
+import Default from '@astrojs/starlight/components/SocialIcons.astro';
+
+const path = Astro.url.pathname;
+const links = [
+  ['/docs/', 'Docs'],
+  ['/examples/', 'Examples'],
+  ['/docs/changelog/', 'Changelog'],
+];
+const current = (href: string) =>
+  href === '/docs/' ? path.startsWith('/docs/') && !path.startsWith('/docs/changelog') : path.startsWith(href);
+---
+<nav class="links" aria-label="Main">
+  {links.map(([href, label]) => <a href={href} aria-current={current(href) ? 'page' : undefined}>{label}</a>)}
+</nav>
+<Default />
+
+<style>
+  .links { display: flex; gap: 1.25rem; margin-inline-end: 0.5rem; }
+  a { color: var(--sl-color-gray-3); text-decoration: none; font-size: var(--sl-text-sm); }
+  a:hover, a[aria-current='page'] { color: var(--sl-color-white); }
+</style>
