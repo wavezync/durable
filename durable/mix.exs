@@ -92,7 +92,8 @@ defmodule Durable.MixProject do
     [
       main: "readme",
       source_url: @source_url,
-      source_ref: "durable-v#{@version}",
+      # Each package lives in a subdirectory and has its own tags.
+      source_url_pattern: "#{@source_url}/blob/durable-v#{@version}/durable/%{path}#L%{line}",
       extras: [
         "README.md",
         "CHANGELOG.md",
