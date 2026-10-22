@@ -1,0 +1,140 @@
+/* The run is always the Night palette, in both site themes.
+   Status shapes follow durable_dashboard DESIGN.md §4. */
+.sim {
+  --s-bg: #111a2e;
+  --s-deep: #0c1322;
+  --s-rule: #22304a;
+  --s-ink: #eaeff9;
+  --s-ink-2: #9ca8c2;
+  --s-ink-3: #8390ab;
+  --s-accent: #a9c1ff;
+  --s-run: #a9c1ff;
+  --s-ok: #2bb3a3;
+  --s-fail: #f0718a;
+  --s-wait: #ffc27a;
+  --s-comp: #9ebcfd;
+  --s-off: #6b7380;
+  background: var(--s-bg);
+  color: var(--s-ink);
+  border: 1px solid var(--s-rule);
+  border-radius: 20px;
+  overflow: hidden;
+  font: 14px/1.55 var(--sl-font, 'Sora Variable', system-ui, sans-serif);
+}
+.sim .head {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 10px 12px; min-height: 58px; padding: 10px 22px;
+  border-bottom: 1px solid var(--s-rule); font: 13px var(--sl-font-mono, monospace); box-sizing: border-box;
+}
+.sim .wf { font-weight: 500; }
+.sim .runid { color: var(--s-ink-3); }
+
+.st-pending, .st-skipped { --c: var(--s-off); }
+.st-running { --c: var(--s-run); }
+.st-waiting { --c: var(--s-wait); }
+.st-completed { --c: var(--s-ok); }
+.st-failed { --c: var(--s-fail); }
+.st-compensating, .st-compensated { --c: var(--s-comp); }
+
+.sim .pill {
+  display: inline-flex; align-items: center; gap: 8px; padding: 4px 12px; border-radius: 999px;
+  font: 13px var(--sl-font, sans-serif); background: color-mix(in srgb, var(--c) 16%, transparent);
+  color: color-mix(in srgb, var(--c) 60%, var(--s-ink));
+}
+.sim .pill .st { width: 8px; height: 8px; border-radius: 50%; background: var(--c); }
+.sim .pill.st-pending .st { background: none; border: 1.5px dashed var(--c); box-sizing: border-box; }
+.sim .pill.st-waiting .st { background: none; border: 2px solid var(--c); box-sizing: border-box; }
+.sim .pill.st-failed .st { border-radius: 1px; transform: rotate(45deg) scale(0.85); }
+
+/* Controls sit in the head, right-aligned. */
+.sim .controls { margin-left: auto; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; font-family: var(--sl-font, sans-serif); }
+.sim .actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.sim .act {
+  height: 36px; padding: 0 16px; border-radius: 999px; cursor: pointer; font: 500 13.5px var(--sl-font, sans-serif);
+  color: var(--s-ink); background: transparent; border: 1px solid var(--s-rule); transition: border-color 0.2s;
+}
+.sim .act:hover { border-color: var(--s-ink-3); }
+.sim .act.primary { background: var(--s-accent); border-color: var(--s-accent); color: #0c172e; font-weight: 600; }
+.sim .act:focus-visible, .sim .toggle input:focus-visible { outline: 2px solid var(--s-accent); outline-offset: 2px; }
+.sim .toggle { display: inline-flex; align-items: center; gap: 8px; color: var(--s-ink-2); cursor: pointer; font-size: 13.5px; }
+.sim .toggle input { accent-color: var(--s-fail); margin: 0; }
+
+/* The graph: scales down to fit, but never below a readable size (then it scrolls). */
+.sim .graph-wrap {
+  overflow-x: auto; scroll-behavior: smooth; padding: 18px 16px; scrollbar-width: thin; scrollbar-color: var(--s-rule) transparent;
+  background:
+    radial-gradient(circle at 1px 1px, rgba(255, 255, 255, 0.05) 1px, transparent 0) 0 0 / 22px 22px,
+    var(--s-deep);
+  border-bottom: 1px solid var(--s-rule);
+}
+.sim .graph { display: block; width: 100%; max-width: calc(var(--w) * 1.3); min-width: calc(var(--w) * 0.8); height: auto; margin: 0 auto; overflow: visible; }
+
+.sim .ge .rail { fill: none; stroke: rgba(255, 255, 255, 0.1); stroke-width: 1.5; }
+.sim .ge .ink { fill: none; stroke-width: 2.4; stroke-linecap: round; stroke-dasharray: 1; stroke-dashoffset: 1; transition: stroke-dashoffset 0.55s cubic-bezier(0.4, 0, 0.2, 1); }
+.sim .ge.drawn .ink { stroke-dashoffset: 0; }
+.sim .ge.dim .rail { stroke-dasharray: 3 4; opacity: 0.5; }
+.sim .ge.comp .rail { stroke-dasharray: 3 4; }
+.sim .ge.comp .ink { stroke: var(--s-comp); stroke-dasharray: 1; }
+.sim .elabel rect { fill: var(--s-deep); stroke: rgba(255, 255, 255, 0.12); }
+.sim .elabel text { font: 11.5px var(--sl-font-mono, monospace); fill: var(--s-ink-2); }
+.sim .ge.drawn .elabel rect { stroke: color-mix(in srgb, var(--s-accent) 50%, transparent); }
+.sim .ge.drawn .elabel text { fill: var(--s-ink); }
+.sim .ge.dim .elabel { opacity: 0.45; }
+
+.sim .gn .shape { fill: #141f36; stroke: color-mix(in srgb, var(--c) 55%, transparent); stroke-width: 1.5; transition: stroke 0.3s, fill 0.3s; }
+.sim .gn .dot { fill: var(--c); transition: fill 0.3s; }
+.sim .gn .label { font: 12.5px var(--sl-font-mono, monospace); fill: var(--s-ink); transition: fill 0.3s; }
+.sim .gn .label.small { font-size: 11.5px; fill: var(--s-ink-2); }
+.sim .gn .meta { font: 11px var(--sl-font, sans-serif); fill: var(--s-ink-3); }
+.sim .gn.st-pending .label, .sim .gn.st-skipped .label { fill: var(--s-ink-3); }
+.sim .gn.st-pending .dot { fill: none; stroke: var(--c); stroke-width: 1.5; stroke-dasharray: 2 2; }
+.sim .gn.st-skipped { opacity: 0.45; }
+.sim .gn.st-skipped .label { text-decoration: line-through; }
+.sim .gn.st-running .shape, .sim .gn.st-compensating .shape { fill: color-mix(in srgb, var(--c) 14%, #141f36); stroke: var(--c); }
+.sim .gn.st-running .dot, .sim .gn.st-compensating .dot { animation: sim-beat 1.1s ease-in-out infinite; transform-box: fill-box; transform-origin: center; }
+.sim .gn.st-waiting .shape { fill: color-mix(in srgb, var(--c) 10%, #141f36); stroke: var(--c); stroke-dasharray: 5 4; animation: sim-march 1s linear infinite; }
+.sim .gn.st-waiting .dot { fill: none; stroke: var(--c); stroke-width: 2; }
+.sim .gn.st-completed .shape { stroke: color-mix(in srgb, var(--c) 70%, transparent); }
+.sim .gn.st-failed .shape { fill: color-mix(in srgb, var(--c) 14%, #141f36); stroke: var(--c); }
+.sim .gn.st-failed .meta { fill: var(--s-fail); }
+.sim .gn.comp.st-pending { opacity: 0.4; }
+.sim .gn.comp.st-pending .shape { stroke-dasharray: 4 4; }
+.sim .gn.comp.st-compensated .shape { fill: color-mix(in srgb, var(--c) 12%, #141f36); }
+/* Start, gate and end are small markers. */
+.sim .gn.start .shape, .sim .gn.end .shape { stroke-width: 2; }
+.sim .gn.start.st-completed .shape { fill: var(--s-ok); }
+.sim .gn.end.st-completed .shape { fill: var(--s-wait); stroke: var(--s-wait); filter: drop-shadow(0 0 10px rgba(255, 194, 122, 0.6)); }
+.sim .gn.end.st-compensated .shape { fill: var(--s-comp); }
+.sim .gn.end.st-failed .shape { fill: var(--s-fail); }
+.sim .gn.gate.st-completed .shape { fill: color-mix(in srgb, var(--s-accent) 22%, #141f36); stroke: var(--s-accent); }
+@keyframes sim-beat { 50% { transform: scale(1.5); opacity: 0.6; } }
+@keyframes sim-march { to { stroke-dashoffset: -18; } }
+
+/* Code + log */
+.sim .foot { display: flex; flex-wrap: wrap; }
+.sim .code { flex: 1.5 1 440px; min-width: 0; border-right: 1px solid var(--s-rule); background: var(--s-deep); }
+.sim .file { padding: 12px 22px 0; font: 12px var(--sl-font-mono, monospace); color: var(--s-ink-3); }
+.sim .code pre.astro-code {
+  margin: 0; padding: 10px 0 16px; background: transparent !important; font: 12.5px/1.7 var(--sl-font-mono, monospace);
+  overflow-x: auto; scrollbar-width: thin; scrollbar-color: var(--s-rule) transparent; border: 0;
+}
+.sim .code .line { display: inline-block; min-width: 100%; padding: 0 22px; box-sizing: border-box; transition: background-color 0.2s; }
+.sim .code .line.on { box-shadow: inset 3px 0 var(--c); }
+.sim .code .line.on.st-running, .sim .code .line.on.st-waiting, .sim .code .line.on.st-compensating { background: color-mix(in srgb, var(--c) 10%, transparent); }
+.sim .log {
+  flex: 1 1 280px; min-width: 0; list-style: none; margin: 0; padding: 14px 22px; max-height: 460px; overflow-y: auto;
+  color: var(--s-ink-2); font-size: 13px; scrollbar-width: thin; scrollbar-color: var(--s-rule) transparent;
+}
+.sim .log li { display: grid; grid-template-columns: 48px 1fr; gap: 8px; padding: 2px 0; margin: 0; }
+.sim .log li:last-child { color: var(--s-ink); }
+.sim .log .at { font: 11.5px var(--sl-font-mono, monospace); padding-top: 2px; color: var(--s-ink-3); }
+.sim .log code { font: 12px var(--sl-font-mono, monospace); color: var(--s-ink); background: none; padding: 0; }
+
+@media (max-width: 640px) {
+  .sim .head, .sim .log { padding-left: 14px; padding-right: 14px; }
+  .sim .controls { margin-left: 0; width: 100%; min-height: 36px; }
+  .sim .code { border-right: 0; border-bottom: 1px solid var(--s-rule); max-height: 320px; overflow: auto; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .sim * { animation: none !important; transition: none !important; }
+  .sim .graph-wrap { scroll-behavior: auto; }
+}

@@ -1,0 +1,28 @@
+{
+  "name": "durable-site",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "astro dev",
+    "build": "astro build",
+    "preview": "astro preview",
+    "check": "astro check",
+    "deploy": "astro build && wrangler deploy",
+    "preview:cf": "astro build && wrangler dev"
+  },
+  "dependencies": {
+    "@astrojs/markdown-remark": "^7.3.4",
+    "@astrojs/markdown-satteri": "0.4.5",
+    "@astrojs/starlight": "0.42.6",
+    "@fontsource-variable/sora": "5.3.0",
+    "@fontsource/geist-mono": "5.3.0",
+    "@lucide/astro": "1.61.0",
+    "astro": "7.4.2"
+  },
+  "devDependencies": {
+    "@astrojs/check": "^0.9.12",
+    "@types/node": "^24.19.2",
+    "typescript": "^6.0.3",
+    "wrangler": "^4.151.3"
+  }
+}

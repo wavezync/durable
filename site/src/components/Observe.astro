@@ -1,0 +1,112 @@
+---
+// Observability: what Durable emits and how you read it. The chart is example
+// data; the events, functions and the metrics hook are the real API.
+import { Activity, Gauge, ChartColumn, ScrollText } from '@lucide/astro';
+
+const points = [
+  { icon: Activity, title: 'Telemetry spans', text: 'Runs, steps, compensations, queues and schedules emit :telemetry spans shaped like Phoenix, Ecto and Oban, so your existing tooling reads them as-is.' },
+  { icon: Gauge, title: 'Metrics for any reporter', text: 'Durable.Telemetry.metrics/0 returns Telemetry.Metrics definitions for Prometheus, StatsD or LiveDashboard.' },
+  { icon: ChartColumn, title: 'Stats you can query', text: 'Durable.Stats gives you overviews, timelines, step performance, queue history and grouped errors.' },
+  { icon: ScrollText, title: 'An activity log', text: 'Recovered runs, fenced workers and queue pauses are recorded, so you can see what the system did on its own.' },
+];
+const events = ['[:durable, :workflow, :stop]', '[:durable, :step, :retry]', '[:durable, :queue, :job_claimed]', '[:durable, :schedule, :trigger]'];
+
+// Example throughput: completed and failed runs per minute.
+const ok = [32, 38, 35, 44, 41, 52, 49, 58, 54, 61, 57, 66, 63, 70, 68, 74];
+const bad = [2, 1, 3, 2, 2, 4, 2, 1, 3, 2, 5, 2, 1, 2, 3, 1];
+const W = 560, H = 150, max = 80;
+const x = (i: number) => (i / (ok.length - 1)) * W;
+const y = (v: number) => H - (v / max) * H;
+const line = (vs: number[]) => vs.map((v, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)} ${y(v).toFixed(1)}`).join(' ');
+const area = `${line(ok)} L${W} ${H} L0 ${H} Z`;
+---
+<div class="observe">
+  <ul class="points">
+    {points.map((p) => (
+      <li><span class="ico"><p.icon size={20} /></span><div><h3>{p.title}</h3><p>{p.text}</p></div></li>
+    ))}
+  </ul>
+
+  <div class="panel">
+    <div class="stats">
+      <div><span>Runs per minute</span><b>74</b><small class="up">+18%</small></div>
+      <div><span>Failure rate</span><b>1.4%</b><small>steady</small></div>
+      <div><span>p95 step time</span><b>320ms</b><small class="up">-9%</small></div>
+    </div>
+    <svg class="chart" viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" role="img" aria-label="Example chart: completed runs per minute rising, failures staying low">
+      <defs>
+        <linearGradient id="obs-fill" x1="0" x2="0" y1="0" y2="1">
+          <stop offset="0" stop-color="#d6a6ff" stop-opacity="0.35" />
+          <stop offset="1" stop-color="#d6a6ff" stop-opacity="0" />
+        </linearGradient>
+        <linearGradient id="obs-line" x1="0" x2="1" y1="0" y2="0">
+          <stop offset="0" stop-color="#8fb0ff" /><stop offset="0.6" stop-color="#d6a6ff" /><stop offset="1" stop-color="#ffb69a" />
+        </linearGradient>
+      </defs>
+      {[0.25, 0.5, 0.75].map((g) => <line x1="0" x2={W} y1={H * g} y2={H * g} class="grid" />)}
+      <path d={area} fill="url(#obs-fill)" class="area" />
+      <path d={line(ok)} class="ok" pathLength="1" />
+      <path d={line(bad)} class="bad" pathLength="1" />
+    </svg>
+    <div class="legend"><span><i class="lk"></i>completed</span><span><i class="lb"></i>failed</span><span class="note">Example data</span></div>
+    <pre class="snippet"><code><span class="c"># lib/my_app_web/telemetry.ex</span>
+<span class="k">def</span> metrics, <span class="k">do</span>: my_metrics() ++ <span class="m">Durable.Telemetry</span>.metrics()</code></pre>
+    <div class="events">{events.map((e) => <code>{e}</code>)}</div>
+  </div>
+</div>
+
+<style>
+  .observe { display: grid; grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr); gap: 40px 56px; align-items: center; }
+  .points { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 22px; }
+  .points li { display: flex; gap: 16px; align-items: flex-start; }
+  .ico {
+    flex: none; width: 42px; height: 42px; display: grid; place-items: center; border-radius: 12px; color: #ffb98a;
+    background: linear-gradient(135deg, rgba(176, 201, 255, 0.16), rgba(255, 194, 122, 0.1)); border: 1px solid var(--rule);
+  }
+  h3 { margin: 0 0 4px; font-size: 18px; font-weight: 600; letter-spacing: -0.02em; }
+  .points p { margin: 0; color: var(--mist); font-size: 15.5px; }
+
+  .panel {
+    padding: 22px; border-radius: 22px; border: 1px solid rgba(255, 255, 255, 0.1);
+    background: linear-gradient(180deg, rgba(19, 28, 48, 0.92), rgba(11, 18, 32, 0.92));
+    box-shadow: 0 60px 140px -60px rgba(214, 166, 255, 0.45);
+  }
+  .stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin-bottom: 18px; }
+  .stats div { display: flex; flex-direction: column; gap: 2px; padding: 12px 14px; border-radius: 14px; background: rgba(255, 255, 255, 0.03); border: 1px solid var(--rule); }
+  .stats span { font-size: 12.5px; color: var(--dim); }
+  .stats b { font: 600 24px var(--sl-font); letter-spacing: -0.03em; font-variant-numeric: tabular-nums; }
+  .stats small { font-size: 12px; color: var(--dim); }
+  .stats small.up { color: #5fd4c4; }
+  .chart { display: block; width: 100%; height: 150px; overflow: visible; }
+  .grid { stroke: rgba(255, 255, 255, 0.06); stroke-width: 1; vector-effect: non-scaling-stroke; }
+  .ok, .bad { fill: none; stroke-width: 2.5; vector-effect: non-scaling-stroke; stroke-linejoin: round; stroke-dasharray: 1; stroke-dashoffset: 0; }
+  .ok { stroke: url(#obs-line); }
+  .bad { stroke: #f0718a; stroke-width: 1.5; opacity: 0.8; }
+  .legend { display: flex; gap: 18px; margin: 10px 0 16px; font-size: 12.5px; color: var(--dim); }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .legend i { width: 14px; height: 3px; border-radius: 2px; }
+  .lk { background: linear-gradient(90deg, #8fb0ff, #ffb69a); }
+  .lb { background: #f0718a; }
+  .note { margin-left: auto; }
+  .snippet { margin: 0 0 12px; padding: 14px 16px; border-radius: 12px; background: rgba(11, 16, 27, 0.6); border: 1px solid var(--rule); font: 13px/1.7 var(--sl-font-mono); overflow-x: auto; color: #b2bdd6; }
+  .c { color: #72809c; font-style: italic; }
+  .k { color: #a9c1ff; }
+  .m { color: #fff; }
+  .events { display: flex; flex-wrap: wrap; gap: 6px; }
+  .events code { font: 12px var(--sl-font-mono); color: var(--amber); padding: 3px 8px; border-radius: 7px; background: rgba(255, 194, 122, 0.08); }
+
+  /* The lines draw in once the chart scrolls into view. */
+  @supports (animation-timeline: view()) {
+    .ok, .bad { animation: draw linear both; animation-timeline: view(); animation-range: entry 20% cover 45%; }
+    .area { animation: fade linear both; animation-timeline: view(); animation-range: entry 30% cover 50%; }
+    @keyframes draw { from { stroke-dashoffset: 1; } }
+    @keyframes fade { from { opacity: 0; } }
+  }
+
+  @media (max-width: 900px) {
+    .observe { grid-template-columns: minmax(0, 1fr); }
+  }
+  @media (max-width: 480px) {
+    .stats { grid-template-columns: minmax(0, 1fr); }
+  }
+</style>

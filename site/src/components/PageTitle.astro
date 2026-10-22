@@ -1,0 +1,10 @@
+---
+// Starlight's title, plus a package header on pages that document a package.
+import Default from '@astrojs/starlight/components/PageTitle.astro';
+import PackageHeader from './PackageHeader.astro';
+import { packageMeta } from '../docs';
+
+const meta = packageMeta(Astro.locals.starlightRoute.entry.id);
+---
+<Default />
+{meta && <PackageHeader {...meta} />}

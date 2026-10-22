@@ -1,0 +1,456 @@
+---
+import { Code } from 'astro:components';
+import { getEntry } from 'astro:content';
+import Landing from '../layouts/Landing.astro';
+import Graph from '../components/Graph.astro';
+import Illus from '../components/Illus.astro';
+import AgentDemo from '../components/AgentDemo.astro';
+import Features from '../components/Features.astro';
+import DashboardShowcase from '../components/DashboardShowcase.astro';
+import Observe from '../components/Observe.astro';
+import Ops from '../components/Ops.astro';
+import {
+  Package, DatabaseZap, PlugZap, Database, Server, Network, Workflow, Check,
+  Scale, Droplet, LayoutDashboard, Bot, Sparkles, ChevronRight,
+} from '@lucide/astro';
+import { macroCalls, night } from '../code-theme';
+import { section } from '../docs';
+
+const readme = (await getEntry('docs', 'docs'))!.body!;
+const dashboard = (await getEntry('docs', 'docs/dashboard'))!.body!;
+const install = section(readme, '## Installation').code;
+const dep = /\{:durable, "[^"]+"\}/.exec(install)![0];
+const version = /~> ([\d.]+)/.exec(dep)![1];
+const steps = [
+  { icon: Package, title: 'Add the dependency', code: install },
+  { icon: DatabaseZap, title: 'Add a migration', code: section(readme, '### 1. Create Migration').code },
+  { icon: PlugZap, title: 'Start it with your Repo', code: section(readme, '### 2. Add to Supervision Tree').code },
+];
+const facts = [
+  { icon: Scale, text: 'MIT licensed' },
+  { icon: Droplet, text: 'Elixir 1.15+' },
+  { icon: Database, text: 'PostgreSQL' },
+  { icon: LayoutDashboard, text: 'LiveView dashboard' },
+  { icon: Bot, text: 'Built for AI agents' },
+];
+const api = section(readme, '### API').code;
+const mix = section(readme, '## Mix Tasks', 'bash').code;
+const mount = /use DurableDashboard\.Router[^\n]*/.exec(dashboard)![0];
+
+const promises = [
+  {
+    word: 'Resilient',
+    art: 'durable',
+    title: 'Every step is saved',
+    text: "Each step's result is saved before the next one starts. A deploy, a crash or a restart can't lose work that's already done.",
+    code: 'step :charge, fn ctx -> ... end',
+  },
+  {
+    word: 'Reliable',
+    art: 'reliable',
+    title: 'Retries, deadlines and rollbacks built in',
+    text: 'Steps retry with exponential, linear or constant backoff. Workflows have timeouts. When a step fails for good, compensations undo what already happened, in reverse.',
+    code: 'retry: [max_attempts: 3, backoff: :exponential]\ncompensate: :cancel_hotel',
+  },
+  {
+    word: 'Resumable',
+    art: 'resumable',
+    title: 'Picks up exactly where it stopped',
+    text: "Sleep for days, wait for a webhook or a person's approval. A waiting run holds no process, and when it wakes up it carries on with everything it already knew.",
+    code: 'sleep(days(3))',
+  },
+];
+
+const faq = [
+  {
+    q: 'What is Durable?',
+    a: "Durable is an open-source workflow engine for Elixir. You write a workflow as a series of steps; Durable saves each step's result in your database, retries failures, and resumes runs after crashes, deploys, sleeps and waits for events or human input.",
+  },
+  {
+    q: 'How is Durable different from Oban?',
+    a: 'Oban runs background jobs. Durable runs multi-step workflows: context flows from step to step, every step is persisted, and a workflow can sleep, wait for events or approvals, branch, run steps in parallel, call child workflows and roll back with compensations. Durable has its own queue, so it does not need Oban.',
+  },
+  {
+    q: 'Is Durable like Temporal or Inngest?',
+    a: "It follows the same durable execution idea, but it's a library: it runs inside your Elixir application, under your supervision tree, and uses your Ecto repo.",
+  },
+  {
+    q: 'What does Durable need to run?',
+    a: 'An Elixir app and an Ecto repo. Out of the box, runs are stored in PostgreSQL and workers claim them with FOR UPDATE SKIP LOCKED. The queue is a pluggable adapter, so other backends can be added.',
+  },
+  {
+    q: 'What happens if a node crashes in the middle of a step?',
+    a: "Workers send heartbeats while a step runs. If a node dies, its lock goes stale and another node recovers the run, re-running only the step that was interrupted. Steps that finished don't run again, so keep each step idempotent.",
+  },
+  {
+    q: 'Can I use Durable for AI agents?',
+    a: "Yes. Put each LLM or tool call in a step: its result is saved, failed calls retry with backoff, and an agent can wait days for a human approval without holding a process. After a crash or deploy it resumes at the next step instead of starting over.",
+  },
+  {
+    q: 'Is there a dashboard?',
+    a: 'Yes. durable_dashboard is a Phoenix LiveView dashboard you mount in your router with one line. It shows runs, step timelines, pending inputs, queues and schedules.',
+  },
+];
+const faqLd = {
+  '@context': 'https://schema.org',
+  '@type': 'FAQPage',
+  mainEntity: faq.map(({ q, a }) => ({ '@type': 'Question', name: q, acceptedAnswer: { '@type': 'Answer', text: a } })),
+};
+---
+<Landing
+  title="Durable: reliable, resumable workflow engine for Elixir"
+  description="Open-source durable workflow engine for Elixir and AI agents. Retries, sleeps, approvals and sagas, saved step by step so runs resume after crashes."
+>
+  <main>
+    <section class="hero">
+      <div class="sky" aria-hidden="true"><i class="b1"></i><i class="b2"></i><i class="b3"></i></div>
+      <div class="wrap hero-copy">
+        <a class="badge" href="/docs/changelog/"><Sparkles size={15} />Durable {version} is on Hex<ChevronRight size={15} /></a>
+        <h1>
+          <span class="line">Resilient, Reliable, Resumable</span>
+          <span class="line">workflows for Elixir</span>
+        </h1>
+        <p class="lede">
+          Durable is an open-source workflow engine for Elixir. Write workflows as plain steps. Every step is saved, so
+          runs resume after crashes, deploys and week-long waits.
+        </p>
+        <div class="cta">
+          <a class="btn" href="/docs/">Get started</a>
+          <button class="dep" type="button" data-copy={dep}>
+            <code>{dep}</code><span data-copied>Copy</span>
+          </button>
+        </div>
+        <ul class="facts" aria-label="At a glance">
+          {facts.map(({ icon: Icon, text }) => <li><Icon size={16} />{text}</li>)}
+        </ul>
+      </div>
+      <div class="wrap stage"><Graph /></div>
+    </section>
+
+    <section class="wrap block agents">
+      <h2 class="rise">Ship agents that finish the job</h2>
+      <p class="sub rise">
+        Durable execution for AI agents in Elixir. Every LLM and tool call is saved, so crashes, timeouts and deploys
+        never lose progress or re-bill completed calls.
+      </p>
+      <div class="rise"><AgentDemo /></div>
+    </section>
+
+    <section class="wrap block story" aria-label="Resilient, reliable, resumable">
+      <div class="words" aria-hidden="true">
+        {promises.map((p, i) => <span class:list={['w', { on: i === 0 }]}>{p.word}</span>)}
+      </div>
+      <div class="panels">
+        {promises.map((p) => (
+          <article class="panel rise">
+            <p class="word-m" aria-hidden="true">{p.word}</p>
+            <h2><span class="sr-only">{p.word}: </span>{p.title}</h2>
+            <p>{p.text}</p>
+            <div class="art"><Illus kind={p.art as 'durable'} code={p.code} /></div>
+          </article>
+        ))}
+      </div>
+    </section>
+
+    <section class="wrap block">
+      <h2 class="rise">Every primitive a workflow needs</h2>
+      <p class="sub rise">All of it is plain Elixir in one module, and every step it runs is saved, retried and visible in the dashboard.</p>
+      <div class="rise"><Features /></div>
+    </section>
+
+    <section class="wrap block">
+      <h2 class="rise">See every run</h2>
+      <p class="sub rise">
+        <code>durable_dashboard</code> is a Phoenix LiveView dashboard: live runs, step traces, an inbox for pending
+        approvals, queues and schedules. Retry, cancel or pause right from the browser.
+      </p>
+      <div class="rise"><DashboardShowcase /></div>
+      <div class="dash rise">
+        <p class="sub">Mount it in your Phoenix router with one line. <a href="/docs/dashboard/">Dashboard docs</a></p>
+        <div class="snippet"><Code code={mount} lang="elixir" theme={night} transformers={[macroCalls]} wrap /></div>
+      </div>
+    </section>
+
+    <section class="wrap block">
+      <h2 class="rise">Observability built in</h2>
+      <p class="sub rise">Know how your workflows behave in production with the tools you already use.</p>
+      <div class="rise"><Observe /></div>
+    </section>
+
+    <section class="wrap block">
+      <h2 class="rise">Operate it from code or the terminal</h2>
+      <p class="sub rise">
+        Retry a failed run from the step that failed, rerun a finished one, cancel, pause a queue on every node, or prune
+        old runs.
+      </p>
+      <div class="rise"><Ops api={api} mix={mix} /></div>
+    </section>
+
+    <section class="wrap block">
+      <h2 class="rise">Runs inside your app</h2>
+      <p class="sub rise">
+        Durable is a library. Workflows are plain Elixir modules: no YAML, no new language. It starts in your
+        supervision tree on every node and uses your Ecto repo. Runs are stored through a pluggable queue adapter,
+        PostgreSQL by default.
+      </p>
+      <div class="infra" aria-label="Your Elixir app runs Durable inside its supervision tree; runs are stored through the queue adapter, PostgreSQL by default">
+        <div class="app rise">
+          <div class="app-head"><Server size={20} /><b>Your Elixir app</b><small>on every node</small></div>
+          <span><Network size={16} />MyApp.Supervisor</span>
+          <span class="in"><Database size={16} />MyApp.Repo</span>
+          <span class="in hl"><Workflow size={16} />Durable<small>queues, workers, scheduler</small></span>
+        </div>
+        <div class="wire"><span>claims runs with<br /><code>FOR UPDATE SKIP LOCKED</code></span></div>
+        <div class="db rise" style="--d: 160ms">
+          <Database size={40} stroke-width={1.5} />
+          <b>PostgreSQL</b>
+          <small>default queue adapter</small>
+        </div>
+      </div>
+      <ul class="nope">
+        <li class="rise" style="--d: 0ms"><Check size={16} />A library, not a service</li>
+        <li class="rise" style="--d: 90ms"><Check size={16} />Uses your Ecto repo</li>
+        <li class="rise" style="--d: 180ms"><Check size={16} />Pluggable queue adapter</li>
+      </ul>
+      <ol class="install">
+        {steps.map((s, i) => (
+          <li class="rise" style={`--d: ${i * 90}ms`}>
+            <h3><span class="ico"><s.icon size={20} /></span>{s.title}</h3>
+            <div class="snippet"><Code code={s.code} lang="elixir" theme={night} transformers={[macroCalls]} wrap /></div>
+          </li>
+        ))}
+      </ol>
+    </section>
+
+    <section class="wrap block faq">
+      <h2 class="rise">Questions</h2>
+      <div class="qs">
+        {faq.map(({ q, a }, i) => (
+          <details class="rise" style={`--d: ${i * 60}ms`}>
+            <summary>{q}</summary>
+            <p>{a}</p>
+          </details>
+        ))}
+      </div>
+    </section>
+
+    <section class="finale">
+      <div class="wrap rise">
+        <h2>Build workflows that finish</h2>
+        <div class="cta center">
+          <a class="btn" href="/docs/">Get started</a>
+          <a class="ghost" href="/examples/">Try the examples</a>
+        </div>
+      </div>
+    </section>
+  </main>
+  <script type="application/ld+json" set:html={JSON.stringify(faqLd)} />
+</Landing>
+
+<script>
+  // Reveal each .rise element once, the first time it comes into view.
+  const reveal = new IntersectionObserver(
+    (entries) => {
+      for (const e of entries) {
+        if (!e.isIntersecting) continue;
+        e.target.classList.add('in');
+        reveal.unobserve(e.target);
+      }
+    },
+    { rootMargin: '0px 0px -12% 0px', threshold: 0.12 },
+  );
+  document.querySelectorAll('.rise').forEach((el) => reveal.observe(el));
+
+  // Light up the pinned word for whichever panel is crossing the middle of the screen.
+  const words = [...document.querySelectorAll('.story .w')];
+  const panels = [...document.querySelectorAll('.story .panel')];
+  const middle = new IntersectionObserver(
+    (entries) => {
+      for (const e of entries) {
+        if (!e.isIntersecting) continue;
+        const i = panels.indexOf(e.target);
+        words.forEach((w, j) => w.classList.toggle('on', i === j));
+      }
+    },
+    { rootMargin: '-45% 0px -45% 0px' },
+  );
+  panels.forEach((p) => middle.observe(p));
+
+  for (const b of document.querySelectorAll<HTMLButtonElement>('[data-copy]')) {
+    b.onclick = async () => {
+      await navigator.clipboard.writeText(b.dataset.copy!);
+      const label = b.querySelector('[data-copied]')!;
+      label.textContent = 'Copied';
+      setTimeout(() => (label.textContent = 'Copy'), 1500);
+    };
+  }
+</script>
+
+<style>
+  .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+
+  /* Hero: a drifting dawn sky behind the copy, fading into the page (no hard edge). */
+  .hero { position: relative; isolation: isolate; padding-block: clamp(56px, 9vw, 112px) 0; }
+  .sky {
+    position: absolute; inset: -64px 0 -30% 0; z-index: -1; overflow: hidden; pointer-events: none;
+    mask-image: linear-gradient(180deg, #000 55%, transparent);
+  }
+  .sky::before {
+    content: ''; position: absolute; inset: 0;
+    background-image: linear-gradient(rgba(255, 255, 255, 0.045) 1px, transparent 1px), linear-gradient(90deg, rgba(255, 255, 255, 0.045) 1px, transparent 1px);
+    background-size: 64px 64px; mask-image: radial-gradient(70% 55% at 50% 20%, #000, transparent);
+  }
+  /* Soft glows are radial gradients, not blur filters: same look, nearly free to draw and move. */
+  .sky i { position: absolute; border-radius: 50%; background: radial-gradient(closest-side, var(--g), transparent); animation: drift 18s ease-in-out infinite alternate; will-change: transform; }
+  .sky .b1 { --g: rgba(77, 133, 255, 0.42); width: 70vw; height: 70vw; left: -22vw; top: -6%; }
+  .sky .b2 { --g: rgba(214, 166, 255, 0.36); width: 62vw; height: 62vw; right: -20vw; top: 6%; animation-delay: -6s; }
+  .sky .b3 { --g: rgba(255, 182, 154, 0.3); width: 54vw; height: 54vw; left: 22%; top: 36%; animation-delay: -12s; }
+  @keyframes drift { to { transform: translate(6vw, -4vw) scale(1.12); } }
+
+  .hero-copy { text-align: center; display: flex; flex-direction: column; align-items: center; }
+  .badge {
+    display: inline-flex; align-items: center; gap: 8px; padding: 7px 10px 7px 14px; border-radius: 999px; margin-bottom: 28px;
+    font-size: 14px; color: var(--ink); text-decoration: none; background: rgba(255, 255, 255, 0.06); border: 1px solid rgba(255, 255, 255, 0.12);
+    backdrop-filter: blur(10px); animation: rise 1s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+  }
+  .badge :global(svg:first-child) { color: var(--amber); }
+  .badge :global(svg:last-child) { color: var(--dim); transition: transform 0.2s; }
+  .badge:hover { border-color: rgba(255, 255, 255, 0.24); }
+  .badge:hover :global(svg:last-child) { transform: translateX(2px); }
+  h1 { align-self: stretch; margin: 0; font-weight: 600; letter-spacing: -0.05em; line-height: 1; font-size: clamp(2.4rem, 6.2vw, 5.25rem); }
+  h1 .line { display: block; text-wrap: balance; animation: slide 0.9s cubic-bezier(0.2, 0.7, 0.2, 1) both; }
+  h1 .line + .line {
+    animation-delay: 0.08s; background: var(--dawn); -webkit-background-clip: text; background-clip: text; color: transparent;
+    padding-bottom: 0.08em;
+  }
+  .lede { margin: clamp(20px, 2.6vw, 28px) 0 0; max-width: 46ch; color: var(--mist); font-size: clamp(17px, 1.5vw, 19px); animation: rise 1s 0.28s cubic-bezier(0.2, 0.7, 0.2, 1) both; }
+  .cta { display: flex; flex-wrap: wrap; gap: 12px; justify-content: center; margin-top: 32px; animation: rise 1s 0.38s cubic-bezier(0.2, 0.7, 0.2, 1) both; }
+  .dep {
+    display: inline-flex; align-items: center; gap: 14px; height: 50px; padding: 0 22px; border-radius: 999px; cursor: pointer;
+    border: 1px solid rgba(255, 255, 255, 0.16); background: rgba(255, 255, 255, 0.05); color: var(--ink); font: inherit; backdrop-filter: blur(10px);
+  }
+  .dep code { font-size: 14px; }
+  .dep span { font-size: 13px; color: var(--dim); }
+  .dep:hover { border-color: rgba(255, 255, 255, 0.32); }
+  .facts { list-style: none; margin: 26px 0 0; padding: 0; display: flex; flex-wrap: wrap; justify-content: center; gap: 10px 22px; color: var(--dim); font-size: 14px; animation: rise 1s 0.48s cubic-bezier(0.2, 0.7, 0.2, 1) both; }
+  .facts li { display: inline-flex; align-items: center; gap: 7px; }
+  .facts :global(svg) { color: var(--amber); opacity: 0.85; }
+
+  /* The run, flat and readable from the first frame. */
+  .stage { margin-top: clamp(48px, 7vw, 88px); animation: rise 1.2s 0.5s cubic-bezier(0.2, 0.7, 0.2, 1) both; }
+  @keyframes rise { from { opacity: 0; transform: translateY(22px); } }
+  /* The headline only slides: it's visible from the first frame (it's the largest paint). */
+  @keyframes slide { from { transform: translateY(18px); } }
+
+  .ico {
+    flex: none; width: 44px; height: 44px; display: grid; place-items: center; border-radius: 13px; color: #ffb98a;
+    background: linear-gradient(135deg, rgba(176, 201, 255, 0.16), rgba(255, 194, 122, 0.1)); border: 1px solid var(--rule);
+  }
+
+  /* Sections */
+  .block { margin-top: clamp(112px, 15vw, 200px); }
+  h2 { margin: 0 0 14px; font-size: clamp(2.1rem, 4.6vw, 3.6rem); line-height: 1.04; font-weight: 600; letter-spacing: -0.045em; }
+  h3 { margin: 0; font-size: 17px; font-weight: 600; }
+  .sub { margin: 0 0 44px; color: var(--mist); max-width: 58ch; font-size: 18px; }
+  .sub.after { margin: 28px 0 0; font-size: 16px; }
+
+  .agents h2 { font-size: clamp(2.4rem, 5.6vw, 4.6rem); max-width: 14ch; }
+
+  /* Durable / Reliable / Resumable: the words stay pinned while their panels scroll by. */
+  .story { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 64px; }
+  .words { position: sticky; top: calc(50vh - 180px); align-self: start; display: flex; flex-direction: column; gap: 4px; }
+  .w, .word-m {
+    width: fit-content; padding-right: 0.06em; font-weight: 600; line-height: 1; letter-spacing: -0.06em;
+    background: var(--dawn); -webkit-background-clip: text; background-clip: text; color: transparent;
+  }
+  .w { font-size: clamp(3rem, 7.4vw, 7rem); transition: opacity 0.5s ease, transform 0.6s cubic-bezier(0.2, 0.7, 0.2, 1); }
+  :global(.js) .w { opacity: 0.16; }
+  :global(.js) .w.on { opacity: 1; transform: translateX(14px); }
+  .word-m { display: none; margin: 0; font-size: clamp(3rem, 14vw, 5rem); }
+  .panel { min-height: 76vh; display: flex; flex-direction: column; justify-content: center; gap: 18px; }
+  .panel h2 { font-size: clamp(1.6rem, 2.6vw, 2.2rem); margin: 0; }
+  .panel p { margin: 0; color: var(--mist); font-size: 18px; max-width: 46ch; }
+  .art { margin: 10px 0 0; }
+
+  /* Install and where it runs */
+  .install { list-style: none; margin: 0; padding: 0; counter-reset: n; border-top: 1px solid var(--rule); }
+  .install li { counter-increment: n; display: grid; grid-template-columns: 300px minmax(0, 1fr); gap: 14px 32px; align-items: start; padding: 22px 0; border-bottom: 1px solid var(--rule); }
+  .install h3 { display: flex; align-items: center; gap: 14px; }
+  .install h3::after { content: counter(n); order: -1; font: 500 13px var(--sl-font-mono); color: var(--dim); width: 12px; }
+  .snippet :global(pre) { margin: 0; padding: 16px 20px; border-radius: 14px; border: 1px solid var(--rule); font: 13.5px/1.7 var(--sl-font-mono); }
+  .infra { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(120px, 0.7fr) minmax(0, 0.8fr); align-items: center; margin-bottom: 20px; }
+  .app, .db { border-radius: 18px; border: 1px solid var(--rule); background: rgba(17, 25, 44, 0.7); padding: 22px 24px; }
+  .app { display: flex; flex-direction: column; gap: 10px; font: 14.5px var(--sl-font-mono); color: var(--mist); }
+  .app-head { display: flex; align-items: center; gap: 10px; font-family: var(--sl-font); color: var(--ink); margin-bottom: 4px; }
+  .app-head b { font-weight: 600; font-size: 17px; }
+  .app small, .db small { font-family: var(--sl-font); color: var(--dim); font-size: 13px; margin-left: 6px; }
+  .app span { display: flex; align-items: center; gap: 10px; }
+  .app .in { padding-left: 26px; }
+  .app .hl { color: var(--ink); }
+  .app .hl :global(svg), .app-head :global(svg), .db :global(svg) { color: var(--amber); }
+  .db { display: flex; flex-direction: column; align-items: center; gap: 6px; text-align: center; }
+  .db b { font-weight: 600; font-size: 17px; }
+  .db small { margin: 0; }
+  .wire { position: relative; height: 2px; margin-inline: -1px; transform-origin: left; background: repeating-linear-gradient(90deg, var(--amber) 0 6px, transparent 6px 12px); background-size: 24px 2px; animation: wire 0.9s linear infinite; }
+  .wire span { position: absolute; left: 50%; top: 14px; transform: translateX(-50%); width: max-content; text-align: center; font-size: 12.5px; color: var(--dim); line-height: 1.5; }
+  .wire code { color: var(--mist); font-size: 12px; }
+  @keyframes wire { to { background-position: 24px 0; } }
+  .nope { list-style: none; margin: 56px 0 40px; padding: 0; display: flex; flex-wrap: wrap; gap: 10px; }
+  .nope li { display: inline-flex; align-items: center; gap: 8px; padding: 8px 16px 8px 12px; border-radius: 999px; border: 1px solid var(--rule); color: var(--mist); font-size: 14.5px; }
+  .nope :global(svg) { color: #5fd4c4; }
+  .dash { display: grid; grid-template-columns: 300px minmax(0, 1fr); gap: 14px 32px; align-items: center; margin-top: 28px; }
+  .sub code { font-size: 0.88em; color: var(--ink); }
+  .dash .sub { margin: 0; font-size: 16px; }
+
+  /* FAQ */
+  .faq { display: grid; grid-template-columns: minmax(0, 0.7fr) minmax(0, 1.3fr); gap: 32px 64px; align-items: start; }
+  .qs { border-top: 1px solid var(--rule); }
+  details { border-bottom: 1px solid var(--rule); }
+  summary { display: flex; justify-content: space-between; gap: 24px; padding: 22px 0; cursor: pointer; list-style: none; font-size: 18px; font-weight: 500; }
+  summary::-webkit-details-marker { display: none; }
+  summary::after { content: '+'; color: var(--amber); font-size: 22px; line-height: 1; transition: transform 0.25s; }
+  details[open] summary::after { transform: rotate(45deg); }
+  details p { margin: 0 0 24px; color: var(--mist); max-width: 62ch; }
+
+  /* Finale: the dawn, fully up. */
+  .finale { position: relative; isolation: isolate; overflow: hidden; margin-top: clamp(96px, 12vw, 150px); padding-block: clamp(110px, 15vw, 190px); text-align: center; }
+  .finale::before {
+    content: ''; position: absolute; z-index: -1; left: 50%; bottom: -70%; width: min(1400px, 130vw); aspect-ratio: 1.6; translate: -50% 0; border-radius: 50%;
+    background: radial-gradient(closest-side, rgba(255, 194, 150, 0.75), rgba(214, 166, 255, 0.5) 40%, rgba(77, 133, 255, 0.22) 70%, transparent);
+    filter: blur(40px);
+  }
+  .finale h2 { font-size: clamp(2.4rem, 6vw, 4.8rem); margin-bottom: 8px; }
+  .center { justify-content: center; animation: none; }
+  .ghost { display: inline-flex; align-items: center; height: 50px; padding: 0 22px; border-radius: 999px; border: 1px solid rgba(255, 255, 255, 0.2); color: var(--ink); text-decoration: none; font-weight: 500; }
+  .ghost:hover { border-color: rgba(255, 255, 255, 0.4); }
+
+  /* Reveals: an eased entrance that plays once when an element comes into view (see the script).
+     Never tied to scroll position, so text is never left half-faded while someone reads it. */
+  :global(.js) .rise {
+    opacity: 0; transform: translateY(26px); filter: blur(6px);
+    transition: opacity 0.8s cubic-bezier(0.2, 0.7, 0.2, 1), transform 0.9s cubic-bezier(0.2, 0.7, 0.2, 1), filter 0.8s ease;
+    transition-delay: var(--d, 0ms);
+  }
+  :global(.js) .rise.in { opacity: 1; transform: none; filter: none; }
+
+  /* Only decoration is scroll-linked: the wire draws itself and the closing sun rises. */
+  @supports (animation-timeline: view()) {
+    .wire { animation: wire 0.9s linear infinite, draw linear both; animation-timeline: auto, view(); animation-range: normal, entry 40% cover 50%; }
+    .finale::before { animation: sunrise linear both; animation-timeline: view(); animation-range: entry 0% cover 60%; }
+    @keyframes draw { from { transform: scaleX(0); } }
+    @keyframes sunrise { from { translate: -50% 40%; opacity: 0.2; scale: 0.7; } }
+  }
+
+  @media (max-width: 900px) {
+    .faq, .install li, .dash, .infra, .story { grid-template-columns: minmax(0, 1fr); }
+    .words { display: none; }
+    .word-m { display: block; }
+    .panel { min-height: 0; padding-block: 32px; }
+    .wire { width: 2px; height: 64px; margin: 0 0 0 40px; background: repeating-linear-gradient(180deg, var(--amber) 0 6px, transparent 6px 12px); animation: none; }
+    .wire span { left: 18px; top: 50%; transform: translateY(-50%); text-align: left; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    :global(.js) .rise { opacity: 1; transform: none; filter: none; }
+    .sky i { animation: none; }
+  }
+</style>

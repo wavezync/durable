@@ -1,0 +1,9 @@
+---
+// Preload the fonts every page uses, so text paints in Sora from the first frame
+// instead of flashing a fallback and swapping. Vite gives these the same hashed
+// URLs as the @font-face rules in styles/fonts.css, so nothing downloads twice.
+import sora from '@fontsource-variable/sora/files/sora-latin-wght-normal.woff2?url';
+import mono400 from '@fontsource/geist-mono/files/geist-mono-latin-400-normal.woff2?url';
+import mono500 from '@fontsource/geist-mono/files/geist-mono-latin-500-normal.woff2?url';
+---
+{[sora, mono400, mono500].map((href) => <link rel="preload" href={href} as="font" type="font/woff2" crossorigin />)}
