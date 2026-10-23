@@ -1,6 +1,6 @@
 # M04: Documentation & Release
 
-**Status:** Not Started
+**Status:** Done
 **Priority:** High
 **Effort:** 1 week
 **Dependencies:** M02, M03 (soft — can start without, but references their output)

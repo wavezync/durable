@@ -619,6 +619,7 @@ option list and design notes.
 - [Compensations](guides/compensations.md) - Saga pattern
 - [Waiting](guides/waiting.md) - Sleep, events, human input
 - [Orchestration](guides/orchestration.md) - Parent/child workflow composition
+- [Testing](guides/testing.md) - Run and assert on workflows in ExUnit
 
 ## License
 

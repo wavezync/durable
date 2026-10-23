@@ -255,7 +255,7 @@ defmodule Durable.Executor.StepRunner do
         |> Map.put(:error, error_summary(error))
       )
 
-      Process.sleep(backoff_ms)
+      Backoff.pause(backoff_ms)
 
       execute_with_retry(step, data, step_exec.workflow_id, attempt + 1, max_attempts, config)
     else

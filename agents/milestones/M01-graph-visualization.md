@@ -1,6 +1,6 @@
 # M01: Graph Visualization
 
-**Status:** Not Started
+**Status:** Superseded (dashboard GraphBuilder; DOT/Mermaid export moved to backlog)
 **Priority:** Medium
 **Effort:** 1 week
 **Dependencies:** None

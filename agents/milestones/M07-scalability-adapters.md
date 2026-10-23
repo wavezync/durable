@@ -1,6 +1,6 @@
 # M07: Scalability Adapters
 
-**Status:** Not Started
+**Status:** Backlog
 **Priority:** Low
 **Effort:** 2 weeks
 **Dependencies:** M05 (soft — message bus pattern informs adapter design)

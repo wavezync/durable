@@ -119,8 +119,16 @@ defmodule Durable.Executor.Backoff do
   """
   @spec sleep(strategy(), pos_integer(), opts()) :: :ok
   def sleep(strategy, attempt, opts \\ %{}) do
-    delay = calculate_with_jitter(strategy, attempt, opts)
-    Process.sleep(delay)
+    strategy
+    |> calculate_with_jitter(attempt, opts)
+    |> pause()
+  end
+
+  @doc false
+  # `Durable.Testing.drain/2` sets `:durable_skip_backoff` so retries don't slow tests.
+  @spec pause(non_neg_integer()) :: :ok
+  def pause(ms) do
+    unless Process.get(:durable_skip_backoff), do: Process.sleep(ms)
     :ok
   end
 end

@@ -1,6 +1,6 @@
 # M05: Message Bus
 
-**Status:** Not Started
+**Status:** Partial (Durable.PubSub lifecycle events; adapter behaviour moved to backlog)
 **Priority:** Medium
 **Effort:** 1.5 weeks
 **Dependencies:** None

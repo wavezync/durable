@@ -1,6 +1,6 @@
 # M03: Testing Framework
 
-**Status:** Not Started
+**Status:** Done (shipped as `Durable.Testing` + `guides/testing.md`; see note below)
 **Priority:** Medium
 **Effort:** 1 week
 **Dependencies:** None
@@ -174,6 +174,26 @@ Sections:
 - [ ] `@moduledoc` on `Durable.TestCase` is comprehensive with examples
 - [ ] Existing tests in `test/` still pass (no regressions)
 - [ ] `mix credo --strict` passes
+
+## Outcome (2026-10-23)
+
+Shipped as `Durable.Testing`, a helper module users `import` into their own
+`DataCase`, instead of a `Durable.TestCase` case template: users already have a
+case template that owns the sandbox, and ExUnit allows only one per module.
+
+- `run_workflow/3`, `drain/2`: inline execution of the whole run tree (parallel
+  branches, child workflows); sleeps end immediately, retry backoff is skipped
+  (`Backoff.pause/1` checks `:durable_skip_backoff`).
+- `assert_status/3`, `assert_step/4` (matches parallel/branch steps by their own
+  name, returns the `%StepExecution{}`), `assert_waiting_for_input/3`,
+  `assert_waiting_for_event/3`, `steps/2`.
+- Dropped as unneeded: `assert_context` (pattern-match `run.context`),
+  `assert_completed_within`, `provide_test_input`/`send_test_event` (use
+  `Durable.provide_input/3` / `send_event/3` + `drain/2`).
+- Not covered: wait timeouts (TimeoutWorker needs the queue on).
+- Found and fixed while testing it: a step returning `{:error, "string"}` left
+  the run stuck `:running` (or crashed compensation) because the error wasn't
+  normalized to a map before the write.
 
 ## Open Questions
 

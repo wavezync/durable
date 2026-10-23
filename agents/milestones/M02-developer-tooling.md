@@ -1,6 +1,6 @@
 # M02: Developer Tooling
 
-**Status:** Not Started
+**Status:** Done
 **Priority:** High
 **Effort:** 1 week
 **Dependencies:** None
