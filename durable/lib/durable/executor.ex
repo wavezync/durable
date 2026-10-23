@@ -532,16 +532,26 @@ defmodule Durable.Executor do
     # Get workflow definition for compensation lookup
     {:ok, workflow_def} = get_workflow_definition_from_execution(execution)
 
-    # Find the starting point (for resumed workflows)
+    # A resumed run picks up at its current step, found by name.
     {_already_completed, steps_to_run} =
-      if execution.current_step do
-        # Find and skip to current step
-        current_step_atom = String.to_existing_atom(execution.current_step)
-        Enum.split_while(steps, fn step -> step.name != current_step_atom end)
-      else
-        {[], steps}
-      end
+      Enum.split_while(steps, &(execution.current_step not in [nil, Atom.to_string(&1.name)]))
 
+    if steps_to_run == [] and execution.current_step != nil do
+      # The deployed definition no longer has the step this run stopped at.
+      # Running on from a guess would skip work, so fail, without
+      # compensating: restore the step and `Durable.retry/2` the run.
+      mark_failed(config, execution, %{
+        type: "definition_changed",
+        message:
+          "#{execution.workflow_name} has no step #{execution.current_step} any more; " <>
+            "this run stopped there before the workflow changed"
+      })
+    else
+      run_steps(steps, steps_to_run, execution, workflow_def, config, initial_data)
+    end
+  end
+
+  defp run_steps(steps, steps_to_run, execution, workflow_def, config, initial_data) do
     # Build step index for validation
     step_index = build_step_index(steps)
 

@@ -18,11 +18,7 @@ defmodule Durable.ResumeEdgeCasesTest do
   # ============================================================================
 
   describe "resume with corrupted state" do
-    # Note: Resume with non-existent current_step atom causes ArgumentError
-    # This is documented behavior - binary_to_existing_atom fails
-    # The test below documents this edge case
-
-    test "resume with non-existent current_step raises ArgumentError" do
+    test "resume with non-existent current_step fails the run" do
       config = Config.get(Durable)
       repo = config.repo
       {:ok, workflow_def} = ResumableWorkflow.__default_workflow__()
@@ -44,10 +40,10 @@ defmodule Durable.ResumeEdgeCasesTest do
         |> WorkflowExecution.changeset(attrs)
         |> repo.insert()
 
-      # Execute - should raise ArgumentError due to binary_to_existing_atom
-      assert_raise ArgumentError, fn ->
-        Executor.execute_workflow(execution.id, config)
-      end
+      Executor.execute_workflow(execution.id, config)
+
+      assert %{status: :failed, error: %{"type" => "definition_changed"}} =
+               repo.get!(WorkflowExecution, execution.id)
     end
 
     test "resume with empty context but populated step history" do
