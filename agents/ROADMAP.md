@@ -1,7 +1,7 @@
 # Durable — Roadmap
 
 **Last Updated:** 2026-10-23
-**Current release:** `durable` 1.0.0 and `durable_dashboard` 1.0.0 on Hex (2026-10-21)
+**Current release:** `durable` 1.1.0 (2026-10-23) and `durable_dashboard` 1.0.0 (2026-10-21) on Hex
 **Reference:** See `arch.md` for technical architecture, `WORKPLAN_ARCHIVED.md` for historical detail
 
 ---
@@ -50,6 +50,7 @@
 | [M05](milestones/M05-message-bus.md) | Message Bus | Partial | `Durable.PubSub` lifecycle events shipped. Adapter behaviour / pg_notify not built → backlog |
 | [M06](milestones/M06-phoenix-dashboard.md) | Phoenix Dashboard | Done | Shipped as its own package |
 | [M07](milestones/M07-scalability-adapters.md) | Scalability Adapters | Backlog | No demand for Redis yet |
+| [M08](milestones/M08-workflow-versioning.md) | Workflow Versioning | In Progress | Phase 1 (fail on a removed step) done; phase 2 (`version:` pinning) waits on the doc's open questions |
 
 ---
 
@@ -57,13 +58,9 @@
 
 In priority order:
 
-1. **Correctness follow-ups from v1:**
-   - The workflow deadline can't interrupt a step that's still running; it's only checked between steps.
-   - `wait_for_input` with `on_timeout: :fail` ends the run as `cancelled`, not `failed`. Fixing it changes behaviour, so ship it in a minor release with a changelog note.
-2. **Workflow versioning.** Needs a milestone doc. Changing a deployed workflow while runs are still in flight is the main open problem for production users.
-3. **DSL gaps:** waits inside `parallel` blocks, an `each`/foreach primitive (each iteration needs its own context, see `Durable.DSL.Step` docs), decisions inside `parallel`.
-4. **Testing follow-up:** wait timeouts can't be exercised by `Durable.Testing.drain/2` (the timeout worker only runs with the queue on). A helper that fires a run's pending timeouts would close it.
-5. **Formatter follow-up to #10:** the repo's own `durable/.formatter.exs` only *exports* `locals_without_parens`, so internal code and tests still get parens. Also add `:durable` to `import_deps` in `durable_dashboard` and `examples/phoenix_demo`.
+1. **Workflow versioning, phase 2** ([M08](milestones/M08-workflow-versioning.md)). Pin each run to the `version:` it started on. Needs the doc's three open questions answered first. Adds a migration.
+2. **DSL gaps:** waits inside `parallel` blocks, an `each`/foreach primitive (each iteration needs its own context, see `Durable.DSL.Step` docs), decisions inside `parallel`.
+3. **Testing follow-up:** wait timeouts can't be exercised by `Durable.Testing.drain/2` (the timeout worker only runs with the queue on). A helper that fires a run's pending timeouts would close it.
 
 ---
 
@@ -86,9 +83,10 @@ In priority order:
 2. Decisions are not supported inside parallel blocks
 3. No backward jumps in decision steps (forward-only by design)
 4. Context is single-level atomized (top-level keys only)
-5. No workflow versioning
+5. No workflow version pinning (M08)
 6. No foreach/loop DSL primitive (use Elixir's `Enum` functions)
 7. A resumed wait re-runs the step body from the top; side effects before the wait must be idempotent
 8. Only one `sleep/1` per step body
-9. The workflow deadline is checked between steps and can't interrupt a running step
-10. `Durable.Testing.drain/2` doesn't fire wait timeouts
+9. `Durable.Testing.drain/2` doesn't fire wait timeouts
+10. A step with a `timeout:`, or in a workflow with one, runs in its own process (`self()` isn't the worker)
+11. In-flight runs resume on the deployed definition; a removed current step fails the run (versioning: M08)
