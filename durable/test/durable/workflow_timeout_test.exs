@@ -59,6 +59,19 @@ defmodule Durable.WorkflowTimeoutTest do
     end
   end
 
+  test "step options are evaluated too: timeout: seconds(1) is a number" do
+    defmodule Opts do
+      use Durable
+
+      workflow "opts" do
+        step(:a, [timeout: seconds(1), retry: [base: seconds(2)]], fn data -> {:ok, data} end)
+      end
+    end
+
+    {:ok, %{steps: [step]}} = Opts.__workflow_definition__("opts")
+    assert step.opts == %{timeout: 1_000, retry: %{base: 2_000}}
+  end
+
   test "a run past its deadline fails before the next step and compensates" do
     {:ok, id} = Executor.start_workflow(SlowSaga, %{}, inline: true)
     run = run(id)

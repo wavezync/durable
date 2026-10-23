@@ -89,7 +89,7 @@ defmodule Durable.DSL.Step do
         type: :step,
         module: __MODULE__,
         body_fn: &(__MODULE__.unquote(func_name) / 1),
-        opts: unquote(Macro.escape(normalized_opts))
+        opts: unquote(quote_opts(normalized_opts))
       }
     end
   end
@@ -112,6 +112,14 @@ defmodule Durable.DSL.Step do
   end
 
   defp normalize_retry_opts(opts), do: opts
+
+  # Option values are code: splice them in rather than escape them, so
+  # `timeout: seconds(30)` is a number in the workflow module, not the quoted
+  # call.
+  defp quote_opts(opts) when is_map(opts),
+    do: {:%{}, [], Enum.map(opts, fn {key, value} -> {key, quote_opts(value)} end)}
+
+  defp quote_opts(value), do: value
 
   @doc """
   Defines a decision step for conditional branching.
@@ -165,7 +173,7 @@ defmodule Durable.DSL.Step do
         type: :decision,
         module: __MODULE__,
         body_fn: &(__MODULE__.unquote(func_name) / 1),
-        opts: unquote(Macro.escape(normalized_opts))
+        opts: unquote(quote_opts(normalized_opts))
       }
     end
   end
@@ -227,7 +235,7 @@ defmodule Durable.DSL.Step do
         name: unquote(name),
         module: __MODULE__,
         body_fn: &(__MODULE__.unquote(func_name) / 1),
-        opts: unquote(Macro.escape(normalized_opts))
+        opts: unquote(quote_opts(normalized_opts))
       }
     end
   end
@@ -299,7 +307,7 @@ defmodule Durable.DSL.Step do
             type: :step,
             module: __MODULE__,
             body_fn: &(__MODULE__.unquote(func_name) / 1),
-            opts: unquote(Macro.escape(step_opts))
+            opts: unquote(quote_opts(step_opts))
           }
         end
       end)
@@ -515,7 +523,7 @@ defmodule Durable.DSL.Step do
             type: :step,
             module: __MODULE__,
             body_fn: &(__MODULE__.unquote(func_name) / 1),
-            opts: unquote(Macro.escape(step_opts))
+            opts: unquote(quote_opts(step_opts))
           }
         end
       end)
