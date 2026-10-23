@@ -321,7 +321,8 @@ defmodule Durable.Wait do
   - `:choices` - Choice options for choice input
   - `:timeout` - Timeout in milliseconds
   - `:timeout_value` - Value to return on timeout
-  - `:on_timeout` - `:resume` (default) or `:fail`
+  - `:on_timeout` - `:resume` (default) returns `:timeout_value`; `:fail`
+    fails the run with a `"timeout"` error, running its compensations
 
   ## Examples
 

@@ -482,18 +482,37 @@ defmodule Durable.Executor do
 
   defp past_deadline?(_execution), do: false
 
-  # The deadline passed before `step` began. Fail the run the way a failed step
-  # would — so its compensations run — and stop any child runs it waited on.
+  # The deadline passed before `step` began.
   defp time_out(execution, step, workflow_def, config) do
-    cancel_child_workflows(config, execution.id)
-    {:ok, exec} = update_current_step(config, execution, step.name)
-
     error = %{
       type: "timeout",
       message:
         "the run passed its #{format_timeout(workflow_def.opts[:timeout])} timeout " <>
           "before #{step.name}"
     }
+
+    fail_at(execution, step, error, workflow_def, config)
+  end
+
+  # The TimeoutWorker resumes a run whose `on_timeout: :fail` wait timed out
+  # with the error under `__fail__`, so the run fails here, in the executor,
+  # rather than being written off from outside.
+  defp resume_failure(%{context: %{"__fail__" => error}}), do: error
+  defp resume_failure(_execution), do: nil
+
+  # Fail the run at `step` the way a failed step would — so its compensations
+  # run — and stop any child runs it waited on.
+  defp fail_at(execution, step, error, workflow_def, config) do
+    cancel_child_workflows(config, execution.id)
+
+    {:ok, exec} =
+      execution
+      |> Ecto.Changeset.change(
+        current_step: Atom.to_string(step.name),
+        # A retried run must not fail again on the same marker.
+        context: Map.delete(execution.context || %{}, "__fail__")
+      )
+      |> cas_update!(config)
 
     handle_step_failure(exec, error, workflow_def, config)
   end
@@ -564,10 +583,15 @@ defmodule Durable.Executor do
          config,
          data
        ) do
-    if past_deadline?(execution) do
-      time_out(execution, step, workflow_def, config)
-    else
-      dispatch_step(step, remaining_steps, execution, step_index, workflow_def, config, data)
+    cond do
+      past_deadline?(execution) ->
+        time_out(execution, step, workflow_def, config)
+
+      error = resume_failure(execution) ->
+        fail_at(execution, step, error, workflow_def, config)
+
+      true ->
+        dispatch_step(step, remaining_steps, execution, step_index, workflow_def, config, data)
     end
   end
 

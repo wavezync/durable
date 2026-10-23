@@ -252,6 +252,7 @@ end
 | `:metadata` | Additional data for UI |
 | `:timeout` | Max wait time |
 | `:timeout_value` | Value on timeout |
+| `:on_timeout` | `:resume` (default) returns `:timeout_value`; `:fail` fails the run and runs its compensations |
 | `:fields` | Field definitions for forms |
 | `:choices` | Options for choice inputs |
 

@@ -38,6 +38,18 @@ defmodule Durable.WorkflowTimeoutTest do
     end
   end
 
+  defmodule Ask do
+    use Durable
+    use Durable.Wait
+
+    workflow "ask" do
+      step(:ask, fn data ->
+        wait_for_input("ok", timeout: hours(1), on_timeout: :fail)
+        {:ok, data}
+      end)
+    end
+  end
+
   defp repo, do: Config.get(Durable).repo
   defp run(id), do: repo().get!(WorkflowExecution, id)
 
@@ -81,6 +93,26 @@ defmodule Durable.WorkflowTimeoutTest do
     assert %{"type" => "timeout", "message" => message} = run.error
     assert message =~ "50ms timeout before charge"
     refute run.context["charged"]
+  end
+
+  test "an input wait with on_timeout: :fail fails the run, and a retry waits again" do
+    {:ok, id} = Executor.start_workflow(Ask, %{}, inline: true)
+    past = DateTime.add(DateTime.utc_now(), -1, :second)
+
+    repo().update_all(from(p in PendingInput, where: p.workflow_id == ^id),
+      set: [timeout_at: past]
+    )
+
+    start_supervised!({TimeoutWorker, config: Config.get(Durable), interval: 3_600_000})
+    TimeoutWorker.check_timeouts(Durable)
+    :sys.get_state(TimeoutWorker.worker_name(Durable))
+    Executor.execute_workflow(id, Config.get(Durable))
+
+    assert %{status: :failed, error: %{"message" => "Timeout waiting for input: ok"}} = run(id)
+
+    {:ok, ^id} = Durable.retry(id)
+    Executor.execute_workflow(id, Config.get(Durable))
+    assert %{status: :waiting} = run(id)
   end
 
   test "a waiting run past its deadline is woken and failed" do
