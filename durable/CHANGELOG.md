@@ -4,6 +4,21 @@ All notable changes to this package. Versions follow [Semantic
 Versioning](https://semver.org); entries come from [Conventional
 Commits](https://www.conventionalcommits.org).
 
+## [1.1.0](https://github.com/wavezync/durable/compare/durable-v1.0.0...durable-v1.1.0) - 2026-10-23
+
+### Features
+
+- Add Durable.Testing helpers for testing workflows ([609c7e4](https://github.com/wavezync/durable/commit/609c7e4d11d2d09cd9d1f2d466354be94fae97a8))
+
+### Bug fixes
+
+- Store string step errors as maps instead of leaving the run running ([bfd5c85](https://github.com/wavezync/durable/commit/bfd5c8572b867de5fa32fab76e192f1dd2c2d134))
+
+### Documentation
+
+- Fix HexDocs source links; add a docs-only publish workflow ([4ee2d14](https://github.com/wavezync/durable/commit/4ee2d14927e57a26a4215776d174aacc581367be))
+- Add badges and links to durable.wavezync.com in the READMEs ([b030c68](https://github.com/wavezync/durable/commit/b030c686ab4244e8df56664ac6b0ad233c9cc7ed))
+
 ## [1.0.0](https://github.com/wavezync/durable/compare/durable-v0.1.0-rc...durable-v1.0.0) - 2026-10-21
 
 ### Features
