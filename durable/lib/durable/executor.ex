@@ -1854,6 +1854,11 @@ defmodule Durable.Executor do
 
   # Handles step failure by running compensations if needed
   defp handle_step_failure(execution, error, workflow_def, config) do
+    # `error` is a map column: a step's `{:error, "declined"}` must become a
+    # map here, or the failed/compensated write is rejected and the run stays
+    # :running.
+    error = error |> normalize_error() |> sanitize_for_json()
+
     # Get the compensation stack from completed steps
     compensation_stack = build_compensation_stack(execution.id, workflow_def, config)
 
