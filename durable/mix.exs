@@ -102,6 +102,7 @@ defmodule Durable.MixProject do
         "guides/compensations.md",
         "guides/orchestration.md",
         "guides/parallel.md",
+        "guides/testing.md",
         "guides/waiting.md"
       ],
       groups_for_modules: [

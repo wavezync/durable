@@ -18,6 +18,7 @@ export const DOCS: { file: string; id: string; label: string; group: string; tit
   { file: 'durable/guides/compensations.md', id: 'docs/compensations', label: 'Compensations', group: 'Guides' },
   { file: 'durable/guides/orchestration.md', id: 'docs/orchestration', label: 'Orchestration', group: 'Guides' },
   { file: 'durable/guides/ai_workflows.md', id: 'docs/ai-workflows', label: 'AI workflows', group: 'Guides' },
+  { file: 'durable/guides/testing.md', id: 'docs/testing', label: 'Testing', group: 'Guides' },
   { file: 'durable_dashboard/README.md', id: 'docs/dashboard', label: 'Dashboard', group: 'Dashboard', title: 'Durable Dashboard' },
   { file: 'durable/CHANGELOG.md', id: 'docs/changelog', label: 'durable', group: 'Changelog', description: 'Release history of durable, the workflow engine for Elixir: new features, fixes and breaking changes in every version on Hex.' },
   { file: 'durable_dashboard/CHANGELOG.md', id: 'docs/changelog/dashboard', label: 'durable_dashboard', group: 'Changelog', description: 'Release history of durable_dashboard, the Phoenix LiveView dashboard for Durable: new pages, fixes and changes in every version on Hex.' },
