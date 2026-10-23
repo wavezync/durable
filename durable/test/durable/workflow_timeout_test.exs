@@ -6,7 +6,7 @@ defmodule Durable.WorkflowTimeoutTest do
 
   alias Durable.Config
   alias Durable.Executor
-  alias Durable.Storage.Schemas.{PendingInput, WorkflowExecution}
+  alias Durable.Storage.Schemas.{PendingInput, StepExecution, WorkflowExecution}
   alias Durable.Wait.TimeoutWorker
 
   defmodule SlowSaga do
@@ -14,12 +14,12 @@ defmodule Durable.WorkflowTimeoutTest do
     use Durable.Helpers
 
     workflow "slow_saga", timeout: 50, queue: :sagas do
-      step(:reserve, [compensate: :release], fn data ->
-        Process.sleep(80)
-        {:ok, assign(data, :reserved, true)}
-      end)
+      step(:reserve, [compensate: :release], fn data -> {:ok, assign(data, :reserved, true)} end)
 
-      step(:charge, fn data -> {:ok, assign(data, :charged, true)} end)
+      step(:charge, fn data ->
+        Process.sleep(1_000)
+        {:ok, assign(data, :charged, true)}
+      end)
 
       compensate(:release, fn data -> {:ok, assign(data, :released, true)} end)
     end
@@ -34,6 +34,29 @@ defmodule Durable.WorkflowTimeoutTest do
       step(:ask, fn data ->
         wait_for_approval("manager")
         {:ok, data}
+      end)
+    end
+  end
+
+  defmodule Timed do
+    use Durable
+    use Durable.Context
+    use Durable.Helpers
+
+    require Logger
+
+    workflow "timed", timeout: minutes(1) do
+      step(:remember, fn data ->
+        put_context(:note, "kept")
+        Logger.info("remembering")
+        {:ok, data}
+      end)
+
+      step(:fetch, [timeout: 20, retry: [max_attempts: 2, base: 1]], fn data ->
+        calls = Process.get(:fetch_calls, 0) + 1
+        Process.put(:fetch_calls, calls)
+        if calls == 1, do: Process.sleep(1_000)
+        {:ok, assign(data, :note, get_context(:note))}
       end)
     end
   end
@@ -84,15 +107,38 @@ defmodule Durable.WorkflowTimeoutTest do
     assert step.opts == %{timeout: 1_000, retry: %{base: 2_000}}
   end
 
-  test "a run past its deadline fails before the next step and compensates" do
-    {:ok, id} = Executor.start_workflow(SlowSaga, %{}, inline: true)
+  test "the deadline stops a step that is still running, then compensates" do
+    {micros, {:ok, id}} =
+      :timer.tc(fn -> Executor.start_workflow(SlowSaga, %{}, inline: true) end)
+
     run = run(id)
 
+    assert micros < 500_000
     assert run.queue == "sagas"
     assert run.status == :compensated
-    assert %{"type" => "timeout", "message" => message} = run.error
-    assert message =~ "50ms timeout before charge"
+
+    assert run.error == %{
+             "type" => "timeout",
+             "message" => "the run passed its timeout during charge"
+           }
+
     refute run.context["charged"]
+  end
+
+  test "a step past its own timeout is stopped and retried" do
+    {:ok, id} = Executor.start_workflow(Timed, %{}, inline: true)
+    run = run(id)
+
+    assert run.status == :completed
+    # put_context and logs inside a time-limited step reach the run
+    assert run.context["note"] == "kept"
+
+    [remember, first, second] =
+      repo().all(from(s in StepExecution, where: s.workflow_id == ^id, order_by: s.inserted_at))
+
+    assert [%{"message" => "remembering"}] = remember.logs
+    assert first.error["message"] == "fetch took longer than its 20ms timeout"
+    assert {first.attempt, second.attempt, second.status} == {1, 2, :completed}
   end
 
   test "an input wait with on_timeout: :fail fails the run, and a retry waits again" do

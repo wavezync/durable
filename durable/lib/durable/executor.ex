@@ -517,7 +517,8 @@ defmodule Durable.Executor do
     handle_step_failure(exec, error, workflow_def, config)
   end
 
-  defp format_timeout(ms) when is_integer(ms) do
+  @doc false
+  def format_timeout(ms) when is_integer(ms) do
     Enum.find_value(
       [{86_400_000, "d"}, {3_600_000, "h"}, {60_000, "m"}, {1_000, "s"}],
       "#{ms}ms",
@@ -525,7 +526,7 @@ defmodule Durable.Executor do
     )
   end
 
-  defp format_timeout(_ms), do: "workflow"
+  def format_timeout(_ms), do: "workflow"
 
   defp execute_steps(steps, execution, config, initial_data) do
     # Get workflow definition for compensation lookup
@@ -628,7 +629,7 @@ defmodule Durable.Executor do
     # Update current step
     {:ok, exec} = update_current_step(config, execution, step.name)
 
-    case StepRunner.execute(step, data, exec.id, config) do
+    case StepRunner.execute(step, data, exec.id, config, exec.deadline_at) do
       {:ok, new_data} ->
         # Save data as context and continue to next step
         # save_data_as_context merges orchestration keys from process dict
@@ -888,7 +889,7 @@ defmodule Durable.Executor do
        ) do
     {:ok, exec} = update_current_step(config, execution, step.name)
 
-    case StepRunner.execute(step, data, exec.id, config) do
+    case StepRunner.execute(step, data, exec.id, config, exec.deadline_at) do
       {:ok, new_data} ->
         {:ok, exec} = save_data_as_context(config, exec, new_data)
 
@@ -1075,7 +1076,9 @@ defmodule Durable.Executor do
       context: Map.put(parent_context, "__parallel_step", Atom.to_string(step.name)),
       parent_workflow_id: parent_exec.id,
       trigger: :parent,
-      current_step: Atom.to_string(step.name)
+      current_step: Atom.to_string(step.name),
+      # A branch is part of the run, so the run's deadline stops it too.
+      deadline_at: parent_exec.deadline_at
     }
 
     %WorkflowExecution{}
@@ -1115,7 +1118,7 @@ defmodule Durable.Executor do
       input = atomize_keys(execution.input)
       data = Map.merge(inherited, input)
 
-      case StepRunner.execute(step_def, data, execution.id, config) do
+      case StepRunner.execute(step_def, data, execution.id, config, execution.deadline_at) do
         {:ok, output_data} ->
           mark_completed(config, execution, output_data)
 

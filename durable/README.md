@@ -497,9 +497,9 @@ workflow "process_order", timeout: hours(2), queue: :orders do
 ```
 
 - `:timeout` — how long a run may take from when it's due to start, waits and
-  sleeps included. A run past it fails with a `"timeout"` error before its next
-  step and runs its compensations; a waiting run is woken to do so (within the
-  timeout worker's one-minute sweep). It can't interrupt a step that's running.
+  sleeps included. A run past it fails with a `"timeout"` error and runs its
+  compensations: a step still running is stopped, and a waiting run is woken
+  to fail (within the timeout worker's one-minute sweep).
 - `:queue` — the queue runs start on unless `Durable.start/3` names one.
 
 Unknown options fail the compile.

@@ -37,9 +37,13 @@ defmodule Durable.DSL.Step do
   - `:retry` - Retry configuration
     - `:max_attempts` - Maximum retry attempts (default: 1)
     - `:backoff` - Backoff strategy: `:exponential`, `:linear`, `:constant`
-    - `:base` - Base for backoff calculation (default: 2)
-    - `:max_backoff` - Maximum backoff in ms (default: 3600000)
-  - `:timeout` - Step timeout in milliseconds
+    - `:base` - Base delay in ms (default: 1000)
+    - `:max_backoff` - Maximum backoff in ms (default: 30000)
+  - `:timeout` - How long one attempt may run, in milliseconds. A slower
+    attempt is stopped and fails with a `"timeout"` error, which is retried
+    like any error. A step with a timeout, or in a workflow with one, runs in
+    a separate process: its body sees the same context and captured logs,
+    but `self()` is not the worker.
   - `:compensate` - Name of compensation function for saga pattern
   - `:queue` - Override queue for this step
 
