@@ -482,12 +482,8 @@ defmodule Durable.Executor do
 
   defp past_deadline?(_execution), do: false
 
-  # The deadline passed before `step` began. Fail the run the way a failed step
-  # would — so its compensations run — and stop any child runs it waited on.
+  # The deadline passed before `step` began.
   defp time_out(execution, step, workflow_def, config) do
-    cancel_child_workflows(config, execution.id)
-    {:ok, exec} = update_current_step(config, execution, step.name)
-
     error = %{
       type: "timeout",
       message:
@@ -495,10 +491,34 @@ defmodule Durable.Executor do
           "before #{step.name}"
     }
 
+    fail_at(execution, step, error, workflow_def, config)
+  end
+
+  # The TimeoutWorker resumes a run whose `on_timeout: :fail` wait timed out
+  # with the error under `__fail__`, so the run fails here, in the executor,
+  # rather than being written off from outside.
+  defp resume_failure(%{context: %{"__fail__" => error}}), do: error
+  defp resume_failure(_execution), do: nil
+
+  # Fail the run at `step` the way a failed step would — so its compensations
+  # run — and stop any child runs it waited on.
+  defp fail_at(execution, step, error, workflow_def, config) do
+    cancel_child_workflows(config, execution.id)
+
+    {:ok, exec} =
+      execution
+      |> Ecto.Changeset.change(
+        current_step: Atom.to_string(step.name),
+        # A retried run must not fail again on the same marker.
+        context: Map.delete(execution.context || %{}, "__fail__")
+      )
+      |> cas_update!(config)
+
     handle_step_failure(exec, error, workflow_def, config)
   end
 
-  defp format_timeout(ms) when is_integer(ms) do
+  @doc false
+  def format_timeout(ms) when is_integer(ms) do
     Enum.find_value(
       [{86_400_000, "d"}, {3_600_000, "h"}, {60_000, "m"}, {1_000, "s"}],
       "#{ms}ms",
@@ -506,22 +526,32 @@ defmodule Durable.Executor do
     )
   end
 
-  defp format_timeout(_ms), do: "workflow"
+  def format_timeout(_ms), do: "workflow"
 
   defp execute_steps(steps, execution, config, initial_data) do
     # Get workflow definition for compensation lookup
     {:ok, workflow_def} = get_workflow_definition_from_execution(execution)
 
-    # Find the starting point (for resumed workflows)
+    # A resumed run picks up at its current step, found by name.
     {_already_completed, steps_to_run} =
-      if execution.current_step do
-        # Find and skip to current step
-        current_step_atom = String.to_existing_atom(execution.current_step)
-        Enum.split_while(steps, fn step -> step.name != current_step_atom end)
-      else
-        {[], steps}
-      end
+      Enum.split_while(steps, &(execution.current_step not in [nil, Atom.to_string(&1.name)]))
 
+    if steps_to_run == [] and execution.current_step != nil do
+      # The deployed definition no longer has the step this run stopped at.
+      # Running on from a guess would skip work, so fail, without
+      # compensating: restore the step and `Durable.retry/2` the run.
+      mark_failed(config, execution, %{
+        type: "definition_changed",
+        message:
+          "#{execution.workflow_name} has no step #{execution.current_step} any more; " <>
+            "this run stopped there before the workflow changed"
+      })
+    else
+      run_steps(steps, steps_to_run, execution, workflow_def, config, initial_data)
+    end
+  end
+
+  defp run_steps(steps, steps_to_run, execution, workflow_def, config, initial_data) do
     # Build step index for validation
     step_index = build_step_index(steps)
 
@@ -564,10 +594,15 @@ defmodule Durable.Executor do
          config,
          data
        ) do
-    if past_deadline?(execution) do
-      time_out(execution, step, workflow_def, config)
-    else
-      dispatch_step(step, remaining_steps, execution, step_index, workflow_def, config, data)
+    cond do
+      past_deadline?(execution) ->
+        time_out(execution, step, workflow_def, config)
+
+      error = resume_failure(execution) ->
+        fail_at(execution, step, error, workflow_def, config)
+
+      true ->
+        dispatch_step(step, remaining_steps, execution, step_index, workflow_def, config, data)
     end
   end
 
@@ -604,7 +639,7 @@ defmodule Durable.Executor do
     # Update current step
     {:ok, exec} = update_current_step(config, execution, step.name)
 
-    case StepRunner.execute(step, data, exec.id, config) do
+    case StepRunner.execute(step, data, exec.id, config, exec.deadline_at) do
       {:ok, new_data} ->
         # Save data as context and continue to next step
         # save_data_as_context merges orchestration keys from process dict
@@ -864,7 +899,7 @@ defmodule Durable.Executor do
        ) do
     {:ok, exec} = update_current_step(config, execution, step.name)
 
-    case StepRunner.execute(step, data, exec.id, config) do
+    case StepRunner.execute(step, data, exec.id, config, exec.deadline_at) do
       {:ok, new_data} ->
         {:ok, exec} = save_data_as_context(config, exec, new_data)
 
@@ -1051,7 +1086,9 @@ defmodule Durable.Executor do
       context: Map.put(parent_context, "__parallel_step", Atom.to_string(step.name)),
       parent_workflow_id: parent_exec.id,
       trigger: :parent,
-      current_step: Atom.to_string(step.name)
+      current_step: Atom.to_string(step.name),
+      # A branch is part of the run, so the run's deadline stops it too.
+      deadline_at: parent_exec.deadline_at
     }
 
     %WorkflowExecution{}
@@ -1091,7 +1128,7 @@ defmodule Durable.Executor do
       input = atomize_keys(execution.input)
       data = Map.merge(inherited, input)
 
-      case StepRunner.execute(step_def, data, execution.id, config) do
+      case StepRunner.execute(step_def, data, execution.id, config, execution.deadline_at) do
         {:ok, output_data} ->
           mark_completed(config, execution, output_data)
 

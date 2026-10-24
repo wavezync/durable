@@ -22,9 +22,10 @@ defmodule Durable.DSL.Workflow do
 
   - `:timeout` - How long a run may take, in milliseconds, from when it is due
     to start — waits and sleeps included. A run past it fails with a
-    `"timeout"` error before its next step, running compensations like any
-    failure; a waiting run is woken to do so. The deadline is checked between
-    steps, so it can't interrupt a step that is still running.
+    `"timeout"` error, running compensations like any failure: a step still
+    running is stopped (and not retried), and a waiting run is woken to fail.
+    Steps in a run with a timeout run in their own process; see the step
+    `:timeout` option.
   - `:queue` - The queue runs start on unless `Durable.start/3` names one
 
   """

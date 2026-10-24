@@ -39,14 +39,16 @@ defmodule Durable.Executor.StepRunner do
   - `data` - The data to pass to the step (from previous step or workflow input)
   - `workflow_id` - The workflow execution ID
   - `config` - The Durable config
+  - `deadline` - When the run's `timeout:` runs out, if it has one. A step
+    still running then is stopped, and isn't retried.
 
   Returns `{:ok, data}` on success or `{:error, reason}` after all retries exhausted.
   """
-  @spec execute(Step.t(), map(), String.t(), Config.t()) :: result()
-  def execute(%Step{} = step, data, workflow_id, %Config{} = config) do
+  @spec execute(Step.t(), map(), String.t(), Config.t(), DateTime.t() | nil) :: result()
+  def execute(%Step{} = step, data, workflow_id, %Config{} = config, deadline \\ nil) do
     max_attempts = get_max_attempts(step)
     start_attempt = next_attempt(config, workflow_id, step)
-    execute_with_retry(step, data, workflow_id, start_attempt, max_attempts, config)
+    execute_with_retry(step, data, workflow_id, start_attempt, max_attempts, config, deadline)
   end
 
   # Seed the retry counter from durable state instead of always starting at 1.
@@ -82,7 +84,7 @@ defmodule Durable.Executor.StepRunner do
     (failed_count || 0) + 1
   end
 
-  defp execute_with_retry(step, data, workflow_id, attempt, max_attempts, config) do
+  defp execute_with_retry(step, data, workflow_id, attempt, max_attempts, config, deadline) do
     # Set current step for logging/observability
     Context.set_current_step(step.name)
 
@@ -107,7 +109,7 @@ defmodule Durable.Executor.StepRunner do
 
     result =
       :telemetry.span([:durable, :step], span_meta, fn ->
-        result = run_body(step, data)
+        result = run_body(step, data, time_limit(step, deadline))
         {result, Map.merge(span_meta, step_outcome(result))}
       end)
 
@@ -126,6 +128,7 @@ defmodule Durable.Executor.StepRunner do
       duration_ms: duration_ms,
       attempt: attempt,
       max_attempts: max_attempts,
+      deadline: deadline,
       config: config
     }
 
@@ -138,6 +141,70 @@ defmodule Durable.Executor.StepRunner do
     :throw, value -> {:throw, value}
     kind, reason -> {:error, Durable.Executor.caught_error(kind, reason, __STACKTRACE__)}
   end
+
+  # The step's own `timeout:` or what's left until the run's deadline,
+  # whichever is shorter; nil when neither applies.
+  defp time_limit(step, deadline) do
+    left = deadline && max(DateTime.diff(deadline, DateTime.utc_now(), :millisecond), 0)
+
+    [{step.opts[:timeout], :step}, {left, :run}]
+    |> Enum.filter(&elem(&1, 0))
+    |> Enum.min_by(&elem(&1, 0), fn -> nil end)
+  end
+
+  defp past?(nil), do: false
+  defp past?(deadline), do: DateTime.compare(DateTime.utc_now(), deadline) != :lt
+
+  # Keys Task sets for itself; everything else in the dictionary is copied.
+  @task_keys [:"$ancestors", :"$callers", :"$initial_call"]
+
+  defp run_body(step, data, nil), do: run_body(step, data)
+  defp run_body(step, _data, {0, limit}), do: {:error, timeout_error(step, limit)}
+
+  # A body with a time limit runs in a task that is killed when the limit
+  # passes. The task starts with a copy of this process's dictionary (context,
+  # log capture, telemetry metadata) and hands its own back, so the body sees
+  # no difference beyond `self()`.
+  defp run_body(step, data, {ms, limit}) do
+    dict = Process.get()
+
+    task =
+      Task.async(fn ->
+        put_dict(dict)
+        {run_body(step, data), Process.get()}
+      end)
+
+    case Task.yield(task, ms) || stop(task) do
+      {:ok, {result, dict}} ->
+        put_dict(dict)
+        result
+
+      {:stopped, dict} ->
+        put_dict(dict)
+        {:error, timeout_error(step, limit)}
+    end
+  end
+
+  # Keeps what the body logged before it was stopped.
+  defp stop(task) do
+    {:dictionary, dict} = Process.info(task.pid, :dictionary) || {:dictionary, []}
+    Task.shutdown(task, :brutal_kill) || {:stopped, dict}
+  end
+
+  defp put_dict(dict),
+    do: for({key, value} <- dict, key not in @task_keys, do: Process.put(key, value))
+
+  defp timeout_error(step, :step) do
+    %{
+      type: "timeout",
+      message:
+        "#{step.name} took longer than its " <>
+          "#{Durable.Executor.format_timeout(step.opts[:timeout])} timeout"
+    }
+  end
+
+  defp timeout_error(step, :run),
+    do: %{type: "timeout", message: "the run passed its timeout during #{step.name}"}
 
   defp step_span_meta(config, workflow_id, step, attempt, max_attempts) do
     %{
@@ -234,13 +301,14 @@ defmodule Durable.Executor.StepRunner do
       duration_ms: duration_ms,
       attempt: attempt,
       max_attempts: max_attempts,
+      deadline: deadline,
       config: config
     } = ctx
 
     # Normalize error to map format for database storage
     normalized_error = normalize_error_for_storage(error)
 
-    if attempt < max_attempts do
+    if attempt < max_attempts and not past?(deadline) do
       {:ok, _} = fail_step_execution(config, step_exec, normalized_error, logs, duration_ms)
 
       retry_opts = get_retry_opts(step)
@@ -257,7 +325,15 @@ defmodule Durable.Executor.StepRunner do
 
       Backoff.pause(backoff_ms)
 
-      execute_with_retry(step, data, step_exec.workflow_id, attempt + 1, max_attempts, config)
+      execute_with_retry(
+        step,
+        data,
+        step_exec.workflow_id,
+        attempt + 1,
+        max_attempts,
+        config,
+        deadline
+      )
     else
       {:ok, _} = fail_step_execution(config, step_exec, normalized_error, logs, duration_ms)
       {:error, error}

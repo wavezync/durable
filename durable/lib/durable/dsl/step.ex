@@ -37,9 +37,13 @@ defmodule Durable.DSL.Step do
   - `:retry` - Retry configuration
     - `:max_attempts` - Maximum retry attempts (default: 1)
     - `:backoff` - Backoff strategy: `:exponential`, `:linear`, `:constant`
-    - `:base` - Base for backoff calculation (default: 2)
-    - `:max_backoff` - Maximum backoff in ms (default: 3600000)
-  - `:timeout` - Step timeout in milliseconds
+    - `:base` - Base delay in ms (default: 1000)
+    - `:max_backoff` - Maximum backoff in ms (default: 30000)
+  - `:timeout` - How long one attempt may run, in milliseconds. A slower
+    attempt is stopped and fails with a `"timeout"` error, which is retried
+    like any error. A step with a timeout, or in a workflow with one, runs in
+    a separate process: its body sees the same context and captured logs,
+    but `self()` is not the worker.
   - `:compensate` - Name of compensation function for saga pattern
   - `:queue` - Override queue for this step
 
@@ -89,7 +93,7 @@ defmodule Durable.DSL.Step do
         type: :step,
         module: __MODULE__,
         body_fn: &(__MODULE__.unquote(func_name) / 1),
-        opts: unquote(Macro.escape(normalized_opts))
+        opts: unquote(quote_opts(normalized_opts))
       }
     end
   end
@@ -112,6 +116,14 @@ defmodule Durable.DSL.Step do
   end
 
   defp normalize_retry_opts(opts), do: opts
+
+  # Option values are code: splice them in rather than escape them, so
+  # `timeout: seconds(30)` is a number in the workflow module, not the quoted
+  # call.
+  defp quote_opts(opts) when is_map(opts),
+    do: {:%{}, [], Enum.map(opts, fn {key, value} -> {key, quote_opts(value)} end)}
+
+  defp quote_opts(value), do: value
 
   @doc """
   Defines a decision step for conditional branching.
@@ -165,7 +177,7 @@ defmodule Durable.DSL.Step do
         type: :decision,
         module: __MODULE__,
         body_fn: &(__MODULE__.unquote(func_name) / 1),
-        opts: unquote(Macro.escape(normalized_opts))
+        opts: unquote(quote_opts(normalized_opts))
       }
     end
   end
@@ -227,7 +239,7 @@ defmodule Durable.DSL.Step do
         name: unquote(name),
         module: __MODULE__,
         body_fn: &(__MODULE__.unquote(func_name) / 1),
-        opts: unquote(Macro.escape(normalized_opts))
+        opts: unquote(quote_opts(normalized_opts))
       }
     end
   end
@@ -299,7 +311,7 @@ defmodule Durable.DSL.Step do
             type: :step,
             module: __MODULE__,
             body_fn: &(__MODULE__.unquote(func_name) / 1),
-            opts: unquote(Macro.escape(step_opts))
+            opts: unquote(quote_opts(step_opts))
           }
         end
       end)
@@ -515,7 +527,7 @@ defmodule Durable.DSL.Step do
             type: :step,
             module: __MODULE__,
             body_fn: &(__MODULE__.unquote(func_name) / 1),
-            opts: unquote(Macro.escape(step_opts))
+            opts: unquote(quote_opts(step_opts))
           }
         end
       end)
