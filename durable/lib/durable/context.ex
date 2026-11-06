@@ -47,6 +47,7 @@ defmodule Durable.Context do
   @input_key :durable_input
   @workflow_id_key :durable_workflow_id
   @step_key :durable_current_step
+  @attempt_key :durable_attempt
 
   @doc """
   Injects context management functions into the calling module.
@@ -67,6 +68,9 @@ defmodule Durable.Context do
           input: 0,
           workflow_id: 0,
           current_step: 0,
+          attempt: 0,
+          max_attempts: 0,
+          last_attempt?: 0,
           append_context: 2,
           increment_context: 2,
           parallel_results: 0,
@@ -253,6 +257,57 @@ defmodule Durable.Context do
   end
 
   @doc """
+  Returns which attempt of the current step this is, starting at 1.
+
+  The count carries over when a run resumes after a crash, and starts again at
+  1 after `Durable.retry/2`.
+
+  ## Examples
+
+      step :charge, [retry: [max_attempts: 5]], fn ctx ->
+        Logger.info("charging, attempt \#{attempt()} of \#{max_attempts()}")
+        ...
+      end
+
+  """
+  @spec attempt() :: pos_integer()
+  def attempt do
+    {attempt, _max} = Process.get(@attempt_key, {1, 1})
+    attempt
+  end
+
+  @doc """
+  Returns how many attempts the current step gets: its `retry: [max_attempts: n]`,
+  or 1 if it has no `retry:`.
+  """
+  @spec max_attempts() :: pos_integer()
+  def max_attempts do
+    {_attempt, max} = Process.get(@attempt_key, {1, 1})
+    max
+  end
+
+  @doc """
+  Returns `true` on the current step's last attempt: if it returns an error,
+  the step won't be tried again.
+
+  ## Examples
+
+      step :charge, [retry: [max_attempts: 5]], fn ctx ->
+        case Payments.charge(ctx.order) do
+          {:ok, _} = ok -> ok
+          {:error, reason} ->
+            if last_attempt?(), do: Orders.mark_payment_failed(ctx.order)
+            {:error, reason}
+        end
+      end
+
+  """
+  @spec last_attempt?() :: boolean()
+  def last_attempt? do
+    attempt() >= max_attempts()
+  end
+
+  @doc """
   Appends a value to a list in the context.
 
   If the key doesn't exist, creates a new list with the value.
@@ -384,6 +439,12 @@ defmodule Durable.Context do
   end
 
   @doc false
+  def set_attempt(attempt, max_attempts) do
+    Process.put(@attempt_key, {attempt, max_attempts})
+    :ok
+  end
+
+  @doc false
   def set_workflow_id(workflow_id) do
     Process.put(@workflow_id_key, workflow_id)
     :ok
@@ -400,6 +461,7 @@ defmodule Durable.Context do
     Process.delete(@input_key)
     Process.delete(@workflow_id_key)
     Process.delete(@step_key)
+    Process.delete(@attempt_key)
     # Log capture keys (cleanup in case of crashes)
     Process.delete(:durable_logs)
     Process.delete(:durable_original_group_leader)

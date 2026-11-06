@@ -761,6 +761,9 @@ defmodule Durable.Executor do
 
       {:error, error} ->
         handle_step_failure(exec, error, workflow_def, config)
+
+      {:cancel, reason} ->
+        cancel_from_step(config, exec, reason)
     end
   end
 
@@ -1000,25 +1003,10 @@ defmodule Durable.Executor do
         {:ok, exec} = save_data_as_context(config, exec, new_data)
         {:decision, exec, target_step, new_data}
 
-      {:sleep, opts} ->
+      {wait_type, opts}
+      when wait_type in [:sleep, :wait_for_event, :wait_for_input, :wait_for_any, :wait_for_all] ->
         {:ok, exec} = save_data_as_context(config, exec, data)
-        {:waiting, handle_sleep(config, exec, opts) |> elem(1)}
-
-      {:wait_for_event, opts} ->
-        {:ok, exec} = save_data_as_context(config, exec, data)
-        {:waiting, handle_wait_for_event(config, exec, opts) |> elem(1)}
-
-      {:wait_for_input, opts} ->
-        {:ok, exec} = save_data_as_context(config, exec, data)
-        {:waiting, handle_wait_for_input(config, exec, opts) |> elem(1)}
-
-      {:wait_for_any, opts} ->
-        {:ok, exec} = save_data_as_context(config, exec, data)
-        {:waiting, handle_wait_for_any(config, exec, opts) |> elem(1)}
-
-      {:wait_for_all, opts} ->
-        {:ok, exec} = save_data_as_context(config, exec, data)
-        {:waiting, handle_wait_for_all(config, exec, opts) |> elem(1)}
+        handle_wait_result(config, exec, wait_type, opts)
 
       {:call_workflow, opts} ->
         {:ok, exec} = save_data_as_context(config, exec, data)
@@ -1026,6 +1014,9 @@ defmodule Durable.Executor do
 
       {:error, error} ->
         handle_step_failure(exec, error, workflow_def, config)
+
+      {:cancel, reason} ->
+        cancel_from_step(config, exec, reason)
     end
   end
 
@@ -1217,6 +1208,9 @@ defmodule Durable.Executor do
 
         {:error, error} ->
           mark_failed(config, execution, normalize_error(error))
+
+        {:cancel, reason} ->
+          cancel_from_step(config, execution, reason)
 
         {wait_type, wait_opts}
         when wait_type in [:sleep, :wait_for_event, :wait_for_input, :wait_for_any, :wait_for_all] ->
@@ -1960,7 +1954,16 @@ defmodule Durable.Executor do
   def after_cancel(config, cancelled) do
     DurablePubSub.broadcast_workflow(config, :workflow_cancelled, workflow_event(cancelled))
     cancel_child_workflows(config, cancelled.id)
+    # A parent waiting on this run would otherwise wait forever.
+    maybe_notify_parent(config, cancelled, :cancelled, cancelled.error)
     :ok
+  end
+
+  # A step returned {:cancel, reason}: end the run as Durable.cancel/2 would.
+  # The cancel clears the lock token, so the worker's ack/nack is a no-op.
+  defp cancel_from_step(config, execution, reason) do
+    _ = cancel_workflow(execution.id, reason, durable: config.name)
+    {:error, %{type: "cancelled", message: reason}}
   end
 
   defp cancel_child_workflows(config, parent_id) do

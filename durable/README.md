@@ -514,6 +514,38 @@ workflow "process_order", timeout: hours(2), queue: :orders do
 
 Unknown options fail the compile.
 
+### Retries
+
+```elixir
+use Durable.Context
+
+step :charge, [retry: [max_attempts: 5, backoff: :exponential]], fn ctx ->
+  attempt()        # 1..5
+  max_attempts()   # 5
+  last_attempt?()  # true on attempt 5: an error now fails the step
+  ...
+end
+```
+
+A step without `retry:` gets one attempt. The attempt count carries over
+when a run resumes after a crash, and starts again after `Durable.retry/2`.
+
+When retrying won't help, stop now:
+
+```elixir
+step :download, [retry: [max_attempts: 5]], fn ctx ->
+  case Downloader.fetch(ctx.url) do
+    {:ok, file} -> {:ok, assign(ctx, :file, file)}
+    {:error, :gone} -> {:fail, "the file is gone"}     # fails now, compensations run
+    {:error, :deleted} -> {:cancel, "record deleted"}  # cancelled now, like Durable.cancel/2
+    {:error, reason} -> {:error, reason}               # retried
+  end
+end
+```
+
+`{:cancel, reason}` in a `parallel` step or a `call_workflow` child cancels
+only that run; its parent gets it as an error.
+
 ### Errors
 
 When a step fails, its execution keeps what went wrong as `error`:

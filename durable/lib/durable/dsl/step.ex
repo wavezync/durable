@@ -53,7 +53,15 @@ defmodule Durable.DSL.Step do
   Defines a step within a workflow.
 
   The step receives the previous step's output (or workflow input for the first step)
-  and must return `{:ok, data}` or `{:error, reason}`.
+  and returns one of:
+
+  - `{:ok, data}` - Done; `data` goes to the next step
+  - `{:error, reason}` - Failed; retried while attempts are left
+  - `{:fail, reason}` - Failed, and not retried: the run fails now and its
+    compensations run
+  - `{:cancel, reason}` - The run is cancelled now, like `Durable.cancel/2`:
+    no retries, no compensations. In a `parallel` step or a `call_workflow`
+    child, only that run is cancelled; its parent gets it as an error
 
   ## Examples
 

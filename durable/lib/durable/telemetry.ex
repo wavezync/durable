@@ -33,8 +33,8 @@ defmodule Durable.Telemetry do
 
     * `[:durable, :step, :start]` — metadata `:workflow_id`, `:workflow`,
       `:step`, `:step_type`, `:attempt`, `:max_attempts`
-    * `[:durable, :step, :stop]` — adds `:result` (`:ok`, `:error` or
-      `:suspended`) and, for errors, `:error` (`%{type, message}`)
+    * `[:durable, :step, :stop]` — adds `:result` (`:ok`, `:error`,
+      `:suspended` or `:cancelled`) and, for errors, `:error` (`%{type, message}`)
     * `[:durable, :step, :exception]`
     * `[:durable, :step, :retry]` — `%{backoff_ms}`; the step metadata plus
       `:error`, emitted before sleeping for the next attempt

@@ -9,7 +9,7 @@ defmodule Durable.Storage.Schemas.StepExecution do
   use Ecto.Schema
   import Ecto.Changeset
 
-  @type status :: :pending | :running | :completed | :failed | :waiting
+  @type status :: :pending | :running | :completed | :failed | :waiting | :cancelled
 
   @type t :: %__MODULE__{
           id: Ecto.UUID.t(),
@@ -40,7 +40,7 @@ defmodule Durable.Storage.Schemas.StepExecution do
     field(:attempt, :integer, default: 1)
 
     field(:status, Ecto.Enum,
-      values: [:pending, :running, :completed, :failed, :waiting],
+      values: [:pending, :running, :completed, :failed, :waiting, :cancelled],
       default: :pending
     )
 
@@ -119,13 +119,14 @@ defmodule Durable.Storage.Schemas.StepExecution do
   end
 
   @doc """
-  Creates a changeset for failing step execution.
+  Creates a changeset for a step execution that ended without completing:
+  `:failed`, or `:cancelled` when the step returned `{:cancel, reason}`.
   """
-  def fail_changeset(step_execution, error, logs, duration_ms) do
+  def fail_changeset(step_execution, error, logs, duration_ms, status \\ :failed) do
     step_execution
     |> cast(
       %{
-        status: :failed,
+        status: status,
         error: error,
         logs: logs,
         completed_at: DateTime.utc_now(),

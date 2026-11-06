@@ -22,6 +22,7 @@ defmodule Durable.Executor.StepRunner do
   @type result ::
           {:ok, map()}
           | {:error, any()}
+          | {:cancel, String.t()}
           | {:decision, atom(), map()}
           | {:sleep, keyword()}
           | {:wait_for_event, keyword()}
@@ -87,6 +88,7 @@ defmodule Durable.Executor.StepRunner do
   defp execute_with_retry(step, data, workflow_id, attempt, max_attempts, config, deadline) do
     # Set current step for logging/observability
     Context.set_current_step(step.name)
+    Context.set_attempt(attempt, max_attempts)
 
     # Set current data in process dictionary for wait functions to access.
     # On retry attempts (attempt > 1) we MERGE rather than overwrite so that
@@ -231,6 +233,8 @@ defmodule Durable.Executor.StepRunner do
   defp step_outcome({:goto, _target, _data}), do: %{result: :ok}
   defp step_outcome({:throw, {kind, _opts}}) when kind in @suspending, do: %{result: :suspended}
   defp step_outcome({:error, error}), do: %{result: :error, error: error_summary(error)}
+  defp step_outcome({:fail, error}), do: %{result: :error, error: error_summary(error)}
+  defp step_outcome({:cancel, _reason}), do: %{result: :cancelled}
 
   defp step_outcome(_other),
     do: %{result: :error, error: %{type: "invalid_return", message: "unexpected step result"}}
@@ -305,10 +309,8 @@ defmodule Durable.Executor.StepRunner do
       config: config
     } = ctx
 
-    # Normalize error to map format for database storage
-    normalized_error = normalize_error_for_storage(error)
-
     if attempt < max_attempts and not past?(deadline) do
+      normalized_error = normalize_error_for_storage(error)
       {:ok, _} = fail_step_execution(config, step_exec, normalized_error, logs, duration_ms)
 
       retry_opts = get_retry_opts(step)
@@ -335,9 +337,20 @@ defmodule Durable.Executor.StepRunner do
         deadline
       )
     else
-      {:ok, _} = fail_step_execution(config, step_exec, normalized_error, logs, duration_ms)
-      {:error, error}
+      give_up(error, ctx)
     end
+  end
+
+  # The step says retrying won't help: fail now, whatever attempts are left.
+  defp handle_result({:fail, error}, ctx), do: give_up(error, ctx)
+
+  # The step says the run should stop: the executor cancels it.
+  defp handle_result({:cancel, reason}, ctx) do
+    %{step_exec: step_exec, logs: logs, duration_ms: duration_ms, config: config} = ctx
+    reason = cancel_reason(reason)
+    error = %{type: "cancelled", message: reason}
+    {:ok, _} = fail_step_execution(config, step_exec, error, logs, duration_ms, :cancelled)
+    {:cancel, reason}
   end
 
   # Handle invalid return (not {:ok, map} or {:goto, ...})
@@ -347,12 +360,24 @@ defmodule Durable.Executor.StepRunner do
     error = %{
       type: "invalid_step_return",
       message:
-        "Step must return {:ok, map} or {:goto, :step, map} or {:error, reason}, got: #{inspect(other)}"
+        "Step must return {:ok, map}, {:goto, :step, map}, {:error, reason}, " <>
+          "{:fail, reason} or {:cancel, reason}, got: #{inspect(other)}"
     }
 
     {:ok, _} = fail_step_execution(config, step_exec, error, logs, duration_ms)
     {:error, error}
   end
+
+  defp give_up(error, ctx) do
+    %{step_exec: step_exec, logs: logs, duration_ms: duration_ms, config: config} = ctx
+    normalized_error = normalize_error_for_storage(error)
+    {:ok, _} = fail_step_execution(config, step_exec, normalized_error, logs, duration_ms)
+    {:error, error}
+  end
+
+  defp cancel_reason(reason) when is_binary(reason), do: reason
+  defp cancel_reason(reason) when is_atom(reason), do: Atom.to_string(reason)
+  defp cancel_reason(reason), do: inspect(reason)
 
   defp handle_step_success(config, step, step_exec, new_data, logs, duration_ms) do
     stored_output =
@@ -446,7 +471,7 @@ defmodule Durable.Executor.StepRunner do
     end
   end
 
-  defp fail_step_execution(config, step_exec, error, logs, duration_ms) do
+  defp fail_step_execution(config, step_exec, error, logs, duration_ms, status \\ :failed) do
     # Sanitize the error map — exception payloads frequently carry tuples
     # (e.g., FunctionClauseError args), PIDs, refs, and functions in the
     # stacktrace area, none of which can survive a JSONB write. Mirror the
@@ -454,10 +479,11 @@ defmodule Durable.Executor.StepRunner do
     safe_error = Durable.Executor.sanitize_for_json(error)
 
     case step_exec
-         |> StepExecution.fail_changeset(safe_error, logs, duration_ms)
+         |> StepExecution.fail_changeset(safe_error, logs, duration_ms, status)
          |> Repo.update(config) do
       {:ok, updated} = ok ->
-        DurablePubSub.broadcast_step(config, :step_failed, step_event(updated))
+        kind = if status == :cancelled, do: :step_cancelled, else: :step_failed
+        DurablePubSub.broadcast_step(config, kind, step_event(updated))
         ok
 
       other ->
