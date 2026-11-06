@@ -4,6 +4,26 @@ All notable changes to this package. Versions follow [Semantic
 Versioning](https://semver.org); entries come from [Conventional
 Commits](https://www.conventionalcommits.org).
 
+## [1.2.0](https://github.com/wavezync/durable/compare/durable-v1.1.0...durable-v1.2.0) - 2026-11-06
+
+### Features
+
+- Stop a step at its timeout or the run's deadline ([5a2d483](https://github.com/wavezync/durable/commit/5a2d483bc30c027478155ba44740205077a28068))
+- Add workflow keys, so a key starts at most one run ([bd05157](https://github.com/wavezync/durable/commit/bd051570fd37c15128dbb1a34f916c53d7ed5201))
+- Replace, signal or debounce a run whose key is taken ([e6b7431](https://github.com/wavezync/durable/commit/e6b7431893c7ff3baff7cb7a3bcb9a24b55f7937))
+
+### Bug fixes
+
+- Evaluate step option values, so seconds(1) is a number ([52af677](https://github.com/wavezync/durable/commit/52af677497586a12d3ac0d34868a22b95800d8e3))
+- Fail the run when an input wait times out with on_timeout: :fail ([0f8c177](https://github.com/wavezync/durable/commit/0f8c177a43046d61fc5fe0496645ba5a0845e9f2))
+- Fail a run whose current step a deploy removed ([67fc7d1](https://github.com/wavezync/durable/commit/67fc7d1229ff6f367b87f7ad657ca7c957ffabb8))
+- Keep a Stats window's last moments in its last bucket ([6799542](https://github.com/wavezync/durable/commit/67995421eeb366aa649ff5681887ee14dc5d17cd))
+
+### Documentation
+
+- Add the workflow keys guide and plan M09 ([13d4cce](https://github.com/wavezync/durable/commit/13d4cce75bc57513aff7c4eb721499d16928aff3))
+- Cover cancel_existing, send_event, debounce and the Keys page ([1feb9a8](https://github.com/wavezync/durable/commit/1feb9a87c830abe742e2504da33b4b8d5de74583))
+
 ## [1.1.0](https://github.com/wavezync/durable/compare/durable-v1.0.0...durable-v1.1.0) - 2026-10-23
 
 ### Features
