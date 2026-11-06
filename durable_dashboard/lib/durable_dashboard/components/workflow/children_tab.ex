@@ -83,7 +83,7 @@ defmodule DurableDashboard.Components.Workflow.ChildrenTab do
               {@family.parent.workflow_name}
             </span>
             <span
-              class="font-mono text-[10px] text-muted-foreground"
+              class="font-mono text-[11px] text-muted-foreground"
               data-tip="Parent run id"
               data-tip-meta={@family.parent.id}
             >
@@ -118,7 +118,7 @@ defmodule DurableDashboard.Components.Workflow.ChildrenTab do
         <div class="text-xs text-muted-foreground">
           Family executions ({length(@members)})
         </div>
-        <div class="flex items-center gap-2 text-[10px] text-muted-foreground font-mono">
+        <div class="flex items-center gap-2 text-[11px] text-muted-foreground font-mono">
           <span :for={{label, count} <- status_summary(@members)} class="inline-flex items-center gap-1">
             <span class={["size-1 rounded-full", status_dot(label)]} />
             {count} {label}
@@ -153,8 +153,7 @@ defmodule DurableDashboard.Components.Workflow.ChildrenTab do
         @member.id == @workflow.id && "bg-primary/[0.04]"
       ]}
     >
-      <Core.status_pill status={@member.status} />
-      <div class="flex flex-col leading-tight min-w-0 flex-1">
+      <div class="flex w-64 shrink-0 flex-col leading-tight min-w-0">
         <div class="flex items-center gap-2 min-w-0">
           <span
             class="font-mono text-xs text-foreground truncate"
@@ -170,13 +169,14 @@ defmodule DurableDashboard.Components.Workflow.ChildrenTab do
           </span>
         </div>
         <span
-          class="font-mono text-[10px] text-muted-foreground"
+          class="font-mono text-[11px] text-muted-foreground"
           data-tip="Run id"
           data-tip-meta={@member.id}
         >
           {short(@member.id)}
         </span>
       </div>
+      <div class="min-w-0 flex-1"><Core.run_status run={@member} /></div>
       <div
         :if={duration(@member)}
         class="text-numeric text-[11px] text-muted-foreground"

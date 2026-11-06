@@ -10,15 +10,15 @@
  *   data-tip-side   "bottom" to prefer below (default: above)
  *
  * Delegated listeners on `document`, so LiveView patches need no hooks. It
- * opens after a short hover (instantly while another just closed) or on
- * keyboard focus; Esc, a click, or scrolling closes it. It is `position:
- * fixed` on `<body>`, so `overflow: hidden` containers can't clip it, and it
- * re-reads its trigger while open, so a value that updates live stays current.
+ * opens after the pointer rests on a trigger (instantly when it moves straight
+ * from one open tip to the next, so charts scrub) or on keyboard focus; Esc,
+ * a click, or scrolling closes it. It is `position: fixed` on `<body>`, so
+ * `overflow: hidden` containers can't clip it, and it re-reads its trigger
+ * while open, so a value that updates live stays current.
  */
 
 const SELECTOR = "[data-tip], time[data-ts]";
-const OPEN_MS = 350;
-const WARM_MS = 600;
+const OPEN_MS = 700;
 const EDGE = 8;
 const GAP = 8;
 
@@ -36,7 +36,6 @@ let current: Trigger | null = null;
 let pending: Trigger | null = null;
 let openTimer = 0;
 let watchTimer = 0;
-let lastClosed = 0;
 
 export function initTooltips(): void {
   tip = document.createElement("div");
@@ -48,9 +47,8 @@ export function initTooltips(): void {
   document.addEventListener("pointerover", (e) => {
     if (e.pointerType === "touch") return;
     const target = triggerOf(e.target);
-    if (target === current || target === pending) return;
-    if (target) schedule(target);
-    else close();
+    if (!target) return close();
+    if (target !== current && target !== pending) schedule(target);
   });
   document.addEventListener("pointerout", (e) => {
     if (e.relatedTarget === null) close();
@@ -74,7 +72,7 @@ function triggerOf(node: EventTarget | null): Trigger | null {
 function schedule(target: Trigger) {
   window.clearTimeout(openTimer);
   pending = target;
-  const warm = current !== null || performance.now() - lastClosed < WARM_MS;
+  const warm = current !== null;
   if (current) hide();
   openTimer = window.setTimeout(() => open(target), warm ? 0 : OPEN_MS);
 }
@@ -107,7 +105,6 @@ function close() {
   pending = null;
   if (!current) return;
   hide();
-  lastClosed = performance.now();
 }
 
 function hide() {

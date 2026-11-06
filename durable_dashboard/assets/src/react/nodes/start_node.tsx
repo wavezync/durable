@@ -12,7 +12,7 @@ function StartNodeComponent() {
     <div className="relative">
       <div className="flex h-7 items-center gap-1 rounded-full border border-success/40 bg-success/10 pr-2 pl-1.5">
         <Play className="size-2.5 fill-success text-success" aria-hidden="true" />
-        <span className="font-mono text-[9px] uppercase tracking-widest text-success">start</span>
+        <span className="font-mono text-[11px] uppercase tracking-widest text-success">start</span>
       </div>
 
       <Handle

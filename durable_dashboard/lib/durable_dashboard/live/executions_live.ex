@@ -279,7 +279,7 @@ defmodule DurableDashboard.Live.ExecutionsLive do
         </.link>
       </div>
 
-      <nav class="mt-4 flex gap-0.5 overflow-x-auto border-b border-border" aria-label="Saved views">
+      <nav class="mt-4 flex gap-0.5 overflow-x-auto overflow-y-hidden border-b border-border" aria-label="Saved views">
         <button
           :for={{key, label, _} <- views()}
           type="button"
@@ -378,8 +378,7 @@ defmodule DurableDashboard.Live.ExecutionsLive do
                       phx-value-id={row.id}
                     />
                   </td>
-                  <td class="h-11 px-3"><Core.status_pill status={row.status} /></td>
-                  <td class="px-3">
+                  <td class="h-12 px-3">
                     <.link
                       navigate={DPath.execution(@base_path, row.id)}
                       class="flex min-w-0 flex-col leading-tight"
@@ -398,7 +397,7 @@ defmodule DurableDashboard.Live.ExecutionsLive do
                       </span>
                     </.link>
                   </td>
-                  <td class="truncate px-3 text-xs"><.trigger row={row} base_path={@base_path} /></td>
+                  <td class="px-3"><Core.run_status run={row} /></td>
                   <td class="whitespace-nowrap px-3 font-mono text-xs">
                     <Core.local_time at={row.inserted_at} format="datetime" />
                   </td>
@@ -410,7 +409,7 @@ defmodule DurableDashboard.Live.ExecutionsLive do
                       {row.step_count}<span :if={row.failures > 0} class="text-warning"> ↻{row.failures}</span>
                     </span>
                   </td>
-                  <td class="px-3"><.where row={row} /></td>
+                  <td class="truncate px-3 text-xs"><.trigger row={row} base_path={@base_path} /></td>
                   <td class="truncate px-3 text-xs" {queue_tip(row)}>
                     <span class="font-mono text-subtle-foreground">{row.queue}</span>
                     <span :if={row.locked_by && row.status == :running} class="text-muted-foreground"> · {short_node(row.locked_by)}</span>
@@ -564,54 +563,6 @@ defmodule DurableDashboard.Live.ExecutionsLive do
 
   defp trigger(assigns), do: ~H[<span class="text-muted-foreground">—</span>]
 
-  attr :row, :map, required: true
-
-  defp where(%{row: %{status: status}} = assigns) when status in [:completed, :pending] do
-    ~H[<span class="text-muted-foreground">—</span>]
-  end
-
-  defp where(assigns) do
-    error = Trace.error_parts(assigns.row.error)
-
-    assigns =
-      assign(assigns, step: Trace.display_name(assigns.row.current_step || ""), error: error)
-
-    ~H"""
-    <span
-      class="flex min-w-0 items-baseline gap-1.5"
-      data-tip-title={"#{where_label(@row.status)} #{@step}"}
-      data-tip={where_body(@row.status, @error)}
-      data-tip-meta={@error && @error.type}
-    >
-      <span class={["min-w-0 shrink-0 truncate font-mono text-xs", where_tone(@row.status)]}>{@step}</span>
-      <span :if={@error} class="truncate text-xs text-muted-foreground">
-        {@error.message}
-      </span>
-      <span :if={!@error and @row.status == :waiting} class="text-xs text-muted-foreground">waiting</span>
-    </span>
-    """
-  end
-
-  defp where_tone(status) when status in [:failed, :compensation_failed], do: "text-destructive"
-  defp where_tone(:compensated), do: "text-comp"
-  defp where_tone(:waiting), do: "text-warning"
-  defp where_tone(:running), do: "text-primary"
-  defp where_tone(_status), do: "text-subtle-foreground"
-
-  defp where_label(status) when status in [:failed, :compensation_failed], do: "Failed at"
-  defp where_label(:compensated), do: "Undone after"
-  defp where_label(:waiting), do: "Waiting at"
-  defp where_label(:cancelled), do: "Cancelled at"
-  defp where_label(_status), do: "Running"
-
-  defp where_body(_status, %{message: message}), do: message
-
-  defp where_body(:waiting, nil),
-    do: "Paused here until its sleep ends, its event arrives or someone answers"
-
-  defp where_body(:running, nil), do: "This step is running now"
-  defp where_body(_status, nil), do: "The step it stopped at"
-
   defp view_tip("all"), do: "Every top-level run the bar matches"
   defp view_tip("failed"), do: "Failed, compensated or compensation failed"
   defp view_tip("running"), do: "Running now, or queued for a worker"
@@ -621,10 +572,10 @@ defmodule DurableDashboard.Live.ExecutionsLive do
   defp header_tip("Trigger"),
     do: "What started the run · code, a schedule, a parent run or a rerun"
 
+  defp header_tip("Status"), do: "How it ended, or the step it's on and why it stopped there"
   defp header_tip("Started"), do: "When it was created, in your time zone"
   defp header_tip("Duration"), do: "First step to the last, or to now · waits included"
   defp header_tip("Steps"), do: "Distinct steps it reached · ↻ failed attempts that were retried"
-  defp header_tip("Where it is"), do: "The step it's on, or where it stopped and why"
   defp header_tip("Queue · node"), do: "The queue its jobs go through · the node running it now"
   defp header_tip(_label), do: nil
 
@@ -684,24 +635,22 @@ defmodule DurableDashboard.Live.ExecutionsLive do
 
   defp headers(nil),
     do: [
-      "Status",
       "Run",
-      "Trigger",
+      "Status",
       "Started",
       "Duration",
       "Steps",
-      "Where it is",
+      "Trigger",
       "Queue · node"
     ]
 
   defp headers(_name), do: headers(nil)
 
-  # Fixed widths, so live updates and paging never move a column; Run (when
-  # it names the workflow) and Where it is take what's left.
-  defp col_class("Status", _name), do: "w-[150px]"
-  defp col_class("Run", nil), do: "w-[180px]"
-  defp col_class("Run", _name), do: "w-[110px]"
-  defp col_class("Trigger", _name), do: "w-[136px]"
+  # Fixed widths, so live updates and paging never move a column; Status, and
+  # Run when it names the workflow, share what's left.
+  defp col_class("Run", nil), do: nil
+  defp col_class("Run", _name), do: "w-[120px]"
+  defp col_class("Trigger", _name), do: "w-[180px]"
   defp col_class("Started", _name), do: "w-[184px]"
   defp col_class("Duration", _name), do: "w-[80px]"
   defp col_class("Steps", _name), do: "w-[64px]"

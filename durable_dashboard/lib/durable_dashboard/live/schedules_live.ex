@@ -458,27 +458,18 @@ defmodule DurableDashboard.Live.SchedulesLive do
               <th class="px-4 py-2 text-left font-medium">Status</th>
               <th class="px-4 py-2 text-left font-medium">Started</th>
               <th class="px-4 py-2 text-right font-medium">Took</th>
-              <th class="px-4 py-2 text-left font-medium">Where it is</th>
             </tr>
           </thead>
           <tbody>
-            <tr :for={run <- Enum.take(@runs, 15)} class="h-10 border-b border-border last:border-b-0 hover:bg-accent">
+            <tr :for={run <- Enum.take(@runs, 15)} class="h-12 border-b border-border last:border-b-0 hover:bg-accent">
               <td class="px-4">
                 <.link navigate={DPath.execution(@base_path, run.id)} class="font-mono text-xs text-primary hover:underline">
                   {String.slice(run.id, 0, 8)}
                 </.link>
               </td>
-              <td class="px-4"><Core.status_pill status={run.status} /></td>
+              <td class="px-4"><Core.run_status run={run} /></td>
               <td class="px-4 text-xs text-muted-foreground"><Core.relative_time at={run.inserted_at} /></td>
               <td class="px-4 text-right font-mono text-xs">{Format.ms(duration_ms(run, @now))}</td>
-              <td
-                class="max-w-[280px] truncate px-4 text-xs"
-                data-tip-title={run.current_step}
-                data-tip={error_line(run)}
-              >
-                <span class="font-mono">{run.current_step || "—"}</span>
-                <span :if={error_line(run)} class="text-destructive"> — {error_line(run)}</span>
-              </td>
             </tr>
           </tbody>
         </table>
@@ -593,8 +584,4 @@ defmodule DurableDashboard.Live.SchedulesLive do
     sorted = Enum.sort(values)
     Enum.at(sorted, min(length(sorted) - 1, floor(p * length(sorted))))
   end
-
-  defp error_line(%{error: %{"message" => message}}) when is_binary(message), do: message
-  defp error_line(%{error: %{"reason" => reason}}) when is_binary(reason), do: reason
-  defp error_line(_run), do: nil
 end

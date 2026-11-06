@@ -9,6 +9,7 @@ defmodule DurableDashboard.Components.Core do
 
   use Phoenix.Component
 
+  alias DurableDashboard.Trace
   alias Phoenix.LiveView.JS
 
   # ============================================================================
@@ -477,7 +478,7 @@ defmodule DurableDashboard.Components.Core do
     <kbd class={[
       "inline-flex items-center justify-center min-w-[20px] h-5 px-1.5",
       "rounded-sm border border-border bg-muted text-muted-foreground",
-      "font-mono text-[10px] tracking-wide",
+      "font-mono text-[11px] tracking-wide",
       @class
     ]}>
       {render_slot(@inner_block)}
@@ -569,6 +570,64 @@ defmodule DurableDashboard.Components.Core do
     </span>
     """
   end
+
+  @doc """
+  A run's status in a list row: the mark and label, the step it is on or
+  stopped at, and its error on a second line. No pill ground, so a column of
+  them reads quietly; a completed run's label stays neutral and only states
+  that need a look take their color (`DESIGN.md` §6 "List / table row").
+
+      <.run_status run={row} />
+  """
+  attr :run, :map, required: true, doc: "a run with `:status`, `:current_step` and `:error`"
+
+  def run_status(assigns) do
+    run = assigns.run
+    key = status_key(run.status)
+    {label, tone} = status_meta(key)
+
+    step =
+      if key not in ["completed", "pending"] && run.current_step,
+        do: Trace.display_name(run.current_step)
+
+    error = Trace.error_parts(run.error)
+    where = step && "#{if key == "compensated", do: "after", else: "at"} "
+
+    assigns =
+      assign(assigns,
+        key: key,
+        label: label,
+        tone: run_status_tone(tone),
+        step: step,
+        where: where,
+        error: error,
+        tip_title: if(step, do: label <> " " <> where <> step, else: label)
+      )
+
+    ~H"""
+    <div
+      class="flex min-w-0 flex-col leading-tight"
+      data-tip-title={@tip_title}
+      data-tip={(@error && @error.message) || status_help(@key)}
+      data-tip-meta={@error && @error.type}
+    >
+      <span class="flex min-w-0 items-center gap-1.5 whitespace-nowrap">
+        <.status_dot status={@key} />
+        <span class={["font-medium", @tone]}>{@label}</span>
+        <span :if={@step} class="min-w-0 truncate text-muted-foreground">
+          {@where}<span class={["font-mono text-xs", @tone]}>{@step}</span>
+        </span>
+      </span>
+      <span :if={@error} class="truncate pl-3.5 text-xs text-muted-foreground">{@error.message}</span>
+    </div>
+    """
+  end
+
+  defp run_status_tone("primary"), do: "text-primary"
+  defp run_status_tone("warning"), do: "text-warning"
+  defp run_status_tone("destructive"), do: "text-destructive"
+  defp run_status_tone("comp"), do: "text-comp"
+  defp run_status_tone(_calm), do: "text-subtle-foreground"
 
   @doc """
   The bare status mark — the shape that carries a status wherever a full pill

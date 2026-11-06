@@ -181,14 +181,17 @@
   html,
   body {
     font-family: var(--font-sans);
-    font-size: 13px;
     line-height: 1.45;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
   }
 
+  /* Body text is 13px, but the root stays at the browser's 16px: Tailwind's
+     sizes are rem, so a 13px root shrank text-xs to 9.75px and every rem
+     spacing step by a fifth. */
   body {
     @apply bg-background text-foreground;
+    font-size: 13px;
   }
 
   code,

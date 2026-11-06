@@ -255,7 +255,7 @@ defmodule DurableDashboard.Components.Data.ExecutionFilters do
             }
             class="peer h-6 min-w-[16ch] flex-1 bg-transparent px-0.5 font-mono text-xs text-foreground outline-none placeholder:text-muted-foreground"
           />
-          <kbd class="shrink-0 rounded-[4px] border border-border px-1 font-mono text-[10px] text-muted-foreground peer-placeholder-shown:hidden">
+          <kbd class="shrink-0 rounded-[4px] border border-border px-1 font-mono text-[11px] text-muted-foreground peer-placeholder-shown:hidden">
             ↵ add
           </kbd>
           <button
