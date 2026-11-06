@@ -4,6 +4,22 @@ All notable changes to this package. Versions follow [Semantic
 Versioning](https://semver.org); entries come from [Conventional
 Commits](https://www.conventionalcommits.org).
 
+## [1.1.0](https://github.com/wavezync/durable/compare/durable_dashboard-v1.0.0...durable_dashboard-v1.1.0) - 2026-11-06
+
+### Features
+
+- Show and control workflow keys ([61f603b](https://github.com/wavezync/durable/commit/61f603be5d5d6d87e16e94a132728fce6f318b60))
+- Add the Keys page and show replaced, sent and debounced runs ([97b88ca](https://github.com/wavezync/durable/commit/97b88ca3b0accc39c065076d1200a55170fd097f))
+
+### Bug fixes
+
+- Require durable 1.2, which has the workflow keys APIs ([c3b387a](https://github.com/wavezync/durable/commit/c3b387abe30ca4fb8fb7ceead349ceee9c5d2c88))
+
+### Documentation
+
+- Fix HexDocs source links; add a docs-only publish workflow ([4ee2d14](https://github.com/wavezync/durable/commit/4ee2d14927e57a26a4215776d174aacc581367be))
+- Add badges and links to durable.wavezync.com in the READMEs ([b030c68](https://github.com/wavezync/durable/commit/b030c686ab4244e8df56664ac6b0ad233c9cc7ed))
+
 ## [1.0.0](https://github.com/wavezync/durable/compare/durable_dashboard-v0.1.0-rc...durable_dashboard-v1.0.0) - 2026-10-21
 
 ### Features
