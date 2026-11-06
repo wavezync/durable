@@ -401,6 +401,7 @@ defmodule Durable.Executor do
     with {:ok, execution} <- load_execution(config, workflow_id),
          true <- execution.status in [:pending, :running] || {:error, :superseded},
          {:ok, workflow_def} <- get_workflow_definition_from_execution(execution),
+         {:ok, execution} <- take_waiting_key(config, execution, workflow_def),
          resumed = execution.current_step != nil,
          {:ok, execution} <- mark_running(config, execution) do
       # Set workflow ID for logging/observability
@@ -613,6 +614,54 @@ defmodule Durable.Executor do
   # started_at is the first start: a run resumed after a wait keeps it, so
   # queue wait (ready → started) and run duration (started → finished) aren't
   # measured from the last resume.
+  # A run_again run waits behind its key's holder (runs_after_id), and the
+  # claim query skips it until that holder has ended. Now it takes the key.
+  # If another run took the key meanwhile it waits behind that one instead,
+  # unless a newer start already waits there (that one has the newer input,
+  # so this one is cancelled). If `reuse:` keeps the key, it's cancelled.
+  defp take_waiting_key(_config, %{runs_after_id: nil} = execution, _workflow_def),
+    do: {:ok, execution}
+
+  defp take_waiting_key(config, execution, workflow_def) do
+    case Keys.take_waiting(config, execution, workflow_def) do
+      {:ok, taken} ->
+        {:ok, taken}
+
+      {:behind, holder_id} ->
+        wait_behind(config, execution, holder_id)
+
+      {:kept, holder_id} ->
+        stop_waiting(
+          config,
+          execution,
+          "the key is kept by reuse: #{Keys.reuse(workflow_def)} " <>
+            "(held by #{String.slice(holder_id, 0, 8)})"
+        )
+    end
+  end
+
+  defp wait_behind(config, execution, holder_id) do
+    execution
+    |> Ecto.Changeset.change(
+      status: :pending,
+      runs_after_id: holder_id,
+      locked_by: nil,
+      locked_at: nil
+    )
+    |> Ecto.Changeset.unique_constraint(:key, name: :workflow_executions_runs_after_index)
+    |> cas_update(config)
+    |> case do
+      {:ok, waiting} -> {:waiting, waiting}
+      {:error, :superseded} = superseded -> superseded
+      {:error, _taken} -> stop_waiting(config, execution, "a newer start is waiting for the key")
+    end
+  end
+
+  defp stop_waiting(config, execution, reason) do
+    _ = cancel_workflow(execution.id, reason, durable: config.name)
+    {:error, :superseded}
+  end
+
   defp mark_running(config, execution) do
     started_at = execution.started_at || DateTime.utc_now()
 

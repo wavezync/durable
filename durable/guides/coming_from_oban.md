@@ -15,6 +15,7 @@ does the same thing here.
 | `Oban.insert_all/2` | `Durable.start_many/2` (keys are still checked) |
 | `unique:` | A workflow key: `key: "order:42"` ([Workflow keys](workflow_keys.md)) |
 | `unique:` on a cron job | `@schedule cron: "...", key: "cleanup"` |
+| Finish, check for new work, snooze to go again | `on_duplicate: :run_again` |
 | `max_attempts`, `backoff/1` | `retry: [max_attempts: 5, backoff: :exponential]` on a step |
 | `job.attempt` | `attempt/0`, `max_attempts/0`, `last_attempt?/0` in `Durable.Context` |
 | `{:snooze, seconds}` | `{:snooze, ms}` or `{:snooze, ms, reason}` |

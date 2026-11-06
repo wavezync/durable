@@ -25,15 +25,21 @@ defmodule Durable.Queue.Adapters.Postgres do
     # Use raw SQL for FOR UPDATE SKIP LOCKED which Ecto doesn't support directly
     sql = """
     WITH claimable AS (
-      SELECT id FROM #{prefix}.workflow_executions
-      WHERE status = 'pending'
-        AND queue = $1
-        AND (scheduled_at IS NULL OR scheduled_at <= NOW())
-        AND (locked_by IS NULL OR locked_at < NOW() - INTERVAL '#{config.stale_lock_timeout} seconds')
+      SELECT w.id FROM #{prefix}.workflow_executions w
+      WHERE w.status = 'pending'
+        AND w.queue = $1
+        AND (w.scheduled_at IS NULL OR w.scheduled_at <= NOW())
+        AND (w.locked_by IS NULL OR w.locked_at < NOW() - INTERVAL '#{config.stale_lock_timeout} seconds')
         AND NOT EXISTS (
           SELECT 1 FROM #{prefix}.queues q WHERE q.name = $1 AND q.paused_at IS NOT NULL
         )
-      ORDER BY priority DESC, scheduled_at ASC NULLS FIRST, inserted_at ASC
+        -- A run_again run waits until the run it's behind has ended.
+        AND NOT EXISTS (
+          SELECT 1 FROM #{prefix}.workflow_executions h
+          WHERE h.id = w.runs_after_id
+            AND h.status IN ('pending', 'running', 'waiting', 'compensating')
+        )
+      ORDER BY w.priority DESC, w.scheduled_at ASC NULLS FIRST, w.inserted_at ASC
       LIMIT $2
       FOR UPDATE SKIP LOCKED
     )
