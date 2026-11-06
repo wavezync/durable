@@ -237,8 +237,9 @@ execution id, settings config values).
 
 A run's workflow key: the caption `key` (sans, muted) beside the value in
 mono, on a `bg-secondary` chip, with the hover copy button. `holds` adds a
-muted badge: `true` → "Holds key", `false` → "Key moved" (another run took
-it). Both stay neutral, because holding a key is a normal state, not a status.
+muted badge: `true` → "Holds key"; `false` → "Key moved" when another run
+holds it, "Key released" when an operator let it go, else "Key free". All stay
+neutral, because holding a key is a normal state, not a status.
 The tooltip names the holder ("Held by 3f2a91c4 · Running"). It renders
 nothing for a run without a key.
 
@@ -351,7 +352,7 @@ its own `Phoenix.LiveComponent` module under
     schema name.
   - ⌘K button ("Jump to run, workflow…").
   - Nav in three intent groups under plain sentence-case captions —
-    **Observe** (Overview, Runs, Workflows), **Operate** (Inbox, Queues &
+    **Observe** (Overview, Runs, Workflows), **Operate** (Inbox, Keys, Queues &
     nodes, Schedules), **Instrument** (Telemetry, Settings). Active item:
     `bg-secondary` with the icon in the live blue.
   - Inbox carries an amber count pill when inputs are waiting on a person
@@ -527,13 +528,16 @@ One run, one page — header, banner, facts, then a view switch.
 - **Header**: workflow name + status pill, short id, the `<.key_chip>` when
   the run has a key, and the actions that fit the run's state: Cancel (live
   runs), Retry from step (failed), Rerun and Rerun with edited input
-  (finished), Release key (a closed run that holds its key). Actions need
+  (finished), Release key (a closed run that holds its key, when the
+  workflow's `reuse:` would otherwise keep it — releasing a key `reuse:`
+  already lets go would change nothing, so the button isn't offered). Actions need
   operator access; errors render inline under the buttons (`role="alert"`).
 - **A blocked action says why**, in one muted line under the buttons, and
   names what would unblock it: "Retry needs `article:42` back. `3f2a91c4`
   holds it and is still running: cancel it or wait for it to finish." When
   Retry would take the key back from a closed holder, its label says so:
-  "Retry and take the key back".
+  "Retry and take the key back". When Retry and Rerun are blocked by the
+  same key, one sentence covers both ("Retry and rerun need …").
 - **Release key confirms inline**: a strip under the header, never a modal
   (§10), that says what happens next: "Release `invoice:INV-2208`? This run
   keeps its history. The next start for this key sends the invoice again."
@@ -544,13 +548,21 @@ One run, one page — header, banner, facts, then a view switch.
   for rolled-back runs, why Retry is off. No banner for a clean success. A
   keyed run adds what happened to its key: "Run `3f2a91c4` took `article:42`
   at 10:41." on a run that lost it, and an amber banner on a holder that
-  dropped newer input ("Added again 3 times while running. The newest input
+  dropped newer input ("Added again 3 times while waiting. The newest input
   differs from this run's and was dropped (`on_duplicate: :use_existing`).")
-  with "Show dropped inputs" linking to the Key view.
+  — the "while …" follows the run's status — with "Show dropped inputs"
+  linking to the Key view. A run replaced by `on_duplicate: :cancel_existing`
+  says so in its cancelled banner, linking the run that replaced it ("Cancelled
+  — replaced by run `9c1e77a0`"). A pending run of a debounced workflow gets a
+  neutral banner: "Debounced: starts 13:42:10 unless the key is added again;
+  at the latest 13:46:00" (`local_time`; the latest is its first start plus
+  the debounce `timeout`).
 - **Facts strip**: started, duration, queued for, attempts, trigger (and
   what triggered it), queue · node, child runs, and for a keyed run the key
-  (with the run it came from) and "re-added 3× · last 41s ago" — one line,
-  mono values.
+  (with the run it came from) and "re-added 3× · last 41s ago", and for a
+  run with events kept for it (`send_event(..., buffer: true)`, a keyed start
+  with `on_duplicate: {:send_event, name}`) "Kept events 1 · article_updated"
+  — one line, mono values.
 - **Views**: Trace (default), Graph, Logs, Context, Family, Key. Family shows
   only when the run has a family, Key only when it has a key. URL:
   `/executions/:id/:view?step=&pane=`, so "this step's error" is a link.
@@ -564,17 +576,20 @@ side by side:
 - **Added again**: one row per start that found this run holding the key,
   newest first (`Activity`, kind `key_duplicate`). Columns: when
   (`local_time`), outcome as a phrase ("Returned this run", "Returned
-  `{:error, {:key_taken, …}}`"), input ("Same input", muted, or a warning
-  badge "Newer input dropped"), node. A dropped row opens in place to a
-  **field diff**: the field name muted, the old value struck through in
-  `destructive`, the new one in `success`, all mono, plus Copy input. The
-  strike-through carries the meaning without color.
+  `{:error, {:key_taken, …}}`", "Replaced this run", "Sent as event
+  `article_updated`", "Gave it the newer input (debounce)"), input ("Same
+  input", muted; a warning badge "Newer input dropped"; or a muted "Different
+  input"), node. A row whose input differed opens in place — through a
+  disclosure button in its Input cell (`aria-expanded`), so it works from the
+  keyboard — to a **field diff**: the field name muted, the old value struck
+  through in `destructive`, the new one in `success`, all mono, plus Copy
+  input. The strike-through carries the meaning without color.
 - **Runs with this key**: every run with the key, the holder first, then
   newest first. Each row is the run id (a link), its status pill and one
   sentence on its part in the key's history: "Holds the key · took it 10:41",
-  "Failed at `fetch_article`, so the key could move", "Released by alice ·
-  2d ago". The panel's subtitle is the workflow's policy, `reuse:
-  :after_failure`.
+  "Failed at `fetch_article`, so the key could move", "Replaced by
+  `9c1e77a0`", "Released by alice · 2d ago". The panel's subtitle is the
+  workflow's policy, `reuse: :after_failure`.
 
 Empty state: "Nobody added `article:42` again."
 
@@ -669,14 +684,18 @@ events, throttled to one reload per 2 s.
 
 **Keys section** (Workflow page, only for a workflow that has started a
 keyed run), after the charts row. Its header carries the policy in words
-(`reuse: :after_failure` · duplicates return the holder · pruning frees a
-key after 30 days).
+(`reuse: :after_failure` · duplicates return the holder · debounce 30s, at
+most 5m · pruning frees a key after 30 days).
 
 - **Readout**: Keys held, Re-added, Newer input dropped, Handed off, Errors
-  returned. Only "Newer input dropped" lights up (warning, when > 0); the
-  rest stay neutral (§6 Status readout).
-- **Re-adds per bucket** as `stacked_bars` with two series: returned the
-  holder (`--chart-1`), returned an error (`--chart-4`).
+  returned, plus Replaced, Sent as events and Debounced — each of those three
+  only when its count is above 0 or the workflow is set up for it, so the
+  readout doesn't fill with zeros. Only "Newer input dropped" lights up
+  (warning, when > 0); the rest stay neutral (§6 Status readout).
+- **Re-adds per bucket** as `stacked_bars`, one series per outcome that has
+  data: returned the holder (`--chart-1`), returned an error (`--chart-4`),
+  replaced the holder (`--chart-2`), sent as an event (`--chart-3`),
+  debounced (`--off`).
 - **Re-added most**: key, holder status pill, re-adds, dropped (warning
   when > 0). Each key links to its holder's Key view.
 - The counts come from `Durable.Activity`, which keeps a week, so the 30d
@@ -709,6 +728,27 @@ through it — a funnel you read left to right.
   line: "↺ name · runs if a later step fails · ran N×".
 - Cards share the panel width (grid `minmax(168px, 1fr)` per card, 40 px
   arrows) and the row scrolls only when they hit their minimum.
+
+### Keys (`KeysLive`, `/keys`)
+
+Every workflow key a run was started with, one row per workflow and key,
+most recently started first (`Durable.Query.list_keys/1`). It sits under
+**Operate**, between Inbox and Queues & nodes, and ⌘K's Go to lists it.
+
+- **Filters**: one row — a key-prefix field (search icon, `h-8`, debounced),
+  a Workflow combobox over the workflows that started a keyed run (a native
+  `<input list>` with a `<datalist>`, so it's searchable without a script),
+  and a Holder status menu (checkboxes in a popover). Three filters don't
+  need the Runs query bar's tags; the values still live in the URL
+  (`?q=&workflow=&status=a,b&page=`).
+- **Columns**: key (mono), workflow, holder (short id → its Key view, with
+  its status pill; "No holder" muted), runs (→ Runs filtered by `key:`),
+  re-added in the last 24h, dropped (warning when > 0), last added
+  (`relative_time`, the newest re-add or start), and the workflow's `reuse:`
+  in mono.
+- 25 a page with ← Newer / Older →, the same as Runs. Empty: "No run was
+  started with a key"; a filter that matches nothing says so. Workflow events
+  reload it at most every 2 s.
 
 ### Queues & nodes (`QueuesLive`)
 
@@ -942,6 +982,7 @@ intent — Observe, Operate, Instrument.
 | `/workflows/:name`           | `WorkflowDetailLive` | One workflow's health, steps and errors         |
 | `/workflows/:name/runs`      | `ExecutionsLive`     | Runs of one workflow                            |
 | `/inputs`                    | `InputsLive`         | Inbox: inputs, events, sleeping runs            |
+| `/keys`                      | `KeysLive`           | Workflow keys: holders, re-adds, dropped inputs |
 | `/queues`                    | `QueuesLive`         | Queues and nodes                                |
 | `/schedules`                 | `SchedulesLive`      | Cron schedules                                  |
 | `/telemetry`                 | `TelemetryLive`      | Events, handlers, metrics                       |

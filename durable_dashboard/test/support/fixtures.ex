@@ -13,6 +13,8 @@ defmodule DurableDashboard.Fixtures do
       run as child runs) then a branch; `run_family!/2` drives it to the end
     * `Invoices` (`send_invoice`) — completes; `reuse: :never`, so a run
       started with a `key:` keeps it until it's released
+    * `Digests` (`send_digest`) — completes; `debounce: [period: 1 min,
+      timeout: 5 min]`, so a keyed start waits and takes newer input
   """
 
   alias Durable.Config
@@ -112,6 +114,15 @@ defmodule DurableDashboard.Fixtures do
     use Durable
 
     workflow "send_invoice", reuse: :never do
+      step(:send, fn data -> {:ok, data} end)
+    end
+  end
+
+  defmodule Digests do
+    @moduledoc false
+    use Durable
+
+    workflow "send_digest", debounce: [period: 60_000, timeout: 300_000] do
       step(:send, fn data -> {:ok, data} end)
     end
   end

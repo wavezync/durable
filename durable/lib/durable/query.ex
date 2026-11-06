@@ -7,7 +7,7 @@ defmodule Durable.Query do
 
   alias Durable.Config
   alias Durable.Repo
-  alias Durable.Storage.Schemas.{StepExecution, WorkflowExecution}
+  alias Durable.Storage.Schemas.{ActivityEvent, StepExecution, WorkflowExecution}
 
   @doc """
   Gets a workflow execution by ID.
@@ -82,6 +82,137 @@ defmodule Durable.Query do
 
     Repo.all(config, query)
     |> Enum.map(&execution_to_map(&1, false, false))
+  end
+
+  @doc """
+  Workflow keys: one row per workflow and key that a run was started with,
+  most recently started first.
+
+      [%{workflow_module: "Elixir.MyApp.ProcessArticle", workflow_name: "process_article",
+         key: "article:42", runs: 2, last_started_at: ~U[...],
+         holder_id: "3f2a91c4-…", holder_status: :running,   # nil when no run holds it
+         readded: 3, dropped: 1, last_readded_at: ~U[...]}]  # in the last 24 hours
+
+  ## Filters
+
+  - `:workflow_name` - One workflow
+  - `:key_prefix` - Keys that start with this text
+  - `:holder_status` - Status or statuses of the run holding the key
+  - `:limit` (default 50), `:offset`
+  - `:durable` - The Durable instance name (default: Durable)
+  """
+  @spec list_keys(keyword()) :: [map()]
+  def list_keys(filters \\ []) do
+    config = get_config(filters)
+
+    rows =
+      Repo.all(
+        config,
+        from(w in keys_query(filters),
+          order_by: [desc: max(w.inserted_at)],
+          limit: ^Keyword.get(filters, :limit, 50),
+          offset: ^Keyword.get(filters, :offset, 0),
+          select: %{
+            workflow_module: w.workflow_module,
+            workflow_name: w.workflow_name,
+            key: w.key,
+            runs: count(w.id),
+            last_started_at: max(w.inserted_at),
+            holder_id: fragment("(array_agg(?::text) FILTER (WHERE ?))[1]", w.id, w.holds_key),
+            holder_status: fragment("(array_agg(?) FILTER (WHERE ?))[1]", w.status, w.holds_key)
+          }
+        )
+      )
+
+    activity = key_activity(config, rows)
+
+    Enum.map(rows, fn row ->
+      row
+      |> Map.update!(:holder_status, &(&1 && String.to_existing_atom(&1)))
+      |> Map.merge(
+        Map.get(activity, {row.workflow_name, row.key}, %{
+          readded: 0,
+          dropped: 0,
+          last_readded_at: nil
+        })
+      )
+    end)
+  end
+
+  @doc """
+  Counts the keys `list_keys/1` would list, ignoring `:limit` and `:offset`.
+  """
+  @spec count_keys(keyword()) :: non_neg_integer()
+  def count_keys(filters \\ []) do
+    config = get_config(filters)
+
+    Repo.one(
+      config,
+      from(k in subquery(from(w in keys_query(filters), select: %{key: w.key})), select: count())
+    )
+  end
+
+  defp keys_query(filters) do
+    query =
+      from(w in WorkflowExecution,
+        where: not is_nil(w.key),
+        group_by: [w.workflow_module, w.workflow_name, w.key]
+      )
+
+    Enum.reduce(filters, query, fn
+      {:workflow_name, name}, q when is_binary(name) and name != "" ->
+        from(w in q, where: w.workflow_name == ^name)
+
+      {:key_prefix, prefix}, q when is_binary(prefix) and prefix != "" ->
+        from(w in q, where: like(w.key, ^(escape_like(prefix) <> "%")))
+
+      {:holder_status, status}, q when not is_nil(status) ->
+        statuses = status |> List.wrap() |> Enum.map(&to_string/1)
+
+        from(w in q,
+          having:
+            fragment(
+              "(array_agg(?) FILTER (WHERE ?))[1] = ANY(?)",
+              w.status,
+              w.holds_key,
+              ^statuses
+            )
+        )
+
+      _, q ->
+        q
+    end)
+  end
+
+  # Re-adds in the last 24 hours, per workflow name and key, from Activity.
+  defp key_activity(_config, []), do: %{}
+
+  defp key_activity(config, rows) do
+    keys = rows |> Enum.map(& &1.key) |> Enum.uniq()
+    since = DateTime.add(DateTime.utc_now(), -86_400, :second)
+
+    Repo.all(
+      config,
+      from(a in ActivityEvent,
+        where: a.kind == "key_duplicate" and a.at >= ^since,
+        where: fragment("?->>'key' = ANY(?)", a.details, ^keys),
+        group_by: [fragment("?->>'workflow'", a.details), fragment("?->>'key'", a.details)],
+        select: {
+          fragment("?->>'workflow'", a.details),
+          fragment("?->>'key'", a.details),
+          count(a.id),
+          fragment(
+            "count(*) FILTER (WHERE ?->>'outcome' = 'use_existing' AND (?->>'input_changed')::boolean)",
+            a.details,
+            a.details
+          ),
+          max(a.at)
+        }
+      )
+    )
+    |> Map.new(fn {workflow, key, readded, dropped, last} ->
+      {{workflow, key}, %{readded: readded, dropped: dropped, last_readded_at: last}}
+    end)
   end
 
   @doc """

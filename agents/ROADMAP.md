@@ -51,7 +51,7 @@
 | [M06](milestones/M06-phoenix-dashboard.md) | Phoenix Dashboard | Done | Shipped as its own package |
 | [M07](milestones/M07-scalability-adapters.md) | Scalability Adapters | Backlog | No demand for Redis yet |
 | [M08](milestones/M08-workflow-versioning.md) | Workflow Versioning | In Progress | Phase 1 (fail on a removed step) done; phase 2 (`version:` pinning) waits on the doc's open questions |
-| [M09](milestones/M09-workflow-keys.md) | Workflow Keys | Not Started | Designed: Temporal-style key holder, Activity tracking, dashboard on the run page and the workflow page |
+| [M09](milestones/M09-workflow-keys.md) | Workflow Keys | Complete | Temporal-style key holder, `reuse:`, `on_duplicate:` (incl. `:cancel_existing`, `{:send_event, name}`), `debounce:`, Activity tracking, dashboard run page, workflow page and Keys page |
 
 ---
 
@@ -59,10 +59,9 @@
 
 In priority order:
 
-1. **Workflow keys** ([M09](milestones/M09-workflow-keys.md)). At most one run per key, so a producer that sends the same item twice gets the existing run. Designed and reviewed; two small open questions on Activity writes. Adds a migration.
-2. **Workflow versioning, phase 2** ([M08](milestones/M08-workflow-versioning.md)). Pin each run to the `version:` it started on. Needs the doc's three open questions answered first. Adds a migration.
-3. **DSL gaps:** waits inside `parallel` blocks, an `each`/foreach primitive (each iteration needs its own context, see `Durable.DSL.Step` docs), decisions inside `parallel`.
-4. **Testing follow-up:** wait timeouts can't be exercised by `Durable.Testing.drain/2` (the timeout worker only runs with the queue on). A helper that fires a run's pending timeouts would close it.
+1. **Workflow versioning, phase 2** ([M08](milestones/M08-workflow-versioning.md)). Pin each run to the `version:` it started on. Needs the doc's three open questions answered first. Adds a migration.
+2. **DSL gaps:** waits inside `parallel` blocks, an `each`/foreach primitive (each iteration needs its own context, see `Durable.DSL.Step` docs), decisions inside `parallel`.
+3. **Testing follow-up:** wait timeouts can't be exercised by `Durable.Testing.drain/2` (the timeout worker only runs with the queue on). A helper that fires a run's pending timeouts would close it.
 
 ---
 
@@ -76,8 +75,6 @@ In priority order:
 | RabbitMQ queue adapter | Niche — add if requested |
 | Switch/Case macro | Low priority — `branch` covers most use cases |
 | Pipe-based API | Functional workflow composition — nice-to-have |
-| `on_duplicate: :cancel_existing`, `{:send_event, name}`, `debounce:` | Follow-up to M09: replace a running holder, hand it the new input as an event, or collapse a burst of starts |
-| Dashboard Keys page | M09 concept direction B. Only if keys come to span workflows |
 
 ---
 
@@ -94,4 +91,4 @@ In priority order:
 9. `Durable.Testing.drain/2` doesn't fire wait timeouts
 10. A step with a `timeout:`, or in a workflow with one, runs in its own process (`self()` isn't the worker)
 11. In-flight runs resume on the deployed definition; a removed current step fails the run (versioning: M08)
-12. No unique runs: starting the same item twice creates two runs (workflow keys: M09)
+12. A run gets one event per name: `wait_for_event` returns the first one, so events kept with `buffer: true` after that are never read

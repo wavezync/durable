@@ -32,7 +32,8 @@ defmodule DurableDashboard.Components.Workflow.KeyTab do
 
   @doc """
   What the page shows about `run`'s key, or nil for a run without one:
-  `%{key, reuse, holder, runs, events, duplicates, dropped, took}`.
+  `%{key, reuse, debounce, holder, runs, events, duplicates, dropped, took,
+  released?}`.
   """
   @spec load(Durable.Config.t(), WorkflowExecution.t()) :: map() | nil
   def load(_config, %WorkflowExecution{key: nil}), do: nil
@@ -65,10 +66,13 @@ defmodule DurableDashboard.Components.Workflow.KeyTab do
       )
 
     duplicates = Enum.filter(events, &(&1.kind == "key_duplicate" and &1.workflow_id == run.id))
+    definition = definition(run)
 
     %{
       key: run.key,
-      reuse: reuse(run),
+      reuse: definition && Map.get(definition.opts, :reuse, :after_close),
+      debounce: definition && Durable.Keys.debounce(definition),
+      released?: Enum.any?(events, &(&1.kind == "key_released" and &1.workflow_id == run.id)),
       holder: Enum.find(runs, & &1.holds_key),
       runs: runs,
       events: events,
@@ -82,11 +86,11 @@ defmodule DurableDashboard.Components.Workflow.KeyTab do
     }
   end
 
-  defp reuse(run) do
+  defp definition(run) do
     module = String.to_existing_atom(run.workflow_module)
 
     case module.__workflow_definition__(run.workflow_name) do
-      {:ok, definition} -> Map.get(definition.opts, :reuse, :after_close)
+      {:ok, definition} -> definition
       _ -> nil
     end
   rescue
@@ -125,6 +129,17 @@ defmodule DurableDashboard.Components.Workflow.KeyTab do
     end
   end
 
+  @doc """
+  Whether releasing `run`'s key changes anything: it holds the key, it's
+  finished, and the workflow's `reuse:` would otherwise keep it.
+  """
+  def release_changes?(_run, nil), do: false
+
+  def release_changes?(run, info) do
+    run.holds_key and run.status in WorkflowExecution.closed_statuses() and
+      not reusable?(run, info)
+  end
+
   defp reusable?(_holder, %{reuse: nil}), do: false
 
   defp reusable?(holder, %{reuse: reuse}),
@@ -139,21 +154,29 @@ defmodule DurableDashboard.Components.Workflow.KeyTab do
   attr :run_id, :string, required: true
   attr :info, :map, required: true
   attr :base_path, :string, required: true
+  attr :also_rerun, :boolean, default: false, doc: "Rerun is blocked by the same key too"
 
   @doc "One muted line under the actions: why Retry or Rerun is off, and what would unblock it."
   def blocked_line(%{block: {:blocked, _, _}} = assigns) do
     {:blocked, why, holder} = assigns.block
-    assigns = assign(assigns, why: why, holder: holder, self?: holder.id == assigns.run_id)
+
+    assigns =
+      assign(assigns,
+        why: why,
+        holder: holder,
+        self?: holder.id == assigns.run_id,
+        need: if(assigns.also_rerun, do: "Retry and rerun need", else: "Retry needs")
+      )
 
     ~H"""
     <p class="w-full text-xs text-muted-foreground">
       <%= cond do %>
         <% @action == :retry and @why == :open -> %>
-          Retry needs <span class="font-mono">{@info.key}</span> back.
+          {@need} <span class="font-mono">{@info.key}</span> back.
           <.run_link id={@holder.id} base_path={@base_path} />
           holds it and {still(@holder.status)}: cancel it or wait for it to finish.
         <% @action == :retry -> %>
-          Retry needs <span class="font-mono">{@info.key}</span> back.
+          {@need} <span class="font-mono">{@info.key}</span> back.
           <.run_link id={@holder.id} base_path={@base_path} />
           holds it, and the workflow's <span class="font-mono">reuse: {inspect(@info.reuse)}</span>
           keeps a {status_word(@holder.status)} run's key. Release its key first.
@@ -239,25 +262,19 @@ defmodule DurableDashboard.Components.Workflow.KeyTab do
           </thead>
           <tbody>
             <%= for dup <- @info.duplicates do %>
-              <tr
-                class={[
-                  "h-10 border-b border-border last:border-b-0",
-                  changed?(dup) && "cursor-pointer hover:bg-accent",
-                  @open == dup.id && "bg-accent"
-                ]}
-                phx-click={changed?(dup) && "toggle"}
-                phx-value-id={dup.id}
-                phx-target={@myself}
-                aria-expanded={changed?(dup) && to_string(@open == dup.id)}
-              >
+              <tr class={["h-10 border-b border-border last:border-b-0", @open == dup.id && "bg-accent"]}>
                 <td class="px-3.5 font-mono text-xs"><Core.local_time at={dup.at} format="datetime" /></td>
-                <td class="truncate px-3">{outcome(dup)}</td>
-                <td class="px-3"><.input_cell dup={dup} /></td>
+                <td class="px-3 py-1.5 leading-snug">
+                  <.outcome dup={dup} />
+                </td>
+                <td class="px-3">
+                  <.input_cell dup={dup} open={@open == dup.id} target={@myself} />
+                </td>
                 <td class="truncate px-3 font-mono text-xs text-muted-foreground" data-tip-meta={dup.node_id}>
                   {short_node(dup.node_id)}
                 </td>
               </tr>
-              <tr :if={@open == dup.id} class="border-b border-border bg-muted">
+              <tr :if={@open == dup.id} id={"dup-#{dup.id}"} class="border-b border-border bg-muted">
                 <td colspan="4" class="px-3.5 py-3">
                   <.dropped_input dup={dup} input={@workflow.input} />
                 </td>
@@ -299,28 +316,56 @@ defmodule DurableDashboard.Components.Workflow.KeyTab do
     """
   end
 
-  defp changed?(%{details: d}), do: d["input_changed"] == true
-
-  defp outcome(%{details: %{"outcome" => "error"}}), do: "Returned {:error, {:key_taken, …}}"
-  defp outcome(_dup), do: "Returned this run"
-
   attr :dup, :map, required: true
 
+  defp outcome(%{dup: %{details: %{"outcome" => "send_event"} = d}} = assigns) do
+    assigns = assign(assigns, event: d["event"])
+    ~H|Sent as event <span class="font-mono">{@event}</span>|
+  end
+
+  defp outcome(assigns), do: ~H|{outcome_text(@dup.details["outcome"])}|
+
+  defp outcome_text("error"), do: "Returned {:error, {:key_taken, …}}"
+  defp outcome_text("cancel_existing"), do: "Replaced this run"
+  defp outcome_text("debounced"), do: "Gave it the newer input (debounce)"
+  defp outcome_text(_use_existing), do: "Returned this run"
+
+  attr :dup, :map, required: true
+  attr :open, :boolean, required: true
+  attr :target, :any, required: true
+
+  # A differing input is a disclosure button, so the diff opens from the
+  # keyboard too.
   defp input_cell(%{dup: %{details: %{"input_changed" => true}}} = assigns) do
+    assigns = assign(assigns, tip: input_tip(assigns.dup.details["outcome"]))
+
     ~H"""
-    <span
-      :if={dropped?(@dup)}
-      data-tip="The caller got this run back, so its newer input wasn't run · click to compare"
+    <button
+      type="button"
+      phx-click="toggle"
+      phx-value-id={@dup.id}
+      phx-target={@target}
+      aria-expanded={to_string(@open)}
+      aria-controls={"dup-#{@dup.id}"}
+      class="inline-flex items-center gap-1 rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      data-tip={@tip <> " · click to compare"}
     >
-      <Core.badge kind="warning">Newer input dropped</Core.badge>
-    </span>
-    <span :if={!dropped?(@dup)} data-tip="The caller got the error · click to compare">
-      <Core.badge kind="muted">Different input</Core.badge>
-    </span>
+      <Core.badge :if={dropped?(@dup)} kind="warning">Newer input dropped</Core.badge>
+      <Core.badge :if={!dropped?(@dup)} kind="muted">Different input</Core.badge>
+      <Core.icon name="chevron-down" class={["size-3.5 text-muted-foreground", @open && "rotate-180"]} />
+    </button>
     """
   end
 
   defp input_cell(assigns), do: ~H|<span class="text-xs text-muted-foreground">Same input</span>|
+
+  defp input_tip("use_existing"),
+    do: "The caller got this run back, so its newer input wasn't run"
+
+  defp input_tip("cancel_existing"), do: "This run was cancelled and a new run started with it"
+  defp input_tip("send_event"), do: "Sent to this run as an event"
+  defp input_tip("debounced"), do: "Became this run's input before it started"
+  defp input_tip(_error), do: "The caller got the error"
 
   attr :dup, :map, required: true
   attr :input, :map, required: true
@@ -417,6 +462,8 @@ defmodule DurableDashboard.Components.Workflow.KeyTab do
     <%= cond do %>
       <% @released -> %>
         Released{if by = @released.details["by"], do: " by #{by}"} · <Core.relative_time at={@released.at} />
+      <% @moved && @moved.details["replaced"] -> %>
+        Replaced by <.run_link id={@moved.workflow_id} base_path={@base_path} />
       <% @moved -> %>
         {moved_reason(@run)}, so the key moved to <.run_link id={@moved.workflow_id} base_path={@base_path} />
       <% true -> %>

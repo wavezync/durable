@@ -44,12 +44,13 @@ defmodule DurableDashboard.Live.CommandPaletteTest do
     assert has_element?(view, ~s(#{@palette}[data-open="true"]))
     assert groups(view) == ["Go to", "Recent runs"]
 
-    assert Enum.take(labels(view), 8) ==
+    assert Enum.take(labels(view), 9) ==
              [
                "Overview",
                "Runs",
                "Workflows",
                "Inbox",
+               "Keys",
                "Queues & nodes",
                "Schedules",
                "Telemetry",

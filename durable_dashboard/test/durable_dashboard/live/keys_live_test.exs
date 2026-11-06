@@ -6,7 +6,7 @@ defmodule DurableDashboard.Live.KeysLiveTest do
   """
   use DurableDashboard.LiveCase
 
-  alias Fixtures.{Approvals, Invoices, Payments}
+  alias Fixtures.{Approvals, Digests, Invoices, Payments, Webhooks}
 
   # Starts a keyed run, inline unless `inline: false`; returns its id.
   defp start!(module, input, key, opts \\ []) do
@@ -36,7 +36,7 @@ defmodule DurableDashboard.Live.KeysLiveTest do
       assert page =~ "key expense:7 Holds key"
 
       assert page =~
-               "Added again 2 times while running. The newest input differs from this run's and was dropped"
+               "Added again 2 times while waiting. The newest input differs from this run's and was dropped"
 
       assert page =~ "Re-added 2×"
       assert page =~ "Key (2)"
@@ -46,7 +46,9 @@ defmodule DurableDashboard.Live.KeysLiveTest do
       assert html =~ "Same input"
       assert text(html) =~ "Holds the key"
 
-      html = view |> element("tr[phx-click=toggle]") |> render_click()
+      assert has_element?(view, "button[phx-click=toggle][aria-expanded=false]")
+      html = view |> element("button[phx-click=toggle]") |> render_click()
+      assert has_element?(view, "button[phx-click=toggle][aria-expanded=true]")
       assert html =~ "amount"
       assert html =~ "<del class=\"text-destructive\">80</del>"
       assert html =~ "95"
@@ -64,7 +66,7 @@ defmodule DurableDashboard.Live.KeysLiveTest do
       assert page =~ "Run #{String.slice(new, 0, 8)} took pay:1"
 
       assert page =~
-               "Retry needs pay:1 back. #{String.slice(new, 0, 8)} holds it and hasn't started yet"
+               "Retry and rerun need pay:1 back. #{String.slice(new, 0, 8)} holds it and hasn't started yet"
 
       assert has_element?(view, "button[phx-click=retry][disabled]")
 
@@ -123,7 +125,7 @@ defmodule DurableDashboard.Live.KeysLiveTest do
       {:ok, view, html} = live(conn, dash("/executions/#{id}"))
 
       refute html =~ "Holds key"
-      refute has_element?(view, "a", "Key")
+      refute has_element?(view, ~s(a[href="/dashboard/executions/#{id}/key"]))
     end
   end
 
@@ -184,6 +186,168 @@ defmodule DurableDashboard.Live.KeysLiveTest do
 
       {:ok, view, _html} = live(conn, dash("/workflows/fulfill_order"))
       refute has_element?(view, "section[aria-label=Keys]")
+    end
+  end
+
+  describe "the run page, more" do
+    test "Release key is offered only when it changes something", %{conn: conn} do
+      # A failed holder under reuse: :after_close already lets its key go.
+      failed = start!(Payments, %{"decline" => true}, "pay:20")
+      {:ok, view, _html} = live(conn, dash("/executions/#{failed}"))
+      refute has_element?(view, "button[phx-click=confirm-release]")
+
+      kept = start!(Invoices, %{}, "inv:20")
+      {:ok, view, _html} = live(conn, dash("/executions/#{kept}"))
+      assert has_element?(view, "button[phx-click=confirm-release]")
+    end
+
+    test "a released key reads Key released, not Key moved", %{conn: conn} do
+      id = start!(Invoices, %{}, "inv:21")
+      :ok = Durable.release_key(id)
+
+      {:ok, _view, html} = live(conn, dash("/executions/#{id}"))
+      page = text(html)
+      assert page =~ "key inv:21 Key released"
+      refute page =~ "Key moved"
+    end
+
+    test "a run replaced by :cancel_existing links the run that replaced it", %{conn: conn} do
+      old = start!(Webhooks, %{"n" => 1}, "hook:1")
+
+      {:ok, new} =
+        Durable.start(Webhooks, %{"n" => 2}, key: "hook:1", on_duplicate: :cancel_existing)
+
+      {:ok, view, html} = live(conn, dash("/executions/#{old}"))
+      assert text(html) =~ "Cancelled — replaced by run #{String.slice(new, 0, 8)}"
+      assert has_element?(view, ~s(a[href="/dashboard/executions/#{new}/key"]))
+      refute text(html) =~ "took hook:1"
+
+      {:ok, _view, html} = live(conn, dash("/executions/#{old}/key"))
+      assert text(html) =~ "Replaced this run"
+      assert text(html) =~ "Replaced by #{String.slice(new, 0, 8)}"
+    end
+
+    test "{:send_event, name} shows as sent, and a kept event shows in the facts", %{conn: conn} do
+      waiting = start!(Webhooks, %{}, "hook:2")
+
+      {:ok, ^waiting} =
+        Durable.start(Webhooks, %{"n" => 2},
+          key: "hook:2",
+          on_duplicate: {:send_event, "webhook_received"}
+        )
+
+      {:ok, _view, html} = live(conn, dash("/executions/#{waiting}/key"))
+      assert text(html) =~ "Sent as event webhook_received"
+
+      # Not started yet, so the event is kept until it waits for it.
+      pending = start!(Webhooks, %{}, "hook:3", inline: false)
+
+      {:ok, ^pending} =
+        Durable.start(Webhooks, %{"n" => 2},
+          key: "hook:3",
+          on_duplicate: {:send_event, "webhook_received"}
+        )
+
+      {:ok, _view, html} = live(conn, dash("/executions/#{pending}"))
+      assert text(html) =~ "Kept events 1 · webhook_received"
+    end
+
+    test "a debounced run says when it starts, and a re-add shows as debounced", %{conn: conn} do
+      {:ok, id} = Durable.start(Digests, %{"n" => 1}, key: "dig:1")
+      {:ok, ^id} = Durable.start(Digests, %{"n" => 2}, key: "dig:1")
+
+      {:ok, _view, html} = live(conn, dash("/executions/#{id}"))
+      assert text(html) =~ "Debounced: starts"
+      assert text(html) =~ "unless dig:1 is added again; at the latest"
+
+      {:ok, _view, html} = live(conn, dash("/executions/#{id}/key"))
+      assert text(html) =~ "Gave it the newer input (debounce)"
+    end
+  end
+
+  describe "the workflow page, more" do
+    test "shows Replaced, Sent and Debounced only where they apply", %{conn: conn} do
+      start!(Webhooks, %{}, "hook:10")
+
+      {:ok, _} =
+        Durable.start(Webhooks, %{"n" => 2}, key: "hook:10", on_duplicate: :cancel_existing)
+
+      {:ok, _} = Durable.start(Digests, %{}, key: "dig:10")
+      start!(Payments, %{}, "pay:10", inline: false)
+      {:ok, _} = Durable.start(Payments, %{}, key: "pay:10")
+
+      {:ok, _view, html} = live(conn, dash("/workflows/await_webhook"))
+      assert text(html) =~ "Replaced 1"
+      refute text(html) =~ "Debounced"
+
+      {:ok, _view, html} = live(conn, dash("/workflows/send_digest"))
+      assert text(html) =~ "Debounced 0"
+      assert text(html) =~ "debounce 1 min, at most 5 min"
+
+      {:ok, _view, html} = live(conn, dash("/workflows/process_payment"))
+      refute text(html) =~ "Replaced"
+      refute text(html) =~ "Debounced"
+    end
+  end
+
+  describe "the Keys page" do
+    test "lists each key with its holder, and the sidebar links to it", %{conn: conn} do
+      held = start!(Invoices, %{}, "inv:30")
+      {:ok, ^held} = Durable.start(Invoices, %{"x" => 1}, key: "inv:30")
+      start!(Payments, %{}, "pay:30", inline: false)
+
+      {:ok, view, html} = live(conn, dash("/keys"))
+      page = text(html)
+
+      assert page =~ "2 keys"
+      assert page =~ "inv:30 send_invoice #{String.slice(held, 0, 8)} Completed 1 1 1"
+      assert page =~ ":never"
+      assert has_element?(view, ~s(nav a[href="/dashboard/keys"]))
+
+      assert has_element?(
+               view,
+               ~s(a[href="/dashboard/workflows/send_invoice/runs?q=key%3Ainv%3A30"])
+             )
+    end
+
+    test "filters by key prefix, workflow and holder status, in the URL", %{conn: conn} do
+      start!(Invoices, %{}, "inv:40")
+      start!(Payments, %{}, "pay:40", inline: false)
+
+      {:ok, view, _html} = live(conn, dash("/keys"))
+
+      view |> element("form[role=search]") |> render_change(%{"q" => "inv:", "workflow" => ""})
+      assert_patch(view, "/dashboard/keys?q=inv%3A")
+      assert render(view) =~ "inv:40"
+      refute render(view) =~ "pay:40"
+
+      {:ok, view, _html} = live(conn, dash("/keys"))
+      view |> element("button[phx-click=toggle-status-menu]") |> render_click()
+      view |> element("button[phx-value-status=pending]") |> render_click()
+      assert_patch(view, "/dashboard/keys?status=pending")
+      html = render(view)
+      assert html =~ "pay:40"
+      refute html =~ "inv:40"
+
+      {:ok, _view, html} = live(conn, dash("/keys?workflow=send_invoice"))
+      assert html =~ "inv:40"
+      refute html =~ "pay:40"
+
+      {:ok, _view, html} = live(conn, dash("/keys?q=nothing-like-this"))
+      assert html =~ "No keys match these filters"
+    end
+
+    test "says so when no run has a key", %{conn: conn} do
+      Fixtures.run!(Payments)
+      {:ok, _view, html} = live(conn, dash("/keys"))
+      assert html =~ "No run was started with a key"
+    end
+
+    test "⌘K goes to it", %{conn: conn} do
+      {:ok, view, _html} = live(conn, dash())
+      view |> with_target("#command-palette") |> render_hook("palette:open", %{})
+      html = view |> element("#command-palette form") |> render_change(%{value: "keys"})
+      assert html =~ "/dashboard/keys"
     end
   end
 

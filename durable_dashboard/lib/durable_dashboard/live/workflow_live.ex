@@ -16,7 +16,7 @@ defmodule DurableDashboard.Live.WorkflowLive do
   import Ecto.Query
 
   alias Durable.PubSub, as: DurablePubSub
-  alias Durable.Storage.Schemas.{PendingInput, StepExecution, WorkflowExecution}
+  alias Durable.Storage.Schemas.{PendingEvent, PendingInput, StepExecution, WorkflowExecution}
   alias DurableDashboard.Format
   alias DurableDashboard.Access
   alias DurableDashboard.Components.Core
@@ -323,6 +323,7 @@ defmodule DurableDashboard.Live.WorkflowLive do
           now={@now}
           base_path={@base_path}
           key_info={@key_info}
+          kept_events={@kept_events}
         />
 
         <div class="mt-4 flex flex-wrap items-start gap-4">
@@ -387,7 +388,7 @@ defmodule DurableDashboard.Live.WorkflowLive do
         parent_step_lookup: ChildrenTab.step_lookup(assigns.family, assigns.steps),
         retry_block: KeyTab.block(:retry, w, info),
         rerun_block: KeyTab.block(:rerun, w, info),
-        releasable?: info != nil and w.holds_key and w.status in @finished_statuses
+        releasable?: KeyTab.release_changes?(w, info)
       )
 
     ~H"""
@@ -401,6 +402,7 @@ defmodule DurableDashboard.Live.WorkflowLive do
           key={@workflow.key}
           holds={@workflow.holds_key}
           holder={@key_info.holder}
+          released={@key_info.released?}
         />
         <FamilyChip.family_chip
           family={@family}
@@ -463,6 +465,7 @@ defmodule DurableDashboard.Live.WorkflowLive do
         :if={@can_operate? and @workflow.status == :failed}
         action={:retry}
         block={@retry_block}
+        also_rerun={blocked?(@rerun_block)}
         run_id={@workflow.id}
         info={@key_info}
         base_path={@base_path}
@@ -590,6 +593,21 @@ defmodule DurableDashboard.Live.WorkflowLive do
     """
   end
 
+  # Replaced by a start with `on_duplicate: :cancel_existing`: link that run.
+  defp banner(%{workflow: %{status: :cancelled, error: %{"replaced_by" => id}}} = assigns) do
+    assigns = assign(assigns, replaced_by: id)
+
+    ~H"""
+    <div class="mt-4 flex items-center gap-3 rounded-[10px] border border-border bg-secondary px-3.5 py-3">
+      <Core.status_dot status={:cancelled} />
+      <p class="flex-1">
+        Cancelled — replaced by run <KeyTab.run_link id={@replaced_by} base_path={@base_path} />
+        (<span class="font-mono">on_duplicate: :cancel_existing</span>). Steps that finished stay finished.
+      </p>
+    </div>
+    """
+  end
+
   defp banner(%{workflow: %{status: :cancelled}} = assigns) do
     assigns = assign(assigns, reason: get_in(assigns.workflow.error || %{}, ["message"]))
 
@@ -646,8 +664,7 @@ defmodule DurableDashboard.Live.WorkflowLive do
         count: length(info.duplicates),
         newest_dropped?: KeyTab.dropped?(newest),
         dropped: length(info.dropped),
-        while:
-          if(w.status in @live_statuses, do: "while running", else: "while this run held the key")
+        while: while_holding(w.status)
       )
 
     ~H"""
@@ -667,6 +684,40 @@ defmodule DurableDashboard.Live.WorkflowLive do
         class="shrink-0 text-xs font-medium text-primary hover:underline"
       >
         Show dropped inputs
+      </.link>
+    </div>
+    """
+  end
+
+  # The cancelled banner already names the run that replaced this one.
+  defp key_banner(%{workflow: %{error: %{"replaced_by" => _}}} = assigns), do: ~H""
+
+  # A debounced run that hasn't started: when it will, and the latest it can.
+  defp key_banner(
+         %{workflow: %{status: :pending, holds_key: true}, info: %{debounce: %{} = debounce}} =
+           assigns
+       ) do
+    w = assigns.workflow
+
+    assigns =
+      assign(assigns,
+        starts: w.scheduled_at,
+        latest: debounce_latest(w, debounce)
+      )
+
+    ~H"""
+    <div class="mt-4 flex items-center gap-3 rounded-[10px] border border-border bg-secondary px-3.5 py-3">
+      <Core.status_dot status={:pending} />
+      <p class="flex-1">
+        Debounced: starts <Core.local_time :if={@starts} at={@starts} format="time" />
+        unless <span class="font-mono">{@info.key}</span> is added again<span :if={@latest}>; at the latest
+          <Core.local_time at={@latest} format="time" /></span>.
+      </p>
+      <.link
+        patch={run_path(@base_path, @workflow.id, :key)}
+        class="shrink-0 text-xs font-medium text-primary hover:underline"
+      >
+        Key history
       </.link>
     </div>
     """
@@ -705,6 +756,21 @@ defmodule DurableDashboard.Live.WorkflowLive do
 
   defp key_banner(assigns), do: ~H""
 
+  # The latest a debounced run can start; nil without a timeout, or when the
+  # caller's own `scheduled_at` is later anyway.
+  defp debounce_latest(_run, %{timeout: nil}), do: nil
+
+  defp debounce_latest(run, %{timeout: timeout}) do
+    latest = DateTime.add(run.inserted_at, timeout, :millisecond)
+    if run.scheduled_at && DateTime.after?(latest, run.scheduled_at), do: latest
+  end
+
+  defp while_holding(:running), do: "while running"
+  defp while_holding(:waiting), do: "while waiting"
+  defp while_holding(:pending), do: "before it started"
+  defp while_holding(:compensating), do: "while rolling back"
+  defp while_holding(_finished), do: "while this run held the key"
+
   # ---- Facts ------------------------------------------------------------------
 
   attr :workflow, :map, required: true
@@ -712,6 +778,7 @@ defmodule DurableDashboard.Live.WorkflowLive do
   attr :family, :map, required: true
   attr :now, :any, required: true
   attr :base_path, :string, required: true
+  attr :kept_events, :list, default: []
   attr :key_info, :map, default: nil
 
   defp facts(assigns) do
@@ -788,6 +855,13 @@ defmodule DurableDashboard.Live.WorkflowLive do
       >
         <span class="font-mono">{length(@key_info.duplicates)}×</span>
         · last <Core.relative_time at={hd(@key_info.duplicates).at} />
+      </.fact>
+      <.fact
+        :if={@kept_events != []}
+        label="Kept events"
+        tip="Sent before the run waited for them · it gets one when it reaches wait_for_event for that name"
+      >
+        {length(@kept_events)} · {@kept_events |> Enum.uniq() |> Enum.join(", ")}
       </.fact>
       <.fact :if={@children > 0} label="Child runs" mono={false} tip="Runs its steps started · see Family">
         <.link patch={run_path(@base_path, @workflow.id, :family)} class="text-primary hover:underline">
@@ -1511,6 +1585,7 @@ defmodule DurableDashboard.Live.WorkflowLive do
       workflow: nil,
       steps: [],
       pending_inputs: [],
+      kept_events: [],
       trace: %{rows: [], ticks: [], span_ms: 0, live?: false},
       failed_row: nil,
       key_info: nil,
@@ -1533,6 +1608,7 @@ defmodule DurableDashboard.Live.WorkflowLive do
           workflow: execution,
           steps: fetch_steps(config, family.related_ids),
           pending_inputs: fetch_pending_inputs(config, execution.id),
+          kept_events: fetch_kept_events(config, execution.id),
           family: family,
           key_info: KeyTab.load(config, execution),
           page_title: execution.workflow_name
@@ -1605,6 +1681,18 @@ defmodule DurableDashboard.Live.WorkflowLive do
       from(s in StepExecution,
         where: s.workflow_id in ^workflow_ids,
         order_by: [asc: s.inserted_at]
+      )
+    )
+  end
+
+  # Events sent before the run waited for them (`send_event(..., buffer: true)`).
+  defp fetch_kept_events(config, workflow_id) do
+    Durable.Repo.all(
+      config,
+      from(p in PendingEvent,
+        where: p.workflow_id == ^workflow_id and p.status == :buffered,
+        order_by: [asc: p.inserted_at],
+        select: p.event_name
       )
     )
   end

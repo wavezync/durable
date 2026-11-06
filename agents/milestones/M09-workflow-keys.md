@@ -60,17 +60,29 @@ The design was reviewed on three pages:
 
 ### Out of Scope
 
-- `on_duplicate: :cancel_existing` (Temporal TERMINATE_EXISTING, Inngest
-  singleton `cancel`) and the dashboard's "Cancel and run this input", which
-  needs it. Next milestone.
-- `on_duplicate: {:send_event, name}`, the equivalent of Temporal's
-  Signal-With-Start, using `Durable.send_event/3`. Next milestone.
-- `debounce: [period:, timeout:]`, as in Inngest. Next milestone.
-- A Keys page in the dashboard (concept direction B). Keys are scoped per
-  workflow, so it would mostly repeat Runs filtered by `key:`.
 - A key built from the input in the DSL, keys for child workflows, keyed cron
   fires, and sending events or input to a run by its key.
-- A per-call `reuse:`. `start/3` rejects it.
+- A per-call `reuse:` or `debounce:`. `start/3` rejects both.
+
+### Added in the follow-up PR
+
+The first PR (#21) left these for later; the follow-up adds them:
+
+- `on_duplicate: :cancel_existing` (Temporal TERMINATE_EXISTING, Inngest
+  singleton `cancel`): the open holder is cancelled and releases its key in
+  one `UPDATE`, under any `reuse:`. A compensating holder, or a finished one
+  that `reuse:` keeps, answers `{:key_taken, id}`.
+- `on_duplicate: {:send_event, name}` (Signal-With-Start): the new input goes
+  to the open holder as an event. Durable had no event buffer, so
+  `send_event(..., buffer: true)` adds one: `pending_events` rows with status
+  `buffered`, delivered (newest first) when the run reaches
+  `wait_for_event(name)`. The sender and the waiting run both lock the run's
+  row, so neither misses the other.
+- `debounce: [period:, timeout:]` (Inngest debounce) on the workflow: a keyed
+  start is due `period` from now; a duplicate before a worker claims it
+  replaces the input and pushes the start back, up to `inserted_at +
+  timeout`.
+- The dashboard Keys page (concept direction B), on `Query.list_keys/1`.
 
 ## Architecture & Design
 

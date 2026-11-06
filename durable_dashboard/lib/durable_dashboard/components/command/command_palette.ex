@@ -55,6 +55,7 @@ defmodule DurableDashboard.Components.Command.CommandPalette do
     %{label: "Runs", icon: "nav-runs", path: :executions},
     %{label: "Workflows", icon: "nav-workflows", path: :workflows},
     %{label: "Inbox", icon: "nav-inbox", path: :inputs},
+    %{label: "Keys", icon: "nav-keys", path: :keys},
     %{label: "Queues & nodes", icon: "nav-queues", path: :queues},
     %{label: "Schedules", icon: "nav-schedules", path: :schedules},
     %{label: "Telemetry", icon: "nav-telemetry", path: :telemetry},
@@ -528,6 +529,7 @@ defmodule DurableDashboard.Components.Command.CommandPalette do
   defp page_href(base, :executions), do: DPath.executions(base)
   defp page_href(base, :inputs), do: DPath.inputs(base)
   defp page_href(base, :queues), do: DPath.queues(base)
+  defp page_href(base, :keys), do: DPath.keys(base)
   defp page_href(base, :schedules), do: DPath.schedules(base)
   defp page_href(base, :telemetry), do: DPath.telemetry(base)
   defp page_href(base, :settings), do: DPath.settings(base)

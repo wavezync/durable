@@ -405,10 +405,19 @@ defmodule DurableDashboard.Live.WorkflowDetailLive do
   defp keys_section(assigns) do
     opts = (assigns.definition && assigns.definition.opts) || %{}
 
+    on_duplicate = Map.get(opts, :on_duplicate, :use_existing)
+    debounce = assigns.definition && Durable.Keys.debounce(assigns.definition)
+    keys = assigns.keys
+
     assigns =
       assign(assigns,
         reuse: Map.get(opts, :reuse, :after_close),
-        on_duplicate: Map.get(opts, :on_duplicate, :use_existing),
+        duplicates: duplicates_text(on_duplicate),
+        debounce: debounce,
+        show_replaced?: keys.replaced > 0 or on_duplicate == :cancel_existing,
+        show_sent?: keys.sent > 0 or match?({:send_event, _}, on_duplicate),
+        show_debounced?: keys.debounced > 0 or debounce != nil,
+        series: series(keys.timeline),
         window:
           if(assigns.range == "30d",
             do: "last 7 days (kept a week)",
@@ -422,12 +431,17 @@ defmodule DurableDashboard.Live.WorkflowDetailLive do
         <Core.heading level={2}>Keys</Core.heading>
         <span class="text-xs text-muted-foreground">
           <span class="font-mono">reuse: {inspect(@reuse)}</span>
-          · duplicates {if @on_duplicate == :error, do: "return an error", else: "return the holder"}
+          · duplicates {@duplicates}
+          <span :if={@debounce}>
+            · debounce {Format.duration(@debounce.period)}{if @debounce.timeout,
+              do: ", at most #{Format.duration(@debounce.timeout)}"}
+          </span>
           · pruning a run frees its key
         </span>
       </header>
 
-      <div class="grid grid-cols-[repeat(auto-fit,minmax(170px,1fr))] gap-px overflow-hidden rounded-[10px] border border-border bg-border">
+      <%!-- Wrapping flex, not grid: a short last row stretches, so no empty cell shows the border colour. --%>
+      <div class="flex flex-wrap gap-px overflow-hidden rounded-[10px] border border-border bg-border">
         <.kpi
           label="Keys held"
           value={Format.int(@keys.held)}
@@ -459,17 +473,37 @@ defmodule DurableDashboard.Live.WorkflowDetailLive do
           note="on_duplicate: :error"
           tip={"Re-adds answered with {:error, {:key_taken, id}} · #{@window}"}
         />
+        <.kpi
+          :if={@show_replaced?}
+          label="Replaced"
+          value={Format.int(@keys.replaced)}
+          note="on_duplicate: :cancel_existing"
+          tip={"Re-adds that cancelled the running holder and started a new run · #{@window}"}
+        />
+        <.kpi
+          :if={@show_sent?}
+          label="Sent as events"
+          value={Format.int(@keys.sent)}
+          note="on_duplicate: {:send_event, _}"
+          tip={"Re-adds sent to the running holder as an event · #{@window}"}
+        />
+        <.kpi
+          :if={@show_debounced?}
+          label="Debounced"
+          value={Format.int(@keys.debounced)}
+          note="gave a waiting run newer input"
+          tip={"Re-adds that replaced a debounced run's input before it started · #{@window}"}
+        />
       </div>
 
       <div class="flex flex-wrap gap-4">
         <Charts.panel title="Re-adds" sub={"per bucket, by what the start got back · #{@window}"} class="flex-[3_1_480px]">
           <:legend>
-            <Charts.swatch class="bg-chart-1">Returned the holder</Charts.swatch>
-            <Charts.swatch class="bg-chart-4">Returned an error</Charts.swatch>
+            <Charts.swatch :for={{_key, class, label} <- @series} class={class}>{String.capitalize(label)}</Charts.swatch>
           </:legend>
           <Charts.stacked_bars
             timeline={@keys.timeline}
-            series={[{:returned, "bg-chart-1", "returned the holder"}, {:errors, "bg-chart-4", "returned an error"}]}
+            series={@series}
             empty="No key was added again in this window"
           />
         </Charts.panel>
@@ -516,6 +550,29 @@ defmodule DurableDashboard.Live.WorkflowDetailLive do
     """
   end
 
+  defp duplicates_text(:error), do: "return an error"
+  defp duplicates_text(:cancel_existing), do: "replace the running holder"
+  defp duplicates_text({:send_event, name}), do: "are sent to the running holder as #{name}"
+  defp duplicates_text(_use_existing), do: "return the holder"
+
+  @key_series [
+    {:returned, "bg-chart-1", "returned the holder"},
+    {:errors, "bg-chart-4", "returned an error"},
+    {:replaced, "bg-chart-2", "replaced the holder"},
+    {:sent, "bg-chart-3", "sent as an event"},
+    {:debounced, "bg-off", "debounced"}
+  ]
+
+  # One series per outcome with data in the window; the first two when none has.
+  defp series(timeline) do
+    case Enum.filter(@key_series, fn {key, _, _} ->
+           Enum.any?(timeline, &(Map.get(&1, key, 0) > 0))
+         end) do
+      [] -> Enum.take(@key_series, 2)
+      some -> some
+    end
+  end
+
   attr :label, :string, required: true
   attr :value, :string, required: true
   attr :note, :string, default: nil
@@ -526,7 +583,7 @@ defmodule DurableDashboard.Live.WorkflowDetailLive do
   defp kpi(assigns) do
     ~H"""
     <div
-      class="flex min-w-0 flex-col gap-0.5 bg-card px-4 py-3"
+      class="flex min-w-0 flex-1 basis-[150px] flex-col gap-0.5 bg-card px-4 py-3"
       data-tip-title={@tip && @label}
       data-tip={@tip}
       data-tip-meta={@meta}

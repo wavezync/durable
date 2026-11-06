@@ -195,10 +195,19 @@ defmodule Durable do
     instead of creating another. A string of 1 to 255 bytes. Whether a key
     can be used again after its run finishes is the workflow's `reuse:`
     option. See the Workflow keys guide.
-  - `:on_duplicate` - What to return when the key is taken: `:use_existing`
-    (`{:ok, holder_id}`, the default unless the workflow sets another) or
-    `:error` (`{:error, {:key_taken, holder_id}}`). Nothing is created,
-    broadcast or run inline for a duplicate.
+  - `:on_duplicate` - What to do when the key is taken (the default is the
+    workflow's, else `:use_existing`):
+    - `:use_existing` - return `{:ok, holder_id}`
+    - `:error` - return `{:error, {:key_taken, holder_id}}`
+    - `:cancel_existing` - cancel the running holder and start a new run with
+      this input, returning `{:ok, new_id}`
+    - `{:send_event, name}` - send this input to the running holder as event
+      `name` (kept until it waits for it) and return `{:ok, holder_id}`
+
+    Only `:cancel_existing` creates a run; nothing is broadcast or run
+    inline for the others. A finished holder that the workflow's `reuse:`
+    keeps answers `:cancel_existing` and `{:send_event, name}` with
+    `{:error, {:key_taken, holder_id}}`.
 
   ## Returns
 
@@ -440,14 +449,26 @@ defmodule Durable do
   @doc """
   Sends an event to a waiting workflow.
 
+  Returns `{:error, :not_found}` when the run isn't waiting for the event,
+  unless `buffer: true` keeps it until the run reaches
+  `wait_for_event(event_name)`.
+
+  ## Options
+
+  - `:buffer` - Keep the event for a run that isn't waiting for it yet
+    (default: `false`). A run gets one event per name: if several were kept,
+    it gets the newest.
+  - `:durable` - The Durable instance name (default: Durable)
+
   ## Examples
 
       :ok = Durable.send_event(workflow_id, "payment_confirmed", %{amount: 99.99})
+      :ok = Durable.send_event(workflow_id, "article_updated", %{rev: 7}, buffer: true)
 
   """
-  @spec send_event(String.t(), String.t(), map()) :: :ok | {:error, term()}
-  def send_event(workflow_id, event_name, payload) do
-    Durable.Wait.send_event(workflow_id, event_name, payload)
+  @spec send_event(String.t(), String.t(), map(), keyword()) :: :ok | {:error, term()}
+  def send_event(workflow_id, event_name, payload, opts \\ []) do
+    Durable.Wait.send_event(workflow_id, event_name, payload, opts)
   end
 
   @doc """

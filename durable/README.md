@@ -505,9 +505,12 @@ workflow "process_order", timeout: hours(2), queue: :orders do
 - `:reuse` — whether a `key:` can start again after its run finished:
   `:after_close` (default), `:after_failure` or `:never`. See
   [Workflow keys](guides/workflow_keys.md).
-- `:on_duplicate` — what a start with a taken key returns unless the call
-  says: `:use_existing` (default, the holder's id) or `:error`
-  (`{:error, {:key_taken, id}}`).
+- `:on_duplicate` — what a start with a taken key does unless the call says:
+  `:use_existing` (default, the holder's id), `:error`
+  (`{:error, {:key_taken, id}}`), `:cancel_existing` (replace the running
+  holder) or `{:send_event, name}` (send it the new input as an event).
+- `:debounce` — `[period: ms, timeout: ms]`: keyed starts wait `period`, and
+  repeats in that time give the waiting run the newest input.
 
 Unknown options fail the compile.
 
@@ -538,6 +541,7 @@ Durable.get_execution(id)
 Durable.list_executions(workflow: Module, status: :running)
 Durable.cancel(id, "reason")
 Durable.send_event(id, "event", payload)
+Durable.send_event(id, "event", payload, buffer: true)  # keep it until the run waits
 Durable.provide_input(id, "input_name", data)
 Durable.list_children(parent_id)
 

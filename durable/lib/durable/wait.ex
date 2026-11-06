@@ -45,6 +45,8 @@ defmodule Durable.Wait do
   alias Durable.Repo
   alias Durable.Storage.Schemas.{PendingEvent, PendingInput, WaitGroup, WorkflowExecution}
 
+  @finished [:completed, :failed, :cancelled, :compensated, :compensation_failed]
+
   import Ecto.Query
 
   @doc """
@@ -638,8 +640,16 @@ defmodule Durable.Wait do
   @doc """
   Sends an event to a waiting workflow.
 
+  Without `buffer: true`, the workflow must already be waiting for the event:
+  otherwise this returns `{:error, :not_found}` and the event is not kept.
+
   ## Options
 
+  - `:buffer` - Keep the event when the run isn't waiting for it yet, and
+    deliver it when the run reaches `wait_for_event(event_name)` (default:
+    `false`). A run gets one event per name, so when several were kept by
+    then, it gets the newest and the rest are dropped. Returns
+    `{:error, :finished}` for a run that has finished.
   - `:durable` - The Durable instance name (default: Durable)
 
   ## Examples
@@ -647,45 +657,129 @@ defmodule Durable.Wait do
       Durable.send_event(workflow_id, "payment_confirmed", %{amount: 99.99})
 
   """
-  @spec send_event(String.t(), String.t(), map(), keyword()) :: :ok | {:error, term()}
+  @spec send_event(String.t(), String.t(), term(), keyword()) :: :ok | {:error, term()}
   def send_event(workflow_id, event_name, payload, opts \\ []) do
     config = get_config(opts)
     # Sanitize at the API boundary — same rationale as provide_input/4.
     safe_payload = Durable.Executor.sanitize_for_json(payload)
 
-    with {:ok, pending_event} <- find_pending_event(config, workflow_id, event_name) do
-      # PendingEvent.payload is typed `:map`. Non-map payloads (e.g. an event
-      # sent with just a string identifier) get wrapped under "value" so the
-      # cast always succeeds. The wait group / resume context use the
-      # unwrapped payload so user code reading `received_events` sees the
-      # original shape it sent.
-      storable_payload =
-        if is_map(safe_payload), do: safe_payload, else: %{"value" => safe_payload}
+    if Keyword.get(opts, :buffer, false),
+      do: send_or_buffer(config, workflow_id, event_name, safe_payload),
+      else: deliver_to_waiter(config, workflow_id, event_name, safe_payload)
+  end
 
-      multi =
-        build_send_event_multi(
-          workflow_id,
-          event_name,
-          pending_event,
-          storable_payload,
-          safe_payload
+  defp deliver_to_waiter(config, workflow_id, event_name, safe_payload) do
+    with {:ok, pending_event} <- find_pending_event(config, workflow_id, event_name) do
+      deliver(config, workflow_id, event_name, pending_event, safe_payload)
+    end
+  end
+
+  defp deliver(config, workflow_id, event_name, pending_event, safe_payload) do
+    # PendingEvent.payload is typed `:map`. Non-map payloads (e.g. an event
+    # sent with just a string identifier) get wrapped under "value" so the
+    # cast always succeeds. The wait group / resume context use the
+    # unwrapped payload so user code reading `received_events` sees the
+    # original shape it sent.
+    storable_payload =
+      if is_map(safe_payload), do: safe_payload, else: %{"value" => safe_payload}
+
+    multi =
+      build_send_event_multi(
+        workflow_id,
+        event_name,
+        pending_event,
+        storable_payload,
+        safe_payload
+      )
+
+    case Repo.transaction(config, multi) do
+      {:ok, _} ->
+        :ok
+
+      {:error, stage, reason, _} ->
+        require Logger
+
+        Logger.error(
+          "[Durable] failed to atomically fulfill event + (optional wait_group) + resume: " <>
+            "stage=#{stage} reason=#{inspect(reason)} workflow=#{workflow_id} event=#{event_name}"
         )
 
-      case Repo.transaction(config, multi) do
-        {:ok, _} ->
-          :ok
-
-        {:error, stage, reason, _} ->
-          require Logger
-
-          Logger.error(
-            "[Durable] failed to atomically fulfill event + (optional wait_group) + resume: " <>
-              "stage=#{stage} reason=#{inspect(reason)} workflow=#{workflow_id} event=#{event_name}"
-          )
-
-          {:error, reason}
-      end
+        {:error, reason}
     end
+  end
+
+  # Buffered events. The sender and the run reaching `wait_for_event` both lock
+  # the run's row first, so one of them always sees the other: either the
+  # sender finds the waiter and delivers, or the run finds the buffered event.
+  defp send_or_buffer(config, workflow_id, event_name, payload) do
+    Repo.transaction(config, fn ->
+      case lock_run(config, workflow_id) do
+        nil -> {:error, :not_found}
+        %{status: status} when status in @finished -> {:error, :finished}
+        _open -> deliver_or_buffer(config, workflow_id, event_name, payload)
+      end
+    end)
+    |> case do
+      {:ok, result} -> result
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp deliver_or_buffer(config, workflow_id, event_name, payload) do
+    case find_pending_event(config, workflow_id, event_name) do
+      {:ok, pending_event} ->
+        deliver(config, workflow_id, event_name, pending_event, payload)
+
+      {:error, :not_found} ->
+        %PendingEvent{
+          workflow_id: workflow_id,
+          event_name: event_name,
+          step_name: "__buffered",
+          status: :buffered,
+          # Wrapped so any payload shape round-trips through the jsonb column.
+          payload: %{"__payload__" => payload},
+          wait_type: :single
+        }
+        |> Repo.insert(config)
+
+        :ok
+    end
+  end
+
+  @doc false
+  # Called right after a run starts waiting for `event_name`: delivers the
+  # newest event kept for it, if any, and drops the rest.
+  @spec deliver_buffered(Config.t(), String.t(), String.t()) :: :ok
+  def deliver_buffered(config, workflow_id, event_name) do
+    buffered =
+      from(p in PendingEvent,
+        where:
+          p.workflow_id == ^workflow_id and p.event_name == ^event_name and
+            p.status == :buffered
+      )
+
+    Repo.transaction(config, fn ->
+      lock_run(config, workflow_id)
+
+      with [newest | _] <- Repo.all(config, from(p in buffered, order_by: [desc: p.inserted_at])),
+           {:ok, pending_event} <- find_pending_event(config, workflow_id, event_name) do
+        Repo.delete_all(config, buffered)
+        deliver(config, workflow_id, event_name, pending_event, newest.payload["__payload__"])
+      end
+    end)
+
+    :ok
+  end
+
+  defp lock_run(config, workflow_id) do
+    Repo.one(
+      config,
+      from(w in WorkflowExecution,
+        where: w.id == ^workflow_id,
+        lock: "FOR UPDATE",
+        select: struct(w, [:id, :status])
+      )
+    )
   end
 
   # Single Ecto.Multi covering:

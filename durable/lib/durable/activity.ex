@@ -20,8 +20,10 @@ defmodule Durable.Activity do
 
   Key events carry `details.key` and `details.workflow`, and their
   `:workflow_id` is the run they're about: the holder for `"key_duplicate"`,
-  the new holder for `"key_handed_off"` and `"key_retaken"`. A
-  `"key_duplicate"` also has `outcome` (`use_existing` or `error`),
+  the new holder for `"key_handed_off"` (with `replaced: true` when it
+  cancelled the holder) and `"key_retaken"`. A
+  `"key_duplicate"` also has `outcome` (`use_existing`, `error`,
+  `cancel_existing`, `send_event` with the `event` name, or `debounced`),
   `holder_status` and `input_changed`, plus the new `input` when it differed
   (up to 16 KB; `input_truncated` when larger).
 

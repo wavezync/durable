@@ -257,6 +257,14 @@ defmodule DurableDashboard.Components.Core do
     """
   end
 
+  def icon(%{name: "nav-keys"} = assigns) do
+    ~H"""
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" class={@class} aria-hidden="true" {@rest}>
+      <circle cx="8" cy="15" r="4" /><path d="M10.8 12.2L20 3M16 7l3 3M14 9l2 2" />
+    </svg>
+    """
+  end
+
   def icon(%{name: "nav-queues"} = assigns) do
     ~H"""
     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" class={@class} aria-hidden="true" {@rest}>
@@ -1123,15 +1131,18 @@ defmodule DurableDashboard.Components.Core do
 
   @doc """
   A run's workflow key: the caption `key` beside the value in mono, with a
-  hover copy button. `holds` adds a neutral badge — `true` "Holds key",
-  `false` "Key moved" — and `holder` (`%{id, status}`) names who holds it in
-  the tooltip. Renders nothing for a run without a key. See `DESIGN.md` §5.
+  hover copy button. `holds` adds a neutral badge — `true` "Holds key";
+  `false` "Key moved" when another run holds it (`holder`), "Key released"
+  when `released`, else "Key free" — and `holder` (`%{id, status}`) names who
+  holds it in the tooltip. Renders nothing for a run without a key. See
+  `DESIGN.md` §5.
 
       <.key_chip key={run.key} holds={run.holds_key} holder={@holder} />
   """
   attr :key, :string, default: nil
   attr :holds, :any, default: nil, doc: "true, false, or nil for no badge"
   attr :holder, :map, default: nil, doc: "the run holding the key, `%{id, status}`"
+  attr :released, :boolean, default: false, doc: "an operator released this run's key"
   attr :class, :any, default: nil
 
   def key_chip(%{key: nil} = assigns), do: ~H""
@@ -1155,7 +1166,9 @@ defmodule DurableDashboard.Components.Core do
         class="opacity-0 group-hover/key:opacity-100 focus-visible:opacity-100"
       />
       <.badge :if={@holds == true} kind="muted">Holds key</.badge>
-      <.badge :if={@holds == false} kind="muted">Key moved</.badge>
+      <.badge :if={@holds == false and @holder != nil} kind="muted">Key moved</.badge>
+      <.badge :if={@holds == false and @holder == nil and @released} kind="muted">Key released</.badge>
+      <.badge :if={@holds == false and @holder == nil and !@released} kind="muted">Key free</.badge>
     </span>
     """
   end
