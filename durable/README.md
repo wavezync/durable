@@ -22,6 +22,7 @@ A durable, resumable workflow engine for Elixir. Similar to Temporal/Inngest.
 - **Cron Scheduling** - Recurring workflows with cron expressions
 - **Reliability** - Automatic retries with exponential/linear/constant backoff
 - **Orchestration** - Parent/child workflow composition
+- **Workflow keys** - At most one run per key, so duplicate starts return the existing run
 - **Persistence** - PostgreSQL-backed execution state
 
 ## Installation
@@ -501,6 +502,12 @@ workflow "process_order", timeout: hours(2), queue: :orders do
   compensations: a step still running is stopped, and a waiting run is woken
   to fail (within the timeout worker's one-minute sweep).
 - `:queue` — the queue runs start on unless `Durable.start/3` names one.
+- `:reuse` — whether a `key:` can start again after its run finished:
+  `:after_close` (default), `:after_failure` or `:never`. See
+  [Workflow keys](guides/workflow_keys.md).
+- `:on_duplicate` — what a start with a taken key returns unless the call
+  says: `:use_existing` (default, the holder's id) or `:error`
+  (`{:error, {:key_taken, id}}`).
 
 Unknown options fail the compile.
 
@@ -526,6 +533,7 @@ VM's `:backtrace_depth` (8 frames by default; Phoenix dev raises it to 20).
 ```elixir
 Durable.start(Module, input)
 Durable.start(Module, input, queue: :priority, scheduled_at: datetime)
+Durable.start(Module, input, key: "article:42")   # at most one run per key
 Durable.get_execution(id)
 Durable.list_executions(workflow: Module, status: :running)
 Durable.cancel(id, "reason")
@@ -536,6 +544,7 @@ Durable.list_children(parent_id)
 # Operating
 Durable.retry(id)                        # failed run: resume from the failed step
 Durable.rerun(id, input: new_input)      # finished run: start a fresh copy
+Durable.release_key(id, by: user)        # finished run: let its key start again
 Durable.pause_queue(:default, by: user)  # on every node, until resume_queue/2
 Durable.list_nodes()                     # heartbeating instances and what they run
 Durable.prune()                          # apply the :prune retention now
@@ -619,6 +628,7 @@ option list and design notes.
 - [Compensations](guides/compensations.md) - Saga pattern
 - [Waiting](guides/waiting.md) - Sleep, events, human input
 - [Orchestration](guides/orchestration.md) - Parent/child workflow composition
+- [Workflow keys](guides/workflow_keys.md) - One run per key, duplicate starts, reuse policies
 - [Testing](guides/testing.md) - Run and assert on workflows in ExUnit
 
 ## License
