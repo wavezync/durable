@@ -35,7 +35,7 @@ jobs:
       run:
         working-directory: site
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Set up pnpm
         uses: pnpm/action-setup@v6
@@ -43,7 +43,7 @@ jobs:
           version: 12
 
       - name: Set up Node
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: "24"
           cache: pnpm
