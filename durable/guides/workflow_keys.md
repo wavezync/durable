@@ -38,7 +38,7 @@ end
 
 ## How It Works
 
-- **One holder per key.** Among the runs of one workflow, at most one *holds* a key. A start that finds the key held creates nothing: no run, no `:workflow_started` broadcast, nothing run inline. It returns the holder (or an error, see below).
+- **One holder per key.** Among the runs of one workflow, at most one *holds* a key. A start that finds the key held returns the holder (or an error, see below) and creates nothing: no run, no `:workflow_started` broadcast, nothing run inline. The exception is `on_duplicate: :cancel_existing`, which replaces the holder with a new run.
 - **Keys are scoped per workflow.** `"article:42"` on `process_article` and on `index_article` are two different keys.
 - **A run that's still going always holds its key.** Pending, running, waiting (sleep, events, input) and compensating runs keep it, including while a step is between retry attempts.
 - **After the run finishes, `reuse:` decides** whether the next start may take the key or gets the finished run back.
@@ -83,10 +83,14 @@ Durable.start(SendInvoice, %{"id" => "INV-2208"}, key: "invoice:INV-2208", on_du
 #=> {:ok, "3f2a91c4-…"}
 ```
 
-| `on_duplicate:` | Key free | Key taken |
-|-----------------|----------|-----------|
+| `on_duplicate:` | Key free | Key taken by a run that's still going |
+|-----------------|----------|---------------------------------------|
 | `:use_existing` (default) | `{:ok, new_id}` | `{:ok, holder_id}` |
 | `:error` | `{:ok, new_id}` | `{:error, {:key_taken, holder_id}}` |
+| `:cancel_existing` | `{:ok, new_id}` | cancels the holder, `{:ok, new_id}` |
+| `{:send_event, name}` | `{:ok, new_id}` | sends the input to the holder, `{:ok, holder_id}` |
+
+`:cancel_existing` and `{:send_event, name}` are about a holder that's still going; see [Updates That Arrive While a Run Is Going](#updates-that-arrive-while-a-run-is-going). A finished holder that `reuse:` keeps answers both with `{:error, {:key_taken, holder_id}}`, since there's nothing to cancel or send to.
 
 Other results:
 
@@ -143,26 +147,87 @@ The released run keeps its history and its `key`. A run that's still going retur
 
 ## Updates That Arrive While a Run Is Going
 
-With `on_duplicate: :use_existing`, a start that arrives while the holder is running gets the holder back, and its input is dropped. Durable records it, so you can see it happened:
+With `on_duplicate: :use_existing`, a start that arrives while the holder is still going gets the holder back, and its input is dropped. Durable records it, so you can see it happened:
 
 - `Durable.Activity` gets a `"key_duplicate"` event on the holder, with `input_changed: true` and the new `input`.
-- The dashboard's run page shows "Added again 3 times while running" and the dropped input as a diff.
+- The dashboard's run page says how many times the key was added again, and shows the dropped input as a diff.
 
-To avoid losing updates:
+If the newer input matters, pick one of these:
 
-- Pass ids, not content (see Choosing a Key), so the run reads the latest data when it gets there.
-- Put the revision in the key, so each revision is its own run.
-- Use `on_duplicate: :error` and decide in the producer what to do with `{:key_taken, id}`.
+| You want | Use |
+|----------|-----|
+| The run to read the latest data when it gets there | Pass ids, not content (see Choosing a Key) |
+| Every revision processed | Put the revision in the key |
+| The newest input to win, starting over | `on_duplicate: :cancel_existing` |
+| The running run to take the new input itself | `on_duplicate: {:send_event, name}` |
+| A burst of updates to become one run with the last input | `debounce:` |
+| The producer to decide | `on_duplicate: :error` |
 
-Replacing the running run (`:cancel_existing`), sending the new input to it as an event, and debouncing a burst into one run are planned.
+### Replace the Running Run: `:cancel_existing`
+
+```elixir
+Durable.start(ProcessArticle, %{"id" => 42, "rev" => 8}, key: "article:42", on_duplicate: :cancel_existing)
+#=> {:ok, new_id}
+```
+
+The holder is cancelled and gives up its key in one step, and a new run starts with the new input. It works under any `reuse:`, `:never` included, because the holder hadn't finished. The cancel is the same as `Durable.cancel/2`: a step already running finishes but its result is dropped, no later step runs, and compensations don't run. The cancelled run's error says which run replaced it. A compensating holder can't be cancelled, so that start returns `{:error, {:key_taken, holder_id}}`. This is Temporal's TERMINATE_EXISTING, and Inngest's singleton `cancel` mode.
+
+### Hand the Input to the Running Run: `{:send_event, name}`
+
+```elixir
+workflow "process_article", reuse: :after_failure do
+  step :fetch do
+    put_context(:article, MyApp.CMS.get_article!(input()["id"]))
+  end
+
+  step :publish do
+    MyApp.Feeds.publish(get_context(:article))
+  end
+
+  # A later save during processing arrives here.
+  step :catch_up do
+    case wait_for_event("article_updated", timeout: minutes(5), timeout_value: :none) do
+      :none -> :ok
+      %{"rev" => rev} -> MyApp.Feeds.refresh(input()["id"], rev)
+    end
+  end
+end
+```
+
+```elixir
+Durable.start(ProcessArticle, %{"id" => 42, "rev" => 8},
+  key: "article:42",
+  on_duplicate: {:send_event, "article_updated"}
+)
+#=> {:ok, holder_id}
+```
+
+The first start's input is the run's input. Later starts while it's going send their input to it as the event `"article_updated"`, like Temporal's Signal-With-Start:
+
+- If the run is waiting for that event, it gets it and resumes.
+- If it isn't waiting yet, the event is kept and delivered when the run reaches `wait_for_event("article_updated")`, so an update that arrives mid-step isn't lost.
+- A run gets one event per name (`wait_for_event` returns the first one it received). If several were kept by the time it waits, it gets the newest. Events sent after the run already got one are kept but never read.
+
+`Durable.send_event/4` does the same keeping with `buffer: true`, for events you send yourself.
+
+### Collapse a Burst: `debounce:`
+
+```elixir
+workflow "index_article", debounce: [period: seconds(30), timeout: minutes(5)] do
+```
+
+A start with a key waits `period` before it runs. Each start with the same key in that time gives the waiting run the newer input and restarts the wait, so five saves in a minute become one run with the last save. `timeout` caps the wait: the run starts at most that long after the first start, even if saves keep coming. Without `timeout`, a steady stream of saves keeps it waiting.
+
+Once a worker has picked the run up, the next start is an ordinary duplicate and `on_duplicate:` decides. Starts without a key aren't debounced. A workflow `timeout:` counts from when the debounced run is due, not from the first start. This is Inngest's debounce.
 
 ## Watching Keys
 
-- **Activity**: `Durable.Activity.list(kinds: ["key_duplicate"])`. The kinds are `"key_duplicate"`, `"key_handed_off"` (a start took a finished run's key), `"key_released"` and `"key_retaken"` (a retry took its key back). Each has `details.key` and `details.workflow`. Activity is kept for a week.
-- **Stats**: `Durable.Stats.keys(workflow: "process_article")` returns keys held, re-adds, dropped inputs, errors returned, hand-offs, re-adds over time and the keys re-added most.
+- **Activity**: `Durable.Activity.list(kinds: ["key_duplicate"])`. The kinds are `"key_duplicate"` (its `outcome` says what the start did: `use_existing`, `error`, `cancel_existing`, `send_event` or `debounced`), `"key_handed_off"` (a start took the key from a finished or replaced run), `"key_released"` and `"key_retaken"` (a retry took its key back). Each has `details.key` and `details.workflow`. Activity is kept for a week.
+- **Stats**: `Durable.Stats.keys(workflow: "process_article")` returns keys held, re-adds by outcome, dropped inputs, hand-offs, re-adds over time and the keys re-added most.
 - **Telemetry**: `[:durable, :key, :duplicate]`, `[:durable, :key, :handoff]` and `[:durable, :key, :release]`. See `Durable.Telemetry`.
 - **Query**: `Durable.list_executions(key: "article:42")` returns every run started with the key; the holder has `holds_key: true`.
-- **Dashboard**: a run's Key view lists its re-adds and every run with its key, and the workflow page has a Keys section. Search Runs with `key:article:42`.
+- **Query**: `Durable.Query.list_keys(workflow_name: "process_article")` lists keys with their holder, how many runs used each, and re-adds in the last day.
+- **Dashboard**: the Keys page lists every key and its holder. A run's Key view lists its re-adds and every run with its key, and the workflow page has a Keys section. Search Runs with `key:article:42`.
 
 ## Things to Know
 
@@ -173,5 +238,6 @@ Replacing the running run (`:cancel_existing`), sending the new input to it as a
 
 ## Coming From Oban or Temporal
 
-- **Temporal**: a key is a Workflow ID. `reuse:` is the Workflow ID reuse policy (`:after_close` is ALLOW_DUPLICATE, `:after_failure` is ALLOW_DUPLICATE_FAILED_ONLY, `:never` is REJECT_DUPLICATE). `on_duplicate:` is the conflict policy (`:use_existing` is USE_EXISTING, `:error` is FAIL). Pruning plays the part of the retention period.
+- **Temporal**: a key is a Workflow ID. `reuse:` is the Workflow ID reuse policy (`:after_close` is ALLOW_DUPLICATE, `:after_failure` is ALLOW_DUPLICATE_FAILED_ONLY, `:never` is REJECT_DUPLICATE). `on_duplicate:` is the conflict policy (`:use_existing` is USE_EXISTING, `:error` is FAIL, `:cancel_existing` is TERMINATE_EXISTING), and `{:send_event, name}` is Signal-With-Start. Pruning plays the part of the retention period.
+- **Inngest**: `debounce:` is Inngest's debounce, `:cancel_existing` is singleton's `cancel` mode, and `:use_existing` is singleton's `skip`. Inngest's idempotency key lasts 24 hours; a key lasts until its run is pruned.
 - **Oban**: `unique:` is checked against a list of job states and a time `period`. A key has neither: an unfinished run always holds it, and `reuse:` decides after it finishes, so a run moving between states can't let a duplicate in or collide with one.
