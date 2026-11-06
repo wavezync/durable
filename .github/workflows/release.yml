@@ -121,7 +121,7 @@ jobs:
         if: inputs.package == 'durable_dashboard'
         uses: pnpm/action-setup@v6
         with:
-          version: 9
+          version: 12
 
       - name: Set up Node
         if: inputs.package == 'durable_dashboard'
