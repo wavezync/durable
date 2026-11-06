@@ -233,6 +233,21 @@ Inline code chip — IDs, JSON snippets, durations, queue names. Pass
 `copy={"the text"}` to append a hover-revealed `<.copy_button>` (used on the
 execution id, settings config values).
 
+### `<.key_chip>`
+
+A run's workflow key: the caption `key` (sans, muted) beside the value in
+mono, on a `bg-secondary` chip, with the hover copy button. `holds` adds a
+muted badge: `true` → "Holds key", `false` → "Key moved" (another run took
+it). Both stay neutral, because holding a key is a normal state, not a status.
+The tooltip names the holder ("Held by 3f2a91c4 · Running"). It renders
+nothing for a run without a key.
+
+```heex
+<.key_chip key={run.key} holds={run.holds_key} holder={@holder} />
+```
+
+**Don't** use it for other identifiers; that's `<.code>`.
+
 ### `<.copy_button>`
 
 A small ghost clipboard button that copies `text` to the clipboard and flashes
@@ -381,7 +396,10 @@ command-palette discipline (§1).
 - **Snapshot on open, filter in memory** — workflows, schedules and the
   newest runs are fetched once on `palette:open`. The one exception: a
   query shaped like a run id (4+ hex characters) is looked up in the
-  database by prefix, so any run is found, not only the recent ones. The
+  database by prefix, so any run is found, not only the recent ones. A
+  query shaped like a workflow key (it contains `:`) is looked up the same
+  way, by exact key, into a **Keys** group: key, workflow, "held by
+  `3f2a91c4`" and the holder's status pill (→ the holder's Key view). The
   input is debounced (100 ms). Degrades to page routes when `durable` is
   `nil`.
 - **Selection is marked in the live blue**
@@ -506,18 +524,59 @@ override its background or backdrop-blur in the sheet itself.
 
 One run, one page — header, banner, facts, then a view switch.
 
-- **Header**: workflow name + status pill, short id, and the actions that
-  fit the run's state: Cancel (live runs), Retry from step (failed),
-  Rerun and Rerun with edited input (finished). Actions need operator
-  access; errors render inline under the buttons (`role="alert"`).
+- **Header**: workflow name + status pill, short id, the `<.key_chip>` when
+  the run has a key, and the actions that fit the run's state: Cancel (live
+  runs), Retry from step (failed), Rerun and Rerun with edited input
+  (finished), Release key (a closed run that holds its key). Actions need
+  operator access; errors render inline under the buttons (`role="alert"`).
+- **A blocked action says why**, in one muted line under the buttons, and
+  names what would unblock it: "Retry needs `article:42` back. `3f2a91c4`
+  holds it and is still running: cancel it or wait for it to finish." When
+  Retry would take the key back from a closed holder, its label says so:
+  "Retry and take the key back".
+- **Release key confirms inline**: a strip under the header, never a modal
+  (§10), that says what happens next: "Release `invoice:INV-2208`? This run
+  keeps its history. The next start for this key sends the invoice again."
+  Release (destructive) and Keep it (ghost).
 - **Banner** says what happened in a sentence — "`charge_card` failed after
   3 attempts — <error line>", "Cancelled — <reason>. Steps that finished stay
   finished." — with "Show error" linking straight to the inspector pane, and
-  for rolled-back runs, why Retry is off. No banner for a clean success.
+  for rolled-back runs, why Retry is off. No banner for a clean success. A
+  keyed run adds what happened to its key: "Run `3f2a91c4` took `article:42`
+  at 10:41." on a run that lost it, and an amber banner on a holder that
+  dropped newer input ("Added again 3 times while running. The newest input
+  differs from this run's and was dropped (`on_duplicate: :use_existing`).")
+  with "Show dropped inputs" linking to the Key view.
 - **Facts strip**: started, duration, queued for, attempts, trigger (and
-  what triggered it), queue · node, child runs — one line, mono values.
-- **Views**: Trace (default), Graph, Logs, Context, Family. URL:
+  what triggered it), queue · node, child runs, and for a keyed run the key
+  (with the run it came from) and "re-added 3× · last 41s ago" — one line,
+  mono values.
+- **Views**: Trace (default), Graph, Logs, Context, Family, Key. Family shows
+  only when the run has a family, Key only when it has a key. URL:
   `/executions/:id/:view?step=&pane=`, so "this step's error" is a link.
+
+### Key view (`WorkflowLive`, `/executions/:id/key`)
+
+What happened to this run's workflow key. The tab's count is the re-adds
+(tooltip "Added again N times · while this run held the key"). Two panels,
+side by side:
+
+- **Added again**: one row per start that found this run holding the key,
+  newest first (`Activity`, kind `key_duplicate`). Columns: when
+  (`local_time`), outcome as a phrase ("Returned this run", "Returned
+  `{:error, {:key_taken, …}}`"), input ("Same input", muted, or a warning
+  badge "Newer input dropped"), node. A dropped row opens in place to a
+  **field diff**: the field name muted, the old value struck through in
+  `destructive`, the new one in `success`, all mono, plus Copy input. The
+  strike-through carries the meaning without color.
+- **Runs with this key**: every run with the key, the holder first, then
+  newest first. Each row is the run id (a link), its status pill and one
+  sentence on its part in the key's history: "Holds the key · took it 10:41",
+  "Failed at `fetch_article`, so the key could move", "Released by alice ·
+  2d ago". The panel's subtitle is the workflow's policy, `reuse:
+  :after_failure`.
+
+Empty state: "Nobody added `article:42` again."
 
 ### Trace waterfall (`DurableDashboard.Trace`)
 
@@ -548,8 +607,10 @@ stack; the pane says so by its type ("Returned {:error, …}").
 
 Saved views as a tab strip with counts (All, Failed, Running, Waiting,
 Cancelled), then the query bar (search grammar from `RunSearch`: id prefix,
-`step:`, `error:`, `input.path:value`, `schedule:`). Columns: run, status,
-where it is (current step), steps, retries, trigger, node, age.
+`step:`, `error:`, `input.path:value`, `schedule:`, `key:`). Columns: run,
+status, where it is (current step), steps, retries, trigger, node, age. A
+keyed run shows its key after the run id ("3f2a91c4 · article:42 · holds
+key", mono, muted), so keys need no column and rows stay two lines.
 
 **Nothing moves under the pointer.**
 - Columns have fixed widths (`table-fixed` + a `colgroup`); Run and Where it
@@ -561,8 +622,9 @@ where it is (current step), steps, retries, trigger, node, age.
 
 **Bulk actions**: row checkboxes plus a select-all; a bar **floats** at the
 bottom of the viewport (sticky, `bg-popover` + `shadow-lg`) rather than pushing
-the table down, with "Retry N from failed step", "Rerun N", "Cancel N"
-(confirmed), each counting only the selected runs it fits and shown only when
+the table down, with "Retry N from failed step", "Rerun N", "Release N keys"
+(closed runs that hold a key, confirmed), "Cancel N" (confirmed), each
+counting only the selected runs it fits and shown only when
 N > 0. A selection is the rows on screen: a new page, view or filter starts it
 over. More than 100 runs needs admin. The result is one sentence ("Retried 12
 of 12 runs.") in the same floating spot, dismissable.
@@ -604,6 +666,21 @@ signature (digits normalized to `<n>`), slowest steps by p95 *active* time
 the Workflow page adds its structure annotated with each step's p95 and
 failure share, and the definition as compiled. Stats refresh on PubSub
 events, throttled to one reload per 2 s.
+
+**Keys section** (Workflow page, only for a workflow that has started a
+keyed run), after the charts row. Its header carries the policy in words
+(`reuse: :after_failure` · duplicates return the holder · pruning frees a
+key after 30 days).
+
+- **Readout**: Keys held, Re-added, Newer input dropped, Handed off, Errors
+  returned. Only "Newer input dropped" lights up (warning, when > 0); the
+  rest stay neutral (§6 Status readout).
+- **Re-adds per bucket** as `stacked_bars` with two series: returned the
+  holder (`--chart-1`), returned an error (`--chart-4`).
+- **Re-added most**: key, holder status pill, re-adds, dropped (warning
+  when > 0). Each key links to its holder's Key view.
+- The counts come from `Durable.Activity`, which keeps a week, so the 30d
+  range shows the last 7 days and the panel's subtitle says so.
 
 ### Structure map (`Components.Workflow.Structure`)
 
@@ -650,7 +727,9 @@ the tables, **Operations** is `Durable.Activity` for the last day: one line
 per event, written as a sentence ("Put 3 runs back on the queue — their node
 stopped heartbeating for 300 s"), with a status mark (amber for recoveries,
 diamond for fenced workers / failed acks / disabled schedules, ring for
-pauses) and the node that recorded it.
+pauses) and the node that recorded it. Key events (`key_*` kinds) stay out
+of this feed; they belong to the run's Key view and the workflow's Keys
+section.
 
 ### Inbox (`InputsLive`)
 
@@ -696,7 +775,7 @@ Three views: **Needs input**, **Waiting for events**, **Sleeping**.
   migrations are an amber alert with the exact commands. Then instance,
   access (your level highlighted), queues on this node, every timing knob
   with a sentence on what it means for runs, retention (with Prune now,
-  admin) and log capture, and the effective config as a copyable child spec.
+  admin; pruning a run also frees its workflow key) and log capture, and the effective config as a copyable child spec.
 
 ### Empty / loading / error shells
 
@@ -858,7 +937,7 @@ intent — Observe, Operate, Instrument.
 | ---------------------------- | -------------------- | ----------------------------------------------- |
 | `/`                          | `OverviewLive`       | Health over a range, what's failing, live feed  |
 | `/executions`                | `ExecutionsLive`     | Runs: saved views, search, facets, bulk actions |
-| `/executions/:id[/:view]`    | `WorkflowLive`       | One run: trace, graph, logs, context, family    |
+| `/executions/:id[/:view]`    | `WorkflowLive`       | One run: trace, graph, logs, context, family, key |
 | `/workflows`                 | `WorkflowsLive`      | Catalog: runs, failure rate, p50/p95, retries   |
 | `/workflows/:name`           | `WorkflowDetailLive` | One workflow's health, steps and errors         |
 | `/workflows/:name/runs`      | `ExecutionsLive`     | Runs of one workflow                            |
@@ -875,7 +954,7 @@ the current views.
 
 `DurableDashboard.Access`: **viewer** (default — sees everything, changes
 nothing), **operator** (retry, rerun, cancel, answer inputs, send events,
-pause queues, run a schedule now), **admin** (bulk over 100 runs,
+pause queues, run a schedule now, release a workflow key), **admin** (bulk over 100 runs,
 enable/disable schedules, prune). The host supplies a `resolver:` on the
 router. UI rule: controls the viewer can't use are **hidden** in tables and
 **disabled with a sentence** in forms; the server checks again in

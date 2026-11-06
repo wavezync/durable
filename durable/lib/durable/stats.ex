@@ -26,6 +26,7 @@ defmodule Durable.Stats do
   alias Durable.Repo
 
   alias Durable.Storage.Schemas.{
+    ActivityEvent,
     PendingEvent,
     PendingInput,
     Queue,
@@ -103,7 +104,7 @@ defmodule Durable.Stats do
     span = DateTime.diff(until, since, :second)
     bucket = Keyword.get(opts, :bucket_seconds, max(div(span, 48), 60))
     runs = runs(opts)
-    origin = DateTime.to_unix(since)
+    origin = bucket_origin(since)
 
     finished =
       Repo.all(
@@ -563,7 +564,155 @@ defmodule Durable.Stats do
     |> Enum.group_by(& &1.queue, &Map.delete(&1, :queue))
   end
 
+  @doc """
+  Workflow keys over the window, for one workflow with `:workflow` or for all:
+
+      %{
+        keyed: true,          # the workflow has started a run with a key
+        held: 1_284,          # keys held right now
+        readded: 3_912,       # starts that found their key taken
+        dropped: 41,          # ...whose input differed and was dropped
+        errors: 12,           # ...answered with {:error, {:key_taken, id}}
+        handed_off: 87,       # keys a start took from a finished run
+        timeline: [%{at: ~U[...], returned: 160, errors: 1}, ...],
+        top: [%{key: "article:17", readded: 48, dropped: 0,
+                holder_id: "…", holder_status: :completed}, ...]
+      }
+
+  The counts come from `Durable.Activity`, which keeps a week, so they cover
+  at most the last 7 days. `:bucket_seconds` and `:limit` (top keys, default
+  10) are optional.
+  """
+  @spec keys(keyword()) :: map()
+  def keys(opts \\ []) do
+    {config, since, until} = window(opts)
+    runs = runs(opts)
+
+    events =
+      from(a in ActivityEvent,
+        where: a.at >= ^since and a.at < ^until,
+        where: a.kind in ["key_duplicate", "key_handed_off"]
+      )
+
+    events =
+      case Keyword.get(opts, :workflow) do
+        nil -> events
+        name -> from(a in events, where: fragment("?->>'workflow' = ?", a.details, ^name))
+      end
+
+    totals =
+      Repo.all(
+        config,
+        from(a in events,
+          group_by: [a.kind, fragment("outcome"), fragment("changed")],
+          select: {
+            a.kind,
+            fragment("?->>'outcome' AS outcome", a.details),
+            fragment("coalesce((?->>'input_changed')::boolean, false) AS changed", a.details),
+            count(a.id)
+          }
+        )
+      )
+
+    sum = fn pred -> for({k, o, c, n} <- totals, pred.(k, o, c), do: n) |> Enum.sum() end
+
+    %{
+      keyed:
+        Repo.one(config, from(w in runs, where: not is_nil(w.key), select: true, limit: 1)) ==
+          true,
+      held: Repo.aggregate(config, from(w in runs, where: w.holds_key), :count),
+      readded: sum.(fn k, _, _ -> k == "key_duplicate" end),
+      dropped: sum.(fn k, o, c -> k == "key_duplicate" and o == "use_existing" and c end),
+      errors: sum.(fn k, o, _ -> k == "key_duplicate" and o == "error" end),
+      handed_off: sum.(fn k, _, _ -> k == "key_handed_off" end),
+      timeline: key_timeline(config, events, since, until, opts),
+      top: top_keys(config, events, runs, Keyword.get(opts, :limit, 10))
+    }
+  end
+
+  defp key_timeline(config, events, since, until, opts) do
+    span = DateTime.diff(until, since, :second)
+    bucket = Keyword.get(opts, :bucket_seconds, max(div(span, 48), 60))
+    origin = bucket_origin(since)
+
+    counts =
+      Repo.all(
+        config,
+        from(a in events,
+          where: a.kind == "key_duplicate",
+          group_by: [fragment("bucket"), fragment("outcome")],
+          select: {
+            fragment(
+              "floor((extract(epoch from ?) - ?) / ?)::int AS bucket",
+              a.at,
+              ^origin,
+              ^bucket
+            ),
+            fragment("?->>'outcome' AS outcome", a.details),
+            count(a.id)
+          }
+        )
+      )
+      |> Map.new(fn {b, outcome, n} -> {{b, outcome}, n} end)
+
+    for b <- 0..max(div(span - 1, bucket), 0) do
+      %{
+        at: DateTime.add(since, b * bucket, :second),
+        returned: Map.get(counts, {b, "use_existing"}, 0),
+        errors: Map.get(counts, {b, "error"}, 0)
+      }
+    end
+  end
+
+  defp top_keys(config, events, runs, limit) do
+    top =
+      Repo.all(
+        config,
+        from(a in events,
+          where: a.kind == "key_duplicate",
+          group_by: fragment("1"),
+          order_by: [desc: count(a.id)],
+          limit: ^limit,
+          select: {
+            fragment("?->>'key'", a.details),
+            count(a.id),
+            fragment(
+              "count(*) FILTER (WHERE ?->>'outcome' = 'use_existing' AND (?->>'input_changed')::boolean)",
+              a.details,
+              a.details
+            )
+          }
+        )
+      )
+
+    keys = Enum.map(top, &elem(&1, 0))
+
+    holders =
+      Repo.all(
+        config,
+        from(w in runs, where: w.holds_key and w.key in ^keys, select: {w.key, {w.id, w.status}})
+      )
+      |> Map.new()
+
+    for {key, readded, dropped} <- top do
+      {holder_id, status} = Map.get(holders, key, {nil, nil})
+
+      %{
+        key: key,
+        readded: readded,
+        dropped: dropped,
+        holder_id: holder_id,
+        holder_status: status
+      }
+    end
+  end
+
   # --------------------------------------------------------------------------
+
+  # Bucket 0 starts exactly at `since`, microseconds included: truncating it to
+  # the second would push anything in the window's last fraction of a second
+  # into a bucket past the end.
+  defp bucket_origin(since), do: DateTime.to_unix(since, :microsecond) / 1_000_000
 
   defp window(opts) do
     config = Config.get(Keyword.get(opts, :durable, Durable))

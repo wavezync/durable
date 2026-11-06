@@ -14,6 +14,7 @@ defmodule Durable.Executor do
   alias Durable.Definition.Workflow
   alias Durable.Executor.CompensationRunner
   alias Durable.Executor.StepRunner
+  alias Durable.Keys
   alias Durable.PubSub, as: DurablePubSub
   alias Durable.Repo
   alias Durable.Storage.Schemas.PendingEvent
@@ -35,6 +36,8 @@ defmodule Durable.Executor do
   - `:queue` - The queue to use (default: "default")
   - `:priority` - Priority level (default: 0)
   - `:scheduled_at` - Schedule for future execution
+  - `:key` - Workflow key; see `Durable.start/3`
+  - `:on_duplicate` - `:use_existing` or `:error` when the key is taken
   - `:durable` - The Durable instance name (default: Durable)
 
   ## Returns
@@ -47,19 +50,34 @@ defmodule Durable.Executor do
     durable_name = Keyword.get(opts, :durable, Durable)
     config = Config.get(durable_name)
 
-    with {:ok, workflow_def} <- get_workflow_definition(module, opts),
-         {:ok, execution} <- create_execution(config, module, workflow_def, input, opts) do
-      DurablePubSub.broadcast_workflow(config, :workflow_started, workflow_event(execution))
+    Keys.validate_start_opts!(opts)
 
-      # For inline/synchronous execution (useful for testing)
-      if Keyword.get(opts, :inline, false) do
-        execute_workflow(execution.id, config)
-      end
-
-      # Otherwise, the queue poller will pick up the job
-      {:ok, execution.id}
+    with {:ok, workflow_def} <- get_workflow_definition(module, opts) do
+      config
+      |> create_execution(module, workflow_def, input, opts)
+      |> started(config, opts)
     end
   end
+
+  defp started({:ok, execution}, config, opts) do
+    DurablePubSub.broadcast_workflow(config, :workflow_started, workflow_event(execution))
+
+    # For inline/synchronous execution (useful for testing)
+    if Keyword.get(opts, :inline, false) do
+      execute_workflow(execution.id, config)
+    end
+
+    # Otherwise, the queue poller will pick up the job
+    {:ok, execution.id}
+  end
+
+  # The key is held: nothing was created, broadcast or run.
+  defp started({:duplicate, holder_id, :use_existing}, _config, _opts), do: {:ok, holder_id}
+
+  defp started({:duplicate, holder_id, :error}, _config, _opts),
+    do: {:error, {:key_taken, holder_id}}
+
+  defp started({:error, _} = error, _config, _opts), do: error
 
   @doc """
   Cancels a running or pending workflow.
@@ -147,15 +165,49 @@ defmodule Durable.Executor do
       deadline_at: retried_deadline(execution)
     ]
 
-    if parallel_children(execution.context) do
-      retry_parallel_block(config, execution, retry_attrs)
-    else
-      execution
-      |> Ecto.Changeset.change([status: :pending] ++ retry_attrs)
-      |> cas_update(config)
-      |> not_failed_if_superseded()
+    cond do
+      parallel_children(execution.context) ->
+        retry_parallel_block(config, execution, retry_attrs)
+
+      execution.key && not execution.holds_key ->
+        retry_and_retake(config, execution, retry_attrs)
+
+      true ->
+        execution
+        |> Ecto.Changeset.change([status: :pending] ++ retry_attrs)
+        |> cas_update(config)
+        |> not_failed_if_superseded()
     end
   end
+
+  # A run whose key moved to another run takes it back by the start rules
+  # (releasing a closed holder `reuse:` lets go) in the same transaction that
+  # reopens it, or the retry is refused with {:key_taken, holder_id}.
+  defp retry_and_retake(config, execution, retry_attrs) do
+    workflow_def = definition_or_nil(execution)
+
+    {:ok, result} =
+      Repo.transaction(config, fn ->
+        with {:ok, key_attrs} <- Keys.retake(config, execution, workflow_def) do
+          execution
+          |> Ecto.Changeset.change([status: :pending] ++ retry_attrs ++ key_attrs)
+          |> Ecto.Changeset.unique_constraint(:key,
+            name: :workflow_executions_key_holder_index
+          )
+          |> cas_update(config, mode: :savepoint)
+          |> not_failed_if_superseded()
+          |> key_taken_if_conflict(config, execution)
+        end
+      end)
+
+    result
+  end
+
+  defp key_taken_if_conflict({:error, %Ecto.Changeset{} = changeset} = error, config, execution) do
+    if Keys.key_taken?(changeset), do: Keys.key_taken_error(config, execution), else: error
+  end
+
+  defp key_taken_if_conflict(result, _config, _execution), do: result
 
   # A retried run gets its full workflow timeout again, from now.
   defp retried_deadline(execution) do
@@ -177,6 +229,12 @@ defmodule Durable.Executor do
   end
 
   defp reopen_parallel_block(config, parent, retry_attrs) do
+    key_attrs =
+      case Keys.retake(config, parent, definition_or_nil(parent)) do
+        {:ok, attrs} -> attrs
+        {:error, reason} -> config.repo.rollback(reason)
+      end
+
     child_ids = Map.keys(parallel_children(parent.context))
 
     group_id =
@@ -222,12 +280,21 @@ defmodule Durable.Executor do
       |> Repo.update(config)
 
     parent
-    |> Ecto.Changeset.change([status: :waiting] ++ retry_attrs)
-    |> cas_update(config)
+    |> Ecto.Changeset.change([status: :waiting] ++ retry_attrs ++ key_attrs)
+    |> Ecto.Changeset.unique_constraint(:key, name: :workflow_executions_key_holder_index)
+    |> cas_update(config, mode: :savepoint)
     |> not_failed_if_superseded()
+    |> key_taken_if_conflict(config, parent)
     |> case do
       {:ok, retried} -> retried
       {:error, reason} -> config.repo.rollback(reason)
+    end
+  end
+
+  defp definition_or_nil(execution) do
+    case get_workflow_definition_from_execution(execution) do
+      {:ok, definition} -> definition
+      _ -> nil
     end
   end
 
@@ -257,7 +324,11 @@ defmodule Durable.Executor do
         priority: execution.priority,
         durable: durable,
         trigger: :rerun,
-        trigger_ref: execution.id
+        trigger_ref: execution.id,
+        # Keyed runs rerun under the start rules, and an operator should hear
+        # why a rerun was refused rather than get the holder back.
+        key: execution.key,
+        on_duplicate: :error
       )
     end
   end
@@ -440,9 +511,16 @@ defmodule Durable.Executor do
       deadline_at: deadline(workflow_def, scheduled_at)
     }
 
-    %WorkflowExecution{}
-    |> WorkflowExecution.changeset(attrs)
-    |> Repo.insert(config)
+    case Keyword.fetch(opts, :key) do
+      {:ok, key} when not is_nil(key) ->
+        changeset = WorkflowExecution.changeset(%WorkflowExecution{}, Map.put(attrs, :key, key))
+        Keys.insert(config, changeset, workflow_def, opts)
+
+      _ ->
+        %WorkflowExecution{}
+        |> WorkflowExecution.changeset(attrs)
+        |> Repo.insert(config)
+    end
   end
 
   defp load_execution(config, workflow_id) do
@@ -1427,10 +1505,10 @@ defmodule Durable.Executor do
   # (stale-lock recovery) also write this row; when they got there first the
   # run is theirs and we must not overwrite their decision. `force: true`
   # makes even a no-change write hit the database, so the check always runs.
-  defp cas_update(%Ecto.Changeset{} = changeset, config) do
+  defp cas_update(%Ecto.Changeset{} = changeset, config, opts \\ []) do
     guarded = %{changeset | filters: Map.put(changeset.filters, :status, changeset.data.status)}
 
-    case Repo.update(guarded, config, stale_error_field: :status, force: true) do
+    case Repo.update(guarded, config, [stale_error_field: :status, force: true] ++ opts) do
       {:error, %Ecto.Changeset{errors: errors} = failed} ->
         if match?({_, [stale: true]}, errors[:status]),
           do: {:error, :superseded},

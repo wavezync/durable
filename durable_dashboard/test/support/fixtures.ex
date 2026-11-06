@@ -11,6 +11,8 @@ defmodule DurableDashboard.Fixtures do
     * `Webhooks` (`await_webhook`) — waits for a `webhook_received` event
     * `Moderation` (`moderate_content`) — a parallel block (two scans that
       run as child runs) then a branch; `run_family!/2` drives it to the end
+    * `Invoices` (`send_invoice`) — completes; `reuse: :never`, so a run
+      started with a `key:` keeps it until it's released
   """
 
   alias Durable.Config
@@ -102,6 +104,15 @@ defmodule DurableDashboard.Fixtures do
         :high -> step(:remove, fn data -> {:ok, data} end)
         :low -> step(:approve, fn data -> {:ok, data} end)
       end
+    end
+  end
+
+  defmodule Invoices do
+    @moduledoc false
+    use Durable
+
+    workflow "send_invoice", reuse: :never do
+      step(:send, fn data -> {:ok, data} end)
     end
   end
 

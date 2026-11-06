@@ -2,7 +2,8 @@ defmodule DurableDashboard.Live.WorkflowLive do
   @moduledoc """
   One run, on one page: header with actions, a banner saying what went wrong,
   a strip of run facts, and a body with a view switch — **Trace** (waterfall +
-  step inspector), Graph, Logs, Context, Family.
+  step inspector), Graph, Logs, Context, Family, and Key for a run started
+  with a workflow key.
 
   URL: `/executions/:id[/:view]?step=<step execution id>&pane=<pane>` — the
   selected step and inspector pane live in the URL so a link to "this step's
@@ -19,7 +20,16 @@ defmodule DurableDashboard.Live.WorkflowLive do
   alias DurableDashboard.Format
   alias DurableDashboard.Access
   alias DurableDashboard.Components.Core
-  alias DurableDashboard.Components.Workflow.{ChildrenTab, FamilyChip, IoTab, LogLine, LogsTab}
+
+  alias DurableDashboard.Components.Workflow.{
+    ChildrenTab,
+    FamilyChip,
+    IoTab,
+    KeyTab,
+    LogLine,
+    LogsTab
+  }
+
   alias DurableDashboard.Components.Workflow.FlowGraph
   alias DurableDashboard.Layouts
   alias DurableDashboard.Path, as: DPath
@@ -46,6 +56,7 @@ defmodule DurableDashboard.Live.WorkflowLive do
     "logs" => :logs,
     "context" => :context,
     "family" => :family,
+    "key" => :key,
     # Pre-1.0 tab names.
     "summary" => :trace,
     "timeline" => :trace,
@@ -86,6 +97,7 @@ defmodule DurableDashboard.Live.WorkflowLive do
        now: DateTime.utc_now(),
        action_error: nil,
        rerun_editor: nil,
+       release_confirm?: false,
        graph_pick: false
      )
      |> load_workflow()
@@ -183,6 +195,27 @@ defmodule DurableDashboard.Live.WorkflowLive do
     end
   end
 
+  def handle_event("confirm-release", _params, socket),
+    do: {:noreply, assign(socket, release_confirm?: true, action_error: nil)}
+
+  def handle_event("keep-key", _params, socket),
+    do: {:noreply, assign(socket, release_confirm?: false)}
+
+  def handle_event("release-key", _params, socket) do
+    %{workflow_id: id, durable: durable} = socket.assigns
+    by = socket.assigns[:user]
+
+    result =
+      Access.perform(socket, :operator, :release_key, [id], fn ->
+        case Durable.release_key(id, durable: durable, by: by) do
+          {:error, :not_finished} -> {:error, :release_open}
+          other -> other
+        end
+      end)
+
+    {:noreply, socket |> assign(release_confirm?: false) |> after_action(result)}
+  end
+
   def handle_event("edit-input", _params, socket) do
     input = Jason.encode!(socket.assigns.workflow.input || %{}, pretty: true)
     {:noreply, assign(socket, rerun_editor: input, action_error: nil)}
@@ -223,6 +256,19 @@ defmodule DurableDashboard.Live.WorkflowLive do
   defp describe_error(:already_completed), do: "The run already finished."
   defp describe_error(:invalid_json), do: "That input isn't valid JSON."
   defp describe_error(:input_not_an_object), do: "The input must be a JSON object."
+
+  defp describe_error({:key_taken, id}) when is_binary(id),
+    do: "Run #{short(id)} holds this run's key, so it was refused."
+
+  defp describe_error({:key_taken, _id}),
+    do: "Another run holds this run's key, so it was refused."
+
+  defp describe_error(:key_contended), do: "The key changed hands while starting. Try again."
+  defp describe_error(:no_key), do: "This run doesn't hold a key."
+
+  defp describe_error(:release_open),
+    do: "Only a finished run's key can be released. Cancel it first."
+
   defp describe_error(other), do: "That didn't work: #{inspect(other)}"
 
   # ============================================================================
@@ -257,6 +303,8 @@ defmodule DurableDashboard.Live.WorkflowLive do
           access={@access}
           failed_row={@failed_row}
           action_error={@action_error}
+          key_info={@key_info}
+          release_confirm?={@release_confirm?}
         />
         <.rerun_editor :if={@rerun_editor} input={@rerun_editor} />
         <.banner
@@ -267,12 +315,25 @@ defmodule DurableDashboard.Live.WorkflowLive do
           base_path={@base_path}
           view={@view}
         />
-        <.facts workflow={@workflow} trace={@trace} family={@family} now={@now} base_path={@base_path} />
+        <.key_banner :if={@key_info} workflow={@workflow} info={@key_info} base_path={@base_path} />
+        <.facts
+          workflow={@workflow}
+          trace={@trace}
+          family={@family}
+          now={@now}
+          base_path={@base_path}
+          key_info={@key_info}
+        />
 
         <div class="mt-4 flex flex-wrap items-start gap-4">
           <section class="flex-[3_1_560px] min-w-0 overflow-hidden rounded-[10px] border border-border bg-card">
             <div class="flex flex-wrap items-center justify-between gap-2 px-3.5 py-2.5">
-              <.view_switch view={@view} views={view_list(@family)} base_path={@base_path} id={@workflow_id} />
+              <.view_switch
+                view={@view}
+                views={view_list(@family, @key_info)}
+                base_path={@base_path}
+                id={@workflow_id}
+              />
               <span :if={@view == :trace} class="text-xs text-muted-foreground">
                 Select a step to inspect it
               </span>
@@ -286,6 +347,7 @@ defmodule DurableDashboard.Live.WorkflowLive do
               selected={@selected}
               picked={@graph_pick}
               base_path={@base_path}
+              key_info={@key_info}
             />
           </section>
 
@@ -313,12 +375,19 @@ defmodule DurableDashboard.Live.WorkflowLive do
   attr :failed_row, :map, default: nil
   attr :action_error, :string, default: nil
   attr :steps, :list, default: []
+  attr :key_info, :map, default: nil
+  attr :release_confirm?, :boolean, default: false
 
   defp run_header(assigns) do
+    %{workflow: w, key_info: info} = assigns
+
     assigns =
       assign(assigns,
         can_operate?: Access.allowed?(assigns.access, :operator),
-        parent_step_lookup: ChildrenTab.step_lookup(assigns.family, assigns.steps)
+        parent_step_lookup: ChildrenTab.step_lookup(assigns.family, assigns.steps),
+        retry_block: KeyTab.block(:retry, w, info),
+        rerun_block: KeyTab.block(:rerun, w, info),
+        releasable?: info != nil and w.holds_key and w.status in @finished_statuses
       )
 
     ~H"""
@@ -327,6 +396,12 @@ defmodule DurableDashboard.Live.WorkflowLive do
         <Core.status_pill status={@workflow.status} />
         <Core.heading level={1}>{@workflow.workflow_name}</Core.heading>
         <Core.code copy={to_string(@workflow.id)} class="text-muted-foreground">{@workflow.id}</Core.code>
+        <Core.key_chip
+          :if={@key_info}
+          key={@workflow.key}
+          holds={@workflow.holds_key}
+          holder={@key_info.holder}
+        />
         <FamilyChip.family_chip
           family={@family}
           workflow={@workflow}
@@ -347,8 +422,16 @@ defmodule DurableDashboard.Live.WorkflowLive do
           Cancel
         </Core.button>
         <Core.button
+          :if={@releasable?}
+          phx-click="confirm-release"
+          data-tip="Let this run's key go, so the next start with it makes a new run · this run keeps its history"
+        >
+          Release key
+        </Core.button>
+        <Core.button
           :if={@workflow.status in finished_statuses()}
           phx-click="edit-input"
+          disabled={blocked?(@rerun_block)}
           data-tip="Start a new run with input you edit first · this one stays as it is"
         >
           Rerun with edited input…
@@ -357,6 +440,7 @@ defmodule DurableDashboard.Live.WorkflowLive do
           :if={@workflow.status in finished_statuses()}
           kind={if @workflow.status == :failed, do: "secondary", else: "primary"}
           phx-click="rerun"
+          disabled={blocked?(@rerun_block)}
           data-tip="Start a new run from the first step with the same input · linked back here"
         >
           Rerun
@@ -365,15 +449,64 @@ defmodule DurableDashboard.Live.WorkflowLive do
           :if={@workflow.status == :failed}
           kind="primary"
           phx-click="retry"
-          data-tip="Carry on in this run from the failed step · the steps before it keep their results"
+          disabled={blocked?(@retry_block)}
+          data-tip={retry_tip(@retry_block)}
         >
-          Retry from {(@failed_row && @failed_row.name) || "failed step"}
+          <%= if match?({:take, _}, @retry_block) do %>
+            Retry and take the key back
+          <% else %>
+            Retry from {(@failed_row && @failed_row.name) || "failed step"}
+          <% end %>
         </Core.button>
+      </div>
+      <KeyTab.blocked_line
+        :if={@can_operate? and @workflow.status == :failed}
+        action={:retry}
+        block={@retry_block}
+        run_id={@workflow.id}
+        info={@key_info}
+        base_path={@base_path}
+      />
+      <KeyTab.blocked_line
+        :if={@can_operate? and @workflow.status in finished_statuses() and not blocked?(@retry_block)}
+        action={:rerun}
+        block={@rerun_block}
+        run_id={@workflow.id}
+        info={@key_info}
+        base_path={@base_path}
+      />
+      <div
+        :if={@can_operate? and @releasable? and @release_confirm?}
+        class="flex w-full flex-wrap items-center justify-between gap-3 rounded-[10px] border border-destructive/35 bg-popover px-3.5 py-2.5"
+        role="alertdialog"
+        aria-label="Release the key"
+      >
+        <p>
+          Release <span class="font-mono">{@workflow.key}</span>? This run keeps its history.
+          The next start with this key makes a new run.
+        </p>
+        <span class="flex items-center gap-2">
+          <Core.button size="sm" kind="destructive" phx-click="release-key">Release key</Core.button>
+          <Core.button size="sm" kind="ghost" phx-click="keep-key">Keep it</Core.button>
+        </span>
       </div>
       <p :if={@action_error} class="w-full text-xs text-destructive" role="alert">{@action_error}</p>
     </header>
     """
   end
+
+  defp blocked?({:blocked, _, _}), do: true
+  defp blocked?(_block), do: false
+
+  defp retry_tip({:take, nil}),
+    do: "Carry on from the failed step · no run holds its key now, so it takes it back"
+
+  defp retry_tip({:take, holder}),
+    do:
+      "Carry on from the failed step · takes its key back from #{short(holder.id)}, which is #{holder.status}"
+
+  defp retry_tip(_block),
+    do: "Carry on in this run from the failed step · the steps before it keep their results"
 
   defp finished_statuses, do: @finished_statuses
 
@@ -496,6 +629,82 @@ defmodule DurableDashboard.Live.WorkflowLive do
 
   defp banner(assigns), do: ~H""
 
+  # ---- Key banner ---------------------------------------------------------------
+
+  attr :workflow, :map, required: true
+  attr :info, :map, required: true
+  attr :base_path, :string, required: true
+
+  # What happened to the run's key, when there's something to say: newer
+  # input it dropped (it holds the key), or the run that took it.
+  defp key_banner(%{workflow: %{holds_key: true}, info: %{dropped: [_ | _]}} = assigns) do
+    %{info: info, workflow: w} = assigns
+    [newest | _] = info.duplicates
+
+    assigns =
+      assign(assigns,
+        count: length(info.duplicates),
+        newest_dropped?: KeyTab.dropped?(newest),
+        dropped: length(info.dropped),
+        while:
+          if(w.status in @live_statuses, do: "while running", else: "while this run held the key")
+      )
+
+    ~H"""
+    <div class="mt-4 flex items-start gap-3 rounded-[10px] border border-warning/35 bg-warning/10 px-3.5 py-3">
+      <Core.status_dot status={:waiting} class="mt-1.5" />
+      <p class="flex-1">
+        Added again {Format.count(@count, "time")} {@while}.
+        <%= if @newest_dropped? do %>
+          The newest input differs from this run's and was dropped
+        <% else %>
+          {@dropped} of them had a different input, which was dropped
+        <% end %>
+        (<span class="font-mono">on_duplicate: :use_existing</span>).
+      </p>
+      <.link
+        patch={run_path(@base_path, @workflow.id, :key)}
+        class="shrink-0 text-xs font-medium text-primary hover:underline"
+      >
+        Show dropped inputs
+      </.link>
+    </div>
+    """
+  end
+
+  defp key_banner(%{workflow: %{holds_key: false}, info: %{holder: %{id: holder_id}}} = assigns)
+       when holder_id != assigns.workflow.id do
+    took =
+      Enum.find(
+        assigns.info.events,
+        &(&1.workflow_id == holder_id and &1.details["from"] == assigns.workflow.id)
+      )
+
+    assigns =
+      assign(assigns,
+        holder: assigns.info.holder,
+        at: (took && took.at) || assigns.info.holder.inserted_at
+      )
+
+    ~H"""
+    <div class="mt-4 flex items-center gap-3 rounded-[10px] border border-border bg-secondary px-3.5 py-3">
+      <Core.status_dot status={@holder.status} />
+      <p class="flex-1">
+        Run <KeyTab.run_link id={@holder.id} base_path={@base_path} /> took
+        <span class="font-mono">{@info.key}</span> <Core.relative_time at={@at} />
+      </p>
+      <.link
+        patch={run_path(@base_path, @workflow.id, :key)}
+        class="shrink-0 text-xs font-medium text-primary hover:underline"
+      >
+        Key history
+      </.link>
+    </div>
+    """
+  end
+
+  defp key_banner(assigns), do: ~H""
+
   # ---- Facts ------------------------------------------------------------------
 
   attr :workflow, :map, required: true
@@ -503,6 +712,7 @@ defmodule DurableDashboard.Live.WorkflowLive do
   attr :family, :map, required: true
   attr :now, :any, required: true
   attr :base_path, :string, required: true
+  attr :key_info, :map, default: nil
 
   defp facts(assigns) do
     w = assigns.workflow
@@ -522,7 +732,9 @@ defmodule DurableDashboard.Live.WorkflowLive do
       )
 
     ~H"""
-    <dl class="mt-4 grid grid-cols-[repeat(auto-fit,minmax(140px,1fr))] gap-px overflow-hidden rounded-[10px] border border-border bg-border">
+    <%!-- Wrapping flex, not a grid: facts on a wrapped last row grow to fill
+          it, so no hairline-coloured gap shows. --%>
+    <dl class="mt-4 flex flex-wrap gap-px overflow-hidden rounded-[10px] border border-border bg-border">
       <.fact label="Started" tip="When a worker first picked it up">
         <Core.local_time :if={@workflow.started_at} at={@workflow.started_at} format="time" />
         <span :if={!@workflow.started_at}>not yet</span>
@@ -560,6 +772,23 @@ defmodule DurableDashboard.Live.WorkflowLive do
       >
         <Core.relative_time at={@workflow.deadline_at} />
       </.fact>
+      <.fact
+        :if={@key_info}
+        label="Key"
+        tip="The workflow key it was started with · see Key"
+        meta={@key_info.took && "took it from #{@key_info.took.details["from"]}"}
+      >
+        {@workflow.key}{if @key_info.took, do: " · from " <> short(@key_info.took.details["from"])}
+      </.fact>
+      <.fact
+        :if={@key_info && @key_info.duplicates != []}
+        label="Re-added"
+        mono={false}
+        tip="Starts with this key that got this run back, or an error · last 7 days"
+      >
+        <span class="font-mono">{length(@key_info.duplicates)}×</span>
+        · last <Core.relative_time at={hd(@key_info.duplicates).at} />
+      </.fact>
       <.fact :if={@children > 0} label="Child runs" mono={false} tip="Runs its steps started · see Family">
         <.link patch={run_path(@base_path, @workflow.id, :family)} class="text-primary hover:underline">
           {@children}
@@ -578,7 +807,7 @@ defmodule DurableDashboard.Live.WorkflowLive do
   defp fact(assigns) do
     ~H"""
     <div
-      class="flex min-w-0 flex-col gap-0.5 bg-card px-3.5 py-2.5"
+      class="flex min-w-0 flex-[1_1_140px] flex-col gap-0.5 bg-card px-3.5 py-2.5"
       data-tip-title={@tip && @label}
       data-tip={@tip}
       data-tip-meta={@meta}
@@ -663,6 +892,7 @@ defmodule DurableDashboard.Live.WorkflowLive do
   defp view_tip(:logs), do: "What the steps logged"
   defp view_tip(:context), do: "The run's input and what its steps stored"
   defp view_tip(:family), do: "Its parent and child runs"
+  defp view_tip(:key), do: "What happened to its workflow key: re-adds, and the runs that held it"
 
   defp trigger_tip(%{trigger: :schedule}), do: "Started by a schedule"
   defp trigger_tip(%{trigger: :rerun}), do: "A rerun of an earlier run, with its input"
@@ -679,9 +909,15 @@ defmodule DurableDashboard.Live.WorkflowLive do
 
   defp hms(at), do: at |> Calendar.strftime("%H:%M:%S.%f") |> String.slice(0, 12)
 
-  defp view_list(family) do
+  defp view_list(family, key_info) do
     base = [trace: "Trace", graph: "Graph", logs: "Logs", context: "Context"]
-    if family_visible?(family), do: base ++ [family: "Family"], else: base
+    base = if family_visible?(family), do: base ++ [family: "Family"], else: base
+
+    case key_info do
+      nil -> base
+      %{duplicates: []} -> base ++ [key: "Key"]
+      %{duplicates: dups} -> base ++ [key: "Key (#{length(dups)})"]
+    end
   end
 
   attr :view, :atom, required: true
@@ -692,6 +928,7 @@ defmodule DurableDashboard.Live.WorkflowLive do
   attr :selected, :map, default: nil
   attr :picked, :boolean, default: false, doc: "graph: a step was clicked (`?step=`)"
   attr :base_path, :string, required: true
+  attr :key_info, :map, default: nil
 
   defp view_body(%{view: :trace} = assigns) do
     ~H"""
@@ -727,6 +964,26 @@ defmodule DurableDashboard.Live.WorkflowLive do
   defp view_body(%{view: :context} = assigns) do
     ~H"""
     <div class="px-3.5 pb-3.5"><IoTab.io_tab workflow={@workflow} /></div>
+    """
+  end
+
+  defp view_body(%{view: :key, key_info: info} = assigns) when info != nil do
+    ~H"""
+    <.live_component
+      module={KeyTab}
+      id={"key-" <> @workflow.id}
+      workflow={@workflow}
+      info={@key_info}
+      base_path={@base_path}
+    />
+    """
+  end
+
+  defp view_body(%{view: :key} = assigns) do
+    ~H"""
+    <div class="border-t border-border px-4 py-10 text-center text-xs text-muted-foreground">
+      This run wasn't started with a workflow key.
+    </div>
     """
   end
 
@@ -1256,6 +1513,7 @@ defmodule DurableDashboard.Live.WorkflowLive do
       pending_inputs: [],
       trace: %{rows: [], ticks: [], span_ms: 0, live?: false},
       failed_row: nil,
+      key_info: nil,
       selected: nil,
       family: %{root: nil, parent: nil, children: [], related_ids: []}
     )
@@ -1276,6 +1534,7 @@ defmodule DurableDashboard.Live.WorkflowLive do
           steps: fetch_steps(config, family.related_ids),
           pending_inputs: fetch_pending_inputs(config, execution.id),
           family: family,
+          key_info: KeyTab.load(config, execution),
           page_title: execution.workflow_name
         )
         |> assign_trace()

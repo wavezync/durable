@@ -19,7 +19,8 @@ defmodule Durable.Migration.Migrator do
     Durable.Migration.Migrations.V20260623000000AddLockFencing,
     Durable.Migration.Migrations.V20260623000001AddChildWorkflowLink,
     Durable.Migration.Migrations.V20261016000000AddOperatorControls,
-    Durable.Migration.Migrations.V20261016000001AddDeadlinesAndHistory
+    Durable.Migration.Migrations.V20261016000001AddDeadlinesAndHistory,
+    Durable.Migration.Migrations.V20261106000000AddWorkflowKeys
   ]
 
   @doc """

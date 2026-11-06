@@ -8,7 +8,7 @@ defmodule DurableDashboard.Access do
       resolver is configured, so mounting the dashboard never grants writes
       by accident.
     * `:operator` — retry, rerun and cancel runs; answer inputs; send events;
-      pause and resume queues; run a schedule now.
+      pause and resume queues; run a schedule now; release a workflow key.
     * `:admin` — everything above, plus bulk actions over 100 runs, enabling
       and disabling schedules, and pruning on demand.
 

@@ -27,6 +27,13 @@ defmodule Durable.DSL.Workflow do
     Steps in a run with a timeout run in their own process; see the step
     `:timeout` option.
   - `:queue` - The queue runs start on unless `Durable.start/3` names one
+  - `:reuse` - When a start with a `key:` may run again after the run holding
+    that key has finished: `:after_close` (default, after any finish),
+    `:after_failure` (only after it failed, was cancelled or rolled back; a
+    completed run keeps its key) or `:never`. See the Workflow keys guide.
+  - `:on_duplicate` - What `Durable.start/3` returns when the key is taken,
+    unless the call says otherwise: `:use_existing` (default, `{:ok, holder_id}`)
+    or `:error` (`{:error, {:key_taken, holder_id}}`)
 
   """
 
@@ -101,12 +108,20 @@ defmodule Durable.DSL.Workflow do
     end
   end
 
-  @workflow_opts [:timeout, :queue]
+  @workflow_opts [:timeout, :queue, :reuse, :on_duplicate]
+
+  # Literal values are checked here; anything computed is checked when a run starts.
+  @allowed_values %{
+    reuse: [:after_close, :after_failure, :never],
+    on_duplicate: [:use_existing, :error]
+  }
 
   defp validate_workflow_opts!(opts, name) when is_list(opts) do
     case Keyword.keys(opts) -- @workflow_opts do
       [] ->
-        :ok
+        Enum.each(@allowed_values, fn {key, allowed} ->
+          validate_value!(opts, key, allowed, name)
+        end)
 
       unknown ->
         raise ArgumentError,
@@ -116,4 +131,14 @@ defmodule Durable.DSL.Workflow do
   end
 
   defp validate_workflow_opts!(_opts, _name), do: :ok
+
+  defp validate_value!(opts, key, allowed, name) do
+    value = Keyword.get(opts, key)
+
+    if is_atom(value) and not is_nil(value) and value not in allowed do
+      raise ArgumentError,
+            "invalid #{key}: #{inspect(value)} for workflow #{inspect(name)}; " <>
+              "expected one of #{inspect(allowed)}"
+    end
+  end
 end

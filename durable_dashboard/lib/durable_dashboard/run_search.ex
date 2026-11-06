@@ -7,6 +7,7 @@ defmodule DurableDashboard.RunSearch do
       error:503   error:"rate limited"  text anywhere in the run's error
       input.order_id:ORD-1042           exact value of an input field (dotted paths)
       schedule:nightly_report           runs that schedule started
+      key:article:42                    runs started with this workflow key
 
   Other words are searched for in the error. Filters combine with AND.
   `workflow:`, `status:` and `since:` are facets: `split_facets/1` lifts them
@@ -47,7 +48,9 @@ defmodule DurableDashboard.RunSearch do
   id when it looks like one, otherwise text in the error, as `parse/1` reads it.
   """
   @spec label(token()) :: {String.t(), String.t()}
-  def label(%{key: key, value: value}) when key in ~w(step id error schedule), do: {key, value}
+  def label(%{key: key, value: value}) when key in ~w(step id error schedule key),
+    do: {key, value}
+
   def label(%{key: "input." <> path = key, value: value}) when path != "", do: {key, value}
   def label(%{key: nil, value: value}), do: {word_kind(value), value}
   def label(%{key: key, value: value}), do: {"error", "#{key}:#{value}"}
@@ -80,6 +83,7 @@ defmodule DurableDashboard.RunSearch do
   defp add(%{key: "id", value: value}, acc), do: Map.put(acc, :id_prefix, clean_id(value))
   defp add(%{key: "error", value: value}, acc), do: append_error(acc, value)
   defp add(%{key: "schedule", value: value}, acc), do: Map.put(acc, :schedule, value)
+  defp add(%{key: "key", value: value}, acc), do: Map.put(acc, :key, value)
 
   defp add(%{key: "input." <> path, value: value}, acc) when path != "",
     do: Map.update(acc, :input, %{path => value}, &Map.put(&1, path, value))

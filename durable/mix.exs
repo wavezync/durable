@@ -103,7 +103,8 @@ defmodule Durable.MixProject do
         "guides/orchestration.md",
         "guides/parallel.md",
         "guides/testing.md",
-        "guides/waiting.md"
+        "guides/waiting.md",
+        "guides/workflow_keys.md"
       ],
       groups_for_modules: [
         "Mix Tasks": [

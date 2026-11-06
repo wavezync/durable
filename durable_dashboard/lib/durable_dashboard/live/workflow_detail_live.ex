@@ -2,8 +2,9 @@ defmodule DurableDashboard.Live.WorkflowDetailLive do
   @moduledoc """
   One workflow's health over a range: headline numbers, its structure
   annotated with each step's p95 and failure share, runs and duration over
-  time, per-step performance (where the time and the failures go), errors
-  grouped by signature, and the definition as compiled.
+  time, workflow keys (for a workflow started with `key:`), per-step
+  performance (where the time and the failures go), errors grouped by
+  signature, and the definition as compiled.
 
   Data: `Durable.Stats` for numbers, `module.__workflow_definition__/1` for
   structure. Route: `/workflows/:name`.
@@ -108,6 +109,7 @@ defmodule DurableDashboard.Live.WorkflowDetailLive do
       steps: order_steps(steps, definition),
       structure: definition && Structure.build(definition, steps, stats.started),
       errors: Durable.Stats.error_groups(window),
+      keys: Durable.Stats.keys(window ++ [bucket_seconds: bucket]),
       definition: definition,
       schedules: schedules(durable, name)
     )
@@ -250,6 +252,14 @@ defmodule DurableDashboard.Live.WorkflowDetailLive do
           </Charts.panel>
         </div>
 
+        <.keys_section
+          :if={@keys.keyed}
+          keys={@keys}
+          definition={@definition}
+          range={@range}
+          base_path={@base_path}
+        />
+
         <Charts.panel title="Steps" sub={"where the time and the failures go · last #{@range}"} class="mt-4">
           <p :if={@steps == []} class="px-4 pb-5 pt-1 text-xs text-muted-foreground">No steps ran in the last {@range}.</p>
           <div :if={@steps != []} class="thin-scroll overflow-x-auto">
@@ -382,6 +392,127 @@ defmodule DurableDashboard.Live.WorkflowDetailLive do
         </div>
       <% end %>
     </Layouts.app>
+    """
+  end
+
+  attr :keys, :map, required: true
+  attr :definition, :any, required: true
+  attr :range, :string, required: true
+  attr :base_path, :string, required: true
+
+  # Workflow keys over the range: a readout, re-adds per bucket by outcome,
+  # and the keys re-added most. From Durable.Activity, which keeps a week.
+  defp keys_section(assigns) do
+    opts = (assigns.definition && assigns.definition.opts) || %{}
+
+    assigns =
+      assign(assigns,
+        reuse: Map.get(opts, :reuse, :after_close),
+        on_duplicate: Map.get(opts, :on_duplicate, :use_existing),
+        window:
+          if(assigns.range == "30d",
+            do: "last 7 days (kept a week)",
+            else: "last #{assigns.range}"
+          )
+      )
+
+    ~H"""
+    <section class="mt-6 flex flex-col gap-3" aria-label="Keys">
+      <header class="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+        <Core.heading level={2}>Keys</Core.heading>
+        <span class="text-xs text-muted-foreground">
+          <span class="font-mono">reuse: {inspect(@reuse)}</span>
+          · duplicates {if @on_duplicate == :error, do: "return an error", else: "return the holder"}
+          · pruning a run frees its key
+        </span>
+      </header>
+
+      <div class="grid grid-cols-[repeat(auto-fit,minmax(170px,1fr))] gap-px overflow-hidden rounded-[10px] border border-border bg-border">
+        <.kpi
+          label="Keys held"
+          value={Format.int(@keys.held)}
+          note="by open or finished runs"
+          tip="Runs holding a key right now · a start with one of these keys returns its run"
+        />
+        <.kpi
+          label="Re-added"
+          value={Format.int(@keys.readded)}
+          note={@window}
+          tip={"Starts that found their key taken · #{@window}"}
+        />
+        <.kpi
+          label="Newer input dropped"
+          value={Format.int(@keys.dropped)}
+          note="input differed from the holder's"
+          tone={@keys.dropped > 0 && "text-warning"}
+          tip={"Re-adds whose input differed, answered with the holder's run · #{@window}"}
+        />
+        <.kpi
+          label="Handed off"
+          value={Format.int(@keys.handed_off)}
+          note="a finished run's key moved"
+          tip={"Starts that took a key from a finished run reuse: let go · #{@window}"}
+        />
+        <.kpi
+          label="Errors returned"
+          value={Format.int(@keys.errors)}
+          note="on_duplicate: :error"
+          tip={"Re-adds answered with {:error, {:key_taken, id}} · #{@window}"}
+        />
+      </div>
+
+      <div class="flex flex-wrap gap-4">
+        <Charts.panel title="Re-adds" sub={"per bucket, by what the start got back · #{@window}"} class="flex-[3_1_480px]">
+          <:legend>
+            <Charts.swatch class="bg-chart-1">Returned the holder</Charts.swatch>
+            <Charts.swatch class="bg-chart-4">Returned an error</Charts.swatch>
+          </:legend>
+          <Charts.stacked_bars
+            timeline={@keys.timeline}
+            series={[{:returned, "bg-chart-1", "returned the holder"}, {:errors, "bg-chart-4", "returned an error"}]}
+            empty="No key was added again in this window"
+          />
+        </Charts.panel>
+        <Charts.panel title="Re-added most" sub={@window} class="flex-[2_1_340px]">
+          <p :if={@keys.top == []} class="px-4 pb-5 pt-1 text-xs text-muted-foreground">
+            No key was added again in this window.
+          </p>
+          <table :if={@keys.top != []} class="w-full table-fixed border-collapse text-[13px]">
+            <colgroup><col /><col class="w-[124px]" /><col class="w-[76px]" /><col class="w-[84px]" /></colgroup>
+            <thead>
+              <tr class="border-y border-border text-left text-xs text-muted-foreground">
+                <th class="px-4 py-2 font-medium">Key</th>
+                <th class="px-3 py-2 font-medium">Holder</th>
+                <th class="px-3 py-2 text-right font-medium">Re-adds</th>
+                <th class="px-4 py-2 text-right font-medium" data-tip="Re-adds whose newer input was dropped">Dropped</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr :for={k <- @keys.top} class="h-10 border-b border-border last:border-b-0 hover:bg-accent">
+                <td class="truncate px-4 font-mono">
+                  <.link
+                    :if={k.holder_id}
+                    navigate={DPath.execution_tab(@base_path, k.holder_id, "key")}
+                    class="text-primary hover:underline"
+                    data-tip="Open the run holding it · its Key view"
+                    data-tip-meta={k.holder_id}
+                  >
+                    {k.key}
+                  </.link>
+                  <span :if={!k.holder_id}>{k.key}</span>
+                </td>
+                <td class="px-3">
+                  <Core.status_pill :if={k.holder_status} status={k.holder_status} />
+                  <span :if={!k.holder_status} class="text-xs text-muted-foreground">released</span>
+                </td>
+                <td class="px-3 text-right font-mono">{Format.int(k.readded)}</td>
+                <td class={["px-4 text-right font-mono", k.dropped > 0 && "text-warning"]}>{Format.int(k.dropped)}</td>
+              </tr>
+            </tbody>
+          </table>
+        </Charts.panel>
+      </div>
+    </section>
     """
   end
 

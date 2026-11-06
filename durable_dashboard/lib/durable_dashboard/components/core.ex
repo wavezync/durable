@@ -1121,6 +1121,53 @@ defmodule DurableDashboard.Components.Core do
     """
   end
 
+  @doc """
+  A run's workflow key: the caption `key` beside the value in mono, with a
+  hover copy button. `holds` adds a neutral badge — `true` "Holds key",
+  `false` "Key moved" — and `holder` (`%{id, status}`) names who holds it in
+  the tooltip. Renders nothing for a run without a key. See `DESIGN.md` §5.
+
+      <.key_chip key={run.key} holds={run.holds_key} holder={@holder} />
+  """
+  attr :key, :string, default: nil
+  attr :holds, :any, default: nil, doc: "true, false, or nil for no badge"
+  attr :holder, :map, default: nil, doc: "the run holding the key, `%{id, status}`"
+  attr :class, :any, default: nil
+
+  def key_chip(%{key: nil} = assigns), do: ~H""
+
+  def key_chip(assigns) do
+    assigns = assign(assigns, tip: key_tip(assigns))
+
+    ~H"""
+    <span class={["group/key inline-flex items-center gap-1.5 align-middle", @class]}>
+      <span
+        class="inline-flex h-[22px] items-center gap-1.5 rounded-[5px] bg-secondary px-1.5 text-xs"
+        data-tip-title="Workflow key"
+        data-tip={@tip}
+      >
+        <span class="text-muted-foreground">key</span>
+        <span class="font-mono text-foreground">{@key}</span>
+      </span>
+      <.copy_button
+        text={@key}
+        label="Copy key"
+        class="opacity-0 group-hover/key:opacity-100 focus-visible:opacity-100"
+      />
+      <.badge :if={@holds == true} kind="muted">Holds key</.badge>
+      <.badge :if={@holds == false} kind="muted">Key moved</.badge>
+    </span>
+    """
+  end
+
+  defp key_tip(%{holds: true}), do: "This run holds it · a start with this key returns this run"
+
+  defp key_tip(%{holder: %{id: id, status: status}}),
+    do: "Held by #{String.slice(id, 0, 8)} · #{elem(status_meta(status), 0)}"
+
+  defp key_tip(%{holds: false}), do: "No run holds it now · the next start with it takes it"
+  defp key_tip(_assigns), do: "Starts with this key make at most one run at a time"
+
   defp code_class(class) do
     [
       "font-mono text-numeric text-xs text-foreground/90",
