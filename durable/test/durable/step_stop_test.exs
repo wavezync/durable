@@ -7,7 +7,7 @@ defmodule Durable.StepStopTest do
 
   import Durable.Testing
 
-  alias Durable.Storage.Schemas.StepExecution
+  alias Durable.Storage.Schemas.{StepExecution, WorkflowExecution}
 
   defmodule FailNow do
     use Durable
@@ -66,15 +66,56 @@ defmodule Durable.StepStopTest do
     end
   end
 
-  defmodule CancelsOneBranch do
+  defmodule SkipsOneBranch do
     use Durable
     use Durable.Helpers
 
-    workflow "cancels_one_branch" do
+    workflow "skips_one_branch" do
       parallel on_error: :complete_all do
-        step(:skipped, fn _data -> {:cancel, "nothing to send"} end)
+        step(:skipped, fn _data -> {:cancel, "nothing to send", scope: :run} end)
         step(:sent, fn data -> {:ok, assign(data, :sent, true)} end)
       end
+    end
+  end
+
+  defmodule CancelsFromBranch do
+    use Durable
+    use Durable.Helpers
+
+    workflow "cancels_from_branch" do
+      step(:book, [compensate: :unbook], fn data -> {:ok, assign(data, :booked, true)} end)
+
+      parallel do
+        step(:check, fn _data -> {:cancel, "order withdrawn"} end)
+        step(:other, fn data -> {:ok, data} end)
+      end
+
+      step(:after, fn data -> {:ok, assign(data, :after, true)} end)
+
+      compensate(:unbook, fn data -> {:ok, data} end)
+    end
+  end
+
+  defmodule CancelsTree do
+    use Durable
+
+    workflow "cancels_tree" do
+      step(:work, fn _data -> {:cancel, "account closed", scope: :root} end)
+    end
+  end
+
+  defmodule CallsCancelsTree do
+    use Durable
+    use Durable.Helpers
+    use Durable.Orchestration
+
+    workflow "calls_cancels_tree" do
+      step(:call, fn data ->
+        case call_workflow(CancelsTree, %{}) do
+          {:ok, result} -> {:ok, assign(data, :result, result)}
+          {:error, reason} -> {:ok, assign(data, :child_error, reason)}
+        end
+      end)
     end
   end
 
@@ -116,11 +157,32 @@ defmodule Durable.StepStopTest do
     assert run.context["child_error"] == %{"type" => "cancelled", "message" => "not_needed"}
   end
 
-  test "{:cancel, reason} in a parallel step cancels only that branch" do
-    run = run_workflow(CancelsOneBranch)
+  test "{:cancel, reason} in a parallel step cancels the workflow holding the block" do
+    run = run_workflow(CancelsFromBranch)
+
+    assert run.status == :cancelled
+    assert run.error == %{"type" => "cancelled", "message" => "order withdrawn"}
+    refute Enum.any?(step_rows(run), fn {_name, _status, compensation?} -> compensation? end)
+
+    branches = TestRepo.all(from(w in WorkflowExecution, where: w.parent_workflow_id == ^run.id))
+    assert Enum.all?(branches, &(&1.status in [:cancelled, :completed]))
+  end
+
+  test "scope: :run in a parallel step cancels only that branch" do
+    run = run_workflow(SkipsOneBranch)
 
     assert run.status == :completed
     assert %{"skipped" => ["error", cancelled], "sent" => ["ok", _]} = run.context["__results__"]
     assert cancelled == %{"type" => "cancelled", "message" => "nothing to send"}
+  end
+
+  test "scope: :root cancels the top of the tree and everything under it" do
+    run = run_workflow(CallsCancelsTree)
+
+    assert run.status == :cancelled
+    assert run.error == %{"type" => "cancelled", "message" => "account closed"}
+
+    [child] = TestRepo.all(from(w in WorkflowExecution, where: w.parent_workflow_id == ^run.id))
+    assert child.status == :cancelled
   end
 end

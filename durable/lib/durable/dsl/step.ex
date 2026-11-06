@@ -60,8 +60,14 @@ defmodule Durable.DSL.Step do
   - `{:fail, reason}` - Failed, and not retried: the run fails now and its
     compensations run
   - `{:cancel, reason}` - The run is cancelled now, like `Durable.cancel/2`:
-    no retries, no compensations. In a `parallel` step or a `call_workflow`
-    child, only that run is cancelled; its parent gets it as an error
+    no retries, no compensations. A `call_workflow` child's parent gets it as
+    an error. In a `parallel` step the whole workflow holding the block is
+    cancelled
+  - `{:cancel, reason, scope: scope}` - Choose what's cancelled: `:run` (only
+    the run the step is in, so in a `parallel` step only that branch, which
+    the block sees as an error), `:workflow` (the workflow the step is written
+    in; the default) or `:root` (the top run of the tree, through
+    `call_workflow` and `start_workflow` parents, and every run under it)
 
   ## Examples
 

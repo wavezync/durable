@@ -22,7 +22,7 @@ defmodule Durable.Executor.StepRunner do
   @type result ::
           {:ok, map()}
           | {:error, any()}
-          | {:cancel, String.t()}
+          | {:cancel, String.t(), :run | :workflow | :root | nil}
           | {:decision, atom(), map()}
           | {:sleep, keyword()}
           | {:wait_for_event, keyword()}
@@ -220,6 +220,8 @@ defmodule Durable.Executor.StepRunner do
     }
   end
 
+  @cancel_scopes [:run, :workflow, :root]
+
   @suspending [
     :sleep,
     :wait_for_event,
@@ -235,6 +237,9 @@ defmodule Durable.Executor.StepRunner do
   defp step_outcome({:error, error}), do: %{result: :error, error: error_summary(error)}
   defp step_outcome({:fail, error}), do: %{result: :error, error: error_summary(error)}
   defp step_outcome({:cancel, _reason}), do: %{result: :cancelled}
+
+  defp step_outcome({:cancel, _reason, [scope: scope]}) when scope in @cancel_scopes,
+    do: %{result: :cancelled}
 
   defp step_outcome(_other),
     do: %{result: :error, error: %{type: "invalid_return", message: "unexpected step result"}}
@@ -344,14 +349,12 @@ defmodule Durable.Executor.StepRunner do
   # The step says retrying won't help: fail now, whatever attempts are left.
   defp handle_result({:fail, error}, ctx), do: give_up(error, ctx)
 
-  # The step says the run should stop: the executor cancels it.
-  defp handle_result({:cancel, reason}, ctx) do
-    %{step_exec: step_exec, logs: logs, duration_ms: duration_ms, config: config} = ctx
-    reason = cancel_reason(reason)
-    error = %{type: "cancelled", message: reason}
-    {:ok, _} = fail_step_execution(config, step_exec, error, logs, duration_ms, :cancelled)
-    {:cancel, reason}
-  end
+  # The step says the run should stop: the executor cancels the scope's run
+  # (nil = the default for where the step runs).
+  defp handle_result({:cancel, reason}, ctx), do: cancel(reason, nil, ctx)
+
+  defp handle_result({:cancel, reason, [scope: scope]}, ctx) when scope in @cancel_scopes,
+    do: cancel(reason, scope, ctx)
 
   # Handle invalid return (not {:ok, map} or {:goto, ...})
   defp handle_result(other, ctx) do
@@ -361,7 +364,8 @@ defmodule Durable.Executor.StepRunner do
       type: "invalid_step_return",
       message:
         "Step must return {:ok, map}, {:goto, :step, map}, {:error, reason}, " <>
-          "{:fail, reason} or {:cancel, reason}, got: #{inspect(other)}"
+          "{:fail, reason}, {:cancel, reason} or {:cancel, reason, scope: :run | :workflow | :root}, " <>
+          "got: #{inspect(other)}"
     }
 
     {:ok, _} = fail_step_execution(config, step_exec, error, logs, duration_ms)
@@ -373,6 +377,14 @@ defmodule Durable.Executor.StepRunner do
     normalized_error = normalize_error_for_storage(error)
     {:ok, _} = fail_step_execution(config, step_exec, normalized_error, logs, duration_ms)
     {:error, error}
+  end
+
+  defp cancel(reason, scope, ctx) do
+    %{step_exec: step_exec, logs: logs, duration_ms: duration_ms, config: config} = ctx
+    reason = cancel_reason(reason)
+    error = %{type: "cancelled", message: reason}
+    {:ok, _} = fail_step_execution(config, step_exec, error, logs, duration_ms, :cancelled)
+    {:cancel, reason, scope}
   end
 
   defp cancel_reason(reason) when is_binary(reason), do: reason

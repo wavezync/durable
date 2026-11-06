@@ -543,8 +543,13 @@ step :download, [retry: [max_attempts: 5]], fn ctx ->
 end
 ```
 
-`{:cancel, reason}` in a `parallel` step or a `call_workflow` child cancels
-only that run; its parent gets it as an error.
+`{:cancel, reason}` cancels the workflow the step is written in. A
+`call_workflow` parent gets it as an error. Pass a scope to cancel less or more:
+
+```elixir
+{:cancel, reason, scope: :run}   # in a parallel step: only this branch, an error in the block's results
+{:cancel, reason, scope: :root}  # the top run of the tree, through call_workflow parents, and all under it
+```
 
 ### Errors
 

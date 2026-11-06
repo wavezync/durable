@@ -762,8 +762,8 @@ defmodule Durable.Executor do
       {:error, error} ->
         handle_step_failure(exec, error, workflow_def, config)
 
-      {:cancel, reason} ->
-        cancel_from_step(config, exec, reason)
+      {:cancel, reason, scope} ->
+        cancel_from_step(config, exec, reason, scope)
     end
   end
 
@@ -1015,8 +1015,8 @@ defmodule Durable.Executor do
       {:error, error} ->
         handle_step_failure(exec, error, workflow_def, config)
 
-      {:cancel, reason} ->
-        cancel_from_step(config, exec, reason)
+      {:cancel, reason, scope} ->
+        cancel_from_step(config, exec, reason, scope)
     end
   end
 
@@ -1209,8 +1209,8 @@ defmodule Durable.Executor do
         {:error, error} ->
           mark_failed(config, execution, normalize_error(error))
 
-        {:cancel, reason} ->
-          cancel_from_step(config, execution, reason)
+        {:cancel, reason, scope} ->
+          cancel_from_step(config, execution, reason, scope)
 
         {wait_type, wait_opts}
         when wait_type in [:sleep, :wait_for_event, :wait_for_input, :wait_for_any, :wait_for_all] ->
@@ -1959,12 +1959,42 @@ defmodule Durable.Executor do
     :ok
   end
 
-  # A step returned {:cancel, reason}: end the run as Durable.cancel/2 would.
-  # The cancel clears the lock token, so the worker's ack/nack is a no-op.
-  defp cancel_from_step(config, execution, reason) do
+  # A step returned {:cancel, reason, scope}. Cancel the scope's run as
+  # Durable.cancel/2 would (the cascade reaches every run under it), then this
+  # run, which the cascade misses when the target or a run in between already
+  # finished. Cancelling clears the lock token, so the worker's ack/nack is a
+  # no-op. A parallel step defaults to :workflow: a cancelled branch would
+  # otherwise fail a :fail_fast parent and run its compensations.
+  defp cancel_from_step(config, execution, reason, scope) do
+    scope = scope || if(parallel_branch?(execution), do: :workflow, else: :run)
+    target = cancel_target(config, execution, scope)
+    _ = cancel_workflow(target.id, reason, durable: config.name)
     _ = cancel_workflow(execution.id, reason, durable: config.name)
     {:error, %{type: "cancelled", message: reason}}
   end
+
+  # :run stays put; :workflow climbs out of parallel branches; :root climbs
+  # to the run with no parent.
+  defp cancel_target(config, execution, scope) do
+    with true <- climbs?(scope, execution),
+         %WorkflowExecution{} = parent <- parent_run(config, execution) do
+      cancel_target(config, parent, scope)
+    else
+      _ -> execution
+    end
+  end
+
+  defp climbs?(:run, _execution), do: false
+  defp climbs?(:workflow, execution), do: parallel_branch?(execution)
+  defp climbs?(:root, _execution), do: true
+
+  defp parent_run(_config, %{parent_workflow_id: nil}), do: nil
+  defp parent_run(config, %{parent_workflow_id: id}), do: Repo.get(config, WorkflowExecution, id)
+
+  defp parallel_branch?(execution),
+    do:
+      Map.has_key?(execution.context, "__parallel_step") or
+        Map.has_key?(execution.context, :__parallel_step)
 
   defp cancel_child_workflows(config, parent_id) do
     query =
