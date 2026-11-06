@@ -573,8 +573,12 @@ defmodule Durable.Stats do
         readded: 3_912,       # starts that found their key taken
         dropped: 41,          # ...whose input differed and was dropped
         errors: 12,           # ...answered with {:error, {:key_taken, id}}
+        replaced: 3,          # ...that cancelled the holder (:cancel_existing)
+        sent: 9,              # ...sent to the holder as an event ({:send_event, _})
+        debounced: 30,        # ...that gave a debounced run newer input
         handed_off: 87,       # keys a start took from a finished run
-        timeline: [%{at: ~U[...], returned: 160, errors: 1}, ...],
+        timeline: [%{at: ~U[...], returned: 160, errors: 1, replaced: 0,
+                     sent: 2, debounced: 5}, ...],
         top: [%{key: "article:17", readded: 48, dropped: 0,
                 holder_id: "…", holder_status: :completed}, ...]
       }
@@ -614,17 +618,25 @@ defmodule Durable.Stats do
         )
       )
 
-    sum = fn pred -> for({k, o, c, n} <- totals, pred.(k, o, c), do: n) |> Enum.sum() end
+    by_outcome =
+      for {"key_duplicate", outcome, _changed, n} <- totals, reduce: %{} do
+        acc -> Map.update(acc, outcome, n, &(&1 + n))
+      end
+
+    count = &Map.get(by_outcome, &1, 0)
 
     %{
       keyed:
         Repo.one(config, from(w in runs, where: not is_nil(w.key), select: true, limit: 1)) ==
           true,
       held: Repo.aggregate(config, from(w in runs, where: w.holds_key), :count),
-      readded: sum.(fn k, _, _ -> k == "key_duplicate" end),
-      dropped: sum.(fn k, o, c -> k == "key_duplicate" and o == "use_existing" and c end),
-      errors: sum.(fn k, o, _ -> k == "key_duplicate" and o == "error" end),
-      handed_off: sum.(fn k, _, _ -> k == "key_handed_off" end),
+      readded: by_outcome |> Map.values() |> Enum.sum(),
+      dropped: Enum.sum(for {"key_duplicate", "use_existing", true, n} <- totals, do: n),
+      errors: count.("error"),
+      replaced: count.("cancel_existing"),
+      sent: count.("send_event"),
+      debounced: count.("debounced"),
+      handed_off: Enum.sum(for {"key_handed_off", _, _, n} <- totals, do: n),
       timeline: key_timeline(config, events, since, until, opts),
       top: top_keys(config, events, runs, Keyword.get(opts, :limit, 10))
     }
@@ -659,7 +671,10 @@ defmodule Durable.Stats do
       %{
         at: DateTime.add(since, b * bucket, :second),
         returned: Map.get(counts, {b, "use_existing"}, 0),
-        errors: Map.get(counts, {b, "error"}, 0)
+        errors: Map.get(counts, {b, "error"}, 0),
+        replaced: Map.get(counts, {b, "cancel_existing"}, 0),
+        sent: Map.get(counts, {b, "send_event"}, 0),
+        debounced: Map.get(counts, {b, "debounced"}, 0)
       }
     end
   end

@@ -112,8 +112,7 @@ defmodule Durable.Executor do
            ]
          ) do
       {1, [cancelled]} ->
-        DurablePubSub.broadcast_workflow(config, :workflow_cancelled, workflow_event(cancelled))
-        cancel_child_workflows(config, workflow_id)
+        after_cancel(config, cancelled)
         :ok
 
       {0, _} ->
@@ -495,7 +494,11 @@ defmodule Durable.Executor do
   end
 
   defp create_execution(config, module, %Workflow{} = workflow_def, input, opts) do
-    scheduled_at = Keyword.get(opts, :scheduled_at)
+    # A keyed start of a debounced workflow waits out its quiet period first.
+    scheduled_at =
+      if Keyword.get(opts, :key),
+        do: Keys.debounced_start(workflow_def, Keyword.get(opts, :scheduled_at)),
+        else: Keyword.get(opts, :scheduled_at)
 
     attrs = %{
       workflow_module: Atom.to_string(module),
@@ -550,10 +553,12 @@ defmodule Durable.Executor do
 
   # A run's deadline counts from when it's due to start, so a run scheduled for
   # tomorrow doesn't time out before it begins.
-  defp deadline(%Workflow{opts: %{timeout: ms}}, start) when is_integer(ms) and ms > 0,
+  @doc false
+  @spec deadline(Workflow.t(), DateTime.t() | nil) :: DateTime.t() | nil
+  def deadline(%Workflow{opts: %{timeout: ms}}, start) when is_integer(ms) and ms > 0,
     do: DateTime.add(start || DateTime.utc_now(), ms, :millisecond)
 
-  defp deadline(_workflow_def, _start), do: nil
+  def deadline(_workflow_def, _start), do: nil
 
   defp past_deadline?(%{deadline_at: %DateTime{} = deadline}),
     do: DateTime.compare(DateTime.utc_now(), deadline) != :lt
@@ -1949,6 +1954,15 @@ defmodule Durable.Executor do
   # Cascade Cancellation (Orchestration)
   # ============================================================================
 
+  @doc false
+  # What follows a cancel: tell subscribers, and cancel the run's children.
+  @spec after_cancel(Config.t(), WorkflowExecution.t()) :: :ok
+  def after_cancel(config, cancelled) do
+    DurablePubSub.broadcast_workflow(config, :workflow_cancelled, workflow_event(cancelled))
+    cancel_child_workflows(config, cancelled.id)
+    :ok
+  end
+
   defp cancel_child_workflows(config, parent_id) do
     query =
       from(w in WorkflowExecution,
@@ -2117,6 +2131,10 @@ defmodule Durable.Executor do
       execution
       |> Ecto.Changeset.change(status: :waiting, scheduled_at: nil)
       |> cas_update!(config)
+
+    # An event sent before the run got here (`send_event(..., buffer: true)`,
+    # a keyed start with `on_duplicate: {:send_event, name}`) resumes it now.
+    Durable.Wait.deliver_buffered(config, execution.id, event_name)
 
     {:waiting, execution}
   end

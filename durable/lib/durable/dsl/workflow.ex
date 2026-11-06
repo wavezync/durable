@@ -31,9 +31,15 @@ defmodule Durable.DSL.Workflow do
     that key has finished: `:after_close` (default, after any finish),
     `:after_failure` (only after it failed, was cancelled or rolled back; a
     completed run keeps its key) or `:never`. See the Workflow keys guide.
-  - `:on_duplicate` - What `Durable.start/3` returns when the key is taken,
-    unless the call says otherwise: `:use_existing` (default, `{:ok, holder_id}`)
-    or `:error` (`{:error, {:key_taken, holder_id}}`)
+  - `:on_duplicate` - What `Durable.start/3` does when the key is taken,
+    unless the call says otherwise: `:use_existing` (default, `{:ok, holder_id}`),
+    `:error` (`{:error, {:key_taken, holder_id}}`), `:cancel_existing` (replace
+    the running holder with a new run) or `{:send_event, name}` (send the new
+    input to the running holder as an event)
+  - `:debounce` - `[period: ms, timeout: ms]`: a start with a `key:` waits
+    `period` before it runs, and each start with the same key in that time
+    gives it the newer input and restarts the wait, up to `timeout` after the
+    first start. `timeout` is optional
 
   """
 
@@ -108,12 +114,12 @@ defmodule Durable.DSL.Workflow do
     end
   end
 
-  @workflow_opts [:timeout, :queue, :reuse, :on_duplicate]
+  @workflow_opts [:timeout, :queue, :reuse, :on_duplicate, :debounce]
 
   # Literal values are checked here; anything computed is checked when a run starts.
   @allowed_values %{
     reuse: [:after_close, :after_failure, :never],
-    on_duplicate: [:use_existing, :error]
+    on_duplicate: [:use_existing, :error, :cancel_existing]
   }
 
   defp validate_workflow_opts!(opts, name) when is_list(opts) do
@@ -123,6 +129,8 @@ defmodule Durable.DSL.Workflow do
           validate_value!(opts, key, allowed, name)
         end)
 
+        validate_debounce!(Keyword.get(opts, :debounce), name)
+
       unknown ->
         raise ArgumentError,
               "unknown option(s) #{inspect(unknown)} for workflow #{inspect(name)}; " <>
@@ -131,6 +139,20 @@ defmodule Durable.DSL.Workflow do
   end
 
   defp validate_workflow_opts!(_opts, _name), do: :ok
+
+  # A literal keyword list can be checked here; its values (`seconds(30)`) are
+  # evaluated, and checked, when a run starts.
+  defp validate_debounce!(debounce, name) when is_list(debounce) do
+    keys = Enum.map(debounce, fn {k, _} -> k end)
+
+    if :period not in keys or keys -- [:period, :timeout] != [] do
+      raise ArgumentError,
+            "invalid debounce: for workflow #{inspect(name)}; expected " <>
+              "[period: ms] or [period: ms, timeout: ms]"
+    end
+  end
+
+  defp validate_debounce!(_debounce, _name), do: :ok
 
   defp validate_value!(opts, key, allowed, name) do
     value = Keyword.get(opts, key)

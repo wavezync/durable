@@ -5,7 +5,8 @@ defmodule Durable.Keys do
   # part of the index, so no status change can raise a unique error or free a
   # key. A key changes hands only here:
   #
-  #   * a start whose key is held by a closed run that `reuse:` lets go
+  #   * a start whose key is held by a closed run that `reuse:` lets go, or
+  #     by an open run it replaces (`on_duplicate: :cancel_existing`)
   #     (`insert/4`),
   #   * a retry taking back the key it lost (`retake/3`),
   #   * an operator releasing it (`release/2`),
@@ -27,26 +28,35 @@ defmodule Durable.Keys do
   @holder_target {:unsafe_fragment, "(workflow_module, workflow_name, key) WHERE holds_key"}
   @rounds 3
   @max_input_bytes 16_384
-  @on_duplicate [:use_existing, :error]
+  @modes [:use_existing, :error, :cancel_existing]
+  # Statuses `Durable.cancel/2` can cancel; a compensating run finishes its rollback.
+  @cancellable [:pending, :running, :waiting]
 
   @doc false
   # Option checks that are programmer errors, so they raise.
   @spec validate_start_opts!(keyword()) :: :ok
   def validate_start_opts!(opts) do
-    if Keyword.has_key?(opts, :reuse) do
+    for opt <- [:reuse, :debounce], Keyword.has_key?(opts, opt) do
       raise ArgumentError,
-            "reuse: is set on the workflow (`workflow \"name\", reuse: :never`), " <>
+            "#{opt}: is set on the workflow (`workflow \"name\", #{opt}: ...`), " <>
               "not per call, so every producer gets the same answer for a key"
     end
 
-    case Keyword.fetch(opts, :on_duplicate) do
-      {:ok, value} when value not in @on_duplicate ->
-        raise ArgumentError,
-              "invalid on_duplicate: #{inspect(value)}; expected one of #{inspect(@on_duplicate)}"
+    with {:ok, value} <- Keyword.fetch(opts, :on_duplicate), do: validate_on_duplicate!(value)
+    :ok
+  end
 
-      _ ->
-        :ok
-    end
+  @doc false
+  @spec validate_on_duplicate!(term()) :: term()
+  def validate_on_duplicate!(value) when value in @modes, do: value
+
+  def validate_on_duplicate!({:send_event, name} = value) when is_binary(name) and name != "",
+    do: value
+
+  def validate_on_duplicate!(value) do
+    raise ArgumentError,
+          "invalid on_duplicate: #{inspect(value)}; expected :use_existing, :error, " <>
+            ":cancel_existing or {:send_event, event_name}"
   end
 
   @doc false
@@ -60,76 +70,259 @@ defmodule Durable.Keys do
   end
 
   @doc false
+  # The workflow's `debounce:` as `%{period: ms, timeout: ms | nil}`, or nil.
+  @spec debounce(Durable.Definition.Workflow.t()) :: map() | nil
+  def debounce(%{opts: opts}) do
+    case Map.get(opts, :debounce) do
+      nil -> nil
+      list when is_list(list) -> debounce_opts(list)
+      other -> raise ArgumentError, "invalid debounce: #{inspect(other)}"
+    end
+  end
+
+  defp debounce_opts(list) do
+    period = Keyword.get(list, :period)
+    timeout = Keyword.get(list, :timeout)
+
+    valid? =
+      Keyword.keys(list) -- [:period, :timeout] == [] and positive?(period) and
+        (is_nil(timeout) or positive?(timeout))
+
+    if valid?,
+      do: %{period: period, timeout: timeout},
+      else:
+        raise(ArgumentError,
+          message:
+            "invalid debounce: #{inspect(list)}; expected [period: ms] or [period: ms, timeout: ms]"
+        )
+  end
+
+  defp positive?(n), do: is_integer(n) and n > 0
+
+  @doc false
+  # When a keyed start of this workflow is due: `period` from now for a
+  # debounced workflow (or the caller's later `scheduled_at`).
+  @spec debounced_start(Durable.Definition.Workflow.t(), DateTime.t() | nil) :: DateTime.t() | nil
+  def debounced_start(workflow_def, scheduled_at) do
+    case debounce(workflow_def) do
+      nil ->
+        scheduled_at
+
+      %{period: period} ->
+        latest(scheduled_at, DateTime.add(DateTime.utc_now(), period, :millisecond))
+    end
+  end
+
+  defp latest(nil, at), do: at
+  defp latest(a, b), do: if(DateTime.after?(a, b), do: a, else: b)
+
+  @doc false
   # Inserts a keyed run. Returns `{:ok, run}` for a new run (it holds the key),
-  # `{:duplicate, holder_id, on_duplicate}` when the key is taken, or
-  # `{:error, reason}`.
+  # `{:duplicate, holder_id, :use_existing | :error}` when the start didn't
+  # create one, or `{:error, reason}`.
   @spec insert(Config.t(), Ecto.Changeset.t(), Durable.Definition.Workflow.t(), keyword()) ::
           {:ok, WorkflowExecution.t()} | {:duplicate, String.t(), atom()} | {:error, term()}
   def insert(_config, %Ecto.Changeset{valid?: false} = changeset, _workflow_def, _opts),
     do: {:error, changeset}
 
   def insert(config, changeset, workflow_def, opts) do
-    on_duplicate =
-      Keyword.get(opts, :on_duplicate) || Map.get(workflow_def.opts, :on_duplicate, :use_existing)
+    mode =
+      validate_on_duplicate!(
+        Keyword.get(opts, :on_duplicate) ||
+          Map.get(workflow_def.opts, :on_duplicate, :use_existing)
+      )
 
-    if on_duplicate not in @on_duplicate,
-      do: raise(ArgumentError, "invalid on_duplicate: #{inspect(on_duplicate)}")
+    ctx = %{
+      config: config,
+      entry: entry(changeset),
+      reuse: reuse(workflow_def),
+      mode: mode,
+      debounce: debounce(workflow_def),
+      workflow_def: workflow_def
+    }
 
-    reuse = reuse(workflow_def)
-    entry = entry(changeset)
+    # One transaction so a release (or a replaced holder's cancel) and the
+    # insert that follows land together. Nothing in here raises on a taken
+    # key, and nothing rolls back, so a caller's own transaction stays usable.
+    {:ok, result} = Repo.transaction(config, fn -> claim(ctx, @rounds, nil) end)
+    finish(ctx, result)
+  end
 
-    # One transaction so a release and the insert that follows land together.
-    # Nothing in here raises on a taken key, and nothing rolls back, so a
-    # caller's own transaction stays usable after a duplicate.
-    {:ok, result} =
-      Repo.transaction(config, fn -> claim(config, entry, reuse, @rounds, nil) end)
+  defp claim(_ctx, 0, _moved), do: :contended
 
+  defp claim(ctx, rounds, moved) do
+    case Repo.insert_all(ctx.config, WorkflowExecution, [ctx.entry],
+           on_conflict: :nothing,
+           conflict_target: @holder_target,
+           returning: true
+         ) do
+      {1, [run]} -> {:inserted, run, moved}
+      {0, _} -> taken(ctx, rounds, moved)
+    end
+  end
+
+  # The insert hit a holder.
+  defp taken(ctx, rounds, moved) do
+    case holder(ctx.config, ctx.entry) do
+      # Gone between the insert and the read (pruned, released): try again.
+      nil -> claim(ctx, rounds - 1, moved)
+      holder -> take(ctx, holder, rounds, moved)
+    end
+  end
+
+  defp take(ctx, holder, rounds, moved) do
+    cond do
+      # A finished holder `reuse:` lets go hands its key over.
+      holder.status in WorkflowExecution.reusable_statuses(ctx.reuse) ->
+        moved =
+          if release_closed(ctx.config, holder, ctx.reuse), do: {:released, holder}, else: moved
+
+        claim(ctx, rounds - 1, moved)
+
+      # A debounced run that hasn't started takes the newer input and waits again.
+      debouncing?(ctx, holder) ->
+        if debounce_holder(ctx, holder),
+          do: {:debounced, holder},
+          else: claim(ctx, rounds - 1, moved)
+
+      ctx.mode == :cancel_existing and holder.status in @cancellable ->
+        replace(ctx, holder, rounds, moved)
+
+      true ->
+        {:taken, holder}
+    end
+  end
+
+  defp replace(ctx, holder, rounds, moved) do
+    case cancel_holder(ctx, holder) do
+      nil -> claim(ctx, rounds - 1, moved)
+      cancelled -> claim(ctx, rounds - 1, {:replaced, holder, cancelled})
+    end
+  end
+
+  defp debouncing?(%{debounce: nil}, _holder), do: false
+  defp debouncing?(_ctx, holder), do: holder.status == :pending and is_nil(holder.locked_by)
+
+  # Gives the newer input to a debounced run that hasn't been claimed, and
+  # pushes its start back by `period`, but not past `timeout` after the first
+  # start. Matches no row once a worker claimed it.
+  defp debounce_holder(%{debounce: %{period: period, timeout: timeout}} = ctx, holder) do
+    now = DateTime.utc_now()
+    at = DateTime.add(now, period, :millisecond)
+
+    at =
+      if timeout,
+        do: earliest(at, DateTime.add(holder.inserted_at, timeout, :millisecond)),
+        else: at
+
+    {count, _} =
+      Repo.update_all(
+        ctx.config,
+        from(w in WorkflowExecution,
+          where:
+            w.id == ^holder.id and w.holds_key and w.status == :pending and is_nil(w.locked_by)
+        ),
+        set: [
+          input: ctx.entry.input,
+          scheduled_at: at,
+          deadline_at: Executor.deadline(ctx.workflow_def, at),
+          updated_at: now
+        ]
+      )
+
+    count == 1
+  end
+
+  defp earliest(a, b), do: if(DateTime.before?(a, b), do: a, else: b)
+
+  # `on_duplicate: :cancel_existing`: cancel the open holder and take its key
+  # in one UPDATE, under any `reuse:`. Like `Durable.cancel/2`, a step in
+  # flight finishes but its result is dropped; compensations don't run.
+  defp cancel_holder(ctx, holder) do
+    now = DateTime.utc_now()
+
+    error = %{
+      type: "cancelled",
+      message:
+        "Replaced by run #{String.slice(ctx.entry.id, 0, 8)} (on_duplicate: :cancel_existing)",
+      replaced_by: ctx.entry.id
+    }
+
+    case Repo.update_all(
+           ctx.config,
+           from(w in WorkflowExecution,
+             where: w.id == ^holder.id and w.holds_key and w.status in ^@cancellable,
+             select: w
+           ),
+           set: [
+             status: :cancelled,
+             error: error,
+             completed_at: now,
+             updated_at: now,
+             locked_by: nil,
+             locked_at: nil,
+             lock_token: nil,
+             holds_key: false
+           ]
+         ) do
+      {1, [cancelled]} -> cancelled
+      {0, _} -> nil
+    end
+  end
+
+  defp finish(ctx, result) do
     case result do
-      {:inserted, run, released} ->
-        if released, do: record_handoff(config, run, released, reuse)
+      {:inserted, run, nil} ->
         {:ok, run}
 
+      {:inserted, run, {:released, from}} ->
+        record_handoff(ctx, run, from, %{})
+        {:ok, run}
+
+      {:inserted, run, {:replaced, from, cancelled}} ->
+        record_duplicate(ctx, from, :cancel_existing)
+        record_handoff(ctx, run, from, %{replaced: true})
+        Executor.after_cancel(ctx.config, cancelled)
+        {:ok, run}
+
+      {:debounced, holder} ->
+        record_duplicate(ctx, holder, :debounced)
+        {:duplicate, holder.id, :use_existing}
+
       {:taken, holder} ->
-        record_duplicate(config, entry, holder, on_duplicate)
-        {:duplicate, holder.id, on_duplicate}
+        answer(ctx, holder)
 
       :contended ->
         {:error, :key_contended}
     end
   end
 
-  defp claim(_config, _entry, _reuse, 0, _released), do: :contended
+  # The holder keeps the key; what the caller gets back.
+  defp answer(%{mode: mode} = ctx, holder) when mode in [:use_existing, :error] do
+    record_duplicate(ctx, holder, mode)
+    {:duplicate, holder.id, mode}
+  end
 
-  defp claim(config, entry, reuse, rounds, released) do
-    row = %{entry | id: Ecto.UUID.generate()}
-
-    case Repo.insert_all(config, WorkflowExecution, [row],
-           on_conflict: :nothing,
-           conflict_target: @holder_target,
-           returning: true
-         ) do
-      {1, [run]} -> {:inserted, run, released}
-      {0, _} -> taken(config, entry, reuse, rounds, released)
+  defp answer(%{mode: {:send_event, name}} = ctx, holder) do
+    if holder.status in WorkflowExecution.open_statuses() and
+         Durable.Wait.send_event(holder.id, name, ctx.entry.input,
+           buffer: true,
+           durable: ctx.config.name
+         ) == :ok do
+      record_duplicate(ctx, holder, :send_event, %{event: name})
+      {:duplicate, holder.id, :use_existing}
+    else
+      record_duplicate(ctx, holder, :error)
+      {:duplicate, holder.id, :error}
     end
   end
 
-  # The insert hit a holder. Hand the key over if `reuse:` lets the holder go,
-  # else the key is taken.
-  defp taken(config, entry, reuse, rounds, released) do
-    case holder(config, entry) do
-      # Gone between the insert and the read (pruned, released): try again.
-      nil ->
-        claim(config, entry, reuse, rounds - 1, released)
-
-      holder ->
-        if holder.status in WorkflowExecution.reusable_statuses(reuse),
-          do: claim(config, entry, reuse, rounds - 1, hand_over(config, holder, reuse, released)),
-          else: {:taken, holder}
-    end
+  # :cancel_existing with a holder it can't cancel: compensating, or finished
+  # and kept by `reuse:`.
+  defp answer(ctx, holder) do
+    record_duplicate(ctx, holder, :error)
+    {:duplicate, holder.id, :error}
   end
-
-  defp hand_over(config, holder, reuse, released),
-    do: if(release_closed(config, holder, reuse), do: holder, else: released)
 
   defp entry(changeset) do
     now = DateTime.utc_now()
@@ -137,7 +330,7 @@ defmodule Durable.Keys do
     changeset
     |> Ecto.Changeset.apply_changes()
     |> Map.take(WorkflowExecution.__schema__(:fields))
-    |> Map.merge(%{holds_key: true, inserted_at: now, updated_at: now})
+    |> Map.merge(%{id: Ecto.UUID.generate(), holds_key: true, inserted_at: now, updated_at: now})
   end
 
   defp holder(config, %{workflow_module: module, workflow_name: name, key: key}) do
@@ -147,7 +340,17 @@ defmodule Durable.Keys do
         where:
           w.workflow_module == ^module and w.workflow_name == ^name and w.key == ^key and
             w.holds_key,
-        select: struct(w, [:id, :status, :input, :key, :workflow_module, :workflow_name])
+        select:
+          struct(w, [
+            :id,
+            :status,
+            :input,
+            :key,
+            :workflow_module,
+            :workflow_name,
+            :locked_by,
+            :inserted_at
+          ])
       )
     )
   end
@@ -281,7 +484,8 @@ defmodule Durable.Keys do
   # --------------------------------------------------------------------------
   # Tracking
 
-  defp record_duplicate(config, entry, holder, on_duplicate) do
+  defp record_duplicate(ctx, holder, outcome, extra \\ %{}) do
+    %{config: config, entry: entry} = ctx
     input = Executor.sanitize_for_json(entry.input || %{})
     changed = json(input) != json(holder.input || %{})
 
@@ -289,10 +493,11 @@ defmodule Durable.Keys do
       %{
         key: entry.key,
         workflow: entry.workflow_name,
-        outcome: on_duplicate,
+        outcome: outcome,
         holder_status: holder.status,
         input_changed: changed
       }
+      |> Map.merge(extra)
       |> put_input(changed, input)
 
     record(config, "key_duplicate", holder, details)
@@ -302,7 +507,7 @@ defmodule Durable.Keys do
       workflow: entry.workflow_name,
       key: entry.key,
       holder_id: holder.id,
-      outcome: on_duplicate,
+      outcome: outcome,
       input_changed: changed
     })
   end
@@ -318,15 +523,16 @@ defmodule Durable.Keys do
   # Compare as stored JSON, so atom and string keys compare equal.
   defp json(term), do: term |> Jason.encode!() |> Jason.decode!()
 
-  defp record_handoff(config, run, from, reuse) do
-    record(config, "key_handed_off", run, %{
-      from: from.id,
-      from_status: from.status,
-      reuse: reuse
-    })
+  defp record_handoff(ctx, run, from, extra) do
+    record(
+      ctx.config,
+      "key_handed_off",
+      run,
+      Map.merge(%{from: from.id, from_status: from.status, reuse: ctx.reuse}, extra)
+    )
 
     :telemetry.execute([:durable, :key, :handoff], %{count: 1}, %{
-      durable: config.name,
+      durable: ctx.config.name,
       workflow: run.workflow_name,
       key: run.key,
       from: from.id,

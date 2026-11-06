@@ -11,7 +11,7 @@ defmodule Durable.Storage.Schemas.PendingEvent do
 
   @type wait_type :: :single | :any | :all
 
-  @type status :: :pending | :received | :timeout | :cancelled
+  @type status :: :pending | :received | :timeout | :cancelled | :buffered
 
   @type t :: %__MODULE__{
           id: Ecto.UUID.t(),
@@ -40,7 +40,7 @@ defmodule Durable.Storage.Schemas.PendingEvent do
     field(:step_name, :string)
 
     field(:status, Ecto.Enum,
-      values: [:pending, :received, :timeout, :cancelled],
+      values: [:pending, :received, :timeout, :cancelled, :buffered],
       default: :pending
     )
 
