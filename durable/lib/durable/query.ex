@@ -495,9 +495,11 @@ defmodule Durable.Query do
 
   defp apply_filters(query, filters) do
     Enum.reduce(filters, query, fn
+      # Runs store Atom.to_string(module) ("Elixir.MyApp.Orders"); accept the
+      # inspect/1 form too.
       {:workflow, module}, q when is_atom(module) ->
-        module_str = inspect(module)
-        from(w in q, where: w.workflow_module == ^module_str)
+        names = [Atom.to_string(module), inspect(module)]
+        from(w in q, where: w.workflow_module in ^names)
 
       {:workflow_name, name}, q ->
         from(w in q, where: w.workflow_name == ^name)
