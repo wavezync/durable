@@ -183,7 +183,8 @@ defmodule DurableDashboard.Live.ExecutionsLive do
     {:noreply, assign(socket, selected: MapSet.new(), bulk_result: nil)}
   end
 
-  def handle_event("bulk", %{"action" => action}, socket) when action in ~w(retry rerun cancel) do
+  def handle_event("bulk", %{"action" => action}, socket)
+      when action in ~w(retry rerun cancel release) do
     action = String.to_existing_atom(action)
     ids = eligible_ids(socket.assigns, action)
     durable = socket.assigns.durable
@@ -191,22 +192,31 @@ defmodule DurableDashboard.Live.ExecutionsLive do
 
     result =
       Access.perform(socket, required, action, ids, fn ->
-        results = Enum.map(ids, &run_action(action, &1, durable))
+        results = Enum.map(ids, &run_action(action, &1, durable, socket.assigns[:user]))
         {:ok, Enum.count(results, &match?({:ok, _}, &1)) + Enum.count(results, &(&1 == :ok))}
       end)
 
     message =
       case result do
-        {:ok, done} -> "#{verb(action)} #{done} of #{Format.count(length(ids), "run")}."
-        {:error, :forbidden} -> "You don't have permission to do that."
+        {:ok, done} when action == :release ->
+          "Released #{done} of #{Format.count(length(ids), "key")}."
+
+        {:ok, done} ->
+          "#{verb(action)} #{done} of #{Format.count(length(ids), "run")}."
+
+        {:error, :forbidden} ->
+          "You don't have permission to do that."
       end
 
     {:noreply, socket |> assign(selected: MapSet.new(), bulk_result: message) |> load_rows()}
   end
 
-  defp run_action(:retry, id, durable), do: Durable.retry(id, durable: durable)
-  defp run_action(:rerun, id, durable), do: Durable.rerun(id, durable: durable)
-  defp run_action(:cancel, id, _durable), do: Durable.cancel(id)
+  defp run_action(:retry, id, durable, _user), do: Durable.retry(id, durable: durable)
+  defp run_action(:rerun, id, durable, _user), do: Durable.rerun(id, durable: durable)
+  defp run_action(:cancel, id, _durable, _user), do: Durable.cancel(id)
+
+  defp run_action(:release, id, durable, user),
+    do: Durable.release_key(id, durable: durable, by: user)
 
   defp verb(:retry), do: "Retried"
   defp verb(:rerun), do: "Started reruns for"
@@ -214,9 +224,13 @@ defmodule DurableDashboard.Live.ExecutionsLive do
 
   defp eligible_ids(assigns, action) do
     assigns.rows
-    |> Enum.filter(&(MapSet.member?(assigns.selected, &1.id) and eligible?(action, &1.status)))
+    |> Enum.filter(&(MapSet.member?(assigns.selected, &1.id) and eligible?(action, &1)))
     |> Enum.map(& &1.id)
   end
+
+  # Closed runs that hold their workflow key.
+  defp eligible?(:release, row), do: row[:holds_key] == true and eligible?(:rerun, row)
+  defp eligible?(action, %{status: status}), do: eligible?(action, status)
 
   defp eligible?(:retry, status), do: status == :failed
 
@@ -374,8 +388,13 @@ defmodule DurableDashboard.Live.ExecutionsLive do
                       data-tip-meta={row.id}
                     >
                       <span :if={!@workflow_name} class="truncate font-medium">{row.workflow_name}</span>
-                      <span class={["font-mono text-xs", if(@workflow_name, do: "text-foreground", else: "text-muted-foreground")]}>
-                        {short(row.id)}
+                      <span class={["truncate font-mono text-xs", if(@workflow_name, do: "text-foreground", else: "text-muted-foreground")]}>
+                        {short(row.id)}<span
+                          :if={row[:key]}
+                          class="text-muted-foreground"
+                          data-tip-title="Workflow key"
+                          data-tip={if row.holds_key, do: "This run holds it", else: "Another run holds it now, or none"}
+                        > · {row.key}{if row.holds_key, do: " · holds key"}</span>
                       </span>
                     </.link>
                   </td>
@@ -452,6 +471,16 @@ defmodule DurableDashboard.Live.ExecutionsLive do
             data-tip={"Each one starts over as a new run, with the same input · linked back to it\n#{bulk_fit(@counts.rerun, @selected)} · only finished runs"}
           >
             Rerun {@counts.rerun}
+          </Core.button>
+          <Core.button
+            :if={@counts.release > 0}
+            phx-click="bulk"
+            phx-value-action="release"
+            data-confirm={"Release #{Format.count(@counts.release, "key")}? The next start with each key makes a new run."}
+            data-tip-title="Release keys"
+            data-tip={"Each finished run lets its workflow key go · the run keeps its history\n#{bulk_fit(@counts.release, @selected)} · only finished runs that hold a key"}
+          >
+            Release {@counts.release} {if @counts.release == 1, do: "key", else: "keys"}
           </Core.button>
           <Core.button
             kind="destructive"
@@ -705,7 +734,7 @@ defmodule DurableDashboard.Live.ExecutionsLive do
   end
 
   defp bulk_counts(assigns) do
-    for action <- [:retry, :rerun, :cancel], into: %{} do
+    for action <- [:retry, :rerun, :release, :cancel], into: %{} do
       {action, length(eligible_ids(assigns, action))}
     end
   end

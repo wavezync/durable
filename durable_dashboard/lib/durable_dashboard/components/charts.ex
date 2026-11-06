@@ -4,6 +4,7 @@ defmodule DurableDashboard.Components.Charts do
   `Durable.Stats.timeline/1` buckets — see `DESIGN.md` §6 "Charts".
 
     * `stacked_bars/1` — runs finished per bucket: completed, failed, cancelled
+      (or any `series` of counts, such as a workflow's key re-adds)
     * `rate_line/1` — failure rate per bucket, ceiling adapts to the peak
     * `percentile_lines/1` — p50 / p95 duration per bucket
 
@@ -93,40 +94,56 @@ defmodule DurableDashboard.Components.Charts do
 
   # ---- Charts -----------------------------------------------------------------
 
+  @finished_series [
+    {:completed, "bg-chart-ok", "completed"},
+    {:failed, "bg-chart-fail", "failed"},
+    {:cancelled, "bg-off", "cancelled"}
+  ]
+
   attr :timeline, :list, required: true
 
+  attr :series, :list,
+    default: @finished_series,
+    doc: "`{field, bg class, label}` per segment, bottom first (default: runs finished)"
+
+  attr :empty, :string, default: "No runs finished in this window"
+
   def stacked_bars(assigns) do
-    max =
-      assigns.timeline
-      |> Enum.map(&(&1.completed + &1.failed + &1.cancelled))
-      |> Enum.max(fn -> 0 end)
+    fields = Enum.map(assigns.series, &elem(&1, 0))
+    total = fn b -> fields |> Enum.map(&Map.get(b, &1, 0)) |> Enum.sum() end
+    max = assigns.timeline |> Enum.map(total) |> Enum.max(fn -> 0 end)
 
     assigns =
       assign(assigns,
         top: count_max(max),
         empty?: max == 0,
+        total: total,
+        last: length(assigns.series) - 1,
         buckets: Enum.zip(assigns.timeline, bucket_labels(assigns.timeline))
       )
 
     ~H"""
     <div class="relative mx-4 ml-[52px] h-[168px]">
       <.gridlines :if={!@empty?} top={Format.int(@top)} mid={Format.int(div(@top, 2))} />
-      <.empty :if={@empty?}>No runs finished in this window</.empty>
+      <.empty :if={@empty?}>{@empty}</.empty>
       <div class="absolute inset-0 flex items-end gap-0.5">
         <div
           :for={{b, label} <- @buckets}
           class="group flex h-full min-w-0 flex-1 items-end rounded-t-[2px] hover:bg-foreground/[0.04]"
           data-tip-title={label}
-          data-tip={"#{Format.int(b.completed)} completed\n#{Format.int(b.failed)} failed\n#{Format.int(b.cancelled)} cancelled"}
-          data-tip-meta={finished_meta(b)}
+          data-tip={Enum.map_join(@series, "\n", fn {f, _, l} -> "#{Format.int(Map.get(b, f, 0))} #{l}" end)}
+          data-tip-meta={if Map.has_key?(b, :failure_rate), do: finished_meta(b)}
         >
           <div
             class="flex w-full flex-col-reverse gap-px group-hover:brightness-125"
-            style={"height: #{bar_pct(b.completed + b.failed + b.cancelled, @top)}%"}
+            style={"height: #{bar_pct(@total.(b), @top)}%"}
           >
-            <i class="block bg-chart-ok" style={"flex-grow: #{b.completed}"}></i>
-            <i class="block bg-chart-fail" style={"flex-grow: #{b.failed}"}></i>
-            <i class="block rounded-t-[2px] bg-off" style={"flex-grow: #{b.cancelled}"}></i>
+            <i
+              :for={{{f, class, _}, i} <- Enum.with_index(@series)}
+              class={["block", class, i == @last && "rounded-t-[2px]"]}
+              style={"flex-grow: #{Map.get(b, f, 0)}"}
+            >
+            </i>
           </div>
         </div>
       </div>

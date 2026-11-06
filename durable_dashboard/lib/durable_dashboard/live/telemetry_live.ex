@@ -72,6 +72,13 @@ defmodule DurableDashboard.Live.TelemetryLive do
        {[:durable, :wait, :sleep_woken], "count", ""},
        {[:durable, :pruner, :pruned], "count", "group: completed | failed | cancelled"}
      ]},
+    {"Workflow keys",
+     [
+       {[:durable, :key, :duplicate], "count",
+        "workflow, key, holder_id, outcome: use_existing | error, input_changed"},
+       {[:durable, :key, :handoff], "count", "workflow, key, from, to"},
+       {[:durable, :key, :release], "count", "workflow, key, workflow_id, by"}
+     ]},
     {"Dashboard",
      [
        {@audit_event, "count", "action, user, ids, result — an audit trail of every action"}
@@ -101,6 +108,9 @@ defmodule DurableDashboard.Live.TelemetryLive do
     [:durable, :schedule, :trigger] => "A schedule starts a run",
     [:durable, :wait, :sleep_woken] => "Sleeping runs wake up",
     [:durable, :pruner, :pruned] => "Retention deletes a batch of old runs",
+    [:durable, :key, :duplicate] => "A start finds its workflow key taken",
+    [:durable, :key, :handoff] => "A start takes a key from a finished run",
+    [:durable, :key, :release] => "Someone releases a finished run's key",
     @audit_event => "Someone acts in this dashboard"
   }
 

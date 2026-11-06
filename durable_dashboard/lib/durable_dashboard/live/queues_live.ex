@@ -14,6 +14,11 @@ defmodule DurableDashboard.Live.QueuesLive do
 
   use Phoenix.LiveView
 
+  # Operations shows what happened to queues and nodes. Key events
+  # (`key_*`) belong to a run's Key view and its workflow's Keys section.
+  @operation_kinds ~w(stale_recovered zombie_recovered worker_fenced ack_failed queue_paused
+                      queue_resumed schedule_disabled pruned)
+
   alias DurableDashboard.Access
   alias DurableDashboard.Components.Charts
   alias DurableDashboard.Components.Core
@@ -85,7 +90,10 @@ defmodule DurableDashboard.Live.QueuesLive do
       backlog: Map.new(history, fn {queue, samples} -> {queue, per_minute(samples, now)} end),
       backlog_labels: minute_labels(now),
       activity:
-        if(durable_config, do: Durable.Activity.list(durable: durable, limit: 50), else: []),
+        if(durable_config,
+          do: Durable.Activity.list(durable: durable, limit: 50, kinds: @operation_kinds),
+          else: []
+        ),
       now: now
     )
   end

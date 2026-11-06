@@ -9,6 +9,7 @@ defmodule DurableDashboard.RunSearchTest do
     assert RunSearch.parse("step:ship_order") == [current_step: "ship_order"]
     assert RunSearch.parse(~s(error:"rate limited")) == [error_contains: "rate limited"]
     assert RunSearch.parse("schedule:nightly") == [trigger: :schedule, trigger_ref: "nightly"]
+    assert RunSearch.parse("key:article:42") == [key: "article:42"]
 
     assert RunSearch.parse("input.order_id:ORD-1042 input.customer.tier:gold") == [
              input: %{"order_id" => "ORD-1042", "customer.tier" => "gold"}
@@ -20,6 +21,12 @@ defmodule DurableDashboard.RunSearchTest do
 
     assert filters[:current_step] == "charge"
     assert filters[:error_contains] == "carrier timeout 503"
+  end
+
+  test "key: keeps the colons in a key and labels its tag" do
+    [token] = RunSearch.tokens(~s(key:"invoice:INV 7"))
+    assert RunSearch.label(token) == {"key", "invoice:INV 7"}
+    assert RunSearch.parse(~s(key:"invoice:INV 7")) == [key: "invoice:INV 7"]
   end
 
   test "an unknown key is searched as text rather than dropped" do

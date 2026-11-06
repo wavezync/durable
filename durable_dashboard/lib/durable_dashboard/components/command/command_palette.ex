@@ -16,9 +16,11 @@ defmodule DurableDashboard.Components.Command.CommandPalette do
   - **Runs** — the latest runs when empty, filtered by workflow name as you
     type; a run id (4+ hex characters) is looked up in the database, so any
     run is found, not just the recent ones.
+  - **Keys** — a query with a `:` in it is looked up as a workflow key, one
+    row per workflow, opening the holder's Key view.
 
   Workflows, schedules and recent runs are **snapshotted on open** and
-  filtered in memory; only an id-shaped query hits the database.
+  filtered in memory; only id- and key-shaped queries hit the database.
 
   ## Events
 
@@ -289,6 +291,18 @@ defmodule DurableDashboard.Components.Command.CommandPalette do
     """
   end
 
+  defp row_meta(%{item: %{type: :key}} = assigns) do
+    ~H"""
+    <span class="flex items-center gap-2 shrink-0">
+      <span class="text-[11px] text-muted-foreground">
+        {@item.workflow} · {if @item.holds?, do: "held by", else: "last run"}
+      </span>
+      <span data-tip="Run id" data-tip-meta={@item.id}><Core.code>{@item.short_id}</Core.code></span>
+      <Core.status_pill status={@item.status} />
+    </span>
+    """
+  end
+
   defp row_meta(%{item: %{type: :run}} = assigns) do
     ~H"""
     <span class="flex items-center gap-2 shrink-0">
@@ -389,6 +403,7 @@ defmodule DurableDashboard.Components.Command.CommandPalette do
         view_results(base, q) ++
         workflow_results(base, assigns.workflows, q) ++
         schedule_results(base, assigns[:schedules] || [], q) ++
+        key_results(base, assigns[:durable], q) ++
         run_results(base, matching_runs(assigns, q), "Runs")
     end
   end
@@ -447,6 +462,37 @@ defmodule DurableDashboard.Components.Command.CommandPalette do
         status: w.last_status
       }
     end)
+  end
+
+  # A query shaped like a workflow key (it contains ":") is looked up by exact
+  # key: one row per workflow, the run holding it (or its newest run).
+  defp key_results(_base, nil, _q), do: []
+
+  defp key_results(base, durable, q) do
+    if String.contains?(q, ":") do
+      [durable: durable, key: q, limit: 20]
+      |> Durable.Query.list_executions()
+      |> Enum.group_by(& &1.workflow_name)
+      |> Enum.map(fn {_name, runs} -> Enum.find(runs, & &1.holds_key) || hd(runs) end)
+      |> Enum.map(fn r ->
+        %{
+          group: "Keys",
+          type: :key,
+          label: r.key,
+          icon: "nav-runs",
+          href: DPath.execution_tab(base, r.id, "key"),
+          workflow: r.workflow_name,
+          id: r.id,
+          short_id: short_id(r.id),
+          holds?: r.holds_key,
+          status: r.status
+        }
+      end)
+    else
+      []
+    end
+  rescue
+    _ -> []
   end
 
   defp run_results(base, runs, group) do

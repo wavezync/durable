@@ -64,6 +64,7 @@ defmodule DurableDashboard.Components.Data.ExecutionFilters do
     {"input.", "input.", "an input value · input.order_id:42",
      "type input.<path>:<value>, then ↵"},
     {"schedule", "schedule:", "runs a schedule started", nil},
+    {"key", "key:", "runs started with a workflow key", "type a key such as article:42, then ↵"},
     {"since", "since:", "started in the last 15m … 30d", nil},
     {"id", "id:", "a run id, or its first characters", "type an id or its start, then ↵"}
   ]
@@ -377,6 +378,7 @@ defmodule DurableDashboard.Components.Data.ExecutionFilters do
   defp tag_help(%{key: "error"}), do: "Text anywhere in the run's error"
   defp tag_help(%{key: "id"}), do: "Runs whose id starts with this"
   defp tag_help(%{key: "schedule"}), do: "Runs this schedule started"
+  defp tag_help(%{key: "key"}), do: "Runs started with this workflow key"
   defp tag_help(%{key: "input." <> path}), do: "Runs whose input #{path} is exactly this"
   defp tag_help(_tag), do: nil
 
