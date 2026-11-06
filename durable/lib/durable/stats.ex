@@ -103,7 +103,7 @@ defmodule Durable.Stats do
     span = DateTime.diff(until, since, :second)
     bucket = Keyword.get(opts, :bucket_seconds, max(div(span, 48), 60))
     runs = runs(opts)
-    origin = DateTime.to_unix(since)
+    origin = bucket_origin(since)
 
     finished =
       Repo.all(
@@ -564,6 +564,11 @@ defmodule Durable.Stats do
   end
 
   # --------------------------------------------------------------------------
+
+  # Bucket 0 starts exactly at `since`, microseconds included: truncating it to
+  # the second would push anything in the window's last fraction of a second
+  # into a bucket past the end.
+  defp bucket_origin(since), do: DateTime.to_unix(since, :microsecond) / 1_000_000
 
   defp window(opts) do
     config = Config.get(Keyword.get(opts, :durable, Durable))
