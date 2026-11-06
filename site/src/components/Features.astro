@@ -1,6 +1,7 @@
 ---
-// Every workflow primitive, as a bento grid. Two wide tiles carry a small diagram.
-import { RefreshCw, GitBranch, Split, Undo2, Hourglass, Webhook, UserCheck, CalendarClock, Network, Timer } from '@lucide/astro';
+// Every workflow primitive, as a bento grid. The wide tiles carry a small diagram;
+// the last one spans the row, so the grid stays full at every width.
+import { RefreshCw, GitBranch, Split, Undo2, Hourglass, Webhook, UserCheck, CalendarClock, Network, Timer, KeyRound } from '@lucide/astro';
 
 const tiles = [
   { icon: Split, wide: 'parallel', name: 'Parallel steps', text: 'Fan out, run at the same time, and collect each result as {:ok, _} or {:error, _}.', code: 'parallel do ... end', href: '/docs/parallel/' },
@@ -13,11 +14,12 @@ const tiles = [
   { icon: CalendarClock, name: 'Cron schedules', text: 'Recurring workflows, in any timezone.', code: '@schedule cron: "0 9 * * *"', href: '/docs/#scheduled-reports' },
   { icon: Network, name: 'Child workflows', text: 'Call one and wait for it, or start one and move on.', code: 'call_workflow(Child, input)', href: '/docs/orchestration/' },
   { icon: Timer, name: 'Deadlines', text: 'A run past its timeout fails and runs its compensations.', code: 'timeout: hours(2)', href: '/docs/#workflow-options' },
+  { icon: KeyRound, wide: 'keys', name: 'Unique executions', text: 'Start with a key and a repeat gets the run that already holds it. Or replace that run, send it the new input, or debounce a burst into one.', code: 'Durable.start(Article, input, key: "article:42")', href: '/docs/workflow-keys/' },
 ];
 ---
 <ul class="bento">
   {tiles.map((t) => (
-    <li class:list={['tile', { wide: t.wide }]}>
+    <li class:list={['tile', { wide: t.wide, full: t.wide === 'keys' }]}>
       <a href={t.href}>
         <span class="ico"><t.icon size={20} /></span>
         {t.wide === 'parallel' && (
@@ -40,6 +42,17 @@ const tiles = [
             <text x="20" y="22" text-anchor="middle">flight</text><text x="100" y="22" text-anchor="middle">hotel</text><text x="180" y="22" text-anchor="middle">charge</text>
           </svg>
         )}
+        {t.wide === 'keys' && (
+          <svg class="art" viewBox="0 0 360 90" aria-hidden="true">
+            <path class="rail" d="M12 15 C80 15 100 45 176 45 M12 45 H176 M12 75 C80 75 100 45 176 45 M184 45 H348" />
+            <path class="dup" d="M12 45 H170" />
+            <path class="dup d2" d="M12 75 C80 75 100 45 170 45" />
+            <path class="flow" d="M12 15 C80 15 100 45 176 45 H348" />
+            <circle cx="12" cy="15" r="5" class="comp" /><circle cx="12" cy="45" r="5" class="comp" /><circle cx="12" cy="75" r="5" class="comp" />
+            <circle cx="180" cy="45" r="7" class="ok" /><circle cx="348" cy="45" r="5" class="end" />
+            <text x="12" y="2">3 starts, one key</text><text x="180" y="24" text-anchor="middle">one run</text>
+          </svg>
+        )}
         <strong>{t.name}</strong>
         <span class="text">{t.text}</span>
         <code>{t.code}</code>
@@ -51,6 +64,7 @@ const tiles = [
 <style>
   .bento { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
   .tile.wide { grid-column: span 2; }
+  .tile.full { grid-column: 1 / -1; }
   .tile a {
     position: relative; height: 100%; box-sizing: border-box; display: flex; flex-direction: column; gap: 8px; padding: 22px;
     border-radius: 20px; text-decoration: none; color: var(--ink); overflow: hidden;
@@ -87,16 +101,20 @@ const tiles = [
   .undo.u2 { animation-delay: -0.7s; }
   @keyframes back { to { stroke-dashoffset: 18; } }
   .art text { font: 12px var(--sl-font-mono); fill: #8994ab; }
+  /* Repeats with the same key stop at the run that holds it. */
+  .dup { fill: none; stroke: #f0718a; stroke-width: 1.6; stroke-dasharray: 4 5; opacity: 0.75; animation: back 1.4s linear infinite reverse; }
+  .dup.d2 { animation-delay: -0.7s; }
+  .full .art { width: 46%; max-width: 420px; top: 50%; transform: translateY(-50%); }
 
   @media (max-width: 1000px) {
     .bento { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   }
   @media (max-width: 560px) {
     .bento { grid-template-columns: minmax(0, 1fr); }
-    .tile.wide { grid-column: auto; }
-    .art { position: static; width: 100%; max-width: none; margin: 4px 0; }
+    .tile.wide, .tile.full { grid-column: auto; }
+    .art, .full .art { position: static; width: 100%; max-width: none; margin: 4px 0; transform: none; }
   }
   @media (prefers-reduced-motion: reduce) {
-    .flow, .undo { animation: none; }
+    .flow, .undo, .dup { animation: none; }
   }
 </style>
