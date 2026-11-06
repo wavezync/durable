@@ -13,12 +13,24 @@ defmodule Durable.Activity do
   | `"queue_resumed"`     | `Durable.resume_queue/2`                                       |
   | `"schedule_disabled"` | a schedule was turned off after failing repeatedly            |
   | `"pruned"`            | the retention pruner deleted finished runs                     |
+  | `"key_duplicate"`     | a start found its key taken and returned the holder or an error |
+  | `"key_handed_off"`    | a start took a key from a closed run that `reuse:` let go      |
+  | `"key_released"`      | `Durable.release_key/2` (`details.by` when given)              |
+  | `"key_retaken"`       | a retry took its key back from a closed run                    |
+
+  Key events carry `details.key` and `details.workflow`, and their
+  `:workflow_id` is the run they're about: the holder for `"key_duplicate"`,
+  the new holder for `"key_handed_off"` and `"key_retaken"`. A
+  `"key_duplicate"` also has `outcome` (`use_existing` or `error`),
+  `holder_status` and `input_changed`, plus the new `input` when it differed
+  (up to 16 KB; `input_truncated` when larger).
 
   Each row has `:at`, `:kind`, the `:node_id` that recorded it, and where it
   applies `:queue`, `:workflow_id`, a `:count` and `:details`.
 
   Recording never raises: losing an activity row must not break the recovery
-  or the action it describes.
+  or the action it describes. Inside a transaction the insert runs under a
+  savepoint, so a failed insert doesn't abort the caller's transaction either.
   """
 
   import Ecto.Query
@@ -42,7 +54,11 @@ defmodule Durable.Activity do
       details: attrs |> Keyword.get(:details, %{}) |> Durable.Executor.sanitize_for_json()
     }
 
-    Repo.insert(event, config)
+    # Inside a transaction (a caller's `Durable.start/3`), `mode: :savepoint`
+    # rolls back just this insert on error instead of leaving the transaction
+    # aborted. Postgrex refuses that mode outside a transaction.
+    opts = if config.repo.in_transaction?(), do: [mode: :savepoint], else: []
+    Repo.insert(event, config, opts)
     :ok
   rescue
     e ->
@@ -57,6 +73,8 @@ defmodule Durable.Activity do
 
   - `:since` - only events at or after this time (default: 24 hours ago)
   - `:limit` - at most this many (default: 100)
+  - `:workflow_id` - only events about this run
+  - `:kinds` - only these kinds (strings)
   - `:durable` - the Durable instance (default: `Durable`)
   """
   @spec list(keyword()) :: [ActivityEvent.t()]
@@ -64,13 +82,25 @@ defmodule Durable.Activity do
     config = Config.get(Keyword.get(opts, :durable, Durable))
     since = Keyword.get(opts, :since, DateTime.add(DateTime.utc_now(), -86_400, :second))
 
-    Repo.all(
-      config,
+    query =
       from(a in ActivityEvent,
         where: a.at >= ^since,
         order_by: [desc: a.at],
         limit: ^Keyword.get(opts, :limit, 100)
       )
-    )
+
+    query =
+      case Keyword.get(opts, :workflow_id) do
+        nil -> query
+        id -> from(a in query, where: a.workflow_id == ^id)
+      end
+
+    query =
+      case Keyword.get(opts, :kinds) do
+        nil -> query
+        kinds -> from(a in query, where: a.kind in ^kinds)
+      end
+
+    Repo.all(config, query)
   end
 end

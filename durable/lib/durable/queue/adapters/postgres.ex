@@ -176,6 +176,12 @@ defmodule Durable.Queue.Adapters.Postgres do
       nil ->
         {:error, :not_found}
 
+      # Only a run that's still going can be put back on the queue. A finished
+      # run may have lost its workflow key to a newer run, and reopening it
+      # here would run it alongside that run, without the key.
+      %{status: status} when status not in [:pending, :running, :waiting, :compensating] ->
+        {:error, :finished}
+
       execution ->
         if fenced?(execution, lock_token) do
           :ok

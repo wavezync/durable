@@ -57,6 +57,7 @@ defmodule Durable.Query do
   - `:trigger` - What started the run: `:api`, `:schedule`, `:parent` or `:rerun`
   - `:trigger_ref` - What it points at: a schedule's name, or the run a rerun copied
   - `:error_contains` - Case-insensitive text anywhere in the run's error
+  - `:key` - Runs started with this workflow key (the holder has `holds_key: true`)
   - `:input` - Map of dotted input paths to exact values, e.g.
     `%{"order_id" => "ORD-1042"}`
   - `:limit` - Maximum results (default: 50)
@@ -418,6 +419,9 @@ defmodule Durable.Query do
       {:trigger_ref, ref}, q when is_binary(ref) and ref != "" ->
         from(w in q, where: w.trigger_ref == ^ref)
 
+      {:key, key}, q when is_binary(key) and key != "" ->
+        from(w in q, where: w.key == ^key)
+
       # Case-insensitive substring of the stored error (type, message, or any
       # field a step returned in `{:error, map}`).
       {:error_contains, text}, q when is_binary(text) and text != "" ->
@@ -454,6 +458,8 @@ defmodule Durable.Query do
       parent_workflow_id: execution.parent_workflow_id,
       trigger: execution.trigger,
       trigger_ref: execution.trigger_ref,
+      key: execution.key,
+      holds_key: execution.holds_key,
       locked_by: execution.locked_by,
       scheduled_at: execution.scheduled_at,
       started_at: execution.started_at,

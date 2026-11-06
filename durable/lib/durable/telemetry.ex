@@ -61,6 +61,16 @@ defmodule Durable.Telemetry do
     * `[:durable, :pruner, :pruned]` — `%{count}`; `:group` (`:completed`,
       `:failed` or `:cancelled`), once per deleted batch
 
+  ## Workflow keys
+
+    * `[:durable, :key, :duplicate]` — `%{count}`; a start found its key
+      taken. `:workflow`, `:key`, `:holder_id`, `:outcome` (`:use_existing` or
+      `:error`), `:input_changed`
+    * `[:durable, :key, :handoff]` — `%{count}`; a start took the key from a
+      finished run. `:workflow`, `:key`, `:from`, `:to`
+    * `[:durable, :key, :release]` — `%{count}`; `Durable.release_key/2`.
+      `:workflow`, `:key`, `:workflow_id`, `:by`
+
   ## Reporting
 
   `metrics/0` returns `Telemetry.Metrics` definitions for any reporter
@@ -94,7 +104,10 @@ defmodule Durable.Telemetry do
     [:durable, :queue, :ack_failed],
     [:durable, :schedule, :trigger],
     [:durable, :wait, :sleep_woken],
-    [:durable, :pruner, :pruned]
+    [:durable, :pruner, :pruned],
+    [:durable, :key, :duplicate],
+    [:durable, :key, :handoff],
+    [:durable, :key, :release]
   ]
 
   @doc """
@@ -207,7 +220,12 @@ defmodule Durable.Telemetry do
         Metrics.counter("durable.queue.worker_fenced.count", tags: [:queue], measurement: event),
         Metrics.sum("durable.queue.stale_recovered.count", []),
         Metrics.sum("durable.queue.zombie_recovered.count", []),
-        Metrics.counter("durable.schedule.trigger.count", tags: [:schedule], measurement: event)
+        Metrics.counter("durable.schedule.trigger.count", tags: [:schedule], measurement: event),
+        Metrics.counter("durable.key.duplicate.count",
+          tags: [:workflow, :outcome],
+          measurement: event
+        ),
+        Metrics.counter("durable.key.handoff.count", tags: [:workflow], measurement: event)
       ]
     end
   end

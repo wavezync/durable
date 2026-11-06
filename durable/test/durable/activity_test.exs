@@ -8,7 +8,8 @@ defmodule Durable.ActivityTest do
   alias Durable.Config
   alias Durable.Queue.Sampler
   alias Durable.Stats
-  alias Durable.Storage.Schemas.{QueueSample, WorkflowExecution}
+  alias Durable.Storage.Schemas.{ActivityEvent, QueueSample, WorkflowExecution}
+  alias Ecto.Adapters.SQL.Sandbox
 
   defp config, do: Config.get(Durable)
 
@@ -22,6 +23,22 @@ defmodule Durable.ActivityTest do
         )
       )
     )
+  end
+
+  # The SQL sandbox wraps every test in a transaction, which would hide a
+  # recording that only works inside one. This one runs on a real connection.
+  test "records outside a transaction, and inside one without aborting it" do
+    kind = "test_#{System.unique_integer([:positive])}"
+
+    Sandbox.unboxed_run(Durable.TestRepo, fn ->
+      try do
+        :ok = Activity.record(config(), kind)
+        {:ok, :ok} = config().repo.transaction(fn -> Activity.record(config(), kind) end)
+        assert length(Activity.list(kinds: [kind])) == 2
+      after
+        config().repo.delete_all(from(a in ActivityEvent, where: a.kind == ^kind))
+      end
+    end)
   end
 
   test "the sampler writes one row per queue per minute, however often it runs" do

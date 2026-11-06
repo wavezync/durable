@@ -190,10 +190,33 @@ defmodule Durable do
   - `:queue` - The queue to run the workflow on (default: `:default`)
   - `:priority` - Priority level (higher = more important, default: `0`)
   - `:scheduled_at` - Schedule execution for a future time
+  - `:key` - A workflow key, such as `"article:42"`: at most one run of this
+    workflow holds a key at a time, so starting it again returns that run
+    instead of creating another. A string of 1 to 255 bytes. Whether a key
+    can be used again after its run finishes is the workflow's `reuse:`
+    option. See the Workflow keys guide.
+  - `:on_duplicate` - What to return when the key is taken: `:use_existing`
+    (`{:ok, holder_id}`, the default unless the workflow sets another) or
+    `:error` (`{:error, {:key_taken, holder_id}}`). Nothing is created,
+    broadcast or run inline for a duplicate.
+
+  ## Returns
+
+  - `{:ok, workflow_id}` for a new run, or the holder's id for a duplicate
+    under `on_duplicate: :use_existing`
+  - `{:error, {:key_taken, holder_id}}` for a duplicate under
+    `on_duplicate: :error`
+  - `{:error, %Ecto.Changeset{}}` for an invalid key, and
+    `{:error, :key_contended}` in the rare case the key changed hands three
+    times while this start ran
 
   ## Examples
 
       {:ok, workflow_id} = Durable.start(OrderWorkflow, %{order_id: 123})
+
+      # The same article twice: one run
+      {:ok, id} = Durable.start(ProcessArticle, %{"id" => 42}, key: "article:42")
+      {:ok, ^id} = Durable.start(ProcessArticle, %{"id" => 42}, key: "article:42")
 
       {:ok, workflow_id} = Durable.start(
         OrderWorkflow,
@@ -278,6 +301,10 @@ defmodule Durable do
   Returns `{:error, :rolled_back}` for runs whose compensations ran — use
   `rerun/2` for those — and `{:error, :not_failed}` for runs that aren't failed.
 
+  A keyed run whose key moved to a newer run takes it back by the same rules
+  as a start (the newer run is finished and the workflow's `reuse:` lets it
+  go), or returns `{:error, {:key_taken, holder_id}}`.
+
   ## Options
 
   - `:durable` - The Durable instance name (default: Durable)
@@ -297,6 +324,10 @@ defmodule Durable do
   one. The new run's `trigger` is `:rerun` and its `trigger_ref` is the
   original run's id.
 
+  A keyed run's rerun keeps its key and follows the start rules, returning
+  `{:error, {:key_taken, holder_id}}` when the key is held. Under
+  `reuse: :never`, `release_key/2` first.
+
   ## Options
 
   - `:input` - Input for the new run (default: the original run's input)
@@ -311,6 +342,33 @@ defmodule Durable do
   @spec rerun(String.t(), keyword()) :: {:ok, String.t()} | {:error, term()}
   def rerun(workflow_id, opts \\ []) do
     Durable.Executor.rerun_workflow(workflow_id, opts)
+  end
+
+  @doc """
+  Lets a finished run's workflow key go, so the next start with that key
+  creates a new run even if the workflow's `reuse:` would refuse it — for
+  processing an item again on purpose. The run keeps its history and its
+  `key`; only `holds_key` changes.
+
+  Recorded in `Durable.Activity` as `"key_released"`.
+
+  Returns `{:error, :not_finished}` for a run that's still going (cancel it
+  first), `{:error, :no_key}` for a run that doesn't hold a key, and
+  `{:error, :not_found}` for an unknown id.
+
+  ## Options
+
+  - `:durable` - The Durable instance name (default: Durable)
+  - `:by` - who released it, kept with the activity record
+
+  ## Examples
+
+      :ok = Durable.release_key(workflow_id, by: "ops@example.com")
+
+  """
+  @spec release_key(String.t(), keyword()) :: :ok | {:error, term()}
+  def release_key(workflow_id, opts \\ []) do
+    Durable.Keys.release(workflow_id, opts)
   end
 
   @doc """

@@ -42,6 +42,8 @@ defmodule Durable.Storage.Schemas.WorkflowExecution do
           retried_at: DateTime.t() | nil,
           trigger: :api | :schedule | :parent | :rerun | nil,
           trigger_ref: String.t() | nil,
+          key: String.t() | nil,
+          holds_key: boolean(),
           inserted_at: DateTime.t(),
           updated_at: DateTime.t()
         }
@@ -98,6 +100,12 @@ defmodule Durable.Storage.Schemas.WorkflowExecution do
     # fails with a "timeout" error before its next step.
     field(:deadline_at, :utc_datetime_usec)
 
+    # Workflow key (`Durable.start(..., key: "article:42")`). Every keyed run
+    # keeps its key; the one run per workflow and key that holds it has
+    # `holds_key`. Status changes never write `holds_key` — see Durable.Keys.
+    field(:key, :string)
+    field(:holds_key, :boolean, default: false)
+
     has_many(:step_executions, Durable.Storage.Schemas.StepExecution, foreign_key: :workflow_id)
     has_many(:pending_inputs, Durable.Storage.Schemas.PendingInput, foreign_key: :workflow_id)
 
@@ -123,8 +131,20 @@ defmodule Durable.Storage.Schemas.WorkflowExecution do
     :compensated_at,
     :trigger,
     :trigger_ref,
-    :deadline_at
+    :deadline_at,
+    :key
   ]
+
+  @open_statuses [:pending, :running, :waiting, :compensating]
+  @closed_statuses [:completed, :failed, :cancelled, :compensated, :compensation_failed]
+
+  # Which closed holders a new start may take a key from, per `reuse:` policy.
+  # Open holders always keep their key.
+  @reusable %{
+    after_close: @closed_statuses,
+    after_failure: @closed_statuses -- [:completed],
+    never: []
+  }
 
   @doc """
   Creates a changeset for inserting a new workflow execution.
@@ -133,7 +153,36 @@ defmodule Durable.Storage.Schemas.WorkflowExecution do
     execution
     |> cast(attrs, @required_fields ++ @optional_fields)
     |> validate_required(@required_fields)
+    |> validate_key(attrs)
   end
+
+  # `cast/3` turns "" into nil, which would silently start an unkeyed run.
+  defp validate_key(changeset, %{key: ""}), do: add_error(changeset, :key, "can't be blank")
+
+  defp validate_key(changeset, _attrs) do
+    changeset
+    |> validate_length(:key, min: 1, max: 255, count: :bytes)
+    |> unique_constraint(:key, name: :workflow_executions_key_holder_index)
+  end
+
+  @doc "Statuses of a run that's still going: it always keeps its key."
+  @spec open_statuses() :: [status()]
+  def open_statuses, do: @open_statuses
+
+  @doc "Statuses of a finished run."
+  @spec closed_statuses() :: [status()]
+  def closed_statuses, do: @closed_statuses
+
+  @doc "The `reuse:` policies a workflow can declare."
+  @spec reuse_policies() :: [atom()]
+  def reuse_policies, do: Map.keys(@reusable)
+
+  @doc """
+  The statuses a key's holder can be in for a new start to take the key under
+  `policy`. Open holders never give it up.
+  """
+  @spec reusable_statuses(atom()) :: [status()]
+  def reusable_statuses(policy), do: Map.fetch!(@reusable, policy)
 
   @doc """
   Creates a changeset for updating workflow status.
