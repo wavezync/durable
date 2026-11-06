@@ -59,6 +59,9 @@ defmodule Durable.Scheduler.API do
   - `:input` - Input data for each execution
   - `:timezone` - Timezone for cron (default: "UTC")
   - `:queue` - Queue to run on (default: :default)
+  - `:key` - Workflow key each run starts with, so a fire while the last run
+    still holds it follows the workflow's `on_duplicate:` (by default it
+    starts nothing). See the workflow keys guide
   - `:enabled` - Whether schedule is active (default: true)
   - `:durable` - Durable instance name (default: Durable)
 
@@ -95,6 +98,7 @@ defmodule Durable.Scheduler.API do
         timezone: Keyword.get(opts, :timezone, "UTC"),
         input: Keyword.get(opts, :input, %{}),
         queue: to_string(Keyword.get(opts, :queue, :default)),
+        key: Keyword.get(opts, :key),
         enabled: Keyword.get(opts, :enabled, true),
         next_run_at: next_run
       }
@@ -171,6 +175,7 @@ defmodule Durable.Scheduler.API do
   - `:timezone` - New timezone
   - `:input` - New input data
   - `:queue` - New queue
+  - `:key` - New workflow key (`nil` for none)
   - `:enabled` - Enable/disable
 
   ## Examples
@@ -292,6 +297,7 @@ defmodule Durable.Scheduler.API do
       Durable.Executor.start_workflow(module, input,
         workflow: schedule.workflow_name,
         queue: String.to_atom(schedule.queue),
+        key: schedule.key,
         durable: durable_name,
         trigger: :schedule,
         trigger_ref: schedule.name
@@ -552,6 +558,13 @@ defmodule Durable.Scheduler.API do
       end
 
     attrs =
+      if Keyword.has_key?(changes, :key) do
+        Map.put(attrs, :key, Keyword.get(changes, :key))
+      else
+        attrs
+      end
+
+    attrs =
       if Keyword.has_key?(changes, :enabled) do
         Map.put(attrs, :enabled, Keyword.get(changes, :enabled))
       else
@@ -590,6 +603,7 @@ defmodule Durable.Scheduler.API do
         timezone: timezone,
         input: schedule_def[:input] || %{},
         queue: to_string(schedule_def[:queue] || :default),
+        key: schedule_def[:key],
         next_run_at: next_run
       }
 

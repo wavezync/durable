@@ -229,9 +229,20 @@ Once a worker has picked the run up, the next start is an ordinary duplicate and
 - **Query**: `Durable.Query.list_keys(workflow_name: "process_article")` lists keys with their holder, how many runs used each, and re-adds in the last day.
 - **Dashboard**: the Keys page lists every key and its holder. A run's Key view lists its re-adds and every run with its key, and the workflow page has a Keys section. Search Runs with `key:article:42`.
 
+## Cron Schedules
+
+A schedule fires on time even if its last run hasn't finished, so a cleanup every 5 minutes that takes 6 starts a second copy beside the first. Give the schedule a key:
+
+```elixir
+@schedule cron: "*/5 * * * *", key: "cleanup"
+workflow "cleanup" do
+```
+
+(or `Durable.schedule(MyApp.Cleanup, "*/5 * * * *", key: "cleanup")`). Every fire starts with that key, so a fire while the last run still holds it follows the workflow's `on_duplicate:`. With the default `:use_existing` it starts nothing, and Activity records a `"key_duplicate"`. With `:error` the fire is skipped the same way, and it doesn't count toward the schedule's failures. `Durable.trigger_schedule/2` uses the key too.
+
 ## Things to Know
 
-- **Keys aren't inherited.** Parallel branches, `call_workflow` children and cron schedule fires start without a key.
+- **Keys aren't inherited.** Parallel branches and `call_workflow` children start without a key. A cron schedule fire starts without one unless the schedule has a `key:` (next section).
 - **Runs started before the upgrade** have no key and never hold one.
 - **Upgrading** adds two columns and three indexes (`mix durable.gen.upgrade`, then migrate). Creating the indexes scans the runs table and blocks inserts into it while it runs, so on a large table, deploy at a quiet time.
 - **One key, one workflow.** There's no lookup by key across workflows.

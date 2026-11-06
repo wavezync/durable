@@ -41,6 +41,7 @@ defmodule Durable.Storage.Schemas.ScheduledWorkflow do
     field(:timezone, :string, default: "UTC")
     field(:input, :map, default: %{})
     field(:queue, :string, default: "default")
+    field(:key, :string)
     field(:enabled, :boolean, default: true)
     field(:last_run_at, :utc_datetime_usec)
     field(:next_run_at, :utc_datetime_usec)
@@ -58,6 +59,7 @@ defmodule Durable.Storage.Schemas.ScheduledWorkflow do
     :timezone,
     :input,
     :queue,
+    :key,
     :enabled,
     :last_run_at,
     :next_run_at,
@@ -172,7 +174,8 @@ defmodule Durable.Storage.Schemas.ScheduledWorkflow do
       :cron_expression,
       :timezone,
       :input,
-      :queue
+      :queue,
+      :key
     ]
 
     scheduled_workflow
@@ -185,7 +188,7 @@ defmodule Durable.Storage.Schemas.ScheduledWorkflow do
   Creates a changeset for updating a schedule's configuration.
   """
   def update_changeset(scheduled_workflow, attrs) do
-    update_fields = [:cron_expression, :timezone, :input, :queue, :enabled, :next_run_at]
+    update_fields = [:cron_expression, :timezone, :input, :queue, :key, :enabled, :next_run_at]
 
     scheduled_workflow
     |> cast(attrs, update_fields)

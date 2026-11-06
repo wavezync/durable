@@ -347,6 +347,10 @@ end
 {Durable, repo: MyApp.Repo, scheduled_modules: [MyApp.DailyReport]}
 ```
 
+Add `key: "daily_sales_report"` to `@schedule` so a fire while the last run
+is still going doesn't start a second copy. See
+[Workflow keys](guides/workflow_keys.md#cron-schedules).
+
 ### Delayed & Scheduled Execution
 
 Sleep, schedule for specific times, and wait for events.

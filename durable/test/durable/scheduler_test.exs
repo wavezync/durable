@@ -12,7 +12,7 @@ defmodule Durable.SchedulerTest do
 
   alias Durable.Config
   alias Durable.Scheduler.API
-  alias Durable.Storage.Schemas.ScheduledWorkflow
+  alias Durable.Storage.Schemas.{ScheduledWorkflow, WorkflowExecution}
 
   # ============================================================================
   # Test Workflows
@@ -29,6 +29,26 @@ defmodule Durable.SchedulerTest do
          |> assign(:executed, true)
          |> assign(:executed_at, DateTime.utc_now())}
       end)
+    end
+  end
+
+  defmodule RefusesDuplicates do
+    use Durable
+    use Durable.Helpers
+
+    workflow "refuses_duplicates", on_duplicate: :error do
+      step(:do_work, fn data -> {:ok, data} end)
+    end
+  end
+
+  defmodule KeyedSchedule do
+    use Durable
+    use Durable.Helpers
+    use Durable.Scheduler.DSL
+
+    @schedule cron: "*/5 * * * *", key: "cleanup"
+    workflow "keyed_cleanup" do
+      step(:do_work, fn data -> {:ok, data} end)
     end
   end
 
@@ -351,6 +371,66 @@ defmodule Durable.SchedulerTest do
       {:ok, schedule} = Durable.disable_schedule("disable_test")
 
       assert schedule.enabled == false
+    end
+  end
+
+  describe "schedules with a key" do
+    setup do
+      start_supervised!(
+        {Durable.Scheduler, config: Config.get(Durable), interval: :timer.hours(1)}
+      )
+
+      :ok
+    end
+
+    defp fire(name) do
+      past = DateTime.add(DateTime.utc_now(), -60, :second)
+      schedule = TestRepo.get_by!(ScheduledWorkflow, name: name)
+      TestRepo.update!(Ecto.Changeset.change(schedule, next_run_at: past))
+      Durable.Scheduler.check_schedules()
+      # A call after the cast returns once the check has run.
+      Durable.Scheduler.status()
+      TestRepo.get_by!(ScheduledWorkflow, name: name)
+    end
+
+    defp runs(workflow_name) do
+      TestRepo.all(from(w in WorkflowExecution, where: w.workflow_name == ^workflow_name))
+    end
+
+    test "a fire while the last run holds the key starts nothing" do
+      {:ok, _} = Durable.schedule(SimpleWorkflow, "* * * * *", name: "keyed", key: "cleanup")
+
+      fire("keyed")
+      assert [%{key: "cleanup", trigger: :schedule}] = runs("simple")
+
+      fire("keyed")
+      assert [_] = runs("simple")
+
+      assert TestRepo.exists?(
+               from(a in "activity", prefix: "durable", where: a.kind == "key_duplicate")
+             )
+    end
+
+    test "a fire refused by on_duplicate: :error is skipped, not a failure" do
+      {:ok, _} =
+        Durable.schedule(RefusesDuplicates, "* * * * *", name: "refused", key: "only-one")
+
+      fire("refused")
+      schedule = fire("refused")
+
+      assert [_] = runs("refuses_duplicates")
+      assert schedule.consecutive_failures == 0
+      assert DateTime.after?(schedule.next_run_at, DateTime.utc_now())
+    end
+
+    test "trigger_schedule/2 and @schedule take the key too" do
+      {:ok, _} = Durable.schedule(SimpleWorkflow, "0 9 * * *", name: "keyed_trigger", key: "k1")
+      {:ok, id} = Durable.trigger_schedule("keyed_trigger")
+      assert {:ok, %{key: "k1"}} = Durable.get_execution(id)
+
+      assert [%{key: "cleanup"}] = KeyedSchedule.__schedules__()
+      :ok = API.register(KeyedSchedule)
+      assert {:ok, %{key: "cleanup"}} = Durable.get_schedule("keyed_cleanup")
     end
   end
 

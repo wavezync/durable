@@ -31,6 +31,9 @@ defmodule Durable.Scheduler.DSL do
   - `:timezone` - Timezone for cron evaluation (default: "UTC")
   - `:input` - Static input for each execution (default: %{})
   - `:queue` - Queue to run on (default: :default)
+  - `:key` - Workflow key each run starts with. A fire while the last run
+    still holds the key follows the workflow's `on_duplicate:`; with the
+    default `:use_existing` it starts nothing, and Activity records it
 
   """
 
@@ -80,7 +83,8 @@ defmodule Durable.Scheduler.DSL do
           name: Keyword.get(schedule_opts, :name),
           timezone: Keyword.get(schedule_opts, :timezone),
           input: Keyword.get(schedule_opts, :input),
-          queue: Keyword.get(schedule_opts, :queue)
+          queue: Keyword.get(schedule_opts, :queue),
+          key: Keyword.get(schedule_opts, :key)
         }
 
         Module.put_attribute(module, :durable_schedules, schedule_def)
