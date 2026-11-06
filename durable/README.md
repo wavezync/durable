@@ -477,7 +477,7 @@ end
 # Fire-and-forget: start child and continue
 {:ok, child_id} = start_workflow(MyApp.EmailWorkflow, %{"to" => email}, ref: :welcome)
 
-# call_workflow also works inside parallel blocks (executed inline)
+# call_workflow also works inside parallel blocks: each branch waits for its child
 parallel do
   step :payment, fn data ->
     case call_workflow(MyApp.PaymentWorkflow, %{"amount" => data.total}, ref: :pay) do
@@ -586,6 +586,30 @@ The same applies to compensations and to a branch's `on:` function. A
 failed run's `error` is its failing step's. The stack is as deep as the
 VM's `:backtrace_depth` (8 frames by default; Phoenix dev raises it to 20).
 
+### Production Settings
+
+Two defaults suit development more than production:
+
+- **Pruning is off** (`prune: nil`), so finished runs and their steps stay
+  forever.
+- **Every log line a step writes is stored** with its step, at every level.
+
+Something like this keeps the tables small:
+
+```elixir
+# In the supervision tree
+{Durable,
+ repo: MyApp.Repo,
+ prune: [
+   completed: :timer.hours(24 * 7),
+   cancelled: :timer.hours(24 * 7),
+   failed: :timer.hours(24 * 30)
+ ]}
+
+# config/prod.exs
+config :durable, log_capture: [levels: [:warning, :error]]
+```
+
 ### API
 
 ```elixir
@@ -693,6 +717,7 @@ option list and design notes.
 - [Orchestration](guides/orchestration.md) - Parent/child workflow composition
 - [Workflow keys](guides/workflow_keys.md) - One run per key, duplicate starts, reuse policies
 - [Testing](guides/testing.md) - Run and assert on workflows in ExUnit
+- [Coming from Oban](guides/coming_from_oban.md) - What maps to what, and what works differently
 
 ## License
 

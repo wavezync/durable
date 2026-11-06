@@ -49,7 +49,9 @@ defmodule Durable.DSL.Step do
     a separate process: its body sees the same context and captured logs,
     but `self()` is not the worker.
   - `:compensate` - Name of compensation function for saga pattern
-  - `:queue` - Override queue for this step
+  - `:queue` - The queue for this step, in a `parallel` block only: each
+    branch runs as its own run, on this queue. Other steps run on the run's
+    queue
 
   """
 

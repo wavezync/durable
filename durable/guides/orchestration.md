@@ -299,7 +299,7 @@ end
 
 ## `call_workflow` Inside `parallel` Blocks
 
-`call_workflow` works inside `parallel` blocks. Child workflows are executed **inline (synchronously)** within the parallel task, so the result is available immediately — no suspend/resume cycle.
+`call_workflow` works inside `parallel` blocks. Each branch is its own run, so it waits for its child the way any step does: the branch suspends, the child runs on the queue, and the branch resumes with the result. The block finishes once every branch has.
 
 ```elixir
 workflow "enrich_order" do
@@ -331,14 +331,11 @@ workflow "enrich_order" do
 end
 ```
 
-**How it works:** When `call_workflow` detects it's inside a parallel block, it creates the child execution and runs it synchronously via `Executor.execute_workflow` instead of throwing to suspend. The parent's process state is saved beforehand and restored after the child completes.
-
-**Limitation:** Child workflows that use waits (`sleep`, `wait_for_event`, etc.) are not supported inside parallel blocks — they will return an error since the inline execution cannot suspend.
+A child called from a branch can wait like any workflow: sleep, wait for an event or input, or call workflows of its own.
 
 ## Limitations
 
-- Child workflows with waits (`sleep`, `wait_for_event`) cannot be used inside `parallel` blocks
-- Child workflows run in the queue system — they're not executed inline by default (except in parallel blocks)
+- Child workflows run on the queue, like any run
 - The `:timeout` option requires the timeout checker to be running (same as `wait_for_event`)
 
 ## Best Practices
