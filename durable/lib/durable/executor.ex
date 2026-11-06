@@ -126,6 +126,34 @@ defmodule Durable.Executor do
   end
 
   @doc """
+  Cancels every pending, running or waiting run that matches `filters` (those
+  of `Durable.Query.list_executions/1`, without `:limit` and `:offset`), one
+  by one as `cancel_workflow/3` would. Returns how many it cancelled.
+  """
+  @spec cancel_all(keyword(), String.t() | nil) :: {:ok, non_neg_integer()}
+  def cancel_all(filters, reason \\ nil) do
+    {durable, filters} = Keyword.pop(filters, :durable, Durable)
+    filters = Keyword.drop(filters, [:limit, :offset])
+
+    # Guard against cancel_all([]) cancelling every run there is.
+    if filters == [] do
+      raise ArgumentError, "Durable.cancel_all/2 needs at least one filter, such as tag:"
+    end
+
+    ids =
+      Repo.all(
+        Config.get(durable),
+        filters
+        |> Durable.Query.executions_query()
+        |> where([w], w.status in [:pending, :running, :waiting])
+        |> select([w], w.id)
+      )
+
+    # A cancel cascades to children, which may be in `ids` too.
+    {:ok, Enum.count(ids, &(cancel_workflow(&1, reason, durable: durable) == :ok))}
+  end
+
+  @doc """
   Resumes a failed workflow at the step that failed.
 
   Completed steps are not re-run: the run continues from its saved context,
@@ -532,7 +560,8 @@ defmodule Durable.Executor do
       scheduled_at: scheduled_at,
       trigger: Keyword.get(opts, :trigger, :api),
       trigger_ref: Keyword.get(opts, :trigger_ref),
-      deadline_at: deadline(workflow_def, scheduled_at)
+      deadline_at: deadline(workflow_def, scheduled_at),
+      tags: Keyword.get(opts, :tags, [])
     }
 
     case Keyword.fetch(opts, :key) do

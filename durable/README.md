@@ -592,9 +592,12 @@ VM's `:backtrace_depth` (8 frames by default; Phoenix dev raises it to 20).
 Durable.start(Module, input)
 Durable.start(Module, input, queue: :priority, scheduled_at: datetime)
 Durable.start(Module, input, key: "article:42")   # at most one run per key
+Durable.start(Module, input, tags: ["account:7"]) # labels, to find runs across workflows
 Durable.get_execution(id)
 Durable.list_executions(workflow: Module, status: :running)
+Durable.list_executions(tag: "account:7")
 Durable.cancel(id, "reason")
+Durable.cancel_all([tag: "account:7"], "account closed")  # every open run that matches
 Durable.send_event(id, "event", payload)
 Durable.send_event(id, "event", payload, buffer: true)  # keep it until the run waits
 Durable.provide_input(id, "input_name", data)

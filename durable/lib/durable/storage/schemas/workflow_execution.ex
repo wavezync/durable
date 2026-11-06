@@ -44,6 +44,7 @@ defmodule Durable.Storage.Schemas.WorkflowExecution do
           trigger_ref: String.t() | nil,
           key: String.t() | nil,
           holds_key: boolean(),
+          tags: [String.t()],
           inserted_at: DateTime.t(),
           updated_at: DateTime.t()
         }
@@ -105,6 +106,7 @@ defmodule Durable.Storage.Schemas.WorkflowExecution do
     # `holds_key`. Status changes never write `holds_key` — see Durable.Keys.
     field(:key, :string)
     field(:holds_key, :boolean, default: false)
+    field(:tags, {:array, :string}, default: [])
 
     has_many(:step_executions, Durable.Storage.Schemas.StepExecution, foreign_key: :workflow_id)
     has_many(:pending_inputs, Durable.Storage.Schemas.PendingInput, foreign_key: :workflow_id)
@@ -132,7 +134,8 @@ defmodule Durable.Storage.Schemas.WorkflowExecution do
     :trigger,
     :trigger_ref,
     :deadline_at,
-    :key
+    :key,
+    :tags
   ]
 
   @open_statuses [:pending, :running, :waiting, :compensating]

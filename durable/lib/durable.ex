@@ -195,6 +195,10 @@ defmodule Durable do
     instead of creating another. A string of 1 to 255 bytes. Whether a key
     can be used again after its run finishes is the workflow's `reuse:`
     option. See the Workflow keys guide.
+  - `:tags` - Labels for the run, such as `["account:7"]`, to find runs across
+    workflows with `list_executions(tag: ...)` and stop them with
+    `cancel_all/2`. Child runs don't inherit them; cancelling a run cancels
+    its children anyway
   - `:on_duplicate` - What to do when the key is taken (the default is the
     workflow's, else `:use_existing`):
     - `:use_existing` - return `{:ok, holder_id}`
@@ -264,9 +268,13 @@ defmodule Durable do
   ## Filters
 
   - `:workflow` - Filter by workflow module
-  - `:status` - Filter by status
+  - `:status` - Filter by status, or a list of statuses
   - `:queue` - Filter by queue
+  - `:key` - Runs started with this workflow key
+  - `:tag` - Runs started with this tag, across workflows
   - `:limit` - Maximum number of results (default: `50`)
+
+  `Durable.Query.list_executions/1` lists every filter.
 
   ## Examples
 
@@ -298,6 +306,24 @@ defmodule Durable do
   @spec cancel(String.t(), String.t() | nil) :: :ok | {:error, term()}
   def cancel(workflow_id, reason \\ nil) do
     Durable.Executor.cancel_workflow(workflow_id, reason)
+  end
+
+  @doc """
+  Cancels every pending, running or waiting run that matches `filters`, the
+  filters of `list_executions/1`, one by one as `cancel/2` would (children
+  included). Returns `{:ok, count}`. At least one filter is required.
+
+  ## Examples
+
+      # An account was closed: stop everything started for it
+      {:ok, 3} = Durable.cancel_all([tag: "account:7"], "account closed")
+
+      {:ok, _} = Durable.cancel_all([workflow: MyApp.Export, status: :waiting])
+
+  """
+  @spec cancel_all(keyword(), String.t() | nil) :: {:ok, non_neg_integer()}
+  def cancel_all(filters, reason \\ nil) do
+    Durable.Executor.cancel_all(filters, reason)
   end
 
   @doc """

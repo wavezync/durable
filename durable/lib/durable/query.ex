@@ -58,6 +58,7 @@ defmodule Durable.Query do
   - `:trigger_ref` - What it points at: a schedule's name, or the run a rerun copied
   - `:error_contains` - Case-insensitive text anywhere in the run's error
   - `:key` - Runs started with this workflow key (the holder has `holds_key: true`)
+  - `:tag` - Runs started with this tag (`Durable.start(..., tags: [...])`)
   - `:input` - Map of dotted input paths to exact values, e.g.
     `%{"order_id" => "ORD-1042"}`
   - `:limit` - Maximum results (default: 50)
@@ -493,6 +494,12 @@ defmodule Durable.Query do
     Config.get(durable_name)
   end
 
+  @doc false
+  # The runs matching `filters`, as a query, for callers that act on them
+  # (Durable.cancel_all/2).
+  @spec executions_query(keyword()) :: Ecto.Query.t()
+  def executions_query(filters), do: apply_filters(from(w in WorkflowExecution), filters)
+
   defp apply_filters(query, filters) do
     Enum.reduce(filters, query, fn
       # Runs store Atom.to_string(module) ("Elixir.MyApp.Orders"); accept the
@@ -555,6 +562,9 @@ defmodule Durable.Query do
       {:key, key}, q when is_binary(key) and key != "" ->
         from(w in q, where: w.key == ^key)
 
+      {:tag, tag}, q when is_binary(tag) and tag != "" ->
+        from(w in q, where: fragment("? @> ?", w.tags, ^[tag]))
+
       # Case-insensitive substring of the stored error (type, message, or any
       # field a step returned in `{:error, map}`).
       {:error_contains, text}, q when is_binary(text) and text != "" ->
@@ -593,6 +603,7 @@ defmodule Durable.Query do
       trigger_ref: execution.trigger_ref,
       key: execution.key,
       holds_key: execution.holds_key,
+      tags: execution.tags,
       locked_by: execution.locked_by,
       scheduled_at: execution.scheduled_at,
       started_at: execution.started_at,
