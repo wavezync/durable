@@ -693,8 +693,8 @@ defmodule Durable.Wait do
       )
 
     case Repo.transaction(config, multi) do
-      {:ok, _} ->
-        :ok
+      {:ok, %{resume: resumed}} ->
+        DurablePubSub.wake(config, resumed)
 
       {:error, stage, reason, _} ->
         require Logger

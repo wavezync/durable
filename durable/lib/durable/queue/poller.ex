@@ -16,6 +16,7 @@ defmodule Durable.Queue.Poller do
   require Logger
 
   alias Durable.Config
+  alias Durable.PubSub, as: DurablePubSub
   alias Durable.Queue.Adapter
   alias Durable.Queue.Worker
 
@@ -125,6 +126,10 @@ defmodule Durable.Queue.Poller do
       timer_ref: nil
     }
 
+    # A start or resume on this queue wakes us (Durable.PubSub.wake/2), so a
+    # long poll_interval doesn't delay new work. No-op without a PubSub.
+    _ = DurablePubSub.subscribe(config, DurablePubSub.queue_topic(config, queue_name))
+
     # Start polling
     state = schedule_poll(state, 0)
 
@@ -193,6 +198,14 @@ defmodule Durable.Queue.Poller do
     # Schedule next poll
     state = schedule_poll(state, state.poll_interval)
 
+    {:noreply, state}
+  end
+
+  # Poll now, between scheduled polls. A burst of wakes stops polling once
+  # every slot is taken.
+  @impl true
+  def handle_info({:durable_wake, _queue}, state) do
+    state = if state.paused, do: state, else: poll_and_process(state)
     {:noreply, state}
   end
 

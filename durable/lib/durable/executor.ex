@@ -91,6 +91,7 @@ defmodule Durable.Executor do
 
   defp started({:ok, execution}, config, opts) do
     DurablePubSub.broadcast_workflow(config, :workflow_started, workflow_event(execution))
+    DurablePubSub.wake(config, execution)
 
     # For inline/synchronous execution (useful for testing)
     if Keyword.get(opts, :inline, false) do
@@ -199,6 +200,7 @@ defmodule Durable.Executor do
          :ok <- ensure_retryable(execution.status),
          {:ok, retried} <- reset_for_retry(config, execution) do
       DurablePubSub.broadcast_workflow(config, :workflow_retried, workflow_event(retried))
+      DurablePubSub.wake(config, retried)
       {:ok, workflow_id}
     end
   end
@@ -518,7 +520,9 @@ defmodule Durable.Executor do
 
     with {:ok, execution} <- load_execution(config, workflow_id),
          true <- execution.status == :waiting || {:error, :not_waiting},
-         {:ok, _} <- mark_resumed(config, execution, safe_additional) do
+         {:ok, resumed} <- mark_resumed(config, execution, safe_additional) do
+      DurablePubSub.wake(config, resumed)
+
       # For inline/synchronous execution (useful for testing)
       if Keyword.get(opts, :inline, false) do
         execute_workflow(workflow_id, config)
@@ -1924,8 +1928,8 @@ defmodule Durable.Executor do
       end)
 
     case Repo.transaction(config, multi) do
-      {:ok, _} ->
-        :ok
+      {:ok, %{parent: parent}} ->
+        DurablePubSub.wake(config, parent)
 
       {:error, stage, reason, _} ->
         Logger.error(
@@ -2045,8 +2049,8 @@ defmodule Durable.Executor do
       end)
 
     case Repo.transaction(config, multi) do
-      {:ok, _} ->
-        :ok
+      {:ok, %{parent: parent}} ->
+        DurablePubSub.wake(config, parent)
 
       {:error, stage, reason, _} ->
         Logger.error(

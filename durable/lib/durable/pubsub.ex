@@ -188,6 +188,31 @@ defmodule Durable.PubSub do
     broadcast(config, schedules_topic(config), msg)
   end
 
+  @doc """
+  Returns the topic a queue's pollers listen on to poll right away.
+  """
+  @spec queue_topic(Config.t(), String.t() | atom()) :: String.t()
+  def queue_topic(%Config{name: name}, queue), do: "durable:#{name}:queue:#{queue}"
+
+  @doc false
+  # Tells the pollers of `run`'s queue, on every node, to poll now: called
+  # once `run` is pending and due (just started, or just resumed by an event,
+  # an input, a finished child or a retry). Runs that come due later (sleeps,
+  # retries, snoozes, delayed starts) are found by polling. A missed wake only
+  # costs the poll interval.
+  @spec wake(Config.t(), term()) :: :ok
+  def wake(%Config{} = config, %{status: :pending, queue: queue} = run) when is_binary(queue) do
+    if due?(Map.get(run, :scheduled_at)),
+      do: broadcast(config, queue_topic(config, queue), {:durable_wake, queue})
+
+    :ok
+  end
+
+  def wake(_config, _run), do: :ok
+
+  defp due?(nil), do: true
+  defp due?(at), do: DateTime.compare(at, DateTime.utc_now()) != :gt
+
   defp broadcast(%Config{} = config, topic, msg) do
     with server when not is_nil(server) <- server(config),
          true <- pubsub_loaded?() do
