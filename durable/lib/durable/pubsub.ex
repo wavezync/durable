@@ -49,6 +49,7 @@ defmodule Durable.PubSub do
           | :step_completed
           | :step_failed
           | :step_cancelled
+          | :step_snoozed
           | :step_waiting
           | :input_requested
           | :input_provided

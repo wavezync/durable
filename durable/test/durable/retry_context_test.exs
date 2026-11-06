@@ -9,7 +9,6 @@ defmodule Durable.RetryContextTest do
   use Durable.DataCase, async: false
 
   alias Durable.Config
-  alias Durable.Executor
   alias Durable.Storage.Schemas.WorkflowExecution
 
   test "put_context writes survive across retry attempts" do
@@ -31,9 +30,7 @@ defmodule Durable.RetryContextTest do
       })
       |> repo.insert()
 
-    Executor.execute_workflow(exec.id, config)
-
-    reloaded = repo.get!(WorkflowExecution, exec.id)
+    reloaded = Durable.DataCase.execute_while_pending(exec.id)
     assert reloaded.status == :completed
 
     # The step succeeds on attempt #3 only; if put_context was preserved

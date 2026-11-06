@@ -530,6 +530,20 @@ end
 A step without `retry:` gets one attempt. The attempt count carries over
 when a run resumes after a crash, and starts again after `Durable.retry/2`.
 
+Between attempts the run is parked: it goes back on its queue until the
+backoff has passed (up to `max_backoff`, 1 hour by default), so a long wait
+holds no worker.
+
+To wait and try again without using an attempt, snooze:
+
+```elixir
+step :export, fn ctx ->
+  if Exports.running?(ctx.account_id),
+    do: {:snooze, seconds(60), "another export is running"},
+    else: {:ok, assign(ctx, :file, Exports.run(ctx.account_id))}
+end
+```
+
 When retrying won't help, stop now:
 
 ```elixir

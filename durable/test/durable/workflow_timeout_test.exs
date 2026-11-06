@@ -127,7 +127,9 @@ defmodule Durable.WorkflowTimeoutTest do
 
   test "a step past its own timeout is stopped and retried" do
     {:ok, id} = Executor.start_workflow(Timed, %{}, inline: true)
-    run = run(id)
+    # The first attempt runs inline; the retry was parked for the queue.
+    assert run(id).status == :pending
+    run = Durable.DataCase.execute_while_pending(id)
 
     assert run.status == :completed
     # put_context and logs inside a time-limited step reach the run

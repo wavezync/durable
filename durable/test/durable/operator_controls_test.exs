@@ -13,7 +13,12 @@ defmodule Durable.OperatorControlsTest do
   alias Durable.Storage.Schemas.{StepExecution, WorkflowExecution}
 
   import Durable.DataCase,
-    only: [create_and_execute_workflow: 2, execute_children: 3, get_child_executions: 2]
+    only: [
+      create_and_execute_workflow: 2,
+      execute_children: 3,
+      execute_while_pending: 1,
+      get_child_executions: 2
+    ]
 
   # Steps run inline in the test process, so the process dictionary is the
   # "outside world": `broken` makes a step raise, `ran` records each step that
@@ -114,14 +119,14 @@ defmodule Durable.OperatorControlsTest do
       assert ran() == [1, 2, 3, 4, 5]
     end
 
-    test "gives the failed step a fresh attempt budget", %{config: config} do
+    test "gives the failed step a fresh attempt budget" do
       Process.put({Flaky, :broken}, 2)
       {:ok, run} = create_and_execute_workflow(Flaky, %{})
       assert failed_attempts(run.id, "s2") == 2
 
       # Still broken: the retried step must get 2 more attempts, not 0.
       {:ok, _} = Durable.retry(run.id)
-      Executor.execute_workflow(run.id, config)
+      execute_while_pending(run.id)
 
       assert reload(run.id).status == :failed
       assert failed_attempts(run.id, "s2") == 4

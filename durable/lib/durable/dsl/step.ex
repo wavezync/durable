@@ -38,7 +38,11 @@ defmodule Durable.DSL.Step do
     - `:max_attempts` - Maximum retry attempts (default: 1)
     - `:backoff` - Backoff strategy: `:exponential`, `:linear`, `:constant`
     - `:base` - Base delay in ms (default: 1000)
-    - `:max_backoff` - Maximum backoff in ms (default: 30000)
+    - `:max_backoff` - Maximum backoff in ms (default: 3_600_000, 1 hour)
+
+    Between attempts the run is parked: it goes back on its queue until the
+    backoff has passed, so the wait holds no worker. Each attempt starts with
+    the data the last one got, and what it wrote with `put_context/2`.
   - `:timeout` - How long one attempt may run, in milliseconds. A slower
     attempt is stopped and fails with a `"timeout"` error, which is retried
     like any error. A step with a timeout, or in a workflow with one, runs in
@@ -59,6 +63,10 @@ defmodule Durable.DSL.Step do
   - `{:error, reason}` - Failed; retried while attempts are left
   - `{:fail, reason}` - Failed, and not retried: the run fails now and its
     compensations run
+  - `{:snooze, ms}` or `{:snooze, ms, reason}` - Run the step again in `ms`
+    milliseconds, without using an attempt. The run is parked meanwhile, like
+    between retries. Snoozes have no limit; the workflow's `timeout:` is what
+    stops a step that snoozes forever
   - `{:cancel, reason}` - The run is cancelled now, like `Durable.cancel/2`:
     no retries, no compensations. A `call_workflow` child's parent gets it as
     an error. In a `parallel` step the whole workflow holding the block is

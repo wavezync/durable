@@ -27,6 +27,9 @@ defmodule Durable.Executor do
 
   require Logger
 
+  # Context key a parked run records its atom keys under (see park/3).
+  @atom_keys "__atom_keys__"
+
   @doc """
   Starts a new workflow execution.
 
@@ -400,7 +403,7 @@ defmodule Durable.Executor do
       # Pipeline model: start with workflow input or restored context
       initial_data =
         if execution.context != %{} do
-          atomize_keys(execution.context)
+          restore_keys(execution.context)
         else
           execution.input
         end
@@ -415,6 +418,22 @@ defmodule Durable.Executor do
     end
   end
 
+  defp string_keys(map), do: Map.new(map, fn {key, value} -> {to_string(key), value} end)
+
+  # Top-level context keys come back from JSON as strings. A run parked by a
+  # retry or snooze recorded which of them were atoms, so the next attempt gets
+  # the same data the last one did (a first step still reads input["id"]).
+  # Any other resume makes them all atoms.
+  defp restore_keys(%{@atom_keys => atom_keys} = context) do
+    context
+    |> Map.delete(@atom_keys)
+    |> Map.new(fn {key, value} ->
+      if key in atom_keys, do: {String.to_atom(key), value}, else: {key, value}
+    end)
+  end
+
+  defp restore_keys(context), do: atomize_keys(context)
+
   # Atomize top-level keys in map (for context restored from DB)
   defp atomize_keys(map) when is_map(map) do
     Map.new(map, fn
@@ -428,7 +447,9 @@ defmodule Durable.Executor do
 
   ## Options
 
-  - `:inline` - If true, execute synchronously instead of via queue (default: false)
+  - `:inline` - If true, execute synchronously instead of via queue (default: false).
+    Runs until the run finishes or parks: a retry, snooze or wait is left for
+    the queue
   - `:durable` - The Durable instance name (default: Durable)
   """
   @spec resume_workflow(String.t(), map(), keyword()) :: {:ok, String.t()} | {:error, term()}
@@ -764,6 +785,9 @@ defmodule Durable.Executor do
 
       {:cancel, reason, scope} ->
         cancel_from_step(config, exec, reason, scope)
+
+      {:park, delay_ms} ->
+        park(config, exec, delay_ms)
     end
   end
 
@@ -1017,6 +1041,9 @@ defmodule Durable.Executor do
 
       {:cancel, reason, scope} ->
         cancel_from_step(config, exec, reason, scope)
+
+      {:park, delay_ms} ->
+        park(config, exec, delay_ms)
     end
   end
 
@@ -1196,7 +1223,7 @@ defmodule Durable.Executor do
       # what the user sees.
       inherited =
         execution.context
-        |> Map.drop(["__parallel_step", :__parallel_step])
+        |> Map.drop(["__parallel_step", :__parallel_step, @atom_keys])
         |> atomize_keys()
 
       input = atomize_keys(execution.input)
@@ -1211,6 +1238,9 @@ defmodule Durable.Executor do
 
         {:cancel, reason, scope} ->
           cancel_from_step(config, execution, reason, scope)
+
+        {:park, delay_ms} ->
+          park(config, execution, delay_ms)
 
         {wait_type, wait_opts}
         when wait_type in [:sleep, :wait_for_event, :wait_for_input, :wait_for_any, :wait_for_all] ->
@@ -2119,6 +2149,42 @@ defmodule Durable.Executor do
 
   defp format_compensation_result({:ok, _output}), do: %{status: "completed"}
   defp format_compensation_result({:error, error}), do: %{status: "failed", error: error}
+
+  # A retry or a snooze: back to :pending until `delay_ms` from now (no later
+  # than the run's deadline), with the worker freed. The claim query skips the
+  # row until then, and the next claim carries on at the same step.
+  #
+  # The next attempt starts from the context this one ended with: the stored
+  # context (which keeps a parallel branch's marker) plus the attempt's own,
+  # put_context/2 writes included. Keys are strings, so an atom and a string
+  # copy of one key can't both be stored.
+  defp park(config, execution, delay_ms) do
+    attempt_ctx = Process.get(:durable_context, %{})
+    atom_keys = for {key, _} <- attempt_ctx, is_atom(key), do: Atom.to_string(key)
+
+    context =
+      execution.context
+      |> string_keys()
+      |> Map.merge(string_keys(attempt_ctx))
+      |> Map.put(@atom_keys, atom_keys)
+
+    at = DateTime.add(DateTime.utc_now(), delay_ms, :millisecond)
+    deadline = execution.deadline_at
+    at = if deadline && DateTime.after?(at, deadline), do: deadline, else: at
+
+    {:ok, execution} =
+      execution
+      |> Ecto.Changeset.change(
+        context: sanitize_for_json(context),
+        status: :pending,
+        scheduled_at: at,
+        locked_by: nil,
+        locked_at: nil
+      )
+      |> cas_update!(config)
+
+    {:waiting, execution}
+  end
 
   defp handle_sleep(config, execution, opts) do
     wake_at = calculate_wake_time(opts)

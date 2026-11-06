@@ -124,8 +124,8 @@ away, so a run that sleeps for a day finishes in milliseconds.
 
 ## Retries
 
-Retries skip their backoff during a drain. `attempt` on the step's latest row
-says how many attempts it took:
+Retries skip their backoff during a drain, and snoozes end right away.
+`attempt` on the step's latest row says how many attempts it took:
 
 ```elixir
 test "retries a flaky gateway" do

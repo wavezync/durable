@@ -35,7 +35,7 @@ defmodule Durable.RetryTest do
     |> repo.insert!()
   end
 
-  test "the in-process retry loop still drives a flaky step to success" do
+  test "a flaky step is retried until it succeeds" do
     config = Config.get(Durable)
     repo = config.repo
 

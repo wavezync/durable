@@ -100,7 +100,10 @@ defmodule Durable.Executor.CompensationRunner do
           {:ok, _} = fail_step_execution(config, step_exec, error, logs, duration_ms)
 
           # Calculate backoff and sleep
-          retry_opts = get_retry_opts(compensation)
+          # ponytail: compensations still retry in-process, holding the worker
+          # and lock, so their backoff stays under stale_lock_timeout. Park
+          # them like steps if long compensation backoffs are ever needed.
+          retry_opts = compensation |> get_retry_opts() |> Map.put_new(:max_backoff, 30_000)
           backoff_strategy = Map.get(retry_opts, :backoff, :exponential)
           Backoff.sleep(backoff_strategy, attempt, retry_opts)
 
