@@ -131,4 +131,42 @@ defmodule Durable.TestingTest do
     error = assert_raise ExUnit.AssertionError, fn -> assert_waiting_for_event(run, "paid") end
     assert error.message =~ ~s(wait for "paid")
   end
+
+  describe "started runs" do
+    test "match on the module, a subset of the input, and the key" do
+      {:ok, id} = Durable.start(Payment, %{"order_id" => 42, "rush" => true}, key: "order:42")
+
+      assert %{id: ^id} = assert_started(Payment, input: %{"order_id" => 42}, key: "order:42")
+      assert [%{id: ^id}] = all_started(Payment)
+      assert :ok = refute_started(Payment, input: %{"order_id" => 7})
+      assert :ok = refute_started(Payment, key: "order:7")
+      assert :ok = refute_started(Declined)
+    end
+
+    test "leave out parallel branches" do
+      run = run_workflow(Order)
+
+      assert [%{id: id}] = all_started(Order)
+      assert id == run.id
+    end
+
+    test "failures list what was started" do
+      {:ok, id} = Durable.start(Payment, %{"order_id" => 42})
+
+      error =
+        assert_raise ExUnit.AssertionError, fn ->
+          assert_started(Payment, input: %{"order_id" => 7})
+        end
+
+      assert error.message =~ ~s(with [input: %{"order_id" => 7}])
+      assert error.message =~ id
+
+      error = assert_raise ExUnit.AssertionError, fn -> refute_started(Payment) end
+      assert error.message =~ "got 1"
+    end
+
+    test "unknown options raise" do
+      assert_raise ArgumentError, fn -> all_started(Payment, args: %{}) end
+    end
+  end
 end
