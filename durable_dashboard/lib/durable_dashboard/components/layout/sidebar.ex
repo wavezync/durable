@@ -149,6 +149,7 @@ defmodule DurableDashboard.Components.Layout.Sidebar do
             match: :prefix,
             count: inbox_count
           },
+          %{label: "Keys", href: P.keys(base), icon: "nav-keys", match: :prefix},
           %{label: "Queues & nodes", href: P.queues(base), icon: "nav-queues", match: :prefix},
           %{label: "Schedules", href: P.schedules(base), icon: "nav-schedules", match: :prefix}
         ]

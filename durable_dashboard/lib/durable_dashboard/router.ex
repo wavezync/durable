@@ -132,6 +132,7 @@ defmodule DurableDashboard.Router do
           live "/executions/:id", DurableDashboard.Live.WorkflowLive, :show
           live "/executions/:id/:tab", DurableDashboard.Live.WorkflowLive, :show
           live "/inputs", DurableDashboard.Live.InputsLive, :index
+          live "/keys", DurableDashboard.Live.KeysLive, :index
           live "/queues", DurableDashboard.Live.QueuesLive, :index
           live "/schedules", DurableDashboard.Live.SchedulesLive, :index
           live "/schedules/:name", DurableDashboard.Live.SchedulesLive, :show

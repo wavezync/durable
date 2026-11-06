@@ -53,6 +53,10 @@ defmodule DurableDashboard.Path do
   @spec inputs(String.t()) :: String.t()
   def inputs(base_path), do: prefix(base_path, "/inputs")
 
+  @doc "Every workflow key, with its holder."
+  @spec keys(String.t()) :: String.t()
+  def keys(base_path), do: prefix(base_path, "/keys")
+
   @spec queues(String.t()) :: String.t()
   def queues(base_path), do: prefix(base_path, "/queues")
 
