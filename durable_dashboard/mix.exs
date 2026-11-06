@@ -85,7 +85,7 @@ defmodule DurableDashboard.MixProject do
       setup: ["deps.get", "assets.setup"],
       "assets.setup": ["cmd --cd assets pnpm install"],
       "assets.build": ["cmd --cd assets pnpm build"],
-      # Formats + autofixes the React/TS island via Biome (biome check --write).
+      # Autofixes lint (oxlint --fix) and formats (oxfmt) the TS/React island.
       "assets.format": ["cmd --cd assets pnpm lint:fix"],
       "assets.typecheck": ["cmd --cd assets pnpm typecheck"],
       "hex.build": ["assets.build", "hex.build"],

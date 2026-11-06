@@ -16,7 +16,7 @@ export default defineConfig(({ command }) => ({
   build: {
     outDir: "../priv/static/durable_dashboard",
     emptyOutDir: true,
-    rollupOptions: {
+    rolldownOptions: {
       input: {
         // LiveView-first stack: LiveSocket + ReactFlow island only
         app: path.resolve(__dirname, "src/main.ts"),
@@ -25,8 +25,8 @@ export default defineConfig(({ command }) => ({
         entryFileNames: "[name].js",
         chunkFileNames: "[name]-[hash].js",
         assetFileNames: "[name][extname]",
-        manualChunks: {
-          "vendor-xyflow": ["@xyflow/react", "@dagrejs/dagre"],
+        codeSplitting: {
+          groups: [{ name: "vendor-xyflow", test: /node_modules[\\/](@xyflow|@dagrejs)[\\/]/ }],
         },
       },
     },
