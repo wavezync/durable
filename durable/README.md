@@ -593,6 +593,7 @@ Durable.start(Module, input)
 Durable.start(Module, input, queue: :priority, scheduled_at: datetime)
 Durable.start(Module, input, key: "article:42")   # at most one run per key
 Durable.start(Module, input, tags: ["account:7"]) # labels, to find runs across workflows
+Durable.start_many([{Module, input, key: "row:1"}, {Module, input2}])  # one transaction, keys checked
 Durable.get_execution(id)
 Durable.list_executions(workflow: Module, status: :running)
 Durable.list_executions(tag: "account:7")

@@ -245,6 +245,30 @@ defmodule Durable do
   end
 
   @doc """
+  Starts several runs at once: one `{module, input}` or `{module, input, opts}`
+  per run, with `opts` (the options of `start/3`) applying to every item under
+  the item's own.
+
+  All the starts share one transaction, the caller's if it is in one, so they
+  commit together. Keys are checked for every item, as `start/3` checks them,
+  and each item gets its own result, in order.
+
+  ## Examples
+
+      Durable.start_many([
+        {ImportRow, %{"row" => 1}, key: "import:9:row:1"},
+        {ImportRow, %{"row" => 2}, key: "import:9:row:2"}
+      ], tags: ["import:9"])
+      #=> [{:ok, id1}, {:ok, id2}]
+
+  """
+  @spec start_many([{module(), map()} | {module(), map(), keyword()}], keyword()) ::
+          [{:ok, String.t()} | {:error, term()}]
+  def start_many(items, opts \\ []) do
+    Durable.Executor.start_many(items, opts)
+  end
+
+  @doc """
   Gets the execution details for a workflow.
 
   ## Options

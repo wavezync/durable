@@ -62,6 +62,33 @@ defmodule Durable.Executor do
     end
   end
 
+  @doc """
+  Starts one run per `{module, input}` or `{module, input, opts}` item, in one
+  transaction (the caller's, if it is in one). `opts` applies to every item,
+  under the item's own options. Returns one result per item, in order, each
+  what `start_workflow/3` would have returned: keys are checked item by item.
+  """
+  @spec start_many([{module(), map()} | {module(), map(), keyword()}], keyword()) ::
+          [{:ok, String.t()} | {:error, term()}]
+  def start_many(items, opts \\ []) do
+    config = Config.get(Keyword.get(opts, :durable, Durable))
+
+    # ponytail: one insert per item, so keys and on_duplicate: are checked;
+    # an insert_all for unkeyed items if thousands per call ever matter.
+    {:ok, results} =
+      Repo.transaction(config, fn ->
+        Enum.map(items, fn
+          {module, input} ->
+            start_workflow(module, input, opts)
+
+          {module, input, item_opts} ->
+            start_workflow(module, input, Keyword.merge(opts, item_opts))
+        end)
+      end)
+
+    results
+  end
+
   defp started({:ok, execution}, config, opts) do
     DurablePubSub.broadcast_workflow(config, :workflow_started, workflow_event(execution))
 
