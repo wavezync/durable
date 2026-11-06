@@ -80,7 +80,10 @@ blue, so the accent stays a signal.
 
 - `--font-sans` = **IBM Plex Sans** (400/500/600), `--font-mono` = **IBM Plex
   Mono** (400/500), loaded from Google Fonts in `Layouts.root/1`.
-- Body is 13px / 1.45.
+- Body is 13px / 1.45, set on `body`. **Never set a font size on `html`.**
+  Tailwind's sizes and spacing are rem, so the root must stay at the
+  browser's 16px: a 13px root once shrank `text-xs` to 9.75px.
+- Nothing is smaller than 11px.
 - **Mono is for machine facts only**: ids, numbers, durations, timestamps,
   code, JSON, step names. Never for labels.
 - **Labels are sentence case.** No uppercase, no letter-spacing, no mono
@@ -205,6 +208,21 @@ tint of the status color. Reads `status` (atom or string).
 ```heex
 <.status_pill status={execution.status} />
 ```
+
+### `<.run_status>`
+
+A run's status in a list row: the §4 mark + label, the step it's on or
+stopped at ("◆ Failed at `authorize_card`"), and its error on a second line,
+muted. No tint, so a column of them stays quiet: a completed run's label is
+neutral, and only states that need a look (running, waiting, failed, rolled
+back) take their color. Reads `:status`, `:current_step` and `:error`.
+
+```heex
+<.run_status run={row} />
+```
+
+Use it wherever a table or list has one row per run; keep `<.status_pill>`
+for a single status in a header, a card or a menu.
 
 ### `<.status_dot>`
 
@@ -417,6 +435,10 @@ command-palette discipline (§1).
 - **Column headers** are sentence case, `text-xs font-medium
   text-muted-foreground`, with `border-y` framing the header row. Numbers
   right-aligned and mono; never uppercase or letter-spaced.
+- **The noun comes first.** The first column is what the row *is* — the run,
+  the workflow, the queue — linked to its page. Status comes second, never
+  first: a column of status pills down the left edge is the loudest thing on
+  the page and says nothing about which row is which.
 - The row's primary cell links to the noun's page (run, workflow); actions
   sit in a last, right-aligned column as `size="sm"` buttons, rendered only
   when the viewer's access allows them (§12 Access).
@@ -424,10 +446,11 @@ command-palette discipline (§1).
 ### Tooltips
 
 One tooltip for the whole dashboard (`assets/src/tooltip.ts`): it opens after
-a 350 ms hover (instantly while another just closed) or on keyboard focus,
-and Esc, a click or scrolling closes it. It sits above its trigger (below when
-there's no room), is clamped to the viewport, and is `position: fixed` on
-`<body>` — a table or card with `overflow: hidden` can't clip it. While open
+the pointer rests 700 ms (instantly when it moves straight from one open tip
+to the next, so charts scrub; a pointer that crosses a gap waits again) or on
+keyboard focus, and Esc, a click or scrolling closes it. It sits above its
+trigger (below when there's no room), is clamped to the viewport, and is
+`position: fixed` on `<body>` — a table or card with `overflow: hidden` can't clip it. While open
 it re-reads its trigger, so a live value stays current.
 
 - **Markup.** `data-tip` is the body (`\n` for a new line); `data-tip-title`
@@ -623,13 +646,14 @@ stack; the pane says so by its type ("Returned {:error, …}").
 Saved views as a tab strip with counts (All, Failed, Running, Waiting,
 Cancelled), then the query bar (search grammar from `RunSearch`: id prefix,
 `step:`, `error:`, `input.path:value`, `schedule:`, `key:`). Columns: run,
-status, where it is (current step), steps, retries, trigger, node, age. A
-keyed run shows its key after the run id ("3f2a91c4 · article:42 · holds
-key", mono, muted), so keys need no column and rows stay two lines.
+status (`<.run_status>`, which says where it is and why), started,
+duration, steps (with retries), trigger, queue · node. A keyed run shows its
+key after the run id ("3f2a91c4 · article:42 · holds key", mono, muted), so
+keys need no column and rows stay two lines.
 
 **Nothing moves under the pointer.**
-- Columns have fixed widths (`table-fixed` + a `colgroup`); Run and Where it
-  is take the rest and truncate.
+- Columns have fixed widths (`table-fixed` + a `colgroup`); Run and Status
+  share the rest and truncate.
 - Live events reload at most once a second. When the same runs are listed
   they update in place; when *which* runs are listed changes (new ones
   arrive, some leave the view) the rows stay and a blue pill over the

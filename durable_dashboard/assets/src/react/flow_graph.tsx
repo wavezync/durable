@@ -21,7 +21,7 @@ import {
   ReactFlowProvider,
   useReactFlow,
 } from "@xyflow/react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { graphBounds, layoutGraph } from "../lib/graph-layout";
 import type { GraphData } from "../lib/types";
@@ -81,6 +81,9 @@ export function mountFlowIsland(el: HTMLElement, initialGraph: GraphData): FlowI
     <ReactFlowProvider>
       <FlowIslandRoot
         host={el}
+        setHeight={(px) => {
+          el.style.height = `${px}px`;
+        }}
         initialGraph={initialGraph}
         registerHandlers={(setGraph, patchNode) => {
           handlers.setGraph = setGraph;
@@ -109,6 +112,7 @@ export function mountFlowIsland(el: HTMLElement, initialGraph: GraphData): FlowI
 
 interface FlowIslandRootProps {
   host: HTMLElement;
+  setHeight: (px: number) => void;
   initialGraph: GraphData;
   registerHandlers: (
     setGraph: (graph: GraphData) => void,
@@ -123,11 +127,11 @@ interface FlowIslandRootProps {
 function topoSignature(graph: GraphData): string {
   const nodes = graph.nodes
     .map((n) => `${n.id}:${n.type}`)
-    .sort()
+    .toSorted()
     .join("|");
   const edges = graph.edges
     .map((e) => e.id)
-    .sort()
+    .toSorted()
     .join("|");
   return `${nodes}__${edges}`;
 }
@@ -141,48 +145,54 @@ const LEGEND = 36;
 const MIN_HEIGHT = 280;
 const MAX_HEIGHT = 640;
 
-function FlowIslandRoot({ host, initialGraph, registerHandlers }: FlowIslandRootProps) {
-  const [graph, setGraphState] = useState<GraphData>(initialGraph);
-  const { setViewport } = useReactFlow();
+interface Laid {
+  graph: GraphData;
+  sig: string;
+  positions: Map<string, { x: number; y: number }>;
+  nodes: ReturnType<typeof layoutGraph>["nodes"];
+  edges: ReturnType<typeof layoutGraph>["edges"];
+  // Bumped on every relayout (first paint, topology change), never on a plain
+  // status tick, so the viewport is framed only when the shape changed.
+  fit: number;
+}
 
-  // Cache of the last layout's positions + the topology they belong to.
-  const layoutRef = useRef<{
-    sig: string;
-    positions: Map<string, { x: number; y: number }>;
-  }>({ sig: "", positions: new Map() });
-  // Fit the viewport on first paint and whenever topology grows/shrinks,
-  // never on a plain status tick (which would yank the viewport mid-read).
-  const fitPendingRef = useRef(true);
+// Lay out a graph, reusing the previous positions while the topology is the
+// same, so a realtime status tick doesn't reflow the canvas.
+function relayout(prev: Laid | null, graph: GraphData): Laid {
+  const sig = topoSignature(graph);
+  const reuse = prev !== null && sig === prev.sig && prev.positions.size > 0;
+  const result = layoutGraph(graph, reuse ? prev.positions : undefined);
+  const fit = (prev?.fit ?? 0) + (reuse ? 0 : 1);
+  return { graph, sig, positions: result.positions, nodes: result.nodes, edges: result.edges, fit };
+}
+
+function FlowIslandRoot({ host, setHeight, initialGraph, registerHandlers }: FlowIslandRootProps) {
+  const [{ nodes, edges, fit }, setLaid] = useState(() => relayout(null, initialGraph));
+  const { setViewport } = useReactFlow();
+  const framed = useRef(0);
 
   useEffect(() => {
     registerHandlers(
-      (next) => setGraphState(next),
+      (next) => setLaid((prev) => relayout(prev, next)),
       (id, patch) =>
-        setGraphState((prev) => ({
-          ...prev,
-          nodes: prev.nodes.map((n) =>
-            n.id === id
-              ? ({ ...n, data: { ...n.data, ...patch } } as GraphData["nodes"][number])
-              : n,
-          ),
-        })),
+        setLaid((prev) =>
+          relayout(prev, {
+            ...prev.graph,
+            nodes: prev.graph.nodes.map((n) =>
+              n.id === id
+                ? ({ ...n, data: { ...n.data, ...patch } } as GraphData["nodes"][number])
+                : n,
+            ),
+          }),
+        ),
     );
   }, [registerHandlers]);
 
-  const { nodes, edges } = useMemo(() => {
-    const sig = topoSignature(graph);
-    const reuse = sig === layoutRef.current.sig && layoutRef.current.positions.size > 0;
-    const result = layoutGraph(graph, reuse ? layoutRef.current.positions : undefined);
-    layoutRef.current = { sig, positions: result.positions };
-    if (!reuse) fitPendingRef.current = true;
-    return { nodes: result.nodes, edges: result.edges };
-  }, [graph]);
-
-  // Re-fit only when a relayout happened (topology change / first paint).
-  // requestAnimationFrame lets ReactFlow measure the new nodes first.
+  // Frame the viewport once per relayout. requestAnimationFrame lets
+  // ReactFlow measure the new nodes first.
   useEffect(() => {
-    if (!fitPendingRef.current || nodes.length === 0) return;
-    fitPendingRef.current = false;
+    if (framed.current === fit || nodes.length === 0) return;
+    framed.current = fit;
 
     // Size the canvas to the graph at the zoom it will show at, then frame
     // it above the legend: centred when it fits at a legible zoom (never
@@ -192,7 +202,7 @@ function FlowIslandRoot({ host, initialGraph, registerHandlers }: FlowIslandRoot
     const fitZoom = (width - 2 * PAD) / box.width;
     const zoom = Math.min(1, Math.max(MIN_FIT_ZOOM, fitZoom));
     const height = Math.min(MAX_HEIGHT, Math.max(MIN_HEIGHT, box.height * zoom + 2 * PAD + LEGEND));
-    host.style.height = `${Math.round(height)}px`;
+    setHeight(Math.round(height));
 
     const left = fitZoom >= MIN_FIT_ZOOM ? (width - box.width * zoom) / 2 : PAD;
     const raf = requestAnimationFrame(() =>
@@ -206,7 +216,7 @@ function FlowIslandRoot({ host, initialGraph, registerHandlers }: FlowIslandRoot
       ),
     );
     return () => cancelAnimationFrame(raf);
-  }, [nodes, setViewport, host]);
+  }, [fit, nodes, setViewport, host, setHeight]);
 
   return (
     <ReactFlow

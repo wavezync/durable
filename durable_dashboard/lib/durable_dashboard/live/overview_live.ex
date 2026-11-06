@@ -178,7 +178,7 @@ defmodule DurableDashboard.Live.OverviewLive do
       </header>
 
       <section
-        class="mt-4 grid grid-cols-[repeat(auto-fit,minmax(190px,1fr))] gap-px overflow-hidden rounded-[10px] border border-border bg-border"
+        class="mt-4 grid grid-cols-[repeat(auto-fit,minmax(160px,1fr))] gap-px overflow-hidden rounded-[10px] border border-border bg-border"
         aria-label="Key metrics"
       >
         <div :for={k <- @kpis} class="flex min-w-0 flex-col gap-0.5 bg-card px-4 pb-3 pt-3.5">

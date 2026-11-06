@@ -1281,7 +1281,7 @@ defmodule DurableDashboard.Live.WorkflowLive do
         </p>
       </div>
 
-      <nav class="flex gap-0.5 overflow-x-auto border-b border-border px-2.5" aria-label="Step details">
+      <nav class="flex gap-0.5 overflow-x-auto overflow-y-hidden border-b border-border px-2.5" aria-label="Step details">
         <.link
           :for={{pane, label} <- @panes}
           patch={run_path(@base_path, @id, @view, step: @row.key, pane: pane)}
@@ -1433,7 +1433,7 @@ defmodule DurableDashboard.Live.WorkflowLive do
                 <summary class="flex cursor-pointer list-none items-center gap-1.5 px-3 py-1 text-xs text-muted-foreground hover:text-foreground [&::-webkit-details-marker]:hidden">
                   <Core.icon name="chevron-right" class="size-3 transition-transform group-open/frames:rotate-90" />
                   {length(chunk)} library frames
-                  <span class="truncate text-muted-foreground/70">
+                  <span class="truncate text-muted-foreground">
                     · {chunk |> Enum.map(& &1.app) |> Enum.reject(&is_nil/1) |> Enum.uniq() |> Enum.join(", ")}
                   </span>
                 </summary>

@@ -124,7 +124,7 @@ defmodule DurableDashboard.Components.Workflow.FamilyChip do
                 <span class="font-mono text-[11px] truncate">
                   {child_label(child, @parent_step_lookup)}
                 </span>
-                <span class="font-mono text-[9px] text-muted-foreground truncate">
+                <span class="font-mono text-[11px] text-muted-foreground truncate">
                   {short(child.id)}
                 </span>
               </div>

@@ -18,7 +18,7 @@ function EndNodeComponent() {
 
       <div className="flex h-7 items-center gap-1 rounded-full border border-border bg-muted/60 pr-2 pl-1.5">
         <Flag className="size-2.5 text-muted-foreground" aria-hidden="true" />
-        <span className="font-mono text-[9px] uppercase tracking-widest text-muted-foreground">
+        <span className="font-mono text-[11px] uppercase tracking-widest text-muted-foreground">
           end
         </span>
       </div>

@@ -320,7 +320,7 @@ defmodule DurableDashboard.Components.Workflow.Structure do
       data-tip={"#{Format.int(@runs)} runs got this far"}
     >
       <span class="font-mono text-[11px] text-subtle-foreground">{Format.int(@runs)}</span>
-      <svg viewBox="0 0 28 8" class="h-2 w-7 text-muted-foreground/60" aria-hidden="true">
+      <svg viewBox="0 0 28 8" class="h-2 w-7 text-muted-foreground" aria-hidden="true">
         <path d="M0 4h24M20 1l4 3-4 3" fill="none" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round" />
       </svg>
     </div>

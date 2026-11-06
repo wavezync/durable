@@ -72,7 +72,7 @@ function byMatch(values: Value[], needle: string): Value[] {
   const n = needle.toLowerCase();
   return values
     .filter((v) => v.value.toLowerCase().includes(n))
-    .sort((a, b) => {
+    .toSorted((a, b) => {
       const ap = a.value.toLowerCase().startsWith(n) ? 0 : 1;
       const bp = b.value.toLowerCase().startsWith(n) ? 0 : 1;
       return ap - bp;
@@ -144,14 +144,14 @@ function el(tag: string, className: string, text?: string): HTMLElement {
 const ROW = "flex h-8 cursor-pointer items-center gap-2.5 px-3 text-[13px]";
 const ACTIVE = ["bg-accent", "text-accent-foreground"];
 
+const isDraft = (e: Event) => e.target instanceof HTMLInputElement && e.target.name === "draft";
+
 export const QuerySuggest = {
   mounted(this: HookThis) {
     this.items = [];
     this.active = -1;
     this.rows = [];
     this.panel = this.el.querySelector<HTMLElement>("[data-suggest-panel]") as HTMLElement;
-
-    const isDraft = (e: Event) => e.target instanceof HTMLInputElement && e.target.name === "draft";
 
     this.el.addEventListener("input", (e) => {
       if (isDraft(e)) refresh(this);

@@ -28,7 +28,7 @@ hand-rolling HTML — see `DESIGN.md` §5 for the API contract.
 cd assets && pnpm install && pnpm build
 
 # Type / lint / format checks
-cd assets && pnpm exec tsc --noEmit && pnpm exec biome check src/
+cd assets && pnpm format:check && pnpm lint && pnpm typecheck && pnpm run react-doctor
 
 # Elixir (durable comes from Hex unless DURABLE_PATH points at a checkout)
 export DURABLE_PATH=../durable
