@@ -546,13 +546,15 @@ defmodule Durable.Executor.StepRunner do
   # sanitization handles deeply-nested tuples / PIDs / refs / functions —
   # the previous shallow implementation only flattened top-level shapes and
   # let nested tuples crash JSONB encoding.
-  defp serialize_output(nil), do: nil
+  @doc false
+  @spec serialize_output(term()) :: map() | nil
+  def serialize_output(nil), do: nil
 
-  defp serialize_output(output) when is_map(output) do
+  def serialize_output(output) when is_map(output) do
     Durable.Executor.sanitize_for_json(output)
   end
 
-  defp serialize_output(output) do
+  def serialize_output(output) do
     %{value: Durable.Executor.sanitize_for_json(output)}
   end
 

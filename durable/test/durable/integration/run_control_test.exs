@@ -330,6 +330,19 @@ defmodule Durable.Integration.RunControlTest do
     end
   end
 
+  defmodule ChildCompensationErrors do
+    use Durable
+
+    workflow "rc_child_compensation_errors" do
+      step(:book, [compensate: :unbook], fn data -> {:ok, data} end)
+      step(:charge, fn _data -> {:fail, "card declined"} end)
+
+      compensate(:unbook, [retry: [max_attempts: 2, backoff: :constant, base: 1]], fn _data ->
+        {:error, {:still_booked, self()}}
+      end)
+    end
+  end
+
   defmodule Holds do
     @moduledoc false
     # Locks the parent's row from before the child exists until the test says
@@ -856,6 +869,20 @@ defmodule Durable.Integration.RunControlTest do
         assert [%{status: unquote(status)}] = children_of(id)
         assert run.context["child_error"]["message"] == unquote(message)
       end
+    end
+
+    test "a compensation that returns an error fails the child, and the parent hears the first error" do
+      id = start!(CallsChild, %{"child" => to_string(ChildCompensationErrors)})
+
+      run = await_status(id, :completed)
+      assert [child] = children_of(id)
+      assert child.status == :compensation_failed
+
+      assert [%{"result" => %{"status" => "failed", "error" => %{"message" => message}}}] =
+               child.compensation_results
+
+      assert message =~ ":still_booked"
+      assert run.context["child_error"]["message"] == "card declined"
     end
   end
 

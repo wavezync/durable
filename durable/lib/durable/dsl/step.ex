@@ -234,7 +234,10 @@ defmodule Durable.DSL.Step do
   @doc """
   Defines a compensation handler for saga pattern.
 
-  Compensations receive the current data and return `{:ok, data}`.
+  Compensations receive the current data and return `{:ok, data}`. Returning
+  `{:error, reason}` or raising marks the compensation failed once its retries
+  run out, and `{:fail, reason}` marks it failed with no retries. The run then
+  ends `:compensation_failed`.
 
   ## Examples
 

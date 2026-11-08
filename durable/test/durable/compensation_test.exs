@@ -127,6 +127,78 @@ defmodule Durable.CompensationTest do
     end
   end
 
+  # The compensation returns whatever the run's input names.
+  defmodule UndoReturns do
+    use Durable
+
+    workflow "undo_returns" do
+      step(:book, [compensate: :unbook], fn data -> {:ok, data} end)
+      step(:charge, fn _data -> {:fail, "card declined"} end)
+
+      compensate(:unbook, fn data ->
+        Durable.CompensationTest.returned(data[:returns] || data["returns"], data)
+      end)
+    end
+  end
+
+  defmodule UndoRetries do
+    use Durable
+
+    workflow "undo_retries" do
+      step(:book, [compensate: :unbook], fn data -> {:ok, data} end)
+      step(:charge, fn _data -> {:fail, "card declined"} end)
+
+      compensate(:unbook, [retry: [max_attempts: 3, backoff: :constant, base: 1]], fn data ->
+        tries = Process.get(:undo_tries, 0) + 1
+        Process.put(:undo_tries, tries)
+
+        if tries > (data[:fail_times] || data["fail_times"]) do
+          {:ok, data}
+        else
+          Durable.CompensationTest.returned(data[:returns] || data["returns"], data)
+        end
+      end)
+    end
+  end
+
+  defmodule UndoChain do
+    use Durable
+
+    workflow "undo_chain" do
+      step(:first, [compensate: :undo_first], fn data -> {:ok, data} end)
+      step(:second, [compensate: :undo_second], fn data -> {:ok, data} end)
+      step(:charge, fn _data -> {:fail, "card declined"} end)
+
+      compensate(:undo_first, fn data -> {:ok, data} end)
+      compensate(:undo_second, fn _data -> {:error, :gateway_down} end)
+    end
+  end
+
+  # Steps store these errors through their own path.
+  defmodule StepReturnsError do
+    use Durable
+
+    workflow "step_returns_error" do
+      step(:charge, fn data ->
+        Durable.CompensationTest.returned(data[:returns] || data["returns"], data)
+      end)
+    end
+  end
+
+  def returned("map", _data), do: {:error, %{code: 42}}
+  def returned("atom", _data), do: {:error, :gateway_down}
+  def returned("string", _data), do: {:error, "gateway down"}
+  def returned("tuple", _data), do: {:error, {:http, 503}}
+  def returned("fail", _data), do: {:fail, "can't undo"}
+  def returned("changeset", _data), do: {:error, Ecto.Changeset.change(%StepExecution{})}
+  def returned("exception", _data), do: {:error, %RuntimeError{message: "gone"}}
+  def returned("unencodable", _data), do: {:error, %{from: self(), at: {1, 2}}}
+  def returned("ok", data), do: {:ok, data}
+  def returned("bare_ok", _data), do: :ok
+  def returned("nil", _data), do: nil
+  def returned("ok_struct", _data), do: {:ok, URI.parse("https://refunds.example/1")}
+  def returned("ok_unencodable", _data), do: {:ok, %{from: self(), at: {1, 2}}}
+
   describe "compensation DSL" do
     test "compensate macro creates compensation definition" do
       {:ok, workflow_def} = BookTripWorkflow.__workflow_definition__("book_trip")
@@ -261,9 +333,7 @@ defmodule Durable.CompensationTest do
     test "compensation with step that returns {:error, map}" do
       {:ok, execution} = create_and_execute_workflow(ErrorMapCompensationWorkflow, %{})
 
-      # Workflow enters compensation when a step fails
-      # Compensation returning {:error, map} should mark as compensation_failed
-      assert execution.status in [:compensated, :compensation_failed]
+      assert execution.status == :compensation_failed
     end
 
     test "parallel steps trigger compensations when step after parallel fails" do
@@ -276,6 +346,126 @@ defmodule Durable.CompensationTest do
       assert execution.status == :failed
     end
   end
+
+  describe "a compensation that reports an error" do
+    for {returns, stored} <- [
+          {"map", %{"code" => 42}},
+          {"atom", %{"type" => "error", "message" => "gateway_down"}},
+          {"string", %{"type" => "error", "message" => "gateway down"}},
+          {"tuple", %{"type" => "error", "message" => "{:http, 503}"}},
+          {"fail", %{"type" => "error", "message" => "can't undo"}}
+        ] do
+      test "returning #{returns} ends the run :compensation_failed and records why" do
+        {:ok, run} = create_and_execute_workflow(UndoReturns, %{returns: unquote(returns)})
+
+        assert run.status == :compensation_failed
+        assert run.error["message"] == "card declined"
+        assert run.completed_at != nil
+
+        assert [%{"step" => "book", "compensation" => "unbook", "result" => result}] =
+                 run.compensation_results
+
+        assert result == %{"status" => "failed", "error" => unquote(Macro.escape(stored))}
+        assert [%{status: :failed, error: unquote(Macro.escape(stored))}] = undo_rows(run.id)
+      end
+    end
+
+    for returns <- ["changeset", "exception", "unencodable"] do
+      test "returning a #{returns} that JSON can't hold is still recorded" do
+        {:ok, run} = create_and_execute_workflow(UndoReturns, %{returns: unquote(returns)})
+
+        assert run.status == :compensation_failed
+        assert [%{"result" => %{"status" => "failed", "error" => %{}}}] = run.compensation_results
+        assert [%{status: :failed, error: %{}}] = undo_rows(run.id)
+      end
+
+      test "a step returning a #{returns} that JSON can't hold fails its run" do
+        {:ok, run} = create_and_execute_workflow(StepReturnsError, %{returns: unquote(returns)})
+
+        assert run.status == :failed
+        assert [%{status: :failed, error: %{}}] = step_rows(run.id, "charge")
+      end
+    end
+
+    for returns <- ["ok", "bare_ok", "nil", "ok_struct", "ok_unencodable"] do
+      test "returning #{returns} still counts as done" do
+        {:ok, run} = create_and_execute_workflow(UndoReturns, %{returns: unquote(returns)})
+
+        assert run.status == :compensated
+        assert [%{"result" => %{"status" => "completed"}}] = run.compensation_results
+        assert [%{status: :completed}] = undo_rows(run.id)
+      end
+    end
+
+    test "{:error, _} uses the compensation's retries, as a raise does" do
+      {:ok, run} =
+        create_and_execute_workflow(UndoRetries, %{returns: "atom", fail_times: 99})
+
+      assert run.status == :compensation_failed
+      assert [{1, :failed}, {2, :failed}, {3, :failed}] = attempts(run.id)
+    end
+
+    test "a retry that works makes the run :compensated" do
+      {:ok, run} = create_and_execute_workflow(UndoRetries, %{returns: "atom", fail_times: 2})
+
+      assert run.status == :compensated
+      assert [{1, :failed}, {2, :failed}, {3, :completed}] = attempts(run.id)
+    end
+
+    test "{:fail, _} skips the retries" do
+      {:ok, run} = create_and_execute_workflow(UndoRetries, %{returns: "fail", fail_times: 99})
+
+      assert run.status == :compensation_failed
+      assert [{1, :failed}] = attempts(run.id)
+    end
+
+    test "the remaining compensations still run" do
+      {:ok, run} = create_and_execute_workflow(UndoChain, %{})
+
+      assert run.status == :compensation_failed
+
+      assert [
+               %{"compensation" => "undo_second", "result" => %{"status" => "failed"}},
+               %{"compensation" => "undo_first", "result" => %{"status" => "completed"}}
+             ] = run.compensation_results
+    end
+
+    test "telemetry reports the compensation and the run as errors" do
+      test_pid = self()
+      handler = "compensation-error-#{System.unique_integer()}"
+
+      :telemetry.attach_many(
+        handler,
+        [[:durable, :compensation, :stop], [:durable, :workflow, :stop]],
+        fn event, _measurements, meta, _config -> send(test_pid, {event, meta}) end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler) end)
+
+      {:ok, _run} = create_and_execute_workflow(UndoReturns, %{returns: "atom"})
+
+      assert_received {[:durable, :compensation, :stop], %{compensation: :unbook, result: :error}}
+      assert_received {[:durable, :workflow, :stop], %{status: :compensation_failed}}
+    end
+  end
+
+  defp undo_rows(workflow_id) do
+    Durable.TestRepo.all(
+      from(s in StepExecution,
+        where: s.workflow_id == ^workflow_id and s.is_compensation == true,
+        order_by: s.attempt
+      )
+    )
+  end
+
+  defp step_rows(workflow_id, name) do
+    Durable.TestRepo.all(
+      from(s in StepExecution, where: s.workflow_id == ^workflow_id and s.step_name == ^name)
+    )
+  end
+
+  defp attempts(workflow_id), do: Enum.map(undo_rows(workflow_id), &{&1.attempt, &1.status})
 
   # Helper function to create and execute workflow.
   # Drives through parallel fan-out/fan-in if the workflow has parallel blocks.

@@ -1951,6 +1951,11 @@ defmodule Durable.Executor do
     %{type: type, message: message, stacktrace: Exception.format_stacktrace(stacktrace)}
   end
 
+  # An error as a map Jason can encode, whatever a step or compensation returned.
+  @doc false
+  @spec storable_error(term()) :: map()
+  def storable_error(error), do: error |> normalize_error() |> sanitize_for_json()
+
   # Recursively convert a term into something Jason can encode. Tuples become
   # lists, non-Date/DateTime atoms pass through, and anything else exotic
   # (PIDs, ports, functions, refs) is replaced by its inspect/1 form.
@@ -2292,7 +2297,7 @@ defmodule Durable.Executor do
     # `error` is a map column: a step's `{:error, "declined"}` must become a
     # map here, or the failed/compensated write is rejected and the run stays
     # :running.
-    error = error |> normalize_error() |> sanitize_for_json()
+    error = storable_error(error)
 
     # Get the compensation stack from completed steps
     compensation_stack = build_compensation_stack(execution.id, workflow_def, config)

@@ -81,7 +81,7 @@ defmodule Durable.Definition do
     @type t :: %__MODULE__{
             name: atom(),
             module: module(),
-            body_fn: (map() -> {:ok, map()} | {:error, term()}) | nil,
+            body_fn: (map() -> {:ok, map()} | {:error, term()} | {:fail, term()}) | nil,
             opts: %{
               optional(:retry) => Step.retry_opts(),
               optional(:timeout) => pos_integer()
