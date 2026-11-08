@@ -502,6 +502,16 @@ defmodule Durable.Integration.RunControlTest do
     on_exit(fn -> IntegrationRepo.query!("DROP FUNCTION durable.slow_wait() CASCADE") end)
   end
 
+  # Runs `fun` in a transaction that stays open a while after it, so a wake
+  # sent from inside has every chance to arrive before the commit.
+  defp in_slow_transaction(fun) do
+    IntegrationRepo.transaction(fn ->
+      result = fun.()
+      Process.sleep(200)
+      result
+    end)
+  end
+
   defp start!(workflow, input \\ %{}, opts \\ []) do
     {:ok, id} = Durable.start(workflow, input, opts)
     id
@@ -773,6 +783,80 @@ defmodule Durable.Integration.RunControlTest do
       await_status(two, :completed, 3_000)
     end
 
+    test "a start inside a transaction is claimed when it commits" do
+      {:ok, id} = in_slow_transaction(fn -> start!(Quick) end)
+      await_status(id, :completed, 3_000)
+    end
+
+    test "start_many/2 inside a transaction is claimed when it commits" do
+      {:ok, [{:ok, one}, {:ok, two}]} =
+        in_slow_transaction(fn -> Durable.start_many([{Quick, %{}}, {Quick, %{}}]) end)
+
+      await_status(one, :completed, 3_000)
+      await_status(two, :completed, 3_000)
+    end
+
+    test "an event sent inside a transaction resumes the run when it commits" do
+      id = start!(Waits)
+      assert_eventually(fn -> get(id).status == :waiting end)
+
+      {:ok, :ok} = in_slow_transaction(fn -> Durable.send_event(id, "go", %{}) end)
+      await_status(id, :completed, 3_000)
+    end
+
+    test "input given inside a transaction resumes the run when it commits" do
+      id = start!(Asks)
+      assert_eventually(fn -> get(id).status == :waiting end)
+
+      {:ok, :ok} = in_slow_transaction(fn -> Durable.provide_input(id, "approve", %{}) end)
+      await_status(id, :completed, 3_000)
+    end
+
+    test "a buffered event wakes the pollers after its commit, however slow the commit is" do
+      id = start!(Waits)
+      assert_eventually(fn -> get(id).status == :waiting end)
+
+      IntegrationRepo.query!("""
+      CREATE FUNCTION durable.slow_commit() RETURNS trigger AS $$
+      BEGIN PERFORM pg_sleep(0.3); RETURN NULL; END;
+      $$ LANGUAGE plpgsql
+      """)
+
+      IntegrationRepo.query!("""
+      CREATE CONSTRAINT TRIGGER slow_commit AFTER UPDATE ON durable.workflow_executions
+      DEFERRABLE INITIALLY DEFERRED FOR EACH ROW WHEN (NEW.status = 'pending')
+      EXECUTE FUNCTION durable.slow_commit()
+      """)
+
+      on_exit(fn -> IntegrationRepo.query!("DROP FUNCTION durable.slow_commit() CASCADE") end)
+
+      :ok = Durable.send_event(id, "go", %{}, buffer: true)
+      await_status(id, :completed, 3_000)
+    end
+
+    test "a transaction that rolls back wakes nobody" do
+      test_pid = self()
+      handler = "rollback-wake-#{System.unique_integer()}"
+
+      :telemetry.attach(
+        handler,
+        [:durable, :queue, :poll],
+        fn _event, _measurements, _meta, _config -> send(test_pid, :polled) end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler) end)
+
+      {:error, :changed_my_mind} =
+        IntegrationRepo.transaction(fn ->
+          start!(Quick)
+          IntegrationRepo.rollback(:changed_my_mind)
+        end)
+
+      refute_receive :polled, 300
+      assert Probe.hits(:quick) == 0
+    end
+
     test "an event resumes a waiting run at once" do
       id = start!(Waits)
       assert_eventually(fn -> get(id).status == :waiting end)
@@ -912,6 +996,99 @@ defmodule Durable.Integration.RunControlTest do
 
       assert message =~ ":still_booked"
       assert run.context["child_error"]["message"] == "card declined"
+    end
+  end
+
+  describe "the listener behind commit-time wakes" do
+    defmodule DownRepo do
+      @moduledoc false
+      use Ecto.Repo, otp_app: :durable, adapter: Ecto.Adapters.Postgres
+    end
+
+    test "doesn't stop Durable booting while Postgres is down" do
+      Application.put_env(:durable, DownRepo,
+        hostname: "localhost",
+        port: 1,
+        username: "postgres",
+        password: "postgres",
+        database: "nope",
+        pool_size: 1
+      )
+
+      start_supervised!(DownRepo)
+
+      assert {:ok, _} =
+               start_supervised(
+                 {Durable, repo: DownRepo, name: DownInstance, queues: queue_opts(%{default: 1})}
+               )
+
+      listener = Process.whereis(DownInstance.Queue.Notifications)
+      poller = Process.whereis(DownInstance.Queue.Poller.Default)
+
+      # Long enough for many polls and a failed reconnect.
+      Process.sleep(2_500)
+
+      assert Process.whereis(DownInstance.Queue.Notifications) == listener
+      assert Process.whereis(DownInstance.Queue.Poller.Default) == poller
+    end
+
+    test "comes back after Postgres drops its connection" do
+      start_durable!(%{default: 5}, poll_interval: :timer.hours(1))
+      Process.sleep(150)
+
+      [[old_pid]] = listener_pids()
+      IntegrationRepo.query!("SELECT pg_terminate_backend($1)", [old_pid])
+      assert_eventually(fn -> match?([[pid]] when pid != old_pid, listener_pids()) end, 8_000, 50)
+
+      {:ok, id} = in_slow_transaction(fn -> start!(Quick) end)
+      await_status(id, :completed, 3_000)
+    end
+
+    defp listener_pids do
+      IntegrationRepo.query!("""
+      SELECT pid FROM pg_stat_activity
+      WHERE datname = current_database() AND query LIKE '%LISTEN "%' AND pid <> pg_backend_pid()
+      """).rows
+    end
+
+    test "gone for good, leaves the run to the next poll" do
+      start_durable!(%{default: 5}, poll_interval: 300)
+
+      :ok =
+        Supervisor.terminate_child(Durable.Queue.Manager, Postgrex.Notifications)
+
+      {:ok, id} = in_slow_transaction(fn -> start!(Quick) end)
+      await_status(id, :completed, 3_000)
+    end
+
+    test "fits a queue name longer than a Postgres channel can be" do
+      long = String.duplicate("q", 100)
+      start_durable!(%{String.to_atom(long) => 2}, poll_interval: :timer.hours(1))
+      Process.sleep(150)
+
+      {:ok, id} = in_slow_transaction(fn -> start!(Quick, %{}, queue: long) end)
+      await_status(id, :completed, 3_000)
+    end
+
+    test "uses a channel per queue and per prefix" do
+      config = Durable.Config.get(Durable)
+      channel = &Durable.PubSub.wake_channel/2
+
+      assert channel.(config, "a") != channel.(config, "b")
+      assert channel.(config, "a") != channel.(%{config | prefix: "other"}, "a")
+    end
+  end
+
+  describe "with no PubSub and a poll interval too long to help" do
+    setup do
+      start_durable!(%{default: 5}, poll_interval: :timer.hours(1), pubsub: nil)
+      Process.sleep(150)
+      :ok
+    end
+
+    test "a start inside a transaction is still claimed when it commits" do
+      {:ok, id} = in_slow_transaction(fn -> start!(Quick) end)
+      await_status(id, :completed, 3_000)
     end
   end
 

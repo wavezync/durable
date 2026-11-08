@@ -643,6 +643,11 @@ Something like this keeps the tables small:
 config :durable, log_capture: [levels: [:warning, :error]]
 ```
 
+Each node holds one Postgres connection outside the repo's pool, so a run
+started inside your own transaction is claimed the moment it commits. Through
+PgBouncer in transaction mode that wake doesn't arrive, and the run waits for
+the next poll instead.
+
 ### API
 
 ```elixir

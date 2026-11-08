@@ -50,6 +50,16 @@ defmodule Durable.Integration.MultiNodeTest do
     assert Probe.log() == [{:held, "ocr", b}, {:save, "default", a}]
   end
 
+  test "a start inside a transaction wakes another node's poller when it commits" do
+    a = start_node!(:node_a, %{documents: 1}, poll_interval: :timer.hours(1))
+    b = start_node!(:node_b, %{default: 2, ocr: 2}, poll_interval: :timer.hours(1))
+
+    id = :erpc.call(a, Durable.IntegrationCase, :start_in_transaction, [W.QuickOnOcr, %{}])
+
+    await_status(id, :completed, 5_000)
+    assert [{_, _, ^b} | _] = Probe.log()
+  end
+
   test "two nodes sharing queues never run a step twice" do
     queues = %{documents: 4, downloads: 2, ocr: 2, llm: 2}
     a = start_node!(:node_a, queues)

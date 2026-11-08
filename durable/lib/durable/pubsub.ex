@@ -36,6 +36,7 @@ defmodule Durable.PubSub do
   """
 
   alias Durable.Config
+  alias Durable.Repo
 
   @type kind ::
           :workflow_started
@@ -202,13 +203,33 @@ defmodule Durable.PubSub do
   # costs the poll interval.
   @spec wake(Config.t(), term()) :: :ok
   def wake(%Config{} = config, %{status: :pending, queue: queue} = run) when is_binary(queue) do
-    if due?(Map.get(run, :scheduled_at)),
-      do: broadcast(config, queue_topic(config, queue), {:durable_wake, queue})
-
+    if due?(Map.get(run, :scheduled_at)), do: signal(config, queue)
     :ok
   end
 
   def wake(_config, _run), do: :ok
+
+  @doc false
+  # The Postgres channel that wakes a queue's pollers. Hashed so it always fits
+  # the 63-byte limit: a name over it would abort the caller's transaction.
+  @spec wake_channel(Config.t(), String.t()) :: String.t()
+  def wake_channel(%Config{prefix: prefix}, queue) do
+    "durable_" <> Base.encode16(:erlang.md5("#{prefix}:#{queue}"), case: :lower)
+  end
+
+  # A broadcast from inside a transaction reaches the pollers before they can
+  # see the run. Postgres delivers a NOTIFY at commit and drops it on rollback.
+  # ponytail: NOTIFY takes a global lock at commit, which is why only this path
+  # uses it. Apps committing starts at a very high rate may want to start
+  # outside their transaction.
+  defp signal(%Config{repo: repo} = config, queue) do
+    if repo.in_transaction?() do
+      _ = Repo.query(config, "SELECT pg_notify($1, '')", [wake_channel(config, queue)])
+      :ok
+    else
+      broadcast(config, queue_topic(config, queue), {:durable_wake, queue})
+    end
+  end
 
   defp due?(nil), do: true
   defp due?(at), do: DateTime.compare(at, DateTime.utc_now()) != :gt

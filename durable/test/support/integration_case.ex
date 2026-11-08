@@ -141,6 +141,18 @@ defmodule Durable.IntegrationCase do
     :ok
   end
 
+  @doc "Starts a run inside a transaction that stays open a while after it."
+  def start_in_transaction(workflow, input) do
+    {:ok, id} =
+      IntegrationRepo.transaction(fn ->
+        {:ok, id} = Durable.start(workflow, input)
+        Process.sleep(200)
+        id
+      end)
+
+    id
+  end
+
   @doc "Waits for the nodes to see each other, so a broadcast reaches them all."
   def connect_nodes!(nodes) do
     for a <- nodes, b <- nodes, a != b, do: true = :erpc.call(a, Node, :connect, [b])
