@@ -53,8 +53,8 @@ defmodule Durable.DSL.Step do
     step and takes a slot from that queue's `:concurrency`, which is per node.
     The next step without a `:queue` goes back to the queue the run started
     on. Moving costs one more claim, so with no `:pubsub` configured it waits
-    up to that queue's `:poll_interval`. No node polling the queue holds the
-    run there. In a `parallel` block each branch is its own run on this queue
+    up to that queue's `:poll_interval`. A run on a queue no node polls waits
+    there, even past the workflow's `:timeout`. In a `parallel` block each branch is its own run on this queue
 
   """
 

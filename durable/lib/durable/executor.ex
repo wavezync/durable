@@ -379,7 +379,7 @@ defmodule Durable.Executor do
         String.to_existing_atom(execution.workflow_module),
         Keyword.get(opts, :input, execution.input),
         workflow: execution.workflow_name,
-        queue: execution.queue,
+        queue: execution.home_queue || execution.queue,
         priority: execution.priority,
         durable: durable,
         trigger: :rerun,
@@ -506,8 +506,8 @@ defmodule Durable.Executor do
   ## Options
 
   - `:inline` - If true, execute synchronously instead of via queue (default: false).
-    Runs until the run finishes or parks: a retry, snooze or wait is left for
-    the queue
+    Runs until the run finishes or parks: a retry, snooze, wait or move to a
+    step's queue is left for the queue
   - `:durable` - The Durable instance name (default: Durable)
   """
   @spec resume_workflow(String.t(), map(), keyword()) :: {:ok, String.t()} | {:error, term()}
