@@ -595,8 +595,9 @@ queue the run is on when it fails.
   OCR steps at once. For an exact total, list the queue in `:queues` only on
   the nodes that should run it.
 - Every queue a step names needs a poller on some node, and so does the queue
-  the run starts on, even if its first step moves it. A run on a queue nobody
-  polls waits there, even past its `timeout:`.
+  the run starts on, even if its first step moves it. A run on a queue no live
+  node polls waits there. Past its `timeout:` it fails within the timeout
+  worker's one-minute sweep, compensations included.
 - Each move is one more claim. With `:pubsub` configured it happens as soon as
   a slot is free; without it, within that queue's `poll_interval`.
 - A finished run's `queue` is the last one it was on.

@@ -2,7 +2,8 @@ defmodule Durable.Wait.TimeoutWorker do
   @moduledoc """
   Background worker that enforces timeouts for pending inputs and events, and
   wakes waiting runs that passed their workflow `timeout:` so they fail now
-  rather than when their wait ends.
+  rather than when their wait ends. A run past its `timeout:` on a queue no
+  live node polls is failed from here, since no worker will ever claim it.
 
   Periodically checks for timed-out waits and either:
   - Resumes the workflow with the timeout_value (if on_timeout: :resume)
@@ -12,6 +13,7 @@ defmodule Durable.Wait.TimeoutWorker do
   use GenServer
 
   alias Durable.Executor
+  alias Durable.NodeRegistry
   alias Durable.Repo
   alias Durable.Storage.Schemas.{PendingEvent, PendingInput, WaitGroup, WorkflowExecution}
 
@@ -96,6 +98,7 @@ defmodule Durable.Wait.TimeoutWorker do
     process_timed_out_events(config, now)
     process_timed_out_wait_groups(config, now)
     process_expired_runs(config, now)
+    process_unpolled_runs(config, now)
   end
 
   # A waiting run past its deadline is resumed; the executor sees the deadline
@@ -117,6 +120,37 @@ defmodule Durable.Wait.TimeoutWorker do
         {:ok, _} <- [Executor.resume_workflow(id, %{}, durable: config.name)] do
       close_waits(config, id, now)
     end
+  end
+
+  # A run past its deadline on a queue a live node polls is failed by the claim
+  # that reaches it, so a paused or backlogged queue keeps its limits. On any
+  # other queue no claim is coming.
+  defp process_unpolled_runs(config, now) do
+    polled = for %{status: :alive, queues: queues} <- NodeRegistry.list(config), do: queues
+
+    ids =
+      Repo.all(
+        config,
+        from(w in WorkflowExecution,
+          where: w.status == :pending and w.deadline_at <= ^now,
+          where: w.queue not in ^List.flatten(polled),
+          select: w.id,
+          limit: 500
+        )
+      )
+
+    Enum.each(ids, &expire_unpolled(config, &1))
+  end
+
+  # ponytail: compensations run inside the sweep, so slow ones delay it. Runs
+  # stuck on an unpolled queue are rare; give them a process if that changes.
+  defp expire_unpolled(config, id) do
+    Executor.expire_unclaimed(id, config)
+  rescue
+    # A node that doesn't have this workflow's code can't fail it; a crash here
+    # would only repeat on every sweep.
+    error ->
+      Logger.error("[Durable] couldn't time out run #{id}: #{Exception.message(error)}")
   end
 
   defp close_waits(config, workflow_id, now) do

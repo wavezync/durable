@@ -392,6 +392,35 @@ defmodule Durable.Executor do
     end
   end
 
+  # Fails a run past its deadline that no worker will claim, from the timeout
+  # sweep. The claim goes through the row's status, so it can't overlap a poller
+  # or another node's sweep, and the deadline check before the next step does
+  # the failing, compensations included. A parallel branch has no such check;
+  # its parent's timeout cancels it.
+  @doc false
+  @spec expire_unclaimed(String.t(), Config.t()) :: term()
+  def expire_unclaimed(workflow_id, %Config{} = config) do
+    with {:ok, execution} <- load_execution(config, workflow_id),
+         false <- parallel_branch?(execution),
+         {:ok, _workflow_def} <- get_workflow_definition_from_execution(execution),
+         {1, _} <- claim_pending(config, workflow_id) do
+      execute_workflow(workflow_id, config)
+    end
+  end
+
+  defp claim_pending(config, workflow_id) do
+    Repo.update_all(
+      config,
+      from(w in WorkflowExecution, where: w.id == ^workflow_id and w.status == :pending),
+      set: [
+        status: :running,
+        locked_by: config.node_id,
+        locked_at: DateTime.utc_now(),
+        lock_token: Ecto.UUID.generate()
+      ]
+    )
+  end
+
   @doc """
   Executes a workflow by ID.
 

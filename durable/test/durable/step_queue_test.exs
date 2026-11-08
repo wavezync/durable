@@ -11,7 +11,7 @@ defmodule Durable.StepQueueTest do
   alias Durable.Executor
   alias Durable.Queue.Adapters.Postgres
   alias Durable.Queue.Manager
-  alias Durable.Storage.Schemas.{StepExecution, WorkflowExecution}
+  alias Durable.Storage.Schemas.{Node, StepExecution, WorkflowExecution}
   alias Durable.Wait.TimeoutWorker
 
   defmodule Import do
@@ -278,6 +278,19 @@ defmodule Durable.StepQueueTest do
     assert [%{id: ^id}] = claim(queue)
     Executor.execute_workflow(id, Config.get(Durable))
     get(id)
+  end
+
+  defp expire(id) do
+    past = DateTime.add(DateTime.utc_now(), -1, :second)
+
+    TestRepo.update_all(from(w in WorkflowExecution, where: w.id == ^id),
+      set: [deadline_at: past]
+    )
+  end
+
+  defp live_node(queues) do
+    now = DateTime.utc_now()
+    %Node{id: "polling-node", queues: queues, version: "1", started_at: now, heartbeat_at: now}
   end
 
   defp ran(id) do
@@ -576,23 +589,34 @@ defmodule Durable.StepQueueTest do
     assert ran(id) == []
   end
 
-  test "past its timeout, a run on an unpolled queue stays until a claim fails it" do
+  test "past its timeout, a run on a queue a live node polls waits for a claim to fail it" do
     worker = start_supervised!({TimeoutWorker, config: Config.get(Durable), interval: 3_600_000})
+    TestRepo.insert!(live_node(["default", "ocr"]))
 
     {:ok, id} = Durable.start(TimesOutOnOcr, %{})
     advance(id, "default")
-
-    past = DateTime.add(DateTime.utc_now(), -1, :second)
-
-    TestRepo.update_all(from(w in WorkflowExecution, where: w.id == ^id),
-      set: [deadline_at: past]
-    )
+    expire(id)
 
     send(worker, :check_timeouts)
     :sys.get_state(worker)
     assert get(id).status == :pending
 
     run = advance(id, "ocr")
+    assert {run.status, run.error["type"]} == {:failed, "timeout"}
+    assert ran(id) == []
+  end
+
+  test "past its timeout, a run on a queue nobody polls is failed by the sweep" do
+    worker = start_supervised!({TimeoutWorker, config: Config.get(Durable), interval: 3_600_000})
+
+    {:ok, id} = Durable.start(TimesOutOnOcr, %{})
+    advance(id, "default")
+    expire(id)
+
+    send(worker, :check_timeouts)
+    :sys.get_state(worker)
+
+    run = get(id)
     assert {run.status, run.error["type"]} == {:failed, "timeout"}
     assert ran(id) == []
   end
