@@ -130,7 +130,8 @@ defmodule Durable.Integration.StepQueuesTest do
       await_hit(:flaky)
       quick = start!(W.QuickOnOcr)
 
-      await_status(quick, :completed)
+      # Sooner than the backoff can end (1.5 s, less 25% jitter).
+      await_status(quick, :completed, 800)
       assert get(flaky).status == :pending
       assert Probe.hits(:flaky) == 1
 
@@ -155,7 +156,8 @@ defmodule Durable.Integration.StepQueuesTest do
       await_hit(:snoozy)
       quick = start!(W.QuickOnOcr)
 
-      await_status(quick, :completed)
+      # Sooner than the 1.5 s snooze can end.
+      await_status(quick, :completed, 800)
       assert Probe.hits(:snoozy) == 1
 
       await_status(snoozy, :completed)

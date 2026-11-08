@@ -21,7 +21,7 @@ defmodule Durable.Integration.RunControlTest do
     use Durable
 
     workflow "rc_flaky" do
-      step(:call, [retry: [max_attempts: 2, backoff: :constant, base: 800]], fn data ->
+      step(:call, [retry: [max_attempts: 2, backoff: :constant, base: 1_500]], fn data ->
         if Probe.here(:flaky) == 1, do: {:error, :down}, else: {:ok, data}
       end)
     end
@@ -245,10 +245,12 @@ defmodule Durable.Integration.RunControlTest do
 
   defmodule CallsQuick do
     use Durable
+    use Durable.Context
     use Durable.Orchestration
 
     workflow "rc_calls_quick" do
       step(:call, fn data ->
+        Probe.here({:parent, workflow_id()})
         call_workflow(Quick, %{}, ref: :child)
         {:ok, data}
       end)
@@ -476,7 +478,8 @@ defmodule Durable.Integration.RunControlTest do
       assert_eventually(fn -> Probe.hits(:flaky) == 1 end)
       quick = start!(Quick)
 
-      await_status(quick, :completed)
+      # Sooner than the backoff can end (1.5 s, less 25% jitter).
+      await_status(quick, :completed, 800)
       assert Probe.hits(:flaky) == 1
       assert get(flaky).status == :pending
 
@@ -696,6 +699,26 @@ defmodule Durable.Integration.RunControlTest do
       await_status(two, :completed, 3_000)
     end
 
+    test "start_many/2 wakes the pollers after its commit, however slow the commit is" do
+      IntegrationRepo.query!("""
+      CREATE FUNCTION durable.slow_commit() RETURNS trigger AS $$
+      BEGIN PERFORM pg_sleep(0.3); RETURN NULL; END;
+      $$ LANGUAGE plpgsql
+      """)
+
+      IntegrationRepo.query!("""
+      CREATE CONSTRAINT TRIGGER slow_commit AFTER INSERT ON durable.workflow_executions
+      DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION durable.slow_commit()
+      """)
+
+      on_exit(fn -> IntegrationRepo.query!("DROP FUNCTION durable.slow_commit() CASCADE") end)
+
+      [{:ok, one}, {:ok, two}] = Durable.start_many([{Quick, %{}}, {Quick, %{}}])
+
+      await_status(one, :completed, 3_000)
+      await_status(two, :completed, 3_000)
+    end
+
     test "an event resumes a waiting run at once" do
       id = start!(Waits)
       assert_eventually(fn -> get(id).status == :waiting end)
@@ -760,6 +783,29 @@ defmodule Durable.Integration.RunControlTest do
     test "is never missed by the parent calling it" do
       ids = for _ <- 1..60, do: start!(CallsQuick)
       assert_all_completed(ids)
+
+      # Once to call, once with the result: resumed one time, whichever of the
+      # child's notice and the parent's own check got there first.
+      for id <- ids, do: assert(Probe.hits({:parent, id}) == 2)
+    end
+
+    test "is not missed when it ends between its parent's event and its waiting" do
+      IntegrationRepo.query!("""
+      CREATE FUNCTION durable.slow_wait() RETURNS trigger AS $$
+      BEGIN PERFORM pg_sleep(0.5); RETURN NEW; END;
+      $$ LANGUAGE plpgsql
+      """)
+
+      IntegrationRepo.query!("""
+      CREATE TRIGGER slow_wait BEFORE UPDATE ON durable.workflow_executions
+      FOR EACH ROW WHEN (OLD.status = 'running' AND NEW.status = 'waiting')
+      EXECUTE FUNCTION durable.slow_wait()
+      """)
+
+      on_exit(fn -> IntegrationRepo.query!("DROP FUNCTION durable.slow_wait() CASCADE") end)
+
+      id = start!(CallsQuick)
+      await_status(id, :completed, 5_000)
     end
 
     test "is never missed by a parallel block" do

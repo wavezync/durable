@@ -86,7 +86,26 @@ defmodule Durable.Executor do
         end)
       end)
 
+    wake_committed(config, results)
     results
+  end
+
+  # Each start's own wake went out before the commit, when no poller could see
+  # its run yet.
+  defp wake_committed(config, results) do
+    ids = for {:ok, id} <- results, do: id
+    now = DateTime.utc_now()
+
+    config
+    |> Repo.all(
+      from(w in WorkflowExecution,
+        where: w.id in ^ids and w.status == :pending,
+        where: is_nil(w.scheduled_at) or w.scheduled_at <= ^now,
+        distinct: w.queue,
+        select: %{status: w.status, queue: w.queue}
+      )
+    )
+    |> Enum.each(&DurablePubSub.wake(config, &1))
   end
 
   defp started({:ok, execution}, config, opts) do
@@ -2137,8 +2156,9 @@ defmodule Durable.Executor do
         PendingEvent.receive_changeset(pending_event, pending_event.payload || %{})
       )
       |> Ecto.Multi.run(:parent, fn repo, _changes ->
-        # Locked: the child's own notice and settle_child/2 can both get here.
-        case repo.one(from(w in WorkflowExecution, where: w.id == ^parent.id, lock: "FOR UPDATE")) do
+        # The event's update above makes the child's own notice and
+        # settle_child/2 take turns, so the second one sees the parent moved on.
+        case repo.get(WorkflowExecution, parent.id) do
           nil ->
             {:error, :parent_not_found}
 

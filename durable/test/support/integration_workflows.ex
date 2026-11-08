@@ -90,7 +90,7 @@ defmodule Durable.IntegrationWorkflows do
     workflow "it_flaky_on_ocr" do
       step(
         :ocr,
-        [queue: :ocr, retry: [max_attempts: 2, backoff: :constant, base: 800]],
+        [queue: :ocr, retry: [max_attempts: 2, backoff: :constant, base: 1_500]],
         fn data ->
           if Probe.here(:flaky) == 1, do: {:error, :down}, else: {:ok, data}
         end
@@ -109,7 +109,7 @@ defmodule Durable.IntegrationWorkflows do
 
     workflow "it_snoozes_on_ocr" do
       step(:ocr, [queue: :ocr], fn data ->
-        if Probe.here(:snoozy) == 1, do: {:snooze, 800, "not yet"}, else: {:ok, data}
+        if Probe.here(:snoozy) == 1, do: {:snooze, 1_500, "not yet"}, else: {:ok, data}
       end)
 
       step(:save, fn data ->
