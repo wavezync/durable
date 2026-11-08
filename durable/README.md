@@ -505,7 +505,9 @@ workflow "process_order", timeout: hours(2), queue: :orders do
   sleeps included. A run past it fails with a `"timeout"` error and runs its
   compensations: a step still running is stopped, and a waiting run is woken
   to fail (within the timeout worker's one-minute sweep).
-- `:queue` — the queue runs start on unless `Durable.start/3` names one.
+- `:queue` — the queue runs start on unless `Durable.start/3` names one. A
+  step's own `queue:` moves the run for that step (see
+  [Step Queues](#step-queues)).
 - `:reuse` — whether a `key:` can start again after its run finished:
   `:after_close` (default), `:after_failure` or `:never`. See
   [Workflow keys](guides/workflow_keys.md).
@@ -568,6 +570,34 @@ end
 {:cancel, reason, scope: :run}   # in a parallel step: only this branch, an error in the block's results
 {:cancel, reason, scope: :root}  # the top run of the tree, through call_workflow parents, and all under it
 ```
+
+### Step Queues
+
+Give a step its own queue to cap how many runs are in that step at once:
+
+```elixir
+# queues: %{documents: [concurrency: 20], downloads: [concurrency: 80],
+#           ocr: [concurrency: 10], llm: [concurrency: 20]}
+workflow "import_document", queue: :documents do
+  step :download,  [queue: :downloads], fn ctx -> ... end
+  step :ocr,       [queue: :ocr],       fn ctx -> ... end
+  step :summarize, [queue: :llm],       fn ctx -> ... end
+  step :save,                           fn ctx -> ... end  # back on :documents
+end
+```
+
+The run moves to the step's queue before the step and takes a slot there. The
+next step without a `queue:` goes back to the queue the run started on. A
+retry, snooze or wait stays on the step's queue, and compensations run on the
+queue the run is on when it fails.
+
+- `concurrency` is per node: `ocr: [concurrency: 10]` on three nodes allows 30
+  OCR steps at once. For an exact total, list the queue in `:queues` only on
+  the nodes that should run it.
+- Every queue a step names needs a poller on some node, or runs wait there.
+- Each move is one more claim. With `:pubsub` configured it happens as soon as
+  a slot is free; without it, within that queue's `poll_interval`.
+- A finished run's `queue` is the last one it was on.
 
 ### Errors
 

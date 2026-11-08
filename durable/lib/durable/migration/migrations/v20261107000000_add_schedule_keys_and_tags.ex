@@ -10,6 +10,8 @@ defmodule Durable.Migration.Migrations.V20261107000000AddScheduleKeysAndTags do
   #   `on_duplicate: :run_again` while the key's holder was going waits for
   #   that holder to end (the claim query skips it until then). The unique
   #   index keeps at most one such run waiting per workflow and key.
+  # * `workflow_executions.home_queue` — the queue to go back to, while a step's
+  #   `queue:` has moved the run off the one it started on.
   #
   # Creating the index scans `workflow_executions` and blocks inserts while it
   # runs; `CONCURRENTLY` isn't possible inside the migration transaction.
@@ -27,6 +29,7 @@ defmodule Durable.Migration.Migrations.V20261107000000AddScheduleKeysAndTags do
     alter table(:workflow_executions, prefix: prefix) do
       add_if_not_exists(:tags, {:array, :text}, null: false, default: [])
       add_if_not_exists(:runs_after_id, :binary_id)
+      add_if_not_exists(:home_queue, :text)
     end
 
     create_if_not_exists(
@@ -64,6 +67,7 @@ defmodule Durable.Migration.Migrations.V20261107000000AddScheduleKeysAndTags do
     alter table(:workflow_executions, prefix: prefix) do
       remove_if_exists(:tags, {:array, :text})
       remove_if_exists(:runs_after_id, :binary_id)
+      remove_if_exists(:home_queue, :text)
     end
 
     alter table(:scheduled_workflows, prefix: prefix) do

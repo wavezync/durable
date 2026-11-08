@@ -840,6 +840,9 @@ defmodule Durable.Executor do
       error = resume_failure(execution) ->
         fail_at(execution, step, error, workflow_def, config)
 
+      queue = queue_move(step, execution) ->
+        move_to_queue(config, execution, step, queue, data)
+
       true ->
         dispatch_step(step, remaining_steps, execution, step_index, workflow_def, config, data)
     end
@@ -1135,13 +1138,20 @@ defmodule Durable.Executor do
   end
 
   defp execute_branch_steps_sequential(
-         [step | rest],
+         [step | _] = steps,
          execution,
          step_index,
          workflow_def,
          config,
          data
        ) do
+    case queue_move(step, execution) do
+      nil -> run_branch_step(steps, execution, step_index, workflow_def, config, data)
+      queue -> move_to_queue(config, execution, step, queue, data)
+    end
+  end
+
+  defp run_branch_step([step | rest], execution, step_index, workflow_def, config, data) do
     {:ok, exec} = update_current_step(config, execution, step.name)
 
     case StepRunner.execute(step, data, exec.id, config, exec.deadline_at) do
@@ -2294,27 +2304,56 @@ defmodule Durable.Executor do
   # put_context/2 writes included. Keys are strings, so an atom and a string
   # copy of one key can't both be stored.
   defp park(config, execution, delay_ms) do
-    attempt_ctx = Process.get(:durable_context, %{})
-    atom_keys = for {key, _} <- attempt_ctx, is_atom(key), do: Atom.to_string(key)
-
-    context =
-      execution.context
-      |> string_keys()
-      |> Map.merge(string_keys(attempt_ctx))
-      |> Map.put(@atom_keys, atom_keys)
-
     at = DateTime.add(DateTime.utc_now(), delay_ms, :millisecond)
     deadline = execution.deadline_at
     at = if deadline && DateTime.after?(at, deadline), do: deadline, else: at
 
+    release(config, execution, Process.get(:durable_context, %{}), scheduled_at: at)
+  end
+
+  # Where this step has to run, when that isn't where the run is now: its own
+  # `queue:`, or the queue the run started on. A branch only picks a clause, so
+  # it runs where it is, and the clause's steps move for themselves.
+  defp queue_move(%{type: :branch}, _execution), do: nil
+
+  defp queue_move(step, execution) do
+    queue = to_string(step.opts[:queue] || execution.home_queue || execution.queue)
+    if queue != execution.queue, do: queue
+  end
+
+  # Hands the run to another queue before `step`, so the step takes a slot
+  # there. No `scheduled_at`: a run already under way sorts with the runs that
+  # are ready now, oldest first, not behind them.
+  defp move_to_queue(config, execution, step, queue, data) do
+    home = execution.home_queue || execution.queue
+
+    {:waiting, moved} =
+      release(config, execution, data,
+        queue: queue,
+        home_queue: if(queue != home, do: home),
+        current_step: Atom.to_string(step.name),
+        scheduled_at: nil
+      )
+
+    DurablePubSub.wake(config, moved)
+    {:waiting, moved}
+  end
+
+  # Back to :pending with the worker freed, keeping `data` for the next claim.
+  defp release(config, execution, data, attrs) do
+    atom_keys = for {key, _} <- data, is_atom(key), do: Atom.to_string(key)
+
+    context =
+      execution.context
+      |> string_keys()
+      |> Map.merge(string_keys(data))
+      |> Map.put(@atom_keys, atom_keys)
+
     {:ok, execution} =
       execution
       |> Ecto.Changeset.change(
-        context: sanitize_for_json(context),
-        status: :pending,
-        scheduled_at: at,
-        locked_by: nil,
-        locked_at: nil
+        [context: sanitize_for_json(context), status: :pending, locked_by: nil, locked_at: nil] ++
+          attrs
       )
       |> cas_update!(config)
 

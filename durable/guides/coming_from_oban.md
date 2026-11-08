@@ -26,6 +26,7 @@ does the same thing here.
 | `assert_enqueued`, `refute_enqueued`, `all_enqueued` | `assert_started`, `refute_started`, `all_started` in `Durable.Testing` |
 | `Oban.drain_queue/1` | `Durable.Testing.drain/2` |
 | A queue with a `limit` | A queue with a `concurrency` |
+| A queue per pipeline stage | `queue:` on each step of one workflow |
 
 ## Differences That Bite
 
@@ -45,7 +46,8 @@ does the same thing here.
 - **Keys are checked on every start**, `start_many/2` included. Oban's
   `insert_all` on the basic engine skips unique checks.
 - **Queue concurrency is per node.** `concurrency: 20` on three nodes runs up
-  to 60 at once, as Oban's `limit` does without Oban Pro's global limits.
+  to 60 at once, as Oban's `limit` does without Oban Pro's global limits. That
+  goes for a step's `queue:` too.
 
 ## Production Settings
 

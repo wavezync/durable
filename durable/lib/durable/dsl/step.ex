@@ -49,9 +49,12 @@ defmodule Durable.DSL.Step do
     a separate process: its body sees the same context and captured logs,
     but `self()` is not the worker.
   - `:compensate` - Name of compensation function for saga pattern
-  - `:queue` - The queue for this step, in a `parallel` block only: each
-    branch runs as its own run, on this queue. Other steps run on the run's
-    queue
+  - `:queue` - The queue this step runs on. The run moves there before the
+    step and takes a slot from that queue's `:concurrency`, which is per node.
+    The next step without a `:queue` goes back to the queue the run started
+    on. Moving costs one more claim, so with no `:pubsub` configured it waits
+    up to that queue's `:poll_interval`. No node polling the queue holds the
+    run there. In a `parallel` block each branch is its own run on this queue
 
   """
 

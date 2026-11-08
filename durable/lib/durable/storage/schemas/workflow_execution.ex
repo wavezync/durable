@@ -46,6 +46,7 @@ defmodule Durable.Storage.Schemas.WorkflowExecution do
           holds_key: boolean(),
           tags: [String.t()],
           runs_after_id: Ecto.UUID.t() | nil,
+          home_queue: String.t() | nil,
           inserted_at: DateTime.t(),
           updated_at: DateTime.t()
         }
@@ -110,6 +111,9 @@ defmodule Durable.Storage.Schemas.WorkflowExecution do
     field(:tags, {:array, :string}, default: [])
     # A run waiting for this run to end before it takes the key (run_again).
     field(:runs_after_id, :binary_id)
+    # The queue to go back to while a step's `queue:` has the run elsewhere.
+    # `queue` is always where the run is claimed now.
+    field(:home_queue, :string)
 
     has_many(:step_executions, Durable.Storage.Schemas.StepExecution, foreign_key: :workflow_id)
     has_many(:pending_inputs, Durable.Storage.Schemas.PendingInput, foreign_key: :workflow_id)

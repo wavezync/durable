@@ -26,7 +26,8 @@ defmodule Durable.DSL.Workflow do
     running is stopped (and not retried), and a waiting run is woken to fail.
     Steps in a run with a timeout run in their own process; see the step
     `:timeout` option.
-  - `:queue` - The queue runs start on unless `Durable.start/3` names one
+  - `:queue` - The queue runs start on unless `Durable.start/3` names one. A
+    step's own `:queue` moves the run for that step
   - `:reuse` - When a start with a `key:` may run again after the run holding
     that key has finished: `:after_close` (default, after any finish),
     `:after_failure` (only after it failed, was cancelled or rolled back; a
