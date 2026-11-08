@@ -1047,25 +1047,35 @@ defmodule Durable.Executor do
       wait_type: :single
     }
 
-    # Together, so a child that finishes finds the parent waiting or finds no
-    # event at all, never an event on a parent that can't be resumed yet.
-    {:ok, execution} =
+    {execution, _event} = enter_wait(config, execution, fn -> insert_event!(config, attrs) end)
+
+    settle_child(config, child_id)
+    {:waiting, execution}
+  end
+
+  # Commits a wait's rows and the run's :waiting status together, so whoever
+  # answers the wait finds a run it can resume or finds no wait at all, never a
+  # wait on a run that's still :running. Returns the waiting run and what
+  # `insert_wait` returned.
+  defp enter_wait(config, execution, insert_wait) do
+    {:ok, entered} =
       Repo.transaction(config, fn ->
-        {:ok, _} =
-          %PendingEvent{}
-          |> PendingEvent.changeset(attrs)
-          |> Repo.insert(config)
+        wait = insert_wait.()
 
         {:ok, waiting} =
           execution
           |> Ecto.Changeset.change(status: :waiting, scheduled_at: nil)
           |> cas_update!(config)
 
-        waiting
+        {waiting, wait}
       end)
 
-    settle_child(config, child_id)
-    {:waiting, execution}
+    entered
+  end
+
+  defp insert_event!(config, attrs) do
+    {:ok, event} = %PendingEvent{} |> PendingEvent.changeset(attrs) |> Repo.insert(config)
+    event
   end
 
   # A child that finished before the parent's event existed had no one to tell,
@@ -2490,15 +2500,7 @@ defmodule Durable.Executor do
       wait_type: :single
     }
 
-    {:ok, _pending_event} =
-      %PendingEvent{}
-      |> PendingEvent.changeset(attrs)
-      |> Repo.insert(config)
-
-    {:ok, execution} =
-      execution
-      |> Ecto.Changeset.change(status: :waiting, scheduled_at: nil)
-      |> cas_update!(config)
+    {execution, _event} = enter_wait(config, execution, fn -> insert_event!(config, attrs) end)
 
     # An event sent before the run got here (`send_event(..., buffer: true)`,
     # a keyed start with `on_duplicate: {:send_event, name}`) resumes it now.
@@ -2525,15 +2527,11 @@ defmodule Durable.Executor do
       on_timeout: Keyword.get(opts, :on_timeout, :resume)
     }
 
-    {:ok, pending_input} =
-      %PendingInput{}
-      |> PendingInput.changeset(attrs)
-      |> Repo.insert(config)
-
-    {:ok, execution} =
-      execution
-      |> Ecto.Changeset.change(status: :waiting, scheduled_at: nil)
-      |> cas_update!(config)
+    {execution, pending_input} =
+      enter_wait(config, execution, fn ->
+        {:ok, input} = %PendingInput{} |> PendingInput.changeset(attrs) |> Repo.insert(config)
+        input
+      end)
 
     DurablePubSub.broadcast_workflow(config, :workflow_waiting, workflow_event(execution))
     DurablePubSub.broadcast_input(config, :input_requested, pending_input_event(pending_input))
@@ -2563,33 +2561,27 @@ defmodule Durable.Executor do
       timeout_value: serialize_timeout_value(Keyword.get(opts, :timeout_value))
     }
 
-    {:ok, wait_group} =
-      %WaitGroup{}
-      |> WaitGroup.changeset(group_attrs)
-      |> Repo.insert(config)
+    {execution, _group} =
+      enter_wait(config, execution, fn ->
+        {:ok, wait_group} =
+          %WaitGroup{}
+          |> WaitGroup.changeset(group_attrs)
+          |> Repo.insert(config)
 
-    # Create pending event records for each event in the group
-    Enum.each(event_names, fn event_name ->
-      event_attrs = %{
-        workflow_id: execution.id,
-        event_name: event_name,
-        step_name: execution.current_step,
-        wait_group_id: wait_group.id,
-        wait_type: wait_type,
-        timeout_at: timeout_at,
-        timeout_value: serialize_timeout_value(Keyword.get(opts, :timeout_value))
-      }
+        for event_name <- event_names do
+          insert_event!(config, %{
+            workflow_id: execution.id,
+            event_name: event_name,
+            step_name: execution.current_step,
+            wait_group_id: wait_group.id,
+            wait_type: wait_type,
+            timeout_at: timeout_at,
+            timeout_value: serialize_timeout_value(Keyword.get(opts, :timeout_value))
+          })
+        end
 
-      {:ok, _} =
-        %PendingEvent{}
-        |> PendingEvent.changeset(event_attrs)
-        |> Repo.insert(config)
-    end)
-
-    {:ok, execution} =
-      execution
-      |> Ecto.Changeset.change(status: :waiting, scheduled_at: nil)
-      |> cas_update!(config)
+        wait_group
+      end)
 
     {:waiting, execution}
   end

@@ -233,6 +233,30 @@ defmodule Durable.Integration.RunControlTest do
     end
   end
 
+  defmodule WaitsForAny do
+    use Durable
+    use Durable.Wait
+
+    workflow "rc_waits_for_any" do
+      step(:a, fn data ->
+        wait_for_any(["yes", "no"])
+        {:ok, data}
+      end)
+    end
+  end
+
+  defmodule WaitsForAll do
+    use Durable
+    use Durable.Wait
+
+    workflow "rc_waits_for_all" do
+      step(:a, fn data ->
+        wait_for_all(["one", "two"])
+        {:ok, data}
+      end)
+    end
+  end
+
   defmodule FailsUntilAllowed do
     use Durable
 
@@ -459,6 +483,23 @@ defmodule Durable.Integration.RunControlTest do
         {:ok, data}
       end)
     end
+  end
+
+  # Holds every run for half a second as it becomes :waiting.
+  defp slow_wait! do
+    IntegrationRepo.query!("""
+    CREATE FUNCTION durable.slow_wait() RETURNS trigger AS $$
+    BEGIN PERFORM pg_sleep(0.5); RETURN NEW; END;
+    $$ LANGUAGE plpgsql
+    """)
+
+    IntegrationRepo.query!("""
+    CREATE TRIGGER slow_wait BEFORE UPDATE ON durable.workflow_executions
+    FOR EACH ROW WHEN (OLD.status = 'running' AND NEW.status = 'waiting')
+    EXECUTE FUNCTION durable.slow_wait()
+    """)
+
+    on_exit(fn -> IntegrationRepo.query!("DROP FUNCTION durable.slow_wait() CASCADE") end)
   end
 
   defp start!(workflow, input \\ %{}, opts \\ []) do
@@ -803,19 +844,7 @@ defmodule Durable.Integration.RunControlTest do
     end
 
     test "is not missed when it ends between its parent's event and its waiting" do
-      IntegrationRepo.query!("""
-      CREATE FUNCTION durable.slow_wait() RETURNS trigger AS $$
-      BEGIN PERFORM pg_sleep(0.5); RETURN NEW; END;
-      $$ LANGUAGE plpgsql
-      """)
-
-      IntegrationRepo.query!("""
-      CREATE TRIGGER slow_wait BEFORE UPDATE ON durable.workflow_executions
-      FOR EACH ROW WHEN (OLD.status = 'running' AND NEW.status = 'waiting')
-      EXECUTE FUNCTION durable.slow_wait()
-      """)
-
-      on_exit(fn -> IntegrationRepo.query!("DROP FUNCTION durable.slow_wait() CASCADE") end)
+      slow_wait!()
 
       id = start!(CallsQuick)
       await_status(id, :completed, 5_000)
@@ -883,6 +912,49 @@ defmodule Durable.Integration.RunControlTest do
 
       assert message =~ ":still_booked"
       assert run.context["child_error"]["message"] == "card declined"
+    end
+  end
+
+  describe "going into a wait" do
+    setup do
+      start_durable!(%{default: 5})
+      slow_wait!()
+      :ok
+    end
+
+    # Refused while the run isn't waiting yet, accepted once it is.
+    defp until_accepted(send), do: assert_eventually(fn -> send.() == :ok end, 5_000, 10)
+
+    test "an event sent meanwhile is refused or delivered, never swallowed" do
+      id = start!(Waits)
+      until_accepted(fn -> Durable.send_event(id, "go", %{}) end)
+      await_status(id, :completed, 5_000)
+    end
+
+    test "an input given meanwhile is refused or delivered, never swallowed" do
+      id = start!(Asks)
+      until_accepted(fn -> Durable.provide_input(id, "approve", %{}) end)
+      await_status(id, :completed, 5_000)
+    end
+
+    test "wait_for_any gets an event sent meanwhile" do
+      id = start!(WaitsForAny)
+      until_accepted(fn -> Durable.send_event(id, "yes", %{}) end)
+      await_status(id, :completed, 5_000)
+    end
+
+    test "wait_for_all gets events sent meanwhile" do
+      id = start!(WaitsForAll)
+      until_accepted(fn -> Durable.send_event(id, "one", %{}) end)
+      until_accepted(fn -> Durable.send_event(id, "two", %{}) end)
+      await_status(id, :completed, 5_000)
+    end
+
+    test "a buffered event sent meanwhile is delivered" do
+      id = start!(Waits)
+      Process.sleep(100)
+      assert :ok = Durable.send_event(id, "go", %{}, buffer: true)
+      await_status(id, :completed, 5_000)
     end
   end
 
