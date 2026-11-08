@@ -100,6 +100,61 @@ jobs:
       - name: Run tests
         run: mix test
 
+  # Live pollers, committed rows, the real clock and second BEAM nodes: what the
+  # SQL Sandbox in the job above can't exercise.
+  integration:
+    name: Durable integration
+    needs: changes
+    if: needs.changes.outputs.durable == 'true' || needs.changes.outputs.ci == 'true' || github.event_name == 'push'
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 54321:5432
+        options: >-
+          --health-cmd="pg_isready -U postgres"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+
+    defaults:
+      run:
+        working-directory: durable
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Elixir
+        uses: erlef/setup-beam@v1
+        with:
+          elixir-version: ${{ env.ELIXIR_VERSION }}
+          otp-version: ${{ env.OTP_VERSION }}
+
+      - name: Restore dependencies cache
+        uses: actions/cache@v6
+        with:
+          path: durable/deps
+          key: ${{ runner.os }}-durable-mix-${{ hashFiles('durable/mix.lock') }}
+          restore-keys: ${{ runner.os }}-durable-mix-
+
+      - name: Restore build cache
+        uses: actions/cache@v6
+        with:
+          path: durable/_build
+          key: ${{ runner.os }}-durable-build-${{ env.OTP_VERSION }}-${{ env.ELIXIR_VERSION }}-${{ hashFiles('durable/mix.lock') }}
+          restore-keys: ${{ runner.os }}-durable-build-${{ env.OTP_VERSION }}-${{ env.ELIXIR_VERSION }}-
+
+      - name: Install dependencies
+        run: mix deps.get
+
+      - name: Run integration tests
+        run: mix test --only integration
+
   dashboard:
     name: Dashboard
     needs: changes
@@ -204,7 +259,7 @@ jobs:
 
   ci-status:
     name: CI status
-    needs: [changes, durable, dashboard]
+    needs: [changes, durable, integration, dashboard]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -213,4 +268,5 @@ jobs:
           set -e
           [[ "${{ needs.changes.result }}" == "success" ]] || exit 1
           [[ "${{ needs.durable.result }}" =~ ^(success|skipped)$ ]] || exit 1
+          [[ "${{ needs.integration.result }}" =~ ^(success|skipped)$ ]] || exit 1
           [[ "${{ needs.dashboard.result }}" =~ ^(success|skipped)$ ]] || exit 1
