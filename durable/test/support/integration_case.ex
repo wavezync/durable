@@ -14,9 +14,9 @@ defmodule Durable.IntegrationCase do
   alias Durable.IntegrationRepo
   alias Durable.Storage.Schemas.WorkflowExecution
 
-  using do
+  using opts do
     quote do
-      @moduletag :integration
+      @moduletag unquote(Keyword.get(opts, :tag, :integration))
 
       import Durable.DataCase,
         only: [assert_eventually: 1, assert_eventually: 2, assert_eventually: 3]

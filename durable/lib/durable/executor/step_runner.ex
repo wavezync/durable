@@ -19,6 +19,13 @@ defmodule Durable.Executor.StepRunner do
 
   import Ecto.Query, only: [from: 2]
 
+  # A date or a decimal is a map to Elixir, but JSON stores it as a scalar, and
+  # a run's data has to come back as an object.
+  @scalars [Date, DateTime, NaiveDateTime, Time, Decimal]
+  defguardp is_run_data(term)
+            when is_map(term) and
+                   not (is_struct(term) and :erlang.map_get(:__struct__, term) in @scalars)
+
   @type result ::
           {:ok, map()}
           | {:error, any()}
@@ -228,7 +235,7 @@ defmodule Durable.Executor.StepRunner do
     :call_workflow
   ]
 
-  defp step_outcome({:ok, data}) when is_map(data), do: %{result: :ok}
+  defp step_outcome({:ok, data}) when is_run_data(data), do: %{result: :ok}
   defp step_outcome({:goto, _target, _data}), do: %{result: :ok}
   defp step_outcome({:throw, {kind, _opts}}) when kind in @suspending, do: %{result: :suspended}
   defp step_outcome({:error, error}), do: %{result: :error, error: error_summary(error)}
@@ -250,7 +257,7 @@ defmodule Durable.Executor.StepRunner do
   defp error_summary(error), do: %{type: "error", message: inspect(error)}
 
   # Handle step result from pipeline model
-  defp handle_result({:ok, new_data}, ctx) when is_map(new_data) do
+  defp handle_result({:ok, new_data}, ctx) when is_run_data(new_data) do
     %{step: step, step_exec: step_exec, logs: logs, duration_ms: duration_ms, config: config} =
       ctx
 
@@ -317,8 +324,7 @@ defmodule Durable.Executor.StepRunner do
     } = ctx
 
     if attempt < max_attempts and not past?(deadline) do
-      normalized_error = normalize_error_for_storage(error)
-      {:ok, _} = fail_step_execution(config, step_exec, normalized_error, logs, duration_ms)
+      {:ok, _} = fail_step_execution(config, step_exec, error, logs, duration_ms)
 
       retry_opts = get_retry_opts(step)
       backoff_strategy = Map.get(retry_opts, :backoff, :exponential)
@@ -374,8 +380,7 @@ defmodule Durable.Executor.StepRunner do
 
   defp give_up(error, ctx) do
     %{step_exec: step_exec, logs: logs, duration_ms: duration_ms, config: config} = ctx
-    normalized_error = normalize_error_for_storage(error)
-    {:ok, _} = fail_step_execution(config, step_exec, normalized_error, logs, duration_ms)
+    {:ok, _} = fail_step_execution(config, step_exec, error, logs, duration_ms)
     {:error, error}
   end
 
@@ -512,7 +517,7 @@ defmodule Durable.Executor.StepRunner do
     # (e.g., FunctionClauseError args), PIDs, refs, and functions in the
     # stacktrace area, none of which can survive a JSONB write. Mirror the
     # defense applied to workflow-level mark_failed in lib/durable/executor.ex.
-    safe_error = Durable.Executor.sanitize_for_json(error)
+    safe_error = Durable.Executor.storable_error(error)
 
     case step_exec
          |> StepExecution.fail_changeset(safe_error, logs, duration_ms, status)
@@ -550,23 +555,10 @@ defmodule Durable.Executor.StepRunner do
   @spec serialize_output(term()) :: map() | nil
   def serialize_output(nil), do: nil
 
-  def serialize_output(output) when is_map(output) do
-    Durable.Executor.sanitize_for_json(output)
-  end
-
   def serialize_output(output) do
-    %{value: Durable.Executor.sanitize_for_json(output)}
+    case Durable.Executor.sanitize_for_json(output) do
+      map when is_map(map) and not is_struct(map) -> map
+      value -> %{value: value}
+    end
   end
-
-  # Normalize error to map format for database storage
-  # The error field in StepExecution expects a map
-  defp normalize_error_for_storage(error) when is_map(error), do: error
-
-  defp normalize_error_for_storage(error) when is_binary(error),
-    do: %{type: "error", message: error}
-
-  defp normalize_error_for_storage(error) when is_atom(error),
-    do: %{type: "error", message: Atom.to_string(error)}
-
-  defp normalize_error_for_storage(error), do: %{type: "error", message: inspect(error)}
 end

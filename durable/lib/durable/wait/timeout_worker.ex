@@ -95,11 +95,23 @@ defmodule Durable.Wait.TimeoutWorker do
   defp do_check_timeouts(config) do
     now = DateTime.utc_now()
 
-    process_timed_out_inputs(config, now)
-    process_timed_out_events(config, now)
-    process_timed_out_wait_groups(config, now)
-    process_expired_runs(config, now)
-    process_unpolled_runs(config, now)
+    for sweep <- [
+          &process_timed_out_inputs/2,
+          &process_timed_out_events/2,
+          &process_timed_out_wait_groups/2,
+          &process_expired_runs/2,
+          &process_unpolled_runs/2
+        ] do
+      run_sweep(sweep, config, now)
+    end
+  end
+
+  # A row one sweep can't handle mustn't stop the others, or crash this process
+  # over and over until it takes the node's Durable down with it.
+  defp run_sweep(sweep, config, now) do
+    sweep.(config, now)
+  rescue
+    error -> Logger.error("[Durable] timeout sweep failed: #{Exception.message(error)}")
   end
 
   # A waiting run past its deadline is resumed; the executor sees the deadline

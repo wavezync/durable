@@ -150,7 +150,7 @@ defmodule Durable.Queue.Adapters.Postgres do
         if fenced?(execution, lock_token) or execution.status != :running do
           :ok
         else
-          error = normalize_error(reason)
+          error = Durable.Executor.storable_error(reason)
 
           execution
           |> Ecto.Changeset.change(
@@ -521,14 +521,4 @@ defmodule Durable.Queue.Adapters.Postgres do
   defp decode_json(nil), do: %{}
   defp decode_json(value) when is_map(value), do: value
   defp decode_json(value) when is_binary(value), do: Jason.decode!(value)
-
-  defp normalize_error(reason) when is_map(reason), do: reason
-
-  defp normalize_error(reason) when is_binary(reason) do
-    %{type: "error", message: reason}
-  end
-
-  defp normalize_error(reason) do
-    %{type: "error", message: inspect(reason)}
-  end
 end

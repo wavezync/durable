@@ -1487,7 +1487,7 @@ defmodule Durable.Executor do
           mark_completed(config, execution, output_data)
 
         {:error, error} ->
-          mark_failed(config, execution, normalize_error(error))
+          mark_failed(config, execution, error)
 
         {:cancel, reason, scope} ->
           cancel_from_step(config, execution, reason, scope)
@@ -1559,7 +1559,7 @@ defmodule Durable.Executor do
 
     if effective_strategy == :fail_fast && errors != [] do
       {_key, {:error, first_error}} = hd(errors)
-      handle_step_failure(exec, normalize_error(first_error), workflow_def, config)
+      handle_step_failure(exec, first_error, workflow_def, config)
     else
       handle_parallel_completion(results, clean_ctx, into_fn, %{
         remaining_steps: remaining_steps,
@@ -1653,7 +1653,7 @@ defmodule Durable.Executor do
         end
 
       {:error, error} ->
-        handle_step_failure(exec, normalize_error(error), workflow_def, config)
+        handle_step_failure(exec, error, workflow_def, config)
     end
   end
 
@@ -1894,7 +1894,7 @@ defmodule Durable.Executor do
     # Postgres JSONB can't store those, so we recursively replace unencodable
     # leaves with their inspect/1 string. If save STILL fails we fall back to
     # a minimal diagnostic error so the workflow is never left as a zombie.
-    safe_error = sanitize_for_json(error)
+    safe_error = storable_error(error)
 
     result =
       try do
@@ -1966,16 +1966,22 @@ defmodule Durable.Executor do
   # An error as a map Jason can encode, whatever a step or compensation returned.
   @doc false
   @spec storable_error(term()) :: map()
-  def storable_error(error), do: error |> normalize_error() |> sanitize_for_json()
+  def storable_error(error) do
+    case error |> normalize_error() |> sanitize_for_json() do
+      map when is_map(map) and not is_struct(map) -> map
+      # A date or a decimal is JSON, but not the object the column has to load.
+      other -> %{type: "error", message: inspect(other)}
+    end
+  end
+
+  @json_scalars [Date, DateTime, NaiveDateTime, Time, Decimal]
 
   # Recursively convert a term into something Jason can encode. Tuples become
   # lists, non-Date/DateTime atoms pass through, and anything else exotic
   # (PIDs, ports, functions, refs) is replaced by its inspect/1 form.
   @doc false
   @spec sanitize_for_json(term()) :: term()
-  def sanitize_for_json(%module{} = struct)
-      when module in [Date, DateTime, NaiveDateTime, Time, Decimal],
-      do: struct
+  def sanitize_for_json(%module{} = struct) when module in @json_scalars, do: struct
 
   def sanitize_for_json(%_{} = struct),
     do: sanitize_for_json(Map.from_struct(struct))
@@ -1985,23 +1991,32 @@ defmodule Durable.Executor do
   end
 
   def sanitize_for_json(list) when is_list(list) do
-    Enum.map(list, &sanitize_for_json/1)
+    if List.improper?(list), do: inspect(list), else: Enum.map(list, &sanitize_for_json/1)
   end
 
   def sanitize_for_json(tuple) when is_tuple(tuple) do
     tuple |> Tuple.to_list() |> Enum.map(&sanitize_for_json/1)
   end
 
-  def sanitize_for_json(term)
-      when is_binary(term) or is_number(term) or is_boolean(term) or is_nil(term),
-      do: term
+  def sanitize_for_json(term) when is_binary(term), do: storable_string(term)
 
-  def sanitize_for_json(term) when is_atom(term), do: term
+  def sanitize_for_json(term) when is_number(term) or is_boolean(term) or is_nil(term), do: term
+
+  def sanitize_for_json(term) when is_atom(term) do
+    string = Atom.to_string(term)
+    if String.contains?(string, <<0>>), do: storable_string(string), else: term
+  end
 
   def sanitize_for_json(term), do: inspect(term)
 
-  defp sanitize_json_key(k) when is_atom(k) or is_binary(k), do: k
+  defp sanitize_json_key(k) when is_binary(k), do: storable_string(k)
+  defp sanitize_json_key(k) when is_atom(k), do: sanitize_for_json(k)
   defp sanitize_json_key(k), do: inspect(k)
+
+  # jsonb can't hold a NUL, and JSON can't hold bytes that aren't UTF-8.
+  defp storable_string(string) do
+    if String.valid?(string), do: String.replace(string, <<0>>, "\uFFFD"), else: inspect(string)
+  end
 
   # ============================================================================
   # Parent Notification (Orchestration)
@@ -2630,7 +2645,7 @@ defmodule Durable.Executor do
   # their inspect/1 form so Postgrex never crashes on encode.
   defp serialize_timeout_value(nil), do: nil
 
-  defp serialize_timeout_value(value) when is_map(value),
+  defp serialize_timeout_value(value) when is_map(value) and not is_struct(value),
     do: sanitize_for_json(value)
 
   defp serialize_timeout_value(value) when is_atom(value),

@@ -35,6 +35,10 @@ defmodule Durable.IntegrationProbe do
     end
   end
 
+  @doc "Stores a term for a step to pick up, without a trip through JSON."
+  def put(key, value), do: GenServer.call(@name, {:put, key, value})
+  def fetch(key), do: GenServer.call(@name, {:fetch, key})
+
   def set(flag), do: GenServer.call(@name, {:set, flag})
   def set?(flag), do: GenServer.call(@name, {:set?, flag})
   def hits(label), do: GenServer.call(@name, {:hits, label})
@@ -47,9 +51,17 @@ defmodule Durable.IntegrationProbe do
   def trail, do: Enum.map(log(), fn {label, queue, _node} -> {label, queue} end)
 
   @impl true
-  def init(nil), do: {:ok, %{hits: %{}, running: %{}, peak: %{}, log: [], flags: MapSet.new()}}
+  def init(nil) do
+    {:ok, %{hits: %{}, running: %{}, peak: %{}, log: [], flags: MapSet.new(), stored: %{}}}
+  end
 
   @impl true
+  def handle_call({:put, key, value}, _from, state) do
+    {:reply, :ok, put_in(state.stored[key], value)}
+  end
+
+  def handle_call({:fetch, key}, _from, state), do: {:reply, Map.fetch!(state.stored, key), state}
+
   def handle_call({:here, label, queue}, {pid, _}, state) do
     state = count(state, label)
     state = %{state | log: [{label, queue, node(pid)} | state.log]}
