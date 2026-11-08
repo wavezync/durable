@@ -745,9 +745,7 @@ defmodule Durable.Executor do
     # Get workflow definition for compensation lookup
     {:ok, workflow_def} = get_workflow_definition_from_execution(execution)
 
-    # A resumed run picks up at its current step, found by name.
-    {_already_completed, steps_to_run} =
-      Enum.split_while(steps, &(execution.current_step not in [nil, Atom.to_string(&1.name)]))
+    steps_to_run = steps_to_resume(steps, execution.current_step)
 
     if steps_to_run == [] and execution.current_step != nil do
       # The deployed definition no longer has the step this run stopped at.
@@ -763,6 +761,34 @@ defmodule Durable.Executor do
       run_steps(steps, steps_to_run, execution, workflow_def, config, initial_data)
     end
   end
+
+  # A resumed run picks up at its current step, found by name. The steps of
+  # every branch clause sit side by side in the definition, so a run that
+  # stopped inside a branch goes on with the rest of its own clause and then
+  # whatever follows the block.
+  defp steps_to_resume(steps, nil), do: steps
+
+  defp steps_to_resume(steps, current) do
+    rest = Enum.drop_while(steps, &(Atom.to_string(&1.name) != current))
+
+    case Enum.find(steps, &(&1.type == :branch and named?(&1.opts[:all_steps], current))) do
+      nil ->
+        rest
+
+      branch ->
+        rest_of_clause(branch, current, steps) ++
+          Enum.reject(rest, &(&1.name in branch.opts[:all_steps]))
+    end
+  end
+
+  defp rest_of_clause(branch, current, steps) do
+    branch.opts[:clauses]
+    |> Enum.find_value(fn {_pattern, names} -> if named?(names, current), do: names end)
+    |> Enum.drop_while(&(Atom.to_string(&1) != current))
+    |> Enum.map(fn name -> Enum.find(steps, &(&1.name == name)) end)
+  end
+
+  defp named?(names, current), do: Enum.any?(names, &(Atom.to_string(&1) == current))
 
   defp run_steps(steps, steps_to_run, execution, workflow_def, config, initial_data) do
     # Build step index for validation

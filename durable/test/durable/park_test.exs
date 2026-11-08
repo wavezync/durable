@@ -42,6 +42,51 @@ defmodule Durable.ParkTest do
     end
   end
 
+  defmodule RetriesInBranch do
+    use Durable
+    use Durable.Helpers
+    use Durable.Context
+
+    workflow "retries_in_branch" do
+      step(:start, fn data -> {:ok, assign(data, :path, "a")} end)
+
+      branch on: fn data -> data[:path] || data["path"] end do
+        "a" ->
+          step(:a1, [retry: [max_attempts: 2, backoff: :constant, base: 1]], fn data ->
+            if attempt() == 1, do: {:error, :down}, else: {:ok, assign(data, :a1, true)}
+          end)
+
+          step(:a2, fn data -> {:ok, assign(data, :a2, true)} end)
+
+        "b" ->
+          step(:b1, fn data -> {:ok, assign(data, :b1, true)} end)
+      end
+
+      step(:after_branch, fn data -> {:ok, assign(data, :after_branch, true)} end)
+    end
+  end
+
+  defmodule SleepsInBranch do
+    use Durable
+    use Durable.Helpers
+    use Durable.Wait
+
+    workflow "sleeps_in_branch" do
+      branch on: fn _data -> "a" end do
+        "a" ->
+          step(:a1, fn data ->
+            sleep(1)
+            {:ok, assign(data, :a1, true)}
+          end)
+
+          step(:a2, fn data -> {:ok, assign(data, :a2, true)} end)
+
+        "b" ->
+          step(:b1, fn data -> {:ok, assign(data, :b1, true)} end)
+      end
+    end
+  end
+
   defmodule Snoozes do
     use Durable
     use Durable.Helpers
@@ -95,6 +140,22 @@ defmodule Durable.ParkTest do
 
     assert run.status == :completed
     assert %{"flaky" => ["ok", _], "steady" => ["ok", _]} = run.context["__results__"]
+  end
+
+  test "a retry inside a branch goes on with its own clause, then past the block" do
+    run = run_workflow(RetriesInBranch)
+
+    assert run.status == :completed
+    assert %{"a1" => true, "a2" => true, "after_branch" => true} = run.context
+    refute Map.has_key?(run.context, "b1")
+  end
+
+  test "a sleep inside a branch goes on with its own clause" do
+    run = run_workflow(SleepsInBranch)
+
+    assert run.status == :completed
+    assert %{"a1" => true, "a2" => true} = run.context
+    refute Map.has_key?(run.context, "b1")
   end
 
   test "a snooze runs the step again later, without using an attempt" do
