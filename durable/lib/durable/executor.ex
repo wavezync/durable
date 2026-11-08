@@ -411,32 +411,34 @@ defmodule Durable.Executor do
     end
   end
 
-  # Fails a run past its deadline that no worker will claim, from the timeout
-  # sweep. The claim goes through the row's status, so it can't overlap a poller
-  # or another node's sweep, and the deadline check before the next step does
-  # the failing, compensations included. A parallel branch has no such check;
-  # its parent's timeout cancels it.
+  # Moves a run past its deadline off a queue no live node polls, from the
+  # timeout sweep: to the queue it came from if that one is polled, else to one
+  # that is. The claim there fails it before its next step, so its compensations
+  # run in a worker, under that queue's limits, and not in the sweep. The update
+  # goes through the row's status and queue, so it can't overlap a poller or
+  # another node's sweep. A parallel branch has no deadline check; its parent's
+  # timeout cancels it. With no polled queue anywhere it stays until a node
+  # shows up.
   @doc false
-  @spec expire_unclaimed(String.t(), Config.t()) :: term()
-  def expire_unclaimed(workflow_id, %Config{} = config) do
+  @spec expire_unclaimed(String.t(), [String.t()], Config.t()) :: term()
+  def expire_unclaimed(workflow_id, polled, %Config{} = config) do
     with {:ok, execution} <- load_execution(config, workflow_id),
          false <- parallel_branch?(execution),
          {:ok, _workflow_def} <- get_workflow_definition_from_execution(execution),
-         {1, _} <- claim_pending(config, workflow_id) do
-      execute_workflow(workflow_id, config)
+         home = execution.home_queue || execution.queue,
+         queue when is_binary(queue) <- Enum.find([home, "default" | polled], &(&1 in polled)),
+         {1, _} <- hand_over(config, execution, queue, if(queue != home, do: home)) do
+      DurablePubSub.wake(config, %{status: :pending, queue: queue})
     end
   end
 
-  defp claim_pending(config, workflow_id) do
+  defp hand_over(config, execution, queue, home_queue) do
     Repo.update_all(
       config,
-      from(w in WorkflowExecution, where: w.id == ^workflow_id and w.status == :pending),
-      set: [
-        status: :running,
-        locked_by: config.node_id,
-        locked_at: DateTime.utc_now(),
-        lock_token: Ecto.UUID.generate()
-      ]
+      from(w in WorkflowExecution,
+        where: w.id == ^execution.id and w.status == :pending and w.queue == ^execution.queue
+      ),
+      set: [queue: queue, home_queue: home_queue, scheduled_at: nil]
     )
   end
 

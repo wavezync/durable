@@ -258,11 +258,17 @@ defmodule Durable.WorkflowTimeoutTest do
       )
     end
 
-    test "on a queue no node polls, fails from the sweep and runs its compensations" do
+    defp claim(id), do: Executor.execute_workflow(id, Config.get(Durable))
+
+    test "on a queue no node polls, goes back to its own and compensates there" do
       id = stuck_on_nobody()
+      repo().insert!(polling_node(["default"]))
       expire(id)
       sweep()
 
+      assert %{status: :pending, queue: "default", home_queue: nil} = run(id)
+
+      claim(id)
       assert %{status: :compensated, error: %{"type" => "timeout"}} = run(id)
 
       assert steps_of(id) == [
@@ -280,13 +286,55 @@ defmodule Durable.WorkflowTimeoutTest do
       assert %{status: :pending, queue: "nobody"} = run(id)
     end
 
-    test "on a queue only a missing node polled, fails from the sweep" do
+    test "on a queue only a missing node polled, moves" do
       id = stuck_on_nobody()
-      repo().insert!(polling_node(["nobody"], 60))
+      repo().insert!(%{polling_node(["nobody"], 60) | id: "missing-node"})
+      repo().insert!(polling_node(["default"]))
       expire(id)
       sweep()
 
-      assert %{status: :compensated} = run(id)
+      assert %{status: :pending, queue: "default"} = run(id)
+    end
+
+    test "with no live poller anywhere, stays until one shows up" do
+      id = stuck_on_nobody()
+      expire(id)
+      sweep()
+
+      assert %{status: :pending, queue: "nobody"} = run(id)
+    end
+
+    test "when its own queue isn't polled either, goes to \"default\" before any other" do
+      {:ok, id} = Durable.start(StuckSaga, %{}, queue: "gone")
+      repo().insert!(polling_node(["other", "default"]))
+      expire(id)
+      sweep()
+
+      assert %{status: :pending, queue: "default", home_queue: "gone"} = run(id)
+    end
+
+    test "with neither its own queue nor \"default\" polled, goes to one that is" do
+      {:ok, id} = Durable.start(StuckSaga, %{}, queue: "gone")
+      repo().insert!(polling_node(["other"]))
+      expire(id)
+      sweep()
+
+      assert %{status: :pending, queue: "other", home_queue: "gone"} = run(id)
+    end
+
+    test "parked for a retry or snooze far off, is claimable right away" do
+      id = stuck_on_nobody()
+      later = DateTime.add(DateTime.utc_now(), 3_600, :second)
+
+      repo().update_all(from(w in WorkflowExecution, where: w.id == ^id),
+        set: [scheduled_at: later]
+      )
+
+      repo().insert!(polling_node(["default"]))
+      expire(id)
+      sweep()
+
+      assert %{status: :pending, queue: "default", scheduled_at: nil} = run(id)
     end
 
     test "before its deadline, stays on the queue" do
@@ -298,20 +346,23 @@ defmodule Durable.WorkflowTimeoutTest do
 
     test "that never started fails before its first step" do
       {:ok, id} = Durable.start(StuckSaga, %{})
+      repo().insert!(polling_node(["other"]))
       expire(id)
       sweep()
+      claim(id)
 
       assert %{status: :failed, error: %{"type" => "timeout"}} = run(id)
       assert steps_of(id) == []
     end
 
-    test "a compensation that raises doesn't take the sweep down" do
+    test "a compensation that raises ends the run :compensation_failed" do
       id = stuck_on_nobody(StuckRaisingSaga)
+      repo().insert!(polling_node(["default"]))
       expire(id)
       sweep()
+      claim(id)
 
       assert %{status: :compensation_failed} = run(id)
-      assert Process.alive?(Process.whereis(TimeoutWorker.worker_name(Durable)))
     end
 
     for module <- ["Elixir.Enum", "Elixir.NoSuchWorkflowAnywhere"] do
@@ -328,11 +379,12 @@ defmodule Durable.WorkflowTimeoutTest do
           })
 
         id = stuck_on_nobody()
+        repo().insert!(polling_node(["default"]))
         expire(id)
         sweep()
 
-        assert %{status: :pending} = run(unknown.id)
-        assert %{status: :compensated} = run(id)
+        assert %{status: :pending, queue: "nobody"} = run(unknown.id)
+        assert %{status: :pending, queue: "default"} = run(id)
       end
     end
 
@@ -342,9 +394,10 @@ defmodule Durable.WorkflowTimeoutTest do
       [%{lock_token: token}] = Postgres.fetch_jobs(config, "nobody", 1, "worker-node")
       expire(id)
 
-      Executor.expire_unclaimed(id, config)
+      Executor.expire_unclaimed(id, ["default"], config)
 
-      assert %{status: :running, locked_by: "worker-node", lock_token: ^token} = run(id)
+      assert %{status: :running, queue: "nobody", locked_by: "worker-node", lock_token: ^token} =
+               run(id)
     end
 
     test "a parallel branch is not run or failed by itself" do
@@ -355,10 +408,11 @@ defmodule Durable.WorkflowTimeoutTest do
       [child] =
         repo().all(from(w in WorkflowExecution, where: w.parent_workflow_id == ^parent))
 
+      repo().insert!(polling_node(["default"]))
       expire(child.id)
       sweep()
 
-      assert %{status: :pending} = run(child.id)
+      assert %{status: :pending, queue: "nobody"} = run(child.id)
       assert steps_of(child.id) == []
     end
 
@@ -369,9 +423,11 @@ defmodule Durable.WorkflowTimeoutTest do
       [child] =
         repo().all(from(w in WorkflowExecution, where: w.parent_workflow_id == ^parent))
 
+      repo().insert!(polling_node(["default"]))
       expire(parent)
       expire(child.id)
       sweep()
+      claim(parent)
 
       assert %{status: :failed, error: %{"type" => "timeout"}} = run(parent)
       assert %{status: :cancelled} = run(child.id)

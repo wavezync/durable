@@ -3,7 +3,8 @@ defmodule Durable.Wait.TimeoutWorker do
   Background worker that enforces timeouts for pending inputs and events, and
   wakes waiting runs that passed their workflow `timeout:` so they fail now
   rather than when their wait ends. A run past its `timeout:` on a queue no
-  live node polls is failed from here, since no worker will ever claim it.
+  live node polls is handed to a queue that is polled, since no worker will
+  ever claim it where it is. The worker that claims it there fails it.
 
   Periodically checks for timed-out waits and either:
   - Resumes the workflow with the timeout_value (if on_timeout: :resume)
@@ -124,31 +125,33 @@ defmodule Durable.Wait.TimeoutWorker do
 
   # A run past its deadline on a queue a live node polls is failed by the claim
   # that reaches it, so a paused or backlogged queue keeps its limits. On any
-  # other queue no claim is coming.
+  # other queue no claim is coming, so it moves to one where it is.
   defp process_unpolled_runs(config, now) do
-    polled = for %{status: :alive, queues: queues} <- NodeRegistry.list(config), do: queues
+    polled =
+      for %{status: :alive, queues: queues} <- NodeRegistry.list(config),
+          queue <- queues,
+          uniq: true,
+          do: queue
 
     ids =
       Repo.all(
         config,
         from(w in WorkflowExecution,
           where: w.status == :pending and w.deadline_at <= ^now,
-          where: w.queue not in ^List.flatten(polled),
+          where: w.queue not in ^polled,
           select: w.id,
           limit: 500
         )
       )
 
-    Enum.each(ids, &expire_unpolled(config, &1))
+    Enum.each(ids, &expire_unpolled(config, &1, polled))
   end
 
-  # ponytail: compensations run inside the sweep, so slow ones delay it. Runs
-  # stuck on an unpolled queue are rare; give them a process if that changes.
-  defp expire_unpolled(config, id) do
-    Executor.expire_unclaimed(id, config)
+  defp expire_unpolled(config, id, polled) do
+    Executor.expire_unclaimed(id, polled, config)
   rescue
-    # A node that doesn't have this workflow's code can't fail it; a crash here
-    # would only repeat on every sweep.
+    # A node that doesn't have this workflow's code leaves it to one that does;
+    # a crash here would only repeat on every sweep.
     error ->
       Logger.error("[Durable] couldn't time out run #{id}: #{Exception.message(error)}")
   end

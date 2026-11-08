@@ -606,8 +606,9 @@ defmodule Durable.StepQueueTest do
     assert ran(id) == []
   end
 
-  test "past its timeout, a run on a queue nobody polls is failed by the sweep" do
+  test "past its timeout, a run on a queue nobody polls goes home and fails there" do
     worker = start_supervised!({TimeoutWorker, config: Config.get(Durable), interval: 3_600_000})
+    TestRepo.insert!(live_node(["default"]))
 
     {:ok, id} = Durable.start(TimesOutOnOcr, %{})
     advance(id, "default")
@@ -615,8 +616,9 @@ defmodule Durable.StepQueueTest do
 
     send(worker, :check_timeouts)
     :sys.get_state(worker)
+    assert %{status: :pending, queue: "default", home_queue: nil} = get(id)
 
-    run = get(id)
+    run = advance(id, "default")
     assert {run.status, run.error["type"]} == {:failed, "timeout"}
     assert ran(id) == []
   end

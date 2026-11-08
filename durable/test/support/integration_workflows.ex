@@ -252,6 +252,34 @@ defmodule Durable.IntegrationWorkflows do
     end
   end
 
+  defmodule StuckSlowSaga do
+    @moduledoc false
+    use Durable
+
+    workflow "it_stuck_slow_saga", timeout: 300 do
+      step(:reserve, [compensate: :release], fn data -> {:ok, data} end)
+      step(:charge, [queue: :nobody], fn data -> {:ok, data} end)
+
+      compensate(:release, fn data ->
+        Probe.here(:slow_release)
+        Process.sleep(1_200)
+        {:ok, data}
+      end)
+    end
+  end
+
+  defmodule LostFromTheStart do
+    @moduledoc false
+    use Durable
+
+    workflow "it_lost_from_the_start", queue: :nobody, timeout: 300 do
+      step(:a, fn data ->
+        Probe.here(:lost)
+        {:ok, data}
+      end)
+    end
+  end
+
   defmodule TimesOutOnOcr do
     @moduledoc false
     use Durable

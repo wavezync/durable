@@ -357,7 +357,34 @@ defmodule Durable.Integration.StepQueuesTest do
 
       run = await_status(id, :compensated)
       assert run.error["type"] == "timeout"
-      assert Probe.trail() == [{:reserve, "default"}, {:release, "nobody"}]
+      assert Probe.trail() == [{:reserve, "default"}, {:release, "default"}]
+    end
+
+    test "a slow compensation runs in a worker, so the sweep carries on" do
+      id = start!(W.StuckSlowSaga)
+      assert_eventually(fn -> get(id).queue == "nobody" end)
+      Process.sleep(350)
+
+      TimeoutWorker.check_timeouts(Durable)
+      assert_eventually(fn -> Probe.hits(:slow_release) == 1 end)
+
+      # Exits if the sweep is still busy with the compensation.
+      :sys.get_state(TimeoutWorker.worker_name(Durable), 300)
+
+      await_status(id, :compensated)
+    end
+
+    test "a run started on a queue nobody polls fails on one that's polled" do
+      id = start!(W.LostFromTheStart)
+      assert get(id).queue == "nobody"
+      Process.sleep(350)
+
+      sweep()
+
+      run = await_status(id, :failed)
+      assert run.error["type"] == "timeout"
+      assert run.queue != "nobody"
+      assert Probe.hits(:lost) == 0
     end
 
     test "a run that runs out of time on one queue never reaches the next" do
