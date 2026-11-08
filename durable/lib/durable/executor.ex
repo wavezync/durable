@@ -1028,17 +1028,48 @@ defmodule Durable.Executor do
       wait_type: :single
     }
 
-    {:ok, _} =
-      %PendingEvent{}
-      |> PendingEvent.changeset(attrs)
-      |> Repo.insert(config)
-
+    # Together, so a child that finishes finds the parent waiting or finds no
+    # event at all, never an event on a parent that can't be resumed yet.
     {:ok, execution} =
-      execution
-      |> Ecto.Changeset.change(status: :waiting, scheduled_at: nil)
-      |> cas_update!(config)
+      Repo.transaction(config, fn ->
+        {:ok, _} =
+          %PendingEvent{}
+          |> PendingEvent.changeset(attrs)
+          |> Repo.insert(config)
 
+        {:ok, waiting} =
+          execution
+          |> Ecto.Changeset.change(status: :waiting, scheduled_at: nil)
+          |> cas_update!(config)
+
+        waiting
+      end)
+
+    settle_child(config, child_id)
     {:waiting, execution}
+  end
+
+  # A child that finished before the parent's event existed had no one to tell,
+  # so tell it now. A child's finish commits before it looks for the event and
+  # this reads the child after the event commits, so one of the two sees the
+  # other. A child that hasn't finished is woken only now, once its parent is
+  # ready to hear from it.
+  defp settle_child(config, child_id) do
+    child = Repo.get(config, WorkflowExecution, child_id)
+
+    case child do
+      %{status: :completed} ->
+        notify_orchestration_parent(config, child, :completed, child.context)
+
+      %{status: :cancelled} ->
+        notify_orchestration_parent(config, child, :cancelled, child.error)
+
+      %{status: status} when status in [:failed, :compensated, :compensation_failed] ->
+        notify_orchestration_parent(config, child, :failed, child.error)
+
+      _still_going ->
+        DurablePubSub.wake(config, child)
+    end
   end
 
   # The branch's `on:` value. The DSL stores the function as `body_fn`; older
@@ -1278,7 +1309,24 @@ defmodule Durable.Executor do
   end
 
   # Fan-out: create child workflow executions for each parallel step and wait
+  # In one transaction: a branch that a worker could claim while the parent was
+  # still writing its events would finish with no one to tell, and the parent
+  # would wait forever. Pollers are woken once the branches can be seen.
   defp fan_out_parallel(exec, ordered_steps, data, config, error_strategy) do
+    {:ok, waiting} =
+      Repo.transaction(config, fn ->
+        open_parallel_block(exec, ordered_steps, data, config, error_strategy)
+      end)
+
+    ordered_steps
+    |> Enum.map(&to_string(&1.opts[:queue] || exec.queue || "default"))
+    |> Enum.uniq()
+    |> Enum.each(&DurablePubSub.wake(config, %{status: :pending, queue: &1}))
+
+    {:waiting, waiting}
+  end
+
+  defp open_parallel_block(exec, ordered_steps, data, config, error_strategy) do
     parent_queue = exec.queue || "default"
 
     # Create child executions for each parallel step
@@ -1340,7 +1388,7 @@ defmodule Durable.Executor do
       )
       |> cas_update!(config)
 
-    {:waiting, exec}
+    exec
   end
 
   # Create a child workflow execution for a single parallel step
@@ -2089,7 +2137,8 @@ defmodule Durable.Executor do
         PendingEvent.receive_changeset(pending_event, pending_event.payload || %{})
       )
       |> Ecto.Multi.run(:parent, fn repo, _changes ->
-        case repo.get(WorkflowExecution, parent.id) do
+        # Locked: the child's own notice and settle_child/2 can both get here.
+        case repo.one(from(w in WorkflowExecution, where: w.id == ^parent.id, lock: "FOR UPDATE")) do
           nil ->
             {:error, :parent_not_found}
 
@@ -2295,30 +2344,22 @@ defmodule Durable.Executor do
     # Check if any compensations failed
     failed_count = Enum.count(results, &(&1.result.status == "failed"))
 
-    if failed_count > 0 do
-      # Some compensations failed
-      {:ok, _exec} =
-        exec
-        |> WorkflowExecution.compensation_failed_changeset(results, original_error)
-        |> Ecto.Changeset.change(locked_by: nil, locked_at: nil, scheduled_at: nil)
-        |> Repo.update(config)
-
-      {:error, original_error}
-    else
-      # All compensations succeeded
-      {:ok, _exec} =
+    finished =
+      if failed_count > 0 do
+        WorkflowExecution.compensation_failed_changeset(exec, results, original_error)
+      else
         exec
         |> WorkflowExecution.compensated_changeset(results)
-        |> Ecto.Changeset.change(
-          locked_by: nil,
-          locked_at: nil,
-          scheduled_at: nil,
-          error: original_error
-        )
-        |> Repo.update(config)
+        |> Ecto.Changeset.change(error: original_error)
+      end
 
-      {:error, original_error}
-    end
+    {:ok, finished} =
+      finished
+      |> Ecto.Changeset.change(locked_by: nil, locked_at: nil, scheduled_at: nil)
+      |> Repo.update(config)
+
+    maybe_notify_parent(config, finished, :failed, original_error)
+    {:error, original_error}
   end
 
   defp format_compensation_result({:ok, _output}), do: %{status: "completed"}

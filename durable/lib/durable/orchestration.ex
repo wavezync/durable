@@ -38,6 +38,7 @@ defmodule Durable.Orchestration do
   alias Durable.Config
   alias Durable.Context
   alias Durable.Executor
+  alias Durable.PubSub, as: DurablePubSub
   alias Durable.Repo
   alias Durable.Storage.Schemas.WorkflowExecution
 
@@ -140,7 +141,7 @@ defmodule Durable.Orchestration do
       {:ok, Map.get(context, fire_key)}
     else
       # Create child and continue (no throw)
-      {:ok, child_id} = create_child_execution(module, input, parent_id, opts)
+      {:ok, child_id} = create_child_execution(module, input, parent_id, [wake: true] ++ opts)
       Context.put_context(fire_key, child_id)
       record_call_child(child_id, :fire, ref)
       {:ok, child_id}
@@ -197,7 +198,8 @@ defmodule Durable.Orchestration do
       %{status: :completed} = child ->
         parse_child_result(build_result_payload(:completed, child.context))
 
-      %{status: status} = child when status in [:failed, :cancelled, :compensation_failed] ->
+      %{status: status} = child
+      when status in [:failed, :cancelled, :compensated, :compensation_failed] ->
         parse_child_result(build_result_payload(:failed, child.error))
 
       _child ->
@@ -233,6 +235,9 @@ defmodule Durable.Orchestration do
       %WorkflowExecution{}
       |> WorkflowExecution.changeset(attrs)
       |> Repo.insert(config)
+
+    # A child its parent waits for is woken once the parent is listening.
+    if Keyword.get(opts, :wake, false), do: DurablePubSub.wake(config, execution)
 
     # For inline execution (testing), execute the child immediately
     if Keyword.get(opts, :inline, false) do
