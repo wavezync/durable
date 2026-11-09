@@ -35,6 +35,11 @@ defmodule Durable.Executor.StepRunner do
     :call_workflow
   ]
 
+  # A lost worker isn't the step's doing, so it uses no attempt, but a step
+  # that takes its node down has to stop somewhere.
+  # ponytail: fixed at 3, make it an option if anyone needs another number
+  @max_lost_workers 3
+
   @type result ::
           {:ok, map()}
           | {:error, any()}
@@ -65,11 +70,12 @@ defmodule Durable.Executor.StepRunner do
   @spec execute(Step.t(), map(), String.t(), Config.t(), DateTime.t() | nil) :: result()
   def execute(%Step{} = step, data, workflow_id, %Config{} = config, deadline \\ nil) do
     max_attempts = get_max_attempts(step)
-    attempt = next_attempt(config, workflow_id, step)
+    %{failed: failed, lost: lost} = attempts_used(config, workflow_id, step)
+    attempt = failed + 1
 
-    # All its attempts are already spent only when the last one died (its
-    # process or its node) before anything could fail the run. It fails now.
-    if attempt > max(max_attempts, 1) do
+    # Spent before it started only when the last attempt died or lost its
+    # worker before anything could fail the run. It fails now.
+    if attempt > max(max_attempts, 1) or lost >= @max_lost_workers do
       {:error, last_error(config, workflow_id, step)}
     else
       execute_with_retry(step, data, workflow_id, attempt, max_attempts, config, deadline)
@@ -100,8 +106,8 @@ defmodule Durable.Executor.StepRunner do
   # if that was its last, so the next claim fails the run without delay.
   @spec delay_after_death(Step.t(), String.t(), Config.t()) :: non_neg_integer()
   def delay_after_death(%Step{} = step, workflow_id, %Config{} = config) do
-    attempt = next_attempt(config, workflow_id, step)
-    if attempt > get_max_attempts(step), do: 0, else: backoff_ms(step, attempt - 1)
+    %{failed: failed} = attempts_used(config, workflow_id, step)
+    if failed + 1 > get_max_attempts(step), do: 0, else: backoff_ms(step, failed)
   end
 
   # Seed the retry counter from durable state instead of always starting at 1.
@@ -115,26 +121,29 @@ defmodule Durable.Executor.StepRunner do
   # We count `:failed` step_executions for (workflow_id, step_name), NOT the max
   # attempt number: a `:waiting` row is a *suspension* (sleep/event), not a
   # failed attempt, so it must not advance the retry counter. Each genuine retry
-  # writes exactly one `:failed` row, so `failed_count + 1` is the next attempt.
-  defp next_attempt(config, workflow_id, %Step{name: name}) do
+  # writes exactly one `:failed` row, so `failed + 1` is the next attempt.
+  #
+  # A `worker_lost` row is counted apart (`lost`), against @max_lost_workers.
+  defp attempts_used(config, workflow_id, %Step{name: name}) do
     step_name = Atom.to_string(name)
 
     # Only failures since the last Durable.retry/2 count: an operator retry
     # hands the step a fresh max_attempts budget.
-    failed_count =
-      Repo.one(
-        config,
-        from(s in StepExecution,
-          join: w in WorkflowExecution,
-          on: w.id == s.workflow_id,
-          where:
-            s.workflow_id == ^workflow_id and s.step_name == ^step_name and s.status == :failed,
-          where: is_nil(w.retried_at) or s.inserted_at > w.retried_at,
-          select: count(s.id)
-        )
+    Repo.one(
+      config,
+      from(s in StepExecution,
+        join: w in WorkflowExecution,
+        on: w.id == s.workflow_id,
+        where:
+          s.workflow_id == ^workflow_id and s.step_name == ^step_name and s.status == :failed,
+        where: is_nil(w.retried_at) or s.inserted_at > w.retried_at,
+        select: %{
+          failed:
+            filter(count(s.id), fragment("?->>'type' IS DISTINCT FROM 'worker_lost'", s.error)),
+          lost: filter(count(s.id), fragment("?->>'type' = 'worker_lost'", s.error))
+        }
       )
-
-    (failed_count || 0) + 1
+    )
   end
 
   defp last_error(config, workflow_id, %Step{name: name}) do
@@ -557,7 +566,7 @@ defmodule Durable.Executor.StepRunner do
 
     case step_exec
          |> Ecto.Changeset.change(changes)
-         |> Repo.update(config) do
+         |> Durable.Executor.cas_update!(config) do
       {:ok, updated} = ok ->
         DurablePubSub.broadcast_step(config, :step_waiting, step_event(updated))
         ok
@@ -567,12 +576,15 @@ defmodule Durable.Executor.StepRunner do
     end
   end
 
+  # An attempt's ending is written with cas_update!: recovery or a cancel may
+  # have closed the row while the body ran, and then this attempt is over. The
+  # worker stops here, as for any run that's been taken from it.
   defp complete_step_execution(config, step_exec, output, logs, duration_ms) do
     serializable_output = serialize_output(output)
 
     case step_exec
          |> StepExecution.complete_changeset(serializable_output, logs, duration_ms)
-         |> Repo.update(config) do
+         |> Durable.Executor.cas_update!(config) do
       {:ok, updated} = ok ->
         DurablePubSub.broadcast_step(config, :step_completed, step_event(updated))
         ok
@@ -591,7 +603,7 @@ defmodule Durable.Executor.StepRunner do
 
     case step_exec
          |> StepExecution.fail_changeset(safe_error, logs, duration_ms, status)
-         |> Repo.update(config) do
+         |> Durable.Executor.cas_update!(config) do
       {:ok, updated} = ok ->
         kind = :"step_#{status}"
         DurablePubSub.broadcast_step(config, kind, step_event(updated))

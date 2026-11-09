@@ -16,9 +16,10 @@ them as ratios, not as a forecast.
   database at every level.
 - **Give Durable a PubSub**, so new work starts at once and you can poll less.
 - **Make steps safe to run twice.** Delivery is at least once.
-- **Give a step retries if it should survive a crash.** A step whose process or
-  node dies has used an attempt, so with no `retry:` (one attempt) the run fails.
-  A deploy that hands runs back doesn't use one.
+- **Give a step retries if it should survive a crash.** A step whose process
+  dies has used an attempt, so with no `retry:` (one attempt) the run fails.
+  Losing its node or its lock doesn't use one, and nor does a deploy that hands
+  runs back.
 - **Give nodes time to stop.** Your platform's shutdown limit should be longer
   than Durable's grace period, 15 seconds by default.
 - **Tune autovacuum** for the two busiest tables.
@@ -265,12 +266,13 @@ Kubernetes `preStop` hook. For app-wide cleanup of your own, use OTP's
 A node that crashes or gets `kill -9` has no warning. Its runs stay locked until
 the lock goes stale, 300 seconds by default, and a sweep that runs every 60 seconds
 puts them back on the queue. You can shorten that with a smaller
-`stale_lock_timeout`, keeping it several times `heartbeat_interval`. A worker
-whose lock was taken over is fenced out, so two copies can't both record a result.
+`stale_lock_timeout`, keeping it several times `heartbeat_interval` (Durable warns
+at boot if it's under 3). A worker whose lock was taken over is fenced out, so
+two copies can't both record a result.
 
 ### Make steps safe to run twice
 
-A crash, or a takeover like the one above, uses one of the step's attempts and runs the step again if it has any left. Use an
+A step whose process crashes uses one of its attempts and runs again if it has any left. A takeover like the one above uses none: the step runs again, and the run fails only after losing its worker three times. Use an
 idempotency key when you call a payment API, and upserts rather than inserts.
 
 ### Upgrade Durable

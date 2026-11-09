@@ -61,29 +61,6 @@ defmodule Durable.SchedulerResilienceTest do
     assert updated.auto_disabled_at != nil
   end
 
-  test "success_changeset/3 resets the failure counter and clears last_error" do
-    schedule =
-      insert_schedule(%{
-        consecutive_failures: 3,
-        last_error: "previous failure",
-        last_error_at: DateTime.utc_now()
-      })
-
-    now = DateTime.utc_now()
-    next = DateTime.add(now, 300, :second)
-
-    {:ok, updated} =
-      schedule
-      |> ScheduledWorkflow.success_changeset(now, next)
-      |> Repo.update(config())
-
-    assert updated.consecutive_failures == 0
-    assert is_nil(updated.last_error)
-    assert is_nil(updated.last_error_at)
-    assert updated.last_run_at == now
-    assert updated.next_run_at == next
-  end
-
   test "failure_changeset advances next_run_at when supplied" do
     schedule = insert_schedule()
     future = DateTime.utc_now() |> DateTime.add(600, :second) |> DateTime.truncate(:microsecond)

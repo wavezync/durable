@@ -2,7 +2,8 @@ defmodule Durable.Integration.FailurePathsTest do
   @moduledoc """
   What happens when something goes wrong underneath a run: its step's process
   dies, the pool is busy, the node stops heartbeating, or two callers race.
-  Each `#n` in a describe is that item of GitHub issue #32.
+  Each `#n` in a describe is that item of GitHub issue #32, and each `audit n`
+  that item of the re-audit posted on it.
   """
   use Durable.IntegrationCase, async: false
 
@@ -194,6 +195,62 @@ defmodule Durable.Integration.FailurePathsTest do
     end
   end
 
+  # Looking it up fails the way a refused connection does.
+  defmodule RefusedOnStart do
+    def __workflow_definition__(_name) do
+      raise DBConnection.ConnectionError, "connection not available"
+    end
+  end
+
+  defmodule DiesOnSignal do
+    use Durable
+    alias Durable.IntegrationProbe, as: Probe
+
+    workflow "fp_dies_on_signal" do
+      step(:work, fn _data ->
+        Probe.note(:body)
+        Probe.wait_for(:die)
+        Process.exit(self(), :kill)
+      end)
+    end
+  end
+
+  # Only the first attempt waits; the one that replaces it finishes at once.
+  defmodule StaleOnce do
+    use Durable
+    alias Durable.IntegrationProbe, as: Probe
+
+    workflow "fp_stale_once" do
+      step(:work, fn data ->
+        if Probe.note(:body) == 1, do: Probe.wait_for(:release)
+        {:ok, data}
+      end)
+    end
+  end
+
+  # The first attempt waits, then ends however the test says.
+  defmodule EndsLate do
+    use Durable
+    use Durable.Wait
+    alias Durable.IntegrationProbe, as: Probe
+
+    workflow "fp_ends_late" do
+      step(:work, [retry: [max_attempts: 2, backoff: :constant, base: 1]], fn data ->
+        if Probe.note(:body) > 1 do
+          {:ok, data}
+        else
+          Probe.wait_for(:release)
+
+          case Probe.fetch(:ending) do
+            :ok -> {:ok, data}
+            :error -> {:error, "too late"}
+            :sleep -> sleep(20)
+          end
+        end
+      end)
+    end
+  end
+
   defmodule Tick do
     use Durable
 
@@ -346,6 +403,34 @@ defmodule Durable.Integration.FailurePathsTest do
     |> IntegrationRepo.insert!()
   end
 
+  # A long heartbeat is how a test gets here. A long outage or a frozen VM
+  # leaves the same state: the worker is fine, its lock isn't.
+  defp lose_lock! do
+    Process.sleep(1_100)
+    {:ok, 1} = StaleJobRecovery.recover_now(Durable)
+  end
+
+  defp due_schedule!(name, overrides \\ []) do
+    {:ok, schedule} = API.schedule(Tick, "* * * * *", name: name)
+    make_due!(schedule, overrides)
+    schedule
+  end
+
+  defp make_due!(schedule, overrides \\ []) do
+    {1, _} =
+      IntegrationRepo.update_all(from(s in ScheduledWorkflow, where: s.id == ^schedule.id),
+        set: [next_run_at: DateTime.add(DateTime.utc_now(), -5, :second)] ++ overrides
+      )
+  end
+
+  # The cast is handled before the call that follows it.
+  defp run_check! do
+    Scheduler.check_schedules(Durable)
+    Scheduler.status(Durable)
+  end
+
+  defp schedule_row(name), do: IntegrationRepo.get_by!(ScheduledWorkflow, name: name)
+
   defp idle_durable!(opts \\ []) do
     Durable.DataCase.start_supervised_durable!(
       [repo: IntegrationRepo, queue_enabled: false] ++ opts
@@ -446,23 +531,6 @@ defmodule Durable.Integration.FailurePathsTest do
       run = await_status(id, :compensated)
       assert Probe.hits(:undone) == 1
       assert run.error["message"] =~ "boom"
-    end
-
-    test "with its node counts as an attempt once recovery takes the run back" do
-      start_durable!(%{default: 1}, stale_lock_timeout: 1)
-
-      {:ok, id} = Durable.start(Held, %{})
-      assert_eventually(fn -> Probe.hits(:body) == 1 end)
-
-      Process.exit(worker_pid!(id), :kill)
-      Process.sleep(1_100)
-      {:ok, 1} = StaleJobRecovery.recover_now(Durable)
-
-      run = await_status(id, :failed)
-
-      assert Probe.hits(:body) == 1
-      assert run.error["type"] == "worker_lost"
-      assert [%{status: :failed, error: %{"type" => "worker_lost"}}] = step_rows(id)
     end
 
     test "with no running step row fails the run instead of looping" do
@@ -869,6 +937,22 @@ defmodule Durable.Integration.FailurePathsTest do
   end
 
   describe "#12 cancel" do
+    test "leaves no row running when the step dies before the heartbeat stops it" do
+      start_durable!(%{default: 1}, heartbeat_interval: 60_000)
+
+      {:ok, id} = Durable.start(DiesOnSignal, %{})
+      assert_eventually(fn -> Probe.hits(:body) == 1 end)
+
+      :ok = Durable.cancel(id)
+      :ok = Probe.set(:die)
+
+      assert_eventually(fn ->
+        match?([%{status: :failed, error: %{"type" => "task_crash"}}], step_rows(id))
+      end)
+
+      assert get(id).status == :cancelled
+    end
+
     test "stops a running step" do
       start_durable!(%{default: 1}, heartbeat_interval: 50)
 
@@ -928,6 +1012,155 @@ defmodule Durable.Integration.FailurePathsTest do
       assert log =~ "claim"
       assert log =~ "no_such_schema"
       assert_receive {:claim_failed, %{count: 1}, %{queue: "default"}}
+    end
+  end
+
+  describe "audit 1 a step whose lock goes stale" do
+    test "with one attempt runs again instead of failing the run" do
+      start_durable!(%{default: 2}, stale_lock_timeout: 1, heartbeat_interval: 60_000)
+
+      {:ok, id} = Durable.start(StaleOnce, %{})
+      assert_eventually(fn -> Probe.hits(:body) == 1 end)
+      lose_lock!()
+
+      await_status(id, :completed)
+      assert Probe.hits(:body) == 2
+
+      assert [%{status: :failed, error: %{"type" => "worker_lost"}}, %{status: :completed}] =
+               step_rows(id)
+
+      :ok = Probe.set(:release)
+    end
+
+    for ending <- [:ok, :error, :sleep] do
+      @ending ending
+
+      test "can't end an attempt that was already closed (#{ending})" do
+        start_durable!(%{default: 2}, stale_lock_timeout: 1, heartbeat_interval: 60_000)
+        :ok = Probe.put(:ending, @ending)
+
+        {:ok, id} = Durable.start(EndsLate, %{})
+        assert_eventually(fn -> Probe.hits(:body) == 1 end)
+        old_worker = Process.monitor(worker_pid!(id))
+        lose_lock!()
+        await_status(id, :completed)
+
+        :ok = Probe.set(:release)
+        assert_receive {:DOWN, ^old_worker, :process, _pid, _reason}, 5_000
+
+        assert [%{status: :failed, error: %{"type" => "worker_lost"}}, %{status: :completed}] =
+                 step_rows(id)
+
+        assert get(id).status == :completed
+      end
+    end
+
+    test "with its node each time fails the run after three, so it can't loop forever" do
+      start_durable!(%{default: 1}, stale_lock_timeout: 1)
+
+      {:ok, id} = Durable.start(Held, %{})
+
+      for lost <- 1..3 do
+        assert_eventually(fn -> Probe.hits(:body) == lost end)
+        Process.exit(worker_pid!(id), :kill)
+        lose_lock!()
+      end
+
+      run = await_status(id, :failed)
+
+      assert Probe.hits(:body) == 3
+      assert run.error["type"] == "worker_lost"
+      assert length(step_rows(id)) == 3
+    end
+
+    test "warns at boot when the heartbeat is too close to the stale timeout" do
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          start_durable!(%{default: 1}, stale_lock_timeout: 3, heartbeat_interval: 1_001)
+        end)
+
+      assert log =~ "heartbeat_interval"
+    end
+
+    test "says nothing at boot when the heartbeat is well under it" do
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          start_durable!(%{default: 1}, stale_lock_timeout: 3, heartbeat_interval: 1_000)
+        end)
+
+      refute log =~ "heartbeat_interval"
+    end
+  end
+
+  describe "audit 2 a schedule that can't start" do
+    setup do
+      start_durable!(%{default: 1}, scheduler_interval: :timer.hours(1))
+      :ok
+    end
+
+    test "doesn't stop the ones after it" do
+      due_schedule!("bad_zone", timezone: "Nowhere/Land")
+      for n <- 1..3, do: due_schedule!("ok#{n}")
+
+      run_check!()
+
+      fired = IntegrationRepo.all(from(w in WorkflowExecution, select: w.trigger_ref))
+      assert Enum.sort(fired) == ["ok1", "ok2", "ok3"]
+
+      bad = schedule_row("bad_zone")
+      assert bad.consecutive_failures == 1
+      assert bad.last_error =~ "Nowhere/Land"
+      assert DateTime.after?(bad.next_run_at, DateTime.utc_now())
+    end
+
+    test "is turned off after five failures in a row" do
+      bad = due_schedule!("bad_zone", timezone: "Nowhere/Land")
+
+      for _ <- 1..5 do
+        run_check!()
+        make_due!(bad)
+      end
+
+      run_check!()
+
+      assert %{enabled: false, auto_disabled_at: %DateTime{}, consecutive_failures: 5} =
+               schedule_row("bad_zone")
+    end
+
+    test "that returns an error counts as a failure too" do
+      due_schedule!("not_a_workflow", workflow_module: "Elixir.String")
+
+      run_check!()
+
+      row = schedule_row("not_a_workflow")
+      assert row.consecutive_failures == 1
+      assert is_binary(row.last_error)
+      assert DateTime.after?(row.next_run_at, DateTime.utc_now())
+    end
+
+    # The database answers again here, which is the case that matters:
+    # with the pool still full, recording a failure would be refused as well.
+    test "because a connection was refused counts against nothing" do
+      due_schedule!("refused", workflow_module: inspect(RefusedOnStart))
+
+      run_check!()
+
+      row = schedule_row("refused")
+      assert row.consecutive_failures == 0
+      assert row.last_error == nil
+      assert DateTime.before?(row.next_run_at, DateTime.utc_now())
+    end
+
+    test "is forgiven by a fire that starts" do
+      schedule = due_schedule!("recovers", timezone: "Nowhere/Land")
+      run_check!()
+      assert schedule_row("recovers").consecutive_failures == 1
+
+      make_due!(schedule, timezone: "Etc/UTC")
+      run_check!()
+
+      assert %{consecutive_failures: 0, last_error: nil, last_error_at: nil} =
+               schedule_row("recovers")
     end
   end
 end
