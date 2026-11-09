@@ -171,25 +171,10 @@ defmodule Durable.Queue.Worker do
         {:error, error}
     end
   rescue
-    error in DBConnection.ConnectionError ->
-      # Says nothing about the step, so the run goes back rather than failing.
-      Logger.error(
-        "Lost the database connection running job #{job.id}: #{Exception.message(error)}"
-      )
-
-      safely(:fenced, fn -> Durable.Executor.connection_lost(job, error, config) end)
-
     error ->
-      Logger.error(
-        "Worker crashed executing job #{job.id}: #{Exception.message(error)}\n#{Exception.format_stacktrace(__STACKTRACE__)}"
-      )
-
-      {:error,
-       %{
-         type: inspect(error.__struct__),
-         message: Exception.message(error),
-         stacktrace: Exception.format_stacktrace(__STACKTRACE__)
-       }}
+      if Durable.Repo.connection_lost?(error),
+        do: release_after_lost_connection(job, config, error),
+        else: crashed(job, error, __STACKTRACE__)
   catch
     kind, reason ->
       Logger.error(
@@ -198,6 +183,29 @@ defmodule Durable.Queue.Worker do
       )
 
       {:error, Durable.Executor.caught_error(kind, reason, __STACKTRACE__)}
+  end
+
+  # Says nothing about the step, so the run goes back rather than failing.
+  defp release_after_lost_connection(job, config, error) do
+    Logger.error(
+      "Lost the database connection running job #{job.id}: #{Exception.message(error)}"
+    )
+
+    safely(:fenced, fn -> Durable.Executor.connection_lost(job, error, config) end)
+  end
+
+  defp crashed(job, error, stacktrace) do
+    Logger.error(
+      "Worker crashed executing job #{job.id}: #{Exception.message(error)}\n" <>
+        Exception.format_stacktrace(stacktrace)
+    )
+
+    {:error,
+     %{
+       type: inspect(error.__struct__),
+       message: Exception.message(error),
+       stacktrace: Exception.format_stacktrace(stacktrace)
+     }}
   end
 
   # We've been fenced: stale-lock recovery released our claim and another worker

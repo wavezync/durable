@@ -47,9 +47,11 @@ defmodule Durable.Fuzz.ChaosTest do
   # Returns the indexes of the runs this op may have changed.
   defp apply_op({:cancel, i}, runs, seen) do
     %{id: id, case_id: case_id} = Enum.at(runs, i)
-    entered = entered(case_id)
 
-    if Durable.cancel(id, "chaos") == :ok, do: Agent.update(seen, &Map.put(&1, i, entered))
+    # Counted after the cancel returns: until then, starting more steps is allowed.
+    if Durable.cancel(id, "chaos") == :ok,
+      do: Agent.update(seen, &Map.put(&1, i, entered(case_id)))
+
     [i]
   end
 

@@ -318,14 +318,15 @@ defmodule Durable.Telemetry do
       :throw, :durable_attempt_closed ->
         throw(:durable_attempt_closed)
 
-      # The attempt is still open: whoever closes it sends the end event.
-      :error, %DBConnection.ConnectionError{} = error ->
-        reraise error, __STACKTRACE__
-
       kind, reason ->
         stacktrace = __STACKTRACE__
-        details = %{kind: kind, reason: reason, stacktrace: stacktrace}
-        :telemetry.execute(prefix ++ [:exception], elapsed(started), Map.merge(meta, details))
+        # With the connection gone the attempt is still open, and whoever closes it
+        # sends the end event.
+        unless Durable.Repo.connection_lost?(reason) do
+          details = %{kind: kind, reason: reason, stacktrace: stacktrace}
+          :telemetry.execute(prefix ++ [:exception], elapsed(started), Map.merge(meta, details))
+        end
+
         :erlang.raise(kind, reason, stacktrace)
     end
   end

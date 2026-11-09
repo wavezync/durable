@@ -209,8 +209,10 @@ defmodule Durable.Scheduler do
   defp execute_safely(schedule, config) do
     execute_schedule(schedule, config)
   rescue
-    error in DBConnection.ConnectionError -> reraise error, __STACKTRACE__
-    error -> record_failure(schedule, config, Exception.message(error))
+    error ->
+      if Durable.Repo.connection_lost?(error),
+        do: reraise(error, __STACKTRACE__),
+        else: record_failure(schedule, config, Exception.message(error))
   end
 
   defp execute_schedule(schedule, config) do

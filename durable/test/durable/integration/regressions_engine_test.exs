@@ -409,6 +409,28 @@ defmodule Durable.Integration.EngineRegressionsTest do
     end
   end
 
+  describe "telling a lost connection from a failed query" do
+    alias Durable.Repo
+
+    defp pg_error(severity, pg_code) do
+      %Postgrex.Error{postgres: %{severity: severity, pg_code: pg_code, code: nil, message: "x"}}
+    end
+
+    test "counts a dropped connection, directly or from PgBouncer" do
+      assert Repo.connection_lost?(%DBConnection.ConnectionError{message: "tcp recv: closed"})
+      assert Repo.connection_lost?(pg_error("FATAL", "08P01"))
+      assert Repo.connection_lost?(pg_error("FATAL", "57P01"))
+      assert Repo.connection_lost?(pg_error("ERROR", "08006"))
+    end
+
+    test "doesn't count a query that was refused" do
+      refute Repo.connection_lost?(pg_error("ERROR", "57014"))
+      refute Repo.connection_lost?(pg_error("ERROR", "23505"))
+      refute Repo.connection_lost?(%RuntimeError{message: "boom"})
+      refute Repo.connection_lost?(:killed)
+    end
+  end
+
   describe "the pruner" do
     test "deletes a branch once its parent has finished too" do
       start_durable!(%{default: 2}, prune: [completed: :timer.hours(1)])
