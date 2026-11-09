@@ -36,6 +36,41 @@ defmodule Durable.FuzzWorkflows do
     end
   end
 
+  defmodule Quick do
+    @moduledoc false
+    use Durable
+
+    workflow "fuzz_quick" do
+      step(:a, fn data -> {:ok, data} end)
+    end
+  end
+
+  defmodule Waits do
+    @moduledoc false
+    use Durable
+    use Durable.Wait
+
+    workflow "fuzz_waits" do
+      step(:a, fn data ->
+        wait_for_event("go")
+        {:ok, data}
+      end)
+    end
+  end
+
+  defmodule Asks do
+    @moduledoc false
+    use Durable
+    use Durable.Wait
+
+    workflow "fuzz_asks" do
+      step(:a, fn data ->
+        wait_for_input("approve")
+        {:ok, data}
+      end)
+    end
+  end
+
   def case_of(data), do: data[:case] || data["case"]
 
   def act(data) do

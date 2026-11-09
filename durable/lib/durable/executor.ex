@@ -55,10 +55,20 @@ defmodule Durable.Executor do
 
     Keys.validate_start_opts!(opts)
 
-    with {:ok, workflow_def} <- get_workflow_definition(module, opts) do
+    with {:ok, workflow_def} <- get_workflow_definition(module, opts),
+         {:ok, safe_input} <- storable_input(input) do
       config
-      |> create_execution(module, workflow_def, input, opts)
+      |> create_execution(module, workflow_def, safe_input, opts)
       |> started(config, opts)
+    end
+  end
+
+  defp storable_input(input) when not is_map(input), do: {:error, :invalid_input}
+
+  defp storable_input(input) do
+    case sanitize_for_json(input) do
+      map when not is_struct(map) -> {:ok, map}
+      _scalar -> {:error, :invalid_input}
     end
   end
 
@@ -134,10 +144,20 @@ defmodule Durable.Executor do
   """
   @spec cancel_workflow(String.t(), String.t() | nil, keyword()) :: :ok | {:error, term()}
   def cancel_workflow(workflow_id, reason \\ nil, opts \\ []) do
+    if Repo.id?(workflow_id),
+      do: cancel_run(workflow_id, reason, opts),
+      else: {:error, :not_found}
+  end
+
+  defp cancel_run(workflow_id, reason, opts) do
     durable_name = Keyword.get(opts, :durable, Durable)
     config = Config.get(durable_name)
 
-    error = if reason, do: %{type: "cancelled", message: reason}, else: %{type: "cancelled"}
+    error =
+      storable_error(
+        if reason, do: %{type: "cancelled", message: reason}, else: %{type: "cancelled"}
+      )
+
     now = DateTime.utc_now()
 
     # One conditional UPDATE, so a run that finishes concurrently can't be
@@ -659,9 +679,9 @@ defmodule Durable.Executor do
   end
 
   defp load_execution(config, workflow_id) do
-    case Repo.get(config, WorkflowExecution, workflow_id) do
-      nil -> {:error, :not_found}
-      execution -> {:ok, execution}
+    case Repo.id?(workflow_id) && Repo.get(config, WorkflowExecution, workflow_id) do
+      %WorkflowExecution{} = execution -> {:ok, execution}
+      _not_a_run -> {:error, :not_found}
     end
   end
 

@@ -24,6 +24,23 @@ defmodule Durable.Repo do
   alias Durable.Config
   alias Ecto.Adapters.SQL
 
+  @doc false
+  # Whether this could be a run's id. Anything else can't match a row, and would
+  # raise from the query instead of saying so.
+  @spec id?(term()) :: boolean()
+  def id?(value),
+    do: is_binary(value) and byte_size(value) == 36 and Ecto.UUID.cast(value) != :error
+
+  @doc false
+  # A name Postgres can't hold as text, so it can't match a row or be stored.
+  @spec bad_text?(term()) :: boolean()
+  def bad_text?(value) when is_atom(value), do: bad_text?(Atom.to_string(value))
+
+  def bad_text?(value) when is_binary(value),
+    do: not String.valid?(value) or String.contains?(value, <<0>>)
+
+  def bad_text?(_value), do: false
+
   @doc """
   Returns the default options to apply to all Ecto operations.
   """

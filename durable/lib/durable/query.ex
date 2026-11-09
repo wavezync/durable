@@ -34,13 +34,12 @@ defmodule Durable.Query do
         query
       end
 
-    case Repo.one(config, query) do
-      nil ->
-        {:error, :not_found}
+    case Repo.id?(workflow_id) && Repo.one(config, query) do
+      %WorkflowExecution{} = execution ->
+        {:ok, execution_to_map(execution, include_steps, include_logs)}
 
-      execution ->
-        result = execution_to_map(execution, include_steps, include_logs)
-        {:ok, result}
+      _not_a_run ->
+        {:error, :not_found}
     end
   end
 
@@ -69,8 +68,8 @@ defmodule Durable.Query do
   @spec list_executions(keyword()) :: [map()]
   def list_executions(filters \\ []) do
     config = get_config(filters)
-    limit = Keyword.get(filters, :limit, 50)
-    offset = Keyword.get(filters, :offset, 0)
+    limit = max(Keyword.get(filters, :limit, 50), 0)
+    offset = max(Keyword.get(filters, :offset, 0), 0)
 
     query =
       from(w in WorkflowExecution,
@@ -294,6 +293,10 @@ defmodule Durable.Query do
   """
   @spec list_child_executions(String.t(), keyword()) :: [map()]
   def list_child_executions(parent_workflow_id, opts \\ []) do
+    if Repo.id?(parent_workflow_id), do: children_of(parent_workflow_id, opts), else: []
+  end
+
+  defp children_of(parent_workflow_id, opts) do
     config = get_config(opts)
 
     query =
@@ -500,7 +503,14 @@ defmodule Durable.Query do
   @spec executions_query(keyword()) :: Ecto.Query.t()
   def executions_query(filters), do: apply_filters(from(w in WorkflowExecution), filters)
 
+  # A value Postgres can't hold can't match a run.
   defp apply_filters(query, filters) do
+    if Enum.any?(filters, fn {_name, value} -> Repo.bad_text?(value) end),
+      do: from(w in query, where: false),
+      else: reduce_filters(query, filters)
+  end
+
+  defp reduce_filters(query, filters) do
     Enum.reduce(filters, query, fn
       # Runs store Atom.to_string(module) ("Elixir.MyApp.Orders"); accept the
       # inspect/1 form too.

@@ -624,7 +624,8 @@ defmodule Durable.Wait do
     # JSONB persistence in PendingInput.response or workflow.context.
     safe_data = Durable.Executor.sanitize_for_json(data)
 
-    with {:ok, pending} <- find_pending_input(config, workflow_id, input_name),
+    with :ok <- answerable(workflow_id, input_name),
+         {:ok, pending} <- find_pending_input(config, workflow_id, input_name),
          {:ok, completed} <- complete_pending_input(config, pending, safe_data),
          {:ok, _} <-
            Durable.Executor.resume_workflow(workflow_id, %{input_name => safe_data}, opts) do
@@ -663,9 +664,16 @@ defmodule Durable.Wait do
     # Sanitize at the API boundary — same rationale as provide_input/4.
     safe_payload = Durable.Executor.sanitize_for_json(payload)
 
-    if Keyword.get(opts, :buffer, false),
-      do: send_or_buffer(config, workflow_id, event_name, safe_payload),
-      else: deliver_to_waiter(config, workflow_id, event_name, safe_payload)
+    with :ok <- answerable(workflow_id, event_name) do
+      if Keyword.get(opts, :buffer, false),
+        do: send_or_buffer(config, workflow_id, event_name, safe_payload),
+        else: deliver_to_waiter(config, workflow_id, event_name, safe_payload)
+    end
+  end
+
+  # An id or a name that couldn't be in the database has no one waiting on it.
+  defp answerable(workflow_id, name) do
+    if Repo.id?(workflow_id) and not Repo.bad_text?(name), do: :ok, else: {:error, :not_found}
   end
 
   defp deliver_to_waiter(config, workflow_id, event_name, safe_payload) do

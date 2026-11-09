@@ -160,9 +160,11 @@ defmodule Durable.Scheduler.API do
     durable_name = Keyword.get(opts, :durable, Durable)
     config = Config.get(durable_name)
 
-    case Repo.get_by(config, ScheduledWorkflow, name: name) do
-      nil -> {:error, :not_found}
-      schedule -> {:ok, schedule}
+    with false <- Repo.bad_text?(name),
+         %ScheduledWorkflow{} = schedule <- Repo.get_by(config, ScheduledWorkflow, name: name) do
+      {:ok, schedule}
+    else
+      _not_a_schedule -> {:error, :not_found}
     end
   end
 
@@ -214,9 +216,9 @@ defmodule Durable.Scheduler.API do
 
     query = from(s in ScheduledWorkflow, where: s.name == ^name)
 
-    case Repo.delete_all(config, query) do
-      {0, _} -> {:error, :not_found}
-      {_, _} -> :ok
+    case not Repo.bad_text?(name) && Repo.delete_all(config, query) do
+      {count, _} when count > 0 -> :ok
+      _nothing_deleted -> {:error, :not_found}
     end
   end
 

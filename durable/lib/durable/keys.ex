@@ -46,6 +46,13 @@ defmodule Durable.Keys do
     end
 
     with {:ok, value} <- Keyword.fetch(opts, :on_duplicate), do: validate_on_duplicate!(value)
+
+    for {opt, value} <- Keyword.take(opts, [:key, :queue, :tags]),
+        text <- List.wrap(value),
+        Repo.bad_text?(text) do
+      raise ArgumentError, "#{opt}: can't be stored: #{inspect(text)}"
+    end
+
     :ok
   end
 
@@ -598,8 +605,8 @@ defmodule Durable.Keys do
   def release(workflow_id, opts) do
     config = Config.get(Keyword.get(opts, :durable, Durable))
 
-    case Repo.get(config, WorkflowExecution, workflow_id) do
-      nil ->
+    case Repo.id?(workflow_id) && Repo.get(config, WorkflowExecution, workflow_id) do
+      not_a_run when not_a_run in [nil, false] ->
         {:error, :not_found}
 
       %{holds_key: false} ->
