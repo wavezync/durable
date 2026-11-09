@@ -133,7 +133,7 @@ defmodule Durable.Integration.MultiNodeTest do
     :erpc.call(a, Durable, :pause_queue, [:ocr])
     id = start_on!(b, W.TimesOutOnOcr)
     assert_eventually(fn -> get(id).queue == "ocr" end)
-    Process.sleep(350)
+    expire!(id)
 
     sweep_on(b)
     assert get(id).status == :pending
