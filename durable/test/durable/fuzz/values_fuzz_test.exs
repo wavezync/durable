@@ -34,7 +34,10 @@ defmodule Durable.Fuzz.ValuesTest do
     :snooze,
     :log,
     :timeout_value,
-    :input_options
+    :input_options,
+    :child_input,
+    :call_input,
+    :context_ops
   ]
 
   @undo_surfaces [:undo_return, :undo_error, :undo_fail, :undo_raise, :undo_throw]

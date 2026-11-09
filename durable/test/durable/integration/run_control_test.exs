@@ -640,6 +640,18 @@ defmodule Durable.Integration.RunControlTest do
     end
   end
 
+  # A row whose input was written by an older version and can't be loaded.
+  defp insert_poison!(id) do
+    IntegrationRepo.query!(
+      """
+      INSERT INTO durable.workflow_executions
+        (id, workflow_module, workflow_name, status, queue, input, context, inserted_at, updated_at)
+      VALUES ($1, 'Elixir.Gone', 'gone', 'running', 'default', '"1.5"'::jsonb, '{}', now(), now())
+      """,
+      [Ecto.UUID.dump!(id)]
+    )
+  end
+
   # Holds every run for half a second as it becomes :waiting.
   defp slow_wait! do
     IntegrationRepo.query!("""
@@ -1273,6 +1285,38 @@ defmodule Durable.Integration.RunControlTest do
       assert Durable.send_event(id, "go", %{}) == :ok
       assert {:ok, _} = Task.await(holder)
       await_status(id, :completed, 3_000)
+    end
+  end
+
+  describe "a poller" do
+    test "survives a job it can't settle, and keeps working" do
+      start_durable!(%{default: 2})
+      poller = Process.whereis(Durable.Queue.Poller.Default)
+
+      earlier = spawn(fn -> Process.sleep(:infinity) end)
+      ref = Process.monitor(earlier)
+      bad_id = Ecto.UUID.generate()
+
+      {:ok, id} = Durable.start(Quick, %{})
+      await_status(id, :completed, 3_000)
+
+      insert_poison!(bad_id)
+
+      :sys.replace_state(poller, fn state ->
+        put_in(state.workers[earlier], %{ref: ref, job_id: bad_id, token: nil})
+      end)
+
+      send(poller, {:job_complete, earlier, bad_id, {:error, %{type: "x"}}, 1})
+
+      assert Poller.status(poller).active_jobs == 0
+      assert Process.whereis(Durable.Queue.Poller.Default) == poller
+
+      {:ok, next} = Durable.start(Quick, %{})
+      await_status(next, :completed, 3_000)
+
+      IntegrationRepo.query!("DELETE FROM durable.workflow_executions WHERE id = $1", [
+        Ecto.UUID.dump!(bad_id)
+      ])
     end
   end
 

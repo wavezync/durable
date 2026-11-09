@@ -272,6 +272,47 @@ defmodule Durable.HostileValuesTest do
     end
   end
 
+  defmodule ChildWithInput do
+    use Durable
+    use Durable.Orchestration
+
+    workflow "hostile_child_input" do
+      step(:a, fn data ->
+        start_workflow(Durable.HostileValuesTest.Returns, ~D[2026-01-01], ref: :child)
+        {:ok, data}
+      end)
+    end
+  end
+
+  test "a child's input that can't be an object fails the step, and leaves no bad row" do
+    {:ok, id} = Executor.start_workflow(ChildWithInput, %{}, inline: true)
+
+    assert %{status: :failed, error: %{"message" => message}} =
+             TestRepo.get!(WorkflowExecution, id)
+
+    assert message =~ "child input must be a map"
+    assert TestRepo.aggregate(WorkflowExecution, :count) == 1
+  end
+
+  describe "the remaining lookups" do
+    test "cancel_wait doesn't raise on a bad id" do
+      assert Durable.Wait.cancel_wait("not-a-uuid") == {:error, :not_found}
+    end
+
+    test "a filter Postgres can't hold matches nothing" do
+      assert Durable.Query.list_keys(key_prefix: "a\0") == []
+      assert Durable.Query.list_keys(workflow_name: "a\0") == []
+      assert Durable.Wait.list_pending_events(event_name: "a\0") == []
+    end
+
+    for fields <- [%{"a" => "b\0"}, %{"a\0" => "b"}, %{"a" => <<0::1>>}, %{"a" => {1, 2}}] do
+      test "list_executions(input: #{inspect(fields)}) matches nothing" do
+        {:ok, _id} = Durable.start(Returns, %{"a" => "b"})
+        assert Durable.list_executions(input: unquote(Macro.escape(fields))) == []
+      end
+    end
+  end
+
   test "sanitizing leaves nothing Postgres or JSON would reject" do
     for term <- ["a\0b", <<0xFF>>, :"a\0", %{"k\0" => 1}, %{<<0xFF>> => 1}, [1 | 2]] do
       safe = Executor.sanitize_for_json(term)

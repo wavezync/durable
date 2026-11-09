@@ -159,7 +159,12 @@ defmodule Durable.Query do
         group_by: [w.workflow_module, w.workflow_name, w.key]
       )
 
+    filters = if bad_filter?(filters), do: [nothing: true], else: filters
+
     Enum.reduce(filters, query, fn
+      {:nothing, true}, q ->
+        from(w in q, where: false)
+
       {:workflow_name, name}, q when is_binary(name) and name != "" ->
         from(w in q, where: w.workflow_name == ^name)
 
@@ -505,10 +510,24 @@ defmodule Durable.Query do
 
   # A value Postgres can't hold can't match a run.
   defp apply_filters(query, filters) do
-    if Enum.any?(filters, fn {_name, value} -> Repo.bad_text?(value) end),
+    if bad_filter?(filters),
       do: from(w in query, where: false),
       else: reduce_filters(query, filters)
   end
+
+  defp bad_filter?(filters) do
+    Enum.any?(filters, fn
+      {:input, fields} when is_map(fields) -> Enum.any?(fields, &bad_input_field?/1)
+      {_name, value} -> Repo.bad_text?(value)
+    end)
+  end
+
+  defp bad_input_field?({path, value}), do: not comparable?(path) or not comparable?(value)
+
+  defp comparable?(value) when is_binary(value) or is_atom(value),
+    do: not Repo.bad_text?(value)
+
+  defp comparable?(value), do: is_number(value)
 
   defp reduce_filters(query, filters) do
     Enum.reduce(filters, query, fn

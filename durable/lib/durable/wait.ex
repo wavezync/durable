@@ -1002,8 +1002,13 @@ defmodule Durable.Wait do
 
     query =
       case Keyword.get(filters, :event_name) do
-        nil -> query
-        event_name -> from(p in query, where: p.event_name == ^event_name)
+        nil ->
+          query
+
+        event_name ->
+          if Repo.bad_text?(event_name),
+            do: from(p in query, where: false),
+            else: from(p in query, where: p.event_name == ^event_name)
       end
 
     Repo.all(config, query)
@@ -1071,10 +1076,10 @@ defmodule Durable.Wait do
   end
 
   defp get_waiting_execution(config, workflow_id) do
-    case Repo.get(config, WorkflowExecution, workflow_id) do
-      nil -> {:error, :not_found}
+    case Repo.id?(workflow_id) && Repo.get(config, WorkflowExecution, workflow_id) do
       %{status: :waiting} = execution -> {:ok, execution}
-      _ -> {:error, :not_waiting}
+      %WorkflowExecution{} -> {:error, :not_waiting}
+      _not_a_run -> {:error, :not_found}
     end
   end
 

@@ -219,13 +219,22 @@ defmodule Durable.Orchestration do
 
     {:ok, workflow_def} = get_child_workflow_def(module, opts)
 
+    safe_input =
+      case Executor.storable_input(input) do
+        {:ok, map} ->
+          map
+
+        {:error, :invalid_input} ->
+          raise ArgumentError, "child input must be a map: #{inspect(input)}"
+      end
+
     attrs = %{
       workflow_module: Atom.to_string(module),
       workflow_name: workflow_def.name,
       status: :pending,
       queue: Keyword.get(opts, :queue, "default") |> to_string(),
       priority: Keyword.get(opts, :priority, 0),
-      input: input,
+      input: safe_input,
       context: %{},
       parent_workflow_id: parent_id,
       trigger: :parent

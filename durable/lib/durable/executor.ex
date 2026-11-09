@@ -63,9 +63,11 @@ defmodule Durable.Executor do
     end
   end
 
-  defp storable_input(input) when not is_map(input), do: {:error, :invalid_input}
+  @doc false
+  @spec storable_input(term()) :: {:ok, map()} | {:error, :invalid_input}
+  def storable_input(input) when not is_map(input), do: {:error, :invalid_input}
 
-  defp storable_input(input) do
+  def storable_input(input) do
     case sanitize_for_json(input) do
       map when not is_struct(map) -> {:ok, map}
       _scalar -> {:error, :invalid_input}

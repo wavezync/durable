@@ -27,6 +27,12 @@ defmodule Durable.Fuzz.ApiTest do
 
   @statuses [:pending, :running, :waiting, :completed, :failed, :cancelled]
 
+  defp finished do
+    {:ok, id} = Durable.start(Quick, %{})
+    await_status(id, :completed, 5_000)
+    id
+  end
+
   defp waiting(workflow) do
     {:ok, id} = Durable.start(workflow, %{})
     assert_eventually(fn -> get(id).status == :waiting end)
@@ -65,6 +71,24 @@ defmodule Durable.Fuzz.ApiTest do
       {"list limit", :integer, &Durable.list_executions(limit: &1)},
       {"cancel_all tag", :string, &Durable.cancel_all([tag: &1], "x")},
       {"cancel_all reason", :any, &Durable.cancel_all([tag: "no-such-tag"], &1)},
+      {"rerun input", :map, &Durable.rerun(ctx.finished, input: &1)},
+      {"start on_duplicate", :never, &Durable.start(Quick, %{}, key: "k", on_duplicate: &1)},
+      {"start workflow", :string, &Durable.start(Quick, %{}, workflow: &1)},
+      {"list workflow_name", :string, &Durable.list_executions(workflow_name: &1)},
+      {"list current_step", :string, &Durable.list_executions(current_step: &1)},
+      {"list error_contains", :string, &Durable.list_executions(error_contains: &1)},
+      {"list trigger_ref", :string, &Durable.list_executions(trigger_ref: &1)},
+      {"list trigger", :never, &Durable.list_executions(trigger: &1)},
+      {"list input", :map, &Durable.list_executions(input: &1)},
+      {"list offset", :integer, &Durable.list_executions(offset: &1)},
+      {"list_keys prefix", :string, &Durable.Query.list_keys(key_prefix: &1)},
+      {"list_keys workflow", :string, &Durable.Query.list_keys(workflow_name: &1)},
+      {"pending inputs", :never, &Durable.Wait.list_pending_inputs(status: &1)},
+      {"pending events", :string, &Durable.Wait.list_pending_events(event_name: &1)},
+      {"cancel_wait", :string, &Durable.Wait.cancel_wait/1},
+      {"update_schedule", :string, &Durable.update_schedule(&1, enabled: false)},
+      {"enable_schedule", :string, &Durable.enable_schedule/1},
+      {"disable_schedule", :string, &Durable.disable_schedule/1},
       {"pause_queue", :string, &Durable.pause_queue/1},
       {"resume_queue", :string, &Durable.resume_queue/1},
       {"schedule cron", :string, &Durable.schedule(Quick, &1, name: "fuzz")},
@@ -151,6 +175,24 @@ defmodule Durable.Fuzz.ApiTest do
         "list limit",
         "cancel_all tag",
         "cancel_all reason",
+        "rerun input",
+        "start on_duplicate",
+        "start workflow",
+        "list workflow_name",
+        "list current_step",
+        "list error_contains",
+        "list trigger_ref",
+        "list trigger",
+        "list input",
+        "list offset",
+        "list_keys prefix",
+        "list_keys workflow",
+        "pending inputs",
+        "pending events",
+        "cancel_wait",
+        "update_schedule",
+        "enable_schedule",
+        "disable_schedule",
         "pause_queue",
         "resume_queue",
         "schedule cron",
@@ -162,7 +204,8 @@ defmodule Durable.Fuzz.ApiTest do
       ctx = %{
         running: elem(Durable.start(Waits, %{}), 1),
         waiting: waiting(Waits),
-        asking: waiting(Asks)
+        asking: waiting(Asks),
+        finished: finished()
       }
 
       {name, type, call} = Enum.find(calls(ctx), &(elem(&1, 0) == unquote(name)))

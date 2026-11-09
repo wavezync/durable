@@ -374,6 +374,23 @@ defmodule Durable.FuzzWorkflows do
     {:ok, data}
   end
 
+  defp apply_surface(:child_input, term, data) do
+    Durable.Orchestration.start_workflow(Quick, term, ref: :child)
+    {:ok, data}
+  end
+
+  defp apply_surface(:call_input, term, data) do
+    Durable.Orchestration.call_workflow(Quick, term, ref: :child)
+    {:ok, data}
+  end
+
+  defp apply_surface(:context_ops, term, data) do
+    Context.append_context(:list, term)
+    Context.merge_context(%{"merged" => term})
+    Context.update_context(:updated, fn _ -> term end)
+    {:ok, data}
+  end
+
   defp apply_surface(:snooze, term, data) do
     if Probe.here({:snooze, case_of(data)}) == 1, do: {:snooze, 1, term}, else: {:ok, data}
   end

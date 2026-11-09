@@ -305,10 +305,18 @@ defmodule Durable.Queue.Poller do
         state
 
       {%{ref: ref, job_id: job_id, token: token}, workers} ->
-        settle_job(state.config, job_id, token, result)
+        safely_settle_job(state.config, job_id, token, result)
         Process.demonitor(ref, [:flush])
         %{state | workers: workers}
     end
+  end
+
+  # A row that can't be read mustn't take the poller, and its other workers,
+  # down with it. Stale-lock recovery deals with the run.
+  defp safely_settle_job(config, job_id, token, result) do
+    settle_job(config, job_id, token, result)
+  rescue
+    error -> Logger.error("Couldn't settle job #{job_id}: #{Exception.message(error)}")
   end
 
   defp settle_job(config, job_id, token, result) do
