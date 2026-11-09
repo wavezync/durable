@@ -4,6 +4,12 @@ All notable changes to this package. Versions follow [Semantic
 Versioning](https://semver.org); entries come from [Conventional
 Commits](https://www.conventionalcommits.org).
 
+## [1.2.2](https://github.com/wavezync/durable/compare/durable_dashboard-v1.2.1...durable_dashboard-v1.2.2) - 2026-11-09
+
+### Documentation
+
+- Add a guide to using the dashboard ([0c377fc](https://github.com/wavezync/durable/commit/0c377fcc39cf02bb629307a3563cc1c4b5c646e0))
+
 ## [1.2.1](https://github.com/wavezync/durable/compare/durable_dashboard-v1.2.0...durable_dashboard-v1.2.1) - 2026-11-09
 
 ### Bug fixes
