@@ -74,6 +74,12 @@ defmodule DurableDashboard.Live.TelemetryLive do
        {[:durable, :wait, :sleep_woken], "count", ""},
        {[:durable, :pruner, :pruned], "count", "group: completed | failed | cancelled"}
      ]},
+    {"Node shutdown",
+     [
+       {[:durable, :node, :drain, :start], "system_time", "durable, node_id"},
+       {[:durable, :node, :drain, :stop], "duration", "durable, node_id, result"},
+       {[:durable, :node, :drain, :exception], "duration", "durable, node_id, kind, reason"}
+     ]},
     {"Workflow keys",
      [
        {[:durable, :key, :duplicate], "count",
@@ -111,6 +117,9 @@ defmodule DurableDashboard.Live.TelemetryLive do
     [:durable, :schedule, :trigger] => "A schedule starts a run",
     [:durable, :wait, :sleep_woken] => "Sleeping runs wake up",
     [:durable, :pruner, :pruned] => "Retention deletes a batch of old runs",
+    [:durable, :node, :drain, :start] => "A node stops claiming and waits for its steps",
+    [:durable, :node, :drain, :stop] => "A node has finished waiting, or ran out of time",
+    [:durable, :node, :drain, :exception] => "Waiting for a node's steps crashed",
     [:durable, :key, :duplicate] => "A start finds its workflow key taken",
     [:durable, :key, :handoff] => "A start takes a key from a finished run",
     [:durable, :key, :release] => "Someone releases a finished run's key",

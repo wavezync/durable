@@ -249,6 +249,21 @@ defmodule Durable.Queue.Adapters.Postgres do
   end
 
   @impl true
+  def release_node_jobs(%Config{} = config, node_id) when is_binary(node_id) do
+    query =
+      from(w in WorkflowExecution, where: w.status == :running and w.locked_by == ^node_id)
+
+    {count, _} =
+      Repo.update_all(config, query,
+        set: [status: :pending, locked_by: nil, locked_at: nil, lock_token: nil]
+      )
+
+    {:ok, count}
+  rescue
+    e -> {:error, Exception.message(e)}
+  end
+
+  @impl true
   def recover_zombie_workflows(%Config{} = config, timeout_seconds) when timeout_seconds > 0 do
     cutoff = DateTime.add(DateTime.utc_now(), -timeout_seconds, :second)
 
