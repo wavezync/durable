@@ -16,6 +16,9 @@ them as ratios, not as a forecast.
   database at every level.
 - **Give Durable a PubSub**, so new work starts at once and you can poll less.
 - **Make steps safe to run twice.** Delivery is at least once.
+- **Give a step retries if it should survive a crash.** A step whose process or
+  node dies has used an attempt, so with no `retry:` (one attempt) the run fails.
+  A deploy that hands runs back doesn't use one.
 - **Give nodes time to stop.** Your platform's shutdown limit should be longer
   than Durable's grace period, 15 seconds by default.
 - **Tune autovacuum** for the two busiest tables.
@@ -267,7 +270,7 @@ whose lock was taken over is fenced out, so two copies can't both record a resul
 
 ### Make steps safe to run twice
 
-A crash, or a takeover like the one above, runs the step again. Use an
+A crash, or a takeover like the one above, uses one of the step's attempts and runs the step again if it has any left. Use an
 idempotency key when you call a payment API, and upserts rather than inserts.
 
 ### Upgrade Durable
@@ -305,6 +308,10 @@ picked up. If you rename or remove the step a run stopped at, it fails with
 | Forget nodes unseen for a day | With each heartbeat | Every node |
 
 ## Watching it
+
+Every line a step logs has `:workflow`, `:workflow_id`, `:step` and `:attempt` in
+its Logger metadata, so add the ones you want to your formatter's `:metadata`.
+A workflow can add its own with `log_metadata: fn data -> [account_id: data["account_id"]] end`.
 
 Add `Durable.Telemetry.metrics/0` to your reporter:
 

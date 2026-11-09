@@ -405,6 +405,22 @@ defmodule Durable.WorkflowKeysTest do
     end
   end
 
+  describe "a time bucket in the key" do
+    test "runs at most once per bucket, even after the run has finished" do
+      config = Config.get(Durable)
+      this_hour = "report:2026-11-09T14"
+
+      {:ok, first} = Durable.start(Once, %{}, key: this_hour)
+      {:ok, _} = Executor.execute_workflow(first, config)
+      assert reload(first).status == :completed
+
+      assert {:ok, ^first} = Durable.start(Once, %{}, key: this_hour)
+
+      {:ok, next_hour} = Durable.start(Once, %{}, key: "report:2026-11-09T15")
+      assert next_hour != first
+    end
+  end
+
   describe "rerun/2" do
     test "keeps the key and is refused while the key is held" do
       holder = holder!(Once, "once:1", :completed)

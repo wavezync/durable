@@ -66,7 +66,16 @@ defmodule Durable.IntegrationProbe do
 
   @impl true
   def init(nil) do
-    {:ok, %{hits: %{}, running: %{}, peak: %{}, log: [], flags: MapSet.new(), stored: %{}}}
+    {:ok,
+     %{
+       hits: %{},
+       running: %{},
+       entered: %{},
+       peak: %{},
+       log: [],
+       flags: MapSet.new(),
+       stored: %{}
+     }}
   end
 
   @impl true
@@ -88,17 +97,24 @@ defmodule Durable.IntegrationProbe do
 
     state = count(state, label)
 
+    # A step killed mid-way never gets to say it left.
+    ref = Process.monitor(pid)
+
     {:reply, :ok,
      %{
        state
        | running: Map.put(state.running, group, running),
+         entered: Map.put(state.entered, ref, {pid, group}),
          peak: Map.put(state.peak, group, peak),
          log: [{label, group, node(pid)} | state.log]
      }}
   end
 
-  def handle_call({:leave, group}, _from, state),
-    do: {:reply, :ok, %{state | running: Map.update!(state.running, group, &(&1 - 1))}}
+  def handle_call({:leave, group}, {pid, _}, state) do
+    {ref, _} = Enum.find(state.entered, fn {_ref, entered} -> entered == {pid, group} end)
+    Process.demonitor(ref, [:flush])
+    {:reply, :ok, left(state, ref, group)}
+  end
 
   def handle_call({:set, flag}, _from, state),
     do: {:reply, :ok, %{state | flags: MapSet.put(state.flags, flag)}}
@@ -113,6 +129,20 @@ defmodule Durable.IntegrationProbe do
     do: {:reply, Map.get(state.peak, group, 0), state}
 
   def handle_call(:log, _from, state), do: {:reply, Enum.reverse(state.log), state}
+
+  @impl true
+  def handle_info({:DOWN, ref, :process, _pid, _reason}, state) do
+    {_pid, group} = Map.fetch!(state.entered, ref)
+    {:noreply, left(state, ref, group)}
+  end
+
+  defp left(state, ref, group) do
+    %{
+      state
+      | entered: Map.delete(state.entered, ref),
+        running: Map.update!(state.running, group, &(&1 - 1))
+    }
+  end
 
   defp count(state, label), do: %{state | hits: Map.update(state.hits, label, 1, &(&1 + 1))}
 end

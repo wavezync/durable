@@ -28,7 +28,10 @@ defmodule Durable.Executor do
 
   require Logger
 
-  # Context key a parked run records its atom keys under (see park/3).
+  # Context key every save records the run's top-level string keys under, so
+  # that the data comes back the shape it left in (see restore_keys/1).
+  @string_keys "__string_keys__"
+  # What 1.5.0 recorded on a park instead. Kept for runs parked over an upgrade.
   @atom_keys "__atom_keys__"
 
   @doc """
@@ -49,7 +52,8 @@ defmodule Durable.Executor do
   - `{:ok, workflow_id}` on success
   - `{:error, reason}` on failure
   """
-  @spec start_workflow(module(), map(), keyword()) :: {:ok, String.t()} | {:error, term()}
+  @spec start_workflow(module(), map(), keyword()) ::
+          {:ok, String.t() | %{id: String.t(), created: boolean()}} | {:error, term()}
   def start_workflow(module, input, opts \\ []) do
     durable_name = Keyword.get(opts, :durable, Durable)
     config = Config.get(durable_name)
@@ -80,32 +84,59 @@ defmodule Durable.Executor do
   transaction (the caller's, if it is in one). `opts` applies to every item,
   under the item's own options. Returns one result per item, in order, each
   what `start_workflow/3` would have returned: keys are checked item by item.
+  If the batch's key locks can't be taken, nothing is started and every item
+  gets `{:error, reason}`.
   """
   @spec start_many([{module(), map()} | {module(), map(), keyword()}], keyword()) ::
-          [{:ok, String.t()} | {:error, term()}]
+          [{:ok, String.t() | map()} | {:error, term()}]
   def start_many(items, opts \\ []) do
     config = Config.get(Keyword.get(opts, :durable, Durable))
 
+    items =
+      Enum.map(items, fn
+        {module, input} -> {module, input, opts}
+        {module, input, item_opts} -> {module, input, Keyword.merge(opts, item_opts)}
+      end)
+
     # ponytail: one insert per item, so keys and on_duplicate: are checked;
     # an insert_all for unkeyed items if thousands per call ever matter.
-    {:ok, results} =
+    result =
       Repo.transaction(config, fn ->
-        Enum.map(items, fn
-          {module, input} ->
-            start_workflow(module, input, [wake: false] ++ opts)
+        lock_batch_keys(config, items)
 
-          {module, input, item_opts} ->
-            start_workflow(module, input, [wake: false] ++ Keyword.merge(opts, item_opts))
+        Enum.map(items, fn {module, input, item_opts} ->
+          start_workflow(module, input, [wake: false] ++ item_opts)
         end)
       end)
 
-    wake_committed(config, results)
-    results
+    case result do
+      {:ok, results} ->
+        wake_committed(config, results)
+        results
+
+      {:error, reason} ->
+        Enum.map(items, fn _item -> {:error, reason} end)
+    end
+  end
+
+  # Every key the batch will touch, locked up front in one order. Taken item
+  # by item, two batches naming the same keys in different orders deadlock.
+  # A key that can't be stored raises from its own start, as it always has.
+  defp lock_batch_keys(config, items) do
+    names =
+      for {module, _input, item_opts} <- items,
+          key = item_opts[:key],
+          is_binary(key) and not Repo.bad_text?(key),
+          {:ok, workflow_def} <- [get_workflow_definition(module, item_opts)] do
+        Keys.lock_name(module, workflow_def.name, key)
+      end
+
+    Keys.lock_all(config, names)
   end
 
   # One wake per queue, once the batch has committed.
   defp wake_committed(config, results) do
-    ids = for {:ok, id} <- results, do: id
+    ids = for {:ok, result} <- results, do: if(is_map(result), do: result.id, else: result)
     now = DateTime.utc_now()
 
     config
@@ -130,16 +161,21 @@ defmodule Durable.Executor do
     end
 
     # Otherwise, the queue poller will pick up the job
-    {:ok, execution.id}
+    start_reply(execution.id, true, opts)
   end
 
   # The key is held: nothing was created, broadcast or run.
-  defp started({:duplicate, holder_id, :use_existing}, _config, _opts), do: {:ok, holder_id}
+  defp started({:duplicate, holder_id, :use_existing}, _config, opts),
+    do: start_reply(holder_id, false, opts)
 
   defp started({:duplicate, holder_id, :error}, _config, _opts),
     do: {:error, {:key_taken, holder_id}}
 
   defp started({:error, _} = error, _config, _opts), do: error
+
+  defp start_reply(id, created, opts) do
+    if opts[:return] == :details, do: {:ok, %{id: id, created: created}}, else: {:ok, id}
+  end
 
   @doc """
   Cancels a running or pending workflow.
@@ -164,8 +200,9 @@ defmodule Durable.Executor do
 
     # One conditional UPDATE, so a run that finishes concurrently can't be
     # flipped back to :cancelled. Clearing the lock token fences the worker
-    # still executing it: its ack/nack become no-ops, and the executor's
-    # status compare-and-set stops it at the next step boundary.
+    # still executing it: its ack/nack become no-ops, its next heartbeat stops
+    # the step, and the executor's status compare-and-set stops it at the next
+    # step boundary if the step finishes first.
     cancellable =
       from(w in WorkflowExecution,
         where: w.id == ^workflow_id and w.status in [:pending, :running, :waiting],
@@ -487,11 +524,13 @@ defmodule Durable.Executor do
         workflow: execution.workflow_name,
         workflow_module: execution.workflow_module,
         queue: execution.queue,
+        key: execution.key,
+        tags: execution.tags,
         trigger: execution.trigger,
         resumed: resumed
       }
 
-      Durable.Telemetry.put_run_meta(meta)
+      Durable.Telemetry.put_run_meta(meta, workflow_def.opts[:log_metadata])
 
       :telemetry.span([:durable, :workflow], meta, fn ->
         result = run_until_superseded(execution, workflow_def, config)
@@ -550,11 +589,20 @@ defmodule Durable.Executor do
 
   defp string_keys(map), do: Map.new(map, fn {key, value} -> {to_string(key), value} end)
 
-  # Top-level context keys come back from JSON as strings. A run parked by a
-  # retry or snooze recorded which of them were atoms, so the next attempt gets
-  # the same data the last one did (a first step still reads input["id"]).
-  # Any other resume makes them all atoms.
-  defp restore_keys(%{@atom_keys => atom_keys} = context) do
+  defp string_key_names(map), do: for({key, _} <- map, is_binary(key), do: key)
+
+  # Top-level context keys come back from JSON as strings. Every save records
+  # which were strings, so a step sees the same data however the run got back
+  # to it: a retry, a wait, a queue move, a crash (a first step still reads
+  # input["id"]). What the record doesn't list becomes an atom if the code knows
+  # it, which covers what was merged in after the save, such as a wait's answer.
+  # A run saved before the record existed has every key treated that way.
+  defp restore_keys(%{@string_keys => strings} = context) when is_list(strings) do
+    {kept, others} = context |> Map.delete(@string_keys) |> Map.split(strings)
+    others |> atomize_keys() |> Map.merge(kept)
+  end
+
+  defp restore_keys(%{@atom_keys => atom_keys} = context) when is_list(atom_keys) do
     context
     |> Map.delete(@atom_keys)
     |> Map.new(fn {key, value} ->
@@ -713,6 +761,9 @@ defmodule Durable.Executor do
           "the key is kept by reuse: #{Keys.reuse(workflow_def)} " <>
             "(held by #{String.slice(holder_id, 0, 8)})"
         )
+
+      {:error, _reason} = error ->
+        error
     end
   end
 
@@ -1189,6 +1240,18 @@ defmodule Durable.Executor do
               branch_data
             )
 
+          {:decision, exec, step, target_step, new_data} ->
+            handle_decision_result(
+              exec,
+              target_step,
+              new_data,
+              remaining_steps,
+              step,
+              step_index,
+              workflow_def,
+              config
+            )
+
           {:waiting, exec} ->
             {:waiting, exec}
 
@@ -1280,10 +1343,9 @@ defmodule Durable.Executor do
           exec.context
         )
 
+      # The jump is made by execute_branch/7, which has the steps after the block.
       {:decision, target_step, new_data} ->
-        # Decisions within branches - save and return for outer handler
-        {:ok, exec} = save_data_as_context(config, exec, new_data)
-        {:decision, exec, target_step, new_data}
+        {:decision, exec, step, target_step, new_data}
 
       {wait_type, opts}
       when wait_type in [:sleep, :wait_for_event, :wait_for_input, :wait_for_any, :wait_for_all] ->
@@ -1435,7 +1497,10 @@ defmodule Durable.Executor do
     {:ok, exec} =
       exec
       |> Ecto.Changeset.change(
-        context: Map.merge(exec.context || %{}, parallel_context),
+        context:
+          (exec.context || %{})
+          |> Map.merge(parallel_context)
+          |> Map.put(@string_keys, string_key_names(exec.context || %{})),
         status: :waiting,
         scheduled_at: nil
       )
@@ -1457,9 +1522,12 @@ defmodule Durable.Executor do
       workflow_name: parent_exec.workflow_name,
       status: :pending,
       queue: to_string(queue),
-      priority: 0,
+      priority: parent_exec.priority,
       input: data,
-      context: Map.put(parent_context, "__parallel_step", Atom.to_string(step.name)),
+      context:
+        parent_context
+        |> Map.put("__parallel_step", Atom.to_string(step.name))
+        |> Map.put(@string_keys, string_key_names(parent_context)),
       parent_workflow_id: parent_exec.id,
       trigger: :parent,
       current_step: Atom.to_string(step.name),
@@ -1502,13 +1570,11 @@ defmodule Durable.Executor do
       # the body, which is why we need these keys to live inside `data`.
       # The __parallel_step marker is internal plumbing — strip it from
       # what the user sees.
-      inherited =
+      data =
         execution.context
         |> Map.drop(["__parallel_step", :__parallel_step, @atom_keys])
-        |> atomize_keys()
-
-      input = atomize_keys(execution.input)
-      data = Map.merge(inherited, input)
+        |> Map.merge(execution.input)
+        |> restore_keys()
 
       case StepRunner.execute(step_def, data, execution.id, config, execution.deadline_at) do
         {:ok, output_data} ->
@@ -1580,7 +1646,6 @@ defmodule Durable.Executor do
         :__parallel_wait_group_id,
         :__parallel_error_strategy
       ])
-      |> atomize_keys()
 
     # Check for fail_fast
     errors = Enum.filter(results, fn {_key, result} -> match?({:error, _}, result) end)
@@ -1867,9 +1932,15 @@ defmodule Durable.Executor do
       # same step would skip its sleep.
       |> Map.drop([:__sleep_satisfied__, "__sleep_satisfied__"])
 
-    execution
-    |> Ecto.Changeset.change(context: merged)
-    |> cas_update!(config)
+    # The record of its key shapes is stored, but the next step mustn't see it.
+    with {:ok, saved} <-
+           execution
+           |> Ecto.Changeset.change(
+             context: Map.put(merged, @string_keys, string_key_names(merged))
+           )
+           |> cas_update!(config) do
+      {:ok, %{saved | context: merged}}
+    end
   end
 
   defp mark_completed(config, execution, final_data) do
@@ -1885,6 +1956,9 @@ defmodule Durable.Executor do
         completed_at: DateTime.utc_now(),
         current_step: nil
       })
+      # Forced: the in-memory context lacks the stored record of key shapes
+      # (save_data_as_context/3), so it can look unchanged when the row isn't.
+      |> Ecto.Changeset.force_change(:context, safe_final)
       |> Ecto.Changeset.change(locked_by: nil, locked_at: nil, scheduled_at: nil)
       |> cas_update!(config)
 
@@ -2029,9 +2103,11 @@ defmodule Durable.Executor do
   # Parent Notification (Orchestration)
   # ============================================================================
 
-  defp maybe_notify_parent(_config, %{parent_workflow_id: nil}, _status, _data), do: :ok
+  @doc false
+  # Also called by the sweeps and the worker, which fail runs the executor can't.
+  def maybe_notify_parent(_config, %{parent_workflow_id: nil}, _status, _data), do: :ok
 
-  defp maybe_notify_parent(config, execution, status, data) do
+  def maybe_notify_parent(config, execution, status, data) do
     # Check for parallel child notification first (uses __parallel_done: events)
     parallel_event_name = "__parallel_done:#{execution.id}"
 
@@ -2456,11 +2532,72 @@ defmodule Durable.Executor do
   # put_context/2 writes included. Keys are strings, so an atom and a string
   # copy of one key can't both be stored.
   defp park(config, execution, delay_ms) do
+    release(config, execution, Process.get(:durable_context, %{}),
+      scheduled_at: park_until(execution, delay_ms)
+    )
+  end
+
+  defp park_until(execution, delay_ms) do
     at = DateTime.add(DateTime.utc_now(), delay_ms, :millisecond)
     deadline = execution.deadline_at
-    at = if deadline && DateTime.after?(at, deadline), do: deadline, else: at
+    if deadline && DateTime.after?(at, deadline), do: deadline, else: at
+  end
 
-    release(config, execution, Process.get(:durable_context, %{}), scheduled_at: at)
+  @doc false
+  # The process running this claim died, so nothing recorded how its attempt
+  # ended. The attempt counts: it's closed as failed and the run goes back on
+  # its queue, where the next claim retries the step or, out of attempts, fails
+  # the run the normal way, compensations and all (StepRunner.execute/5).
+  #
+  # A compensation that died, or anything that died outside a step (a branch's
+  # `on:`, a parallel `into:`), comes back `{:error, error}` for the poller
+  # to fail the run: running those again would crash the same way, with no
+  # attempts to run out.
+  @spec attempt_died(map(), map(), Config.t()) :: :waiting | :fenced | {:error, map()}
+  def attempt_died(job, error, %Config{} = config) do
+    {:ok, run} = load_execution(config, job.id)
+
+    if run.lock_token == job[:lock_token] and run.status in [:running, :compensating] do
+      closed = StepRunner.close_running(config, [run.id], :failed, error)
+      if run.status == :running and closed > 0, do: requeue(config, run), else: {:error, error}
+    else
+      :fenced
+    end
+  end
+
+  # The context stays as it was last saved: the attempt that died changed nothing.
+  defp requeue(config, run) do
+    run
+    |> Ecto.Changeset.change(
+      status: :pending,
+      scheduled_at: requeue_at(run, delay_after_death(config, run)),
+      locked_by: nil,
+      locked_at: nil,
+      lock_token: nil
+    )
+    |> cas_update(config)
+    |> case do
+      {:ok, requeued} ->
+        DurablePubSub.broadcast_workflow(config, :workflow_parked, workflow_event(requeued))
+        DurablePubSub.wake(config, requeued)
+        :waiting
+
+      _superseded ->
+        :fenced
+    end
+  end
+
+  # Nothing to wait for is ready now, whatever the database's clock says.
+  defp requeue_at(_run, 0), do: nil
+  defp requeue_at(run, delay_ms), do: park_until(run, delay_ms)
+
+  defp delay_after_death(config, run) do
+    with {:ok, workflow_def} <- get_workflow_definition_from_execution(run),
+         %{} = step <- Enum.find(workflow_def.steps, &(to_string(&1.name) == run.current_step)) do
+      StepRunner.delay_after_death(step, run.id, config)
+    else
+      _no_such_step -> 0
+    end
   end
 
   # Where this step has to run, when that isn't where the run is now: its own
@@ -2475,8 +2612,8 @@ defmodule Durable.Executor do
   end
 
   # Hands the run to another queue before `step`, so the step takes a slot
-  # there. No `scheduled_at`: a run already under way sorts with the runs that
-  # are ready now, oldest first, not behind them.
+  # there. No `scheduled_at`: it's ready now, and a run already under way goes
+  # by its age, ahead of runs started after it.
   defp move_to_queue(config, execution, step, queue, data) do
     home = execution.home_queue || execution.queue
 
@@ -2494,13 +2631,12 @@ defmodule Durable.Executor do
 
   # Back to :pending with the worker freed, keeping `data` for the next claim.
   defp release(config, execution, data, attrs) do
-    atom_keys = for {key, _} <- data, is_atom(key), do: Atom.to_string(key)
-
     context =
       execution.context
       |> string_keys()
       |> Map.merge(string_keys(data))
-      |> Map.put(@atom_keys, atom_keys)
+      |> Map.delete(@atom_keys)
+      |> Map.put(@string_keys, string_key_names(data))
 
     {:ok, execution} =
       execution

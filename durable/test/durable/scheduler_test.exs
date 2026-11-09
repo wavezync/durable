@@ -559,6 +559,137 @@ defmodule Durable.SchedulerTest do
     end
   end
 
+  describe "a @schedule that changed" do
+    defp next_run_within?(schedule, seconds) do
+      DateTime.diff(schedule.next_run_at, DateTime.utc_now(), :second) <= seconds
+    end
+
+    test "a new cron takes effect now, not after the old next_run_at has fired" do
+      {:ok, _} =
+        Durable.schedule(ScheduledWorkflowModule, "0 0 1 1 *",
+          name: "daily_report",
+          workflow: "daily_report"
+        )
+
+      {:ok, before} = Durable.get_schedule("daily_report")
+      refute next_run_within?(before, 3 * 86_400) and before.next_run_at.month != 1
+
+      :ok = API.register(ScheduledWorkflowModule)
+
+      {:ok, daily} = Durable.get_schedule("daily_report")
+      assert next_run_within?(daily, 86_400)
+    end
+
+    test "an unchanged schedule keeps its next_run_at" do
+      :ok = API.register(ScheduledWorkflowModule)
+      {:ok, first} = Durable.get_schedule("daily_report")
+
+      far = DateTime.add(first.next_run_at, 7, :day)
+      {:ok, _} = Durable.update_schedule("daily_report", next_run_at_for_test(far))
+
+      :ok = API.register(ScheduledWorkflowModule)
+      {:ok, second} = Durable.get_schedule("daily_report")
+      assert DateTime.compare(second.next_run_at, far) == :eq
+    end
+
+    test "update_schedule/2 recomputes next_run_at for a new time zone alone" do
+      {:ok, _} = Durable.schedule(SimpleWorkflow, "0 9 * * *", name: "tz")
+      {:ok, moved} = Durable.get_schedule("tz")
+
+      far = DateTime.add(moved.next_run_at, 30, :day)
+
+      Config.get(Durable).repo.update_all(from(s in ScheduledWorkflow, where: s.id == ^moved.id),
+        set: [next_run_at: far]
+      )
+
+      {:ok, updated} = Durable.update_schedule("tz", timezone: "Etc/UTC")
+      assert next_run_within?(updated, 86_400)
+    end
+
+    defp next_run_at_for_test(at) do
+      Config.get(Durable).repo.update_all(
+        from(s in ScheduledWorkflow, where: s.name == "daily_report"),
+        set: [next_run_at: at]
+      )
+
+      []
+    end
+  end
+
+  describe "a @schedule removed from the code" do
+    defp declared_row(name, module \\ ScheduledWorkflowModule) do
+      {:ok, schedule} =
+        Durable.schedule(module, "0 9 * * *", name: name, workflow: hd(module.__workflows__()))
+
+      {:ok, schedule} =
+        schedule |> Ecto.Changeset.change(source: "code") |> Config.get(Durable).repo.update()
+
+      schedule
+    end
+
+    test "is turned off; what's still declared stays on" do
+      :ok = API.register(ScheduledWorkflowModule)
+      declared_row("deleted_from_the_module")
+
+      :ok = API.turn_off_removed([ScheduledWorkflowModule], durable: Durable)
+
+      {:ok, removed} = Durable.get_schedule("deleted_from_the_module")
+      assert removed.enabled == false
+
+      {:ok, kept} = Durable.get_schedule("daily_report")
+      assert kept.enabled == true
+    end
+
+    test "leaves schedules made with Durable.schedule/3 alone" do
+      {:ok, _} =
+        Durable.schedule(ScheduledWorkflowModule, "0 9 * * *",
+          name: "made_at_runtime",
+          workflow: "daily_report"
+        )
+
+      :ok = API.turn_off_removed([ScheduledWorkflowModule], durable: Durable)
+
+      {:ok, schedule} = Durable.get_schedule("made_at_runtime")
+      assert schedule.enabled == true
+    end
+
+    test "leaves another module's schedules alone: a node only speaks for its own" do
+      declared_row("someone_elses", SimpleWorkflow)
+
+      :ok = API.turn_off_removed([ScheduledWorkflowModule], durable: Durable)
+
+      {:ok, schedule} = Durable.get_schedule("someone_elses")
+      assert schedule.enabled == true
+    end
+
+    test "comes back on, with a fresh next_run_at, if it's declared again" do
+      :ok = API.register(ScheduledWorkflowModule)
+
+      Config.get(Durable).repo.update_all(
+        from(s in ScheduledWorkflow, where: s.name == "daily_report"),
+        set: [source: "removed", enabled: false, next_run_at: nil]
+      )
+
+      :ok = API.register(ScheduledWorkflowModule)
+
+      {:ok, daily} = Durable.get_schedule("daily_report")
+      assert daily.enabled == true
+      assert daily.source == "code"
+      assert daily.next_run_at != nil
+    end
+
+    test "a schedule an operator turned off stays off" do
+      :ok = API.register(ScheduledWorkflowModule)
+      {:ok, _} = Durable.disable_schedule("daily_report")
+
+      :ok = API.turn_off_removed([ScheduledWorkflowModule], durable: Durable)
+      :ok = API.register(ScheduledWorkflowModule)
+
+      {:ok, daily} = Durable.get_schedule("daily_report")
+      assert daily.enabled == false
+    end
+  end
+
   describe "register_all/1" do
     test "registers multiple modules" do
       :ok = API.register_all([ScheduledWorkflowModule])
@@ -653,23 +784,36 @@ defmodule Durable.SchedulerTest do
     end
   end
 
-  describe "mark_run/2" do
-    test "updates last_run_at and sets next_run_at in future" do
+  describe "claim_fire/2" do
+    test "moves the schedule on, once" do
       config = Config.get(Durable)
 
-      {:ok, schedule} = Durable.schedule(SimpleWorkflow, "0 9 * * *", name: "mark_run_test")
-
+      {:ok, schedule} = Durable.schedule(SimpleWorkflow, "0 9 * * *", name: "claim_test")
       assert schedule.last_run_at == nil
 
-      {:ok, updated} = API.mark_run(schedule, config)
+      # Due, as only a due schedule gets here: the next time is a different one.
+      {:ok, schedule} =
+        schedule
+        |> Ecto.Changeset.change(next_run_at: DateTime.add(DateTime.utc_now(), -5, :second))
+        |> config.repo.update()
 
-      # last_run_at should be set to approximately now
-      assert updated.last_run_at != nil
-      diff = DateTime.diff(DateTime.utc_now(), updated.last_run_at, :second)
-      assert diff >= 0 and diff < 5
+      assert API.claim_fire(schedule, config)
 
-      # next_run_at should be in the future relative to last_run_at
+      {:ok, updated} = Durable.get_schedule("claim_test")
+      assert DateTime.diff(DateTime.utc_now(), updated.last_run_at, :second) in 0..4
       assert DateTime.compare(updated.next_run_at, updated.last_run_at) == :gt
+
+      # A second node that read the same row loses.
+      refute API.claim_fire(schedule, config)
+    end
+
+    test "loses to an operator who turned the schedule off" do
+      config = Config.get(Durable)
+
+      {:ok, schedule} = Durable.schedule(SimpleWorkflow, "0 9 * * *", name: "claim_off")
+      {:ok, _} = Durable.disable_schedule("claim_off")
+
+      refute API.claim_fire(schedule, config)
     end
   end
 

@@ -69,9 +69,9 @@ All tables live in the `durable` schema.
     └── recovered when its node dies
 ```
 
-**Claiming.** A poller claims due runs with `FOR UPDATE SKIP LOCKED`, up to its free slots. The claim sets `running`, the lock, and a new `lock_token`. Paused queues and runs waiting behind a key's holder are skipped.
+**Claiming.** A poller claims due runs with `FOR UPDATE SKIP LOCKED`, up to its free slots, by priority and then by when each became ready (`COALESCE(scheduled_at, inserted_at)`), so a retry that has come due isn't behind runs started after it. The claim sets `running`, the lock, and a new `lock_token`. Paused queues and runs waiting behind a key's holder are skipped.
 
-**Running.** Each claim gets a `Worker`, which runs the executor in a `Task` and sends heartbeats. The executor runs one step at a time, saving the context after each. Concurrency is per node: slots are counted per worker process in each poller.
+**Running.** Each claim gets a `Worker`, which runs the executor in a `Task` and sends heartbeats, and traps exits so it outlives that `Task`. A `Task` that dies is a failed attempt: the worker closes its step row and puts the run back on its queue for the next attempt, or for the next claim to fail it if that was the last. The executor runs one step at a time, saving the context after each. Concurrency is per node: slots are counted per worker process in each poller.
 
 **Stopping and resuming.** A run never holds a worker while it waits for time or for someone else. A retry's backoff, a snooze or a move to another queue puts the run back to `pending` with the lock cleared. A wait sets `waiting`. In both cases the step that stopped runs again from the top when the run resumes, so code before a wait runs twice and must be safe to repeat.
 
@@ -87,11 +87,13 @@ All tables live in the `durable` schema.
 
 **Child workflows.** The parent waits on an internal event named after the child. The child commits its final status and then looks for that event. The parent commits its event and then reads the child. Whichever goes second sees the other, so a child that finishes early can't be missed.
 
-**Compensations** run in reverse order, in the worker, after a step fails for good. Each attempt is a `step_executions` row. Their retries still wait in-process, capped at 30 s. One compensation failing doesn't stop the others.
+**Compensations** run in reverse order, in the worker, after a step fails for good. Each attempt is a `step_executions` row. Their retries still wait in-process, capped at 30 s, and the worker keeps heartbeating. One compensation failing doesn't stop the others.
 
 **Step queues.** `queue` is where the run is claimed now. `home_queue` is where it goes back to, set only while it's away. A move releases the run and wakes the target queue.
 
 **Deadlines.** A run past its `timeout:` fails at its next step boundary, or when `TimeoutWorker` resumes it from a wait. If no live node polls its queue, the sweep hands it to the queue it came from, or to another that's polled, and a worker there fails it.
+
+**Cancelling** clears the run's lock token. The worker's next heartbeat sees the run is cancelled and kills the step. Until then a step can check `cancelled?/0` to stop cleanly.
 
 **Workflow keys.** At most one run holds a key, enforced by a partial unique index on `holds_key`. `on_duplicate: :run_again` keeps one run waiting behind the holder through `runs_after_id`.
 
@@ -101,14 +103,14 @@ All tables live in the `durable` schema.
 
 | Situation | What recovers it |
 |---|---|
-| `running`, lock not refreshed for `stale_lock_timeout` (300 s) | `StaleJobRecovery` sets it back to `pending`, and the old worker is fenced out by its `lock_token` |
+| `running`, lock not refreshed for `stale_lock_timeout` (300 s) | `StaleJobRecovery` closes the attempt as failed and sets the run back to `pending`, and the old worker is fenced out by its `lock_token` |
 | `waiting` with nothing left that could wake it | `StaleJobRecovery` marks it failed |
-| `compensating` with no compensation running | `StaleJobRecovery` marks it failed |
+| `compensating`, lock not refreshed for `stale_lock_timeout` | `StaleJobRecovery` marks it failed |
 | A wait past its timeout | `TimeoutWorker` |
 
-A step can run again after a crash, so steps should be idempotent. Delivery is at least once.
+A crash uses one of the step's attempts. With attempts left the step runs again, so steps should be idempotent: delivery is at least once. With none left (one attempt is the default) the next claim fails the run the normal way.
 
-A node that stops cleanly needs none of this. `Queue.Drainer` stops claiming, and each run finishes its current step and goes back on its queue through the same path as a step's `queue:`. What's still running when `shutdown_grace_period` ends goes back on its queue before its worker is killed, with its lock token cleared.
+A node that stops cleanly needs none of this. `Queue.Drainer` stops claiming, and each run finishes its current step and goes back on its queue through the same path as a step's `queue:`. What's still running when `shutdown_grace_period` ends goes back on its queue before its worker is killed, with its lock token cleared. That doesn't use an attempt.
 
 ## Rules to keep
 
@@ -122,6 +124,8 @@ Each of these was learned from a real bug. Breaking one brings it back.
 6. **Everything stored is made storable first.** Use `sanitize_for_json/1`, `storable_error/1`, `storable_input/1` or `serialize_output/1`. A date or decimal in a `:map` column makes the row unreadable.
 7. **Don't make atoms from stored text.** Use `Context.known_key/1`. Atoms are never freed.
 8. **A wake is only a hint.** Losing one must cost no more than the next poll.
+9. **Whoever ends a run tells its parent.** A sweep or a worker that fails a run in the executor's place calls `Executor.maybe_notify_parent/4`, or the parent waits forever.
+10. **A context save records its key shapes** (`save_data_as_context/3`, `release/4`), and `restore_keys/1` reads them, so a step sees the same data however the run got back to it.
 
 ## Tests
 

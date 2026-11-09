@@ -603,7 +603,7 @@ step :prepare_and_wait, fn ctx ->
 end
 ```
 
-After a wait, the run's data comes back from JSON. A top-level key comes back as an atom if your code mentions that atom anywhere. Otherwise it stays a string, so read a generated key like `"item_123"` with `ctx["item_123"]`.
+A step sees the same data however the run got back to it, after a wait, a retry, a snooze, a queue move or a crash: a top-level key that was a string is still a string, so a first step reading its input with `ctx["id"]` reads it the same way on both passes, and a key that was an atom is still an atom. What a wait adds, the answer under its name, is an atom if your code mentions that atom anywhere and a string otherwise, so read a generated key like `"item_123"` with `ctx["item_123"]`.
 
 ### Use Convenience Wrappers
 

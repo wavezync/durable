@@ -256,6 +256,68 @@ defmodule Durable.BranchTest do
   end
 
   # Helper functions
+  describe "what a branch clause can hold" do
+    test "anything but a step is a compile error that names it" do
+      error =
+        assert_raise CompileError, fn ->
+          Code.compile_string(
+            """
+            defmodule BranchHoldingADecision do
+              use Durable
+
+              workflow "w" do
+                branch on: fn data -> data["kind"] end do
+                  "a" ->
+                    decision :check, fn data -> {:ok, data} end
+                    step :work, fn data -> {:ok, data} end
+                end
+              end
+            end
+            """,
+            "branch_holding_a_decision.ex"
+          )
+        end
+
+      assert error.description =~ "decision(:check"
+      assert error.description =~ "branch"
+      assert error.file =~ "branch_holding_a_decision.ex"
+      assert error.line == 7
+    end
+
+    test "a clause that does nothing still compiles" do
+      assert {{:module, BranchWithEmptyClause, _, _}, _} =
+               Code.eval_string("""
+               defmodule BranchWithEmptyClause do
+                 use Durable
+
+                 workflow "w" do
+                   branch on: fn data -> data["kind"] end do
+                     "a" -> step :work, fn data -> {:ok, data} end
+                     _ -> nil
+                   end
+                 end
+               end
+               """)
+    end
+  end
+
+  describe "{:goto, ...} from a step inside a branch" do
+    test "jumps past the rest of the clause and the steps between" do
+      {:ok, run} = create_and_execute_workflow(GotoInBranchWorkflow, %{"to" => "target"})
+
+      assert run.status == :completed
+      assert run.context["trail"] == ["jumps", "target"]
+    end
+
+    test "to a step that doesn't exist fails the run through the failure path" do
+      {:ok, run} = create_and_execute_workflow(GotoInBranchWorkflow, %{"to" => "nowhere"})
+
+      assert run.status == :failed
+      assert run.error["type"] == "decision_error"
+      assert run.error["message"] =~ "nowhere"
+    end
+  end
+
   defp create_and_execute_workflow(module, input) do
     config = Config.get(Durable)
     repo = config.repo
@@ -561,5 +623,25 @@ defmodule ExceptionConditionBranchWorkflow do
     step(:done, fn data ->
       {:ok, data}
     end)
+  end
+end
+
+defmodule GotoInBranchWorkflow do
+  use Durable
+
+  workflow "goto_in_branch" do
+    branch on: fn _data -> "a" end do
+      "a" ->
+        step(:jumps, fn data ->
+          target = if data["to"] == "target", do: :target, else: :nowhere
+          {:goto, target, Map.put(data, "trail", ["jumps"])}
+        end)
+
+        step(:rest_of_clause, fn data -> {:ok, Map.put(data, "trail", ["rest_of_clause"])} end)
+    end
+
+    step(:between, fn data -> {:ok, Map.put(data, "trail", ["between"])} end)
+
+    step(:target, fn data -> {:ok, Map.update!(data, "trail", &(&1 ++ ["target"]))} end)
   end
 end

@@ -505,7 +505,8 @@ defmodule Durable.IntegrationWorkflows do
     use Durable
 
     workflow "it_held_on_ocr" do
-      step(:ocr, [queue: :ocr], fn data ->
+      # Two attempts: dying with its node uses one.
+      step(:ocr, [queue: :ocr, retry: [max_attempts: 2, backoff: :constant, base: 1]], fn data ->
         Probe.here(:held)
         Probe.wait_for(:release)
         {:ok, data}

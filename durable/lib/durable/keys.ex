@@ -47,6 +47,11 @@ defmodule Durable.Keys do
 
     with {:ok, value} <- Keyword.fetch(opts, :on_duplicate), do: validate_on_duplicate!(value)
 
+    unless Keyword.get(opts, :return, :id) in [:id, :details] do
+      raise ArgumentError,
+            "invalid return: #{inspect(opts[:return])}; expected :id or :details"
+    end
+
     for {opt, value} <- Keyword.take(opts, [:key, :queue, :tags]), Repo.bad_text?(value) do
       raise ArgumentError, "#{opt}: can't be stored: #{inspect(value)}"
     end
@@ -158,22 +163,51 @@ defmodule Durable.Keys do
     # One transaction so a release (or a replaced holder's cancel) and the
     # insert that follows land together. Nothing in here raises on a taken
     # key, and nothing rolls back, so a caller's own transaction stays usable.
-    {:ok, result} =
+    result =
       Repo.transaction(config, fn ->
         lock_key(config, ctx.entry)
         claim(ctx, @rounds, nil)
       end)
 
-    finish(ctx, result)
+    with {:ok, claimed} <- result, do: finish(ctx, claimed)
   end
 
+  @doc false
+  # What a key's advisory lock is named. Module as a string or an atom.
+  @spec lock_name(module() | String.t(), String.t(), String.t()) :: String.t()
+  def lock_name(module, name, key), do: "durable_key:#{module}:#{name}:#{key}"
+
   # Every change to who holds a key takes this first, so a start and a run taking
-  # over from a finished holder can't lock the same rows in opposite orders.
+  # over from a finished holder can't lock the same rows in opposite orders. A
+  # lock that can't be taken (a deadlock, a `lock_timeout`) rolls the
+  # transaction back: Postgres has aborted it anyway.
   defp lock_key(config, %{workflow_module: module, workflow_name: name, key: key}) do
-    {:ok, _} =
-      Repo.query(config, "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [
-        "durable_key:#{module}:#{name}:#{key}"
-      ])
+    with {:error, reason} <-
+           Repo.query(config, "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [
+             lock_name(module, name, key)
+           ]) do
+      config.repo.rollback(reason)
+    end
+
+    :ok
+  end
+
+  @doc false
+  # The locks a batch needs, in sorted order, in one statement. Call it in a
+  # transaction. The locks are re-entrant, so each start taking its own after
+  # this waits for nothing.
+  @spec lock_all(Config.t(), [String.t()]) :: :ok
+  def lock_all(_config, []), do: :ok
+
+  def lock_all(config, names) do
+    sql = """
+    SELECT pg_advisory_xact_lock(hashtextextended(name, 0))
+    FROM (SELECT DISTINCT unnest($1::text[]) AS name ORDER BY name) AS sorted
+    """
+
+    with {:error, reason} <- Repo.query(config, sql, [names]) do
+      config.repo.rollback(reason)
+    end
 
     :ok
   end
@@ -347,7 +381,7 @@ defmodule Durable.Keys do
 
   # `on_duplicate: :cancel_existing`: cancel the open holder and take its key
   # in one UPDATE, under any `reuse:`. Like `Durable.cancel/2`, a step in
-  # flight finishes but its result is dropped; compensations don't run.
+  # flight is stopped at its next heartbeat; compensations don't run.
   defp cancel_holder(ctx, holder) do
     now = DateTime.utc_now()
 
@@ -501,21 +535,27 @@ defmodule Durable.Keys do
   # `{:behind, holder_id}` when another run took the key meanwhile (wait for
   # that one instead), or `{:kept, holder_id}` when `reuse:` keeps it.
   @spec take_waiting(Config.t(), WorkflowExecution.t(), Durable.Definition.Workflow.t()) ::
-          {:ok, WorkflowExecution.t()} | {:behind, String.t()} | {:kept, String.t()}
+          {:ok, WorkflowExecution.t()}
+          | {:behind, String.t()}
+          | {:kept, String.t()}
+          | {:error, term()}
   def take_waiting(config, run, workflow_def) do
-    {:ok, result} =
+    result =
       Repo.transaction(config, fn ->
         lock_key(config, run)
         do_take_waiting(config, run, workflow_def, @rounds)
       end)
 
     case result do
-      {:ok, taken, from} ->
+      {:ok, {:ok, taken, from}} ->
         if from, do: record(config, "key_handed_off", taken, %{key: run.key, from: from.id})
         {:ok, taken}
 
-      other ->
+      {:ok, other} ->
         other
+
+      {:error, _reason} = error ->
+        error
     end
   end
 

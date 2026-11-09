@@ -65,8 +65,43 @@ defmodule Durable.Executor.StepRunner do
   @spec execute(Step.t(), map(), String.t(), Config.t(), DateTime.t() | nil) :: result()
   def execute(%Step{} = step, data, workflow_id, %Config{} = config, deadline \\ nil) do
     max_attempts = get_max_attempts(step)
-    start_attempt = next_attempt(config, workflow_id, step)
-    execute_with_retry(step, data, workflow_id, start_attempt, max_attempts, config, deadline)
+    attempt = next_attempt(config, workflow_id, step)
+
+    # All its attempts are already spent only when the last one died (its
+    # process or its node) before anything could fail the run. It fails now.
+    if attempt > max(max_attempts, 1) do
+      {:error, last_error(config, workflow_id, step)}
+    else
+      execute_with_retry(step, data, workflow_id, attempt, max_attempts, config, deadline)
+    end
+  end
+
+  @doc false
+  # Closes the attempts these runs left :running. A process that dies can't
+  # write its own result, so whoever finds out does it. Returns how many.
+  @spec close_running(Config.t(), [String.t()], atom(), map()) :: non_neg_integer()
+  def close_running(_config, [], _status, _error), do: 0
+
+  def close_running(%Config{} = config, workflow_ids, status, error) do
+    now = DateTime.utc_now()
+
+    {count, _} =
+      Repo.update_all(
+        config,
+        from(s in StepExecution, where: s.workflow_id in ^workflow_ids and s.status == :running),
+        set: [status: status, error: error, completed_at: now, updated_at: now]
+      )
+
+    count
+  end
+
+  @doc false
+  # How long to wait before retrying a step whose last attempt just died; 0
+  # if that was its last, so the next claim fails the run without delay.
+  @spec delay_after_death(Step.t(), String.t(), Config.t()) :: non_neg_integer()
+  def delay_after_death(%Step{} = step, workflow_id, %Config{} = config) do
+    attempt = next_attempt(config, workflow_id, step)
+    if attempt > get_max_attempts(step), do: 0, else: backoff_ms(step, attempt - 1)
   end
 
   # Seed the retry counter from durable state instead of always starting at 1.
@@ -102,11 +137,33 @@ defmodule Durable.Executor.StepRunner do
     (failed_count || 0) + 1
   end
 
+  defp last_error(config, workflow_id, %Step{name: name}) do
+    step_name = Atom.to_string(name)
+
+    Repo.one(
+      config,
+      from(s in StepExecution,
+        where:
+          s.workflow_id == ^workflow_id and s.step_name == ^step_name and s.status == :failed,
+        order_by: [desc: s.inserted_at],
+        limit: 1,
+        select: s.error
+      )
+    )
+  end
+
+  defp backoff_ms(step, attempt) do
+    retry_opts = get_retry_opts(step)
+    strategy = Map.get(retry_opts, :backoff, :exponential)
+    Backoff.calculate_with_jitter(strategy, attempt, retry_opts)
+  end
+
   defp execute_with_retry(step, data, workflow_id, attempt, max_attempts, config, deadline) do
     # Set current step for logging/observability
     Context.set_current_step(step.name)
     Context.set_attempt(attempt, max_attempts)
     Context.set_instance(config.name)
+    Durable.Telemetry.put_log_metadata(workflow_id, step.name, attempt, data)
 
     # Set current data in process dictionary for wait functions to access.
     # A retry runs after the run was parked, from a context that already holds
@@ -223,10 +280,14 @@ defmodule Durable.Executor.StepRunner do
     do: %{type: "timeout", message: "the run passed its timeout during #{step.name}"}
 
   defp step_span_meta(config, workflow_id, step, attempt, max_attempts) do
+    run_meta = Durable.Telemetry.run_meta()
+
     %{
       durable: config.name,
       workflow_id: workflow_id,
-      workflow: Map.get(Durable.Telemetry.run_meta(), :workflow),
+      workflow: Map.get(run_meta, :workflow),
+      key: Map.get(run_meta, :key),
+      tags: Map.get(run_meta, :tags),
       step: step.name,
       step_type: step.type,
       attempt: attempt,
@@ -331,9 +392,7 @@ defmodule Durable.Executor.StepRunner do
     if attempt < max_attempts and not past?(deadline) do
       {:ok, _} = fail_step_execution(config, step_exec, error, logs, duration_ms)
 
-      retry_opts = get_retry_opts(step)
-      backoff_strategy = Map.get(retry_opts, :backoff, :exponential)
-      backoff_ms = Backoff.calculate_with_jitter(backoff_strategy, attempt, retry_opts)
+      backoff_ms = backoff_ms(step, attempt)
 
       :telemetry.execute(
         [:durable, :step, :retry],

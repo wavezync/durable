@@ -117,6 +117,102 @@ defmodule Durable.TelemetryTest do
     assert [{_, %{status: :compensated}}] = of(events, [:durable, :workflow, :stop])
   end
 
+  test "run and step events carry the run's key and tags" do
+    {:ok, id} = Durable.start(Steps, %{}, key: "order:7", tags: ["account:1"])
+    Durable.DataCase.execute_while_pending(id)
+    events = drain()
+
+    assert [{_, %{key: "order:7", tags: ["account:1"]}} | _] =
+             of(events, [:durable, :workflow, :start])
+
+    assert [{_, %{key: "order:7", tags: ["account:1"]}} | _] =
+             of(events, [:durable, :step, :stop])
+  end
+
+  describe "Logger metadata" do
+    defmodule Logged do
+      @moduledoc false
+      use Durable
+
+      def report(data, label) do
+        send(Durable.DataCase.bin_to_pid(data["pid"]), {:meta, label, Logger.metadata()})
+      end
+
+      workflow "logged",
+        log_metadata: fn data ->
+          if data["bad_metadata"], do: raise("no metadata for you")
+          [account_id: data["account_id"]]
+        end do
+        step(:a, [retry: [max_attempts: 2, backoff: :constant, base: 1]], fn data ->
+          __MODULE__.report(data, {:a, Durable.Context.attempt()})
+          if Durable.Context.attempt() == 1, do: {:error, "again"}, else: {:ok, data}
+        end)
+
+        step(:b, [timeout: 5_000], fn data ->
+          __MODULE__.report(data, :b)
+          {:ok, data}
+        end)
+
+        step(:boom, [compensate: :undo], fn data -> {:ok, data} end)
+        step(:fails, fn _data -> {:fail, "stop"} end)
+
+        compensate(:undo, fn data ->
+          __MODULE__.report(data, :undo)
+          {:ok, data}
+        end)
+      end
+    end
+
+    defp input(extra \\ %{}),
+      do: Map.merge(%{"pid" => Durable.DataCase.pid_to_bin(), "account_id" => 7}, extra)
+
+    test "is set before every attempt of every step, with the workflow's own fields" do
+      {:ok, id} = Durable.start(Logged, input())
+      Durable.DataCase.execute_while_pending(id)
+
+      assert_received {:meta, {:a, 1}, first}
+      assert first[:workflow] == "logged"
+      assert first[:workflow_id] == id
+      assert first[:step] == :a
+      assert first[:attempt] == 1
+      assert first[:account_id] == 7
+
+      assert_received {:meta, {:a, 2}, second}
+      assert second[:attempt] == 2
+
+      # A step with a `timeout:` runs in its own process.
+      assert_received {:meta, :b, in_task}
+      assert in_task[:step] == :b
+      assert in_task[:account_id] == 7
+
+      assert_received {:meta, :undo, undo}
+      assert undo[:workflow_id] == id
+      assert undo[:step] == :undo
+    end
+
+    test "a log_metadata function that raises costs the step nothing" do
+      capture_log(fn ->
+        {:ok, id} = Durable.start(Logged, input(%{"bad_metadata" => true}))
+        run = Durable.DataCase.execute_while_pending(id)
+        assert run.status == :compensated
+      end)
+
+      assert_received {:meta, {:a, 1}, meta}
+      assert meta[:step] == :a
+      refute Keyword.has_key?(meta, :account_id)
+    end
+
+    test "an inline run leaves the caller's metadata as it found it" do
+      :logger.update_process_metadata(%{mine: true})
+      {:ok, id} = Durable.start(Logged, input())
+      Durable.DataCase.execute_while_pending(id)
+
+      assert Logger.metadata() == [mine: true]
+    after
+      Logger.reset_metadata()
+    end
+  end
+
   test "metrics/0 only references events Durable emits" do
     for metric <- Durable.Telemetry.metrics() do
       assert metric.event_name in Durable.Telemetry.events(),

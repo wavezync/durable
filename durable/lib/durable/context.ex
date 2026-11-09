@@ -43,7 +43,12 @@ defmodule Durable.Context do
 
   """
 
+  import Ecto.Query, only: [from: 2]
+
+  alias Durable.Config
   alias Durable.Queue.Drainer
+  alias Durable.Repo
+  alias Durable.Storage.Schemas.WorkflowExecution
 
   @context_key :durable_context
   @input_key :durable_input
@@ -75,6 +80,7 @@ defmodule Durable.Context do
           max_attempts: 0,
           last_attempt?: 0,
           shutting_down?: 0,
+          cancelled?: 0,
           append_context: 2,
           increment_context: 2,
           parallel_results: 0,
@@ -124,8 +130,8 @@ defmodule Durable.Context do
   """
   @spec get_context(atom() | String.t(), any()) :: any()
   def get_context(key, default) do
-    context()
-    |> Map.get(normalize_key(key), default)
+    context = context()
+    Map.get(context, stored_key(context, key), default)
   end
 
   @doc """
@@ -139,8 +145,8 @@ defmodule Durable.Context do
   """
   @spec put_context(atom() | String.t(), any()) :: :ok
   def put_context(key, value) do
-    new_context = Map.put(context(), normalize_key(key), value)
-    Process.put(@context_key, new_context)
+    context = context()
+    Process.put(@context_key, Map.put(context, stored_key(context, key), value))
     :ok
   end
 
@@ -201,8 +207,8 @@ defmodule Durable.Context do
   """
   @spec delete_context(atom() | String.t()) :: :ok
   def delete_context(key) do
-    new_context = Map.delete(context(), normalize_key(key))
-    Process.put(@context_key, new_context)
+    context = context()
+    Process.put(@context_key, Map.delete(context, stored_key(context, key)))
     :ok
   end
 
@@ -218,7 +224,8 @@ defmodule Durable.Context do
   """
   @spec has_context?(atom() | String.t()) :: boolean()
   def has_context?(key) do
-    Map.has_key?(context(), normalize_key(key))
+    context = context()
+    Map.has_key?(context, stored_key(context, key))
   end
 
   @doc """
@@ -333,6 +340,32 @@ defmodule Durable.Context do
   @spec shutting_down?() :: boolean()
   def shutting_down? do
     Drainer.stopping?(Process.get(@instance_key, Durable))
+  end
+
+  @doc """
+  Returns `true` once the run has been cancelled.
+
+  A cancelled run's step is stopped at the worker's next heartbeat, killed like
+  any process. A step that would rather stop cleanly, between two chunks of
+  work, can check this first. It reads the database, so check it between chunks
+  and not in a tight loop:
+
+  ## Examples
+
+      step :export, fn ctx ->
+        for chunk <- chunks_left(ctx), not cancelled?(), do: export(chunk)
+        {:ok, ctx}
+      end
+
+  """
+  @spec cancelled?() :: boolean()
+  def cancelled? do
+    id = workflow_id()
+    config = Config.get(Process.get(@instance_key, Durable))
+
+    id != nil and
+      Repo.one(config, from(w in WorkflowExecution, where: w.id == ^id, select: w.status)) ==
+        :cancelled
   end
 
   @doc """
@@ -511,6 +544,7 @@ defmodule Durable.Context do
     Process.delete(:durable_logs)
     Process.delete(:durable_original_group_leader)
     Process.delete(:durable_io_capture_pid)
+    Durable.Telemetry.clear_log_metadata()
     :ok
   end
 
@@ -520,6 +554,18 @@ defmodule Durable.Context do
   # (JSON encoding converts atoms to strings, so we normalize back)
   defp normalize_key(key) when is_atom(key), do: key
   defp normalize_key(key) when is_binary(key), do: known_key(key)
+
+  # The key as this context holds it. Data keeps its shape across a run, so a
+  # key can be a string here though the code knows the atom, or the other way
+  # round. A key that isn't there yet takes the normal form.
+  defp stored_key(context, key) do
+    normalized = normalize_key(key)
+    other = if is_atom(normalized), do: Atom.to_string(normalized), else: key
+
+    if Map.has_key?(context, normalized) or not Map.has_key?(context, other),
+      do: normalized,
+      else: other
+  end
 
   defp deep_merge(left, right) do
     Map.merge(left, right, fn

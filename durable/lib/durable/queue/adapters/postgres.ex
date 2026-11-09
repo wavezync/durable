@@ -10,8 +10,10 @@ defmodule Durable.Queue.Adapters.Postgres do
   @behaviour Durable.Queue.Adapter
 
   alias Durable.Config
+  alias Durable.Executor
+  alias Durable.Executor.StepRunner
   alias Durable.Repo
-  alias Durable.Storage.Schemas.{PendingEvent, PendingInput, StepExecution, WorkflowExecution}
+  alias Durable.Storage.Schemas.{PendingEvent, PendingInput, WorkflowExecution}
 
   import Ecto.Query
 
@@ -24,10 +26,21 @@ defmodule Durable.Queue.Adapters.Postgres do
       {:ok, %{rows: rows, columns: columns}} ->
         rows
         |> Enum.map(&parse_row(&1, columns))
-        # Re-sort in Elixir since UPDATE doesn't preserve order
-        |> Enum.sort_by(fn job -> {-job.priority, job.scheduled_at} end)
+        # Re-sort in Elixir since UPDATE doesn't preserve order. Sorting is
+        # stable, so this is by priority and then by when each became ready.
+        |> Enum.sort_by(& &1.ready_at, NaiveDateTime)
+        |> Enum.sort_by(&(-&1.priority))
 
-      {:error, _reason} ->
+      # A queue that can't claim looks just like an idle one, so say so.
+      {:error, reason} ->
+        Logger.error("[Durable] couldn't claim jobs from queue #{queue}: #{inspect(reason)}")
+
+        :telemetry.execute(
+          [:durable, :queue, :claim_failed],
+          %{count: 1},
+          %{durable: config.name, queue: queue, reason: reason}
+        )
+
         []
     end
   end
@@ -56,14 +69,14 @@ defmodule Durable.Queue.Adapters.Postgres do
           WHERE h.id = w.runs_after_id
             AND h.status IN ('pending', 'running', 'waiting', 'compensating')
         )
-      ORDER BY w.priority DESC, w.scheduled_at ASC NULLS FIRST, w.inserted_at ASC
+      ORDER BY w.priority DESC, COALESCE(w.scheduled_at, w.inserted_at) ASC, w.inserted_at ASC
       LIMIT $2
       FOR UPDATE SKIP LOCKED
     )
     UPDATE #{prefix}.workflow_executions
     SET locked_by = $3, locked_at = NOW(), status = 'running', lock_token = gen_random_uuid()
     WHERE id IN (SELECT id FROM claimable)
-    RETURNING id, workflow_module, workflow_name, queue, priority, input, context, scheduled_at, current_step, lock_token;
+    RETURNING id, workflow_module, workflow_name, queue, priority, input, context, scheduled_at, COALESCE(scheduled_at, inserted_at) AS ready_at, current_step, lock_token;
     """
   end
 
@@ -149,29 +162,35 @@ defmodule Durable.Queue.Adapters.Postgres do
         {:error, :not_found}
 
       execution ->
-        # Only a run still :running needs failing here — the worker crashed
-        # before the executor could record an outcome. Anything else was
-        # settled by the executor (failed, compensated, cancelled, waiting)
-        # and must not be overwritten.
-        if fenced?(execution, lock_token) or execution.status != :running do
+        # Only a run still :running or :compensating needs failing here — the
+        # worker crashed before the executor could record an outcome. Anything
+        # else was settled by the executor (failed, compensated, cancelled,
+        # waiting) and must not be overwritten.
+        if fenced?(execution, lock_token) or execution.status not in [:running, :compensating] do
           :ok
         else
-          error = Durable.Executor.storable_error(reason)
-
-          execution
-          |> Ecto.Changeset.change(
-            status: :failed,
-            error: error,
-            completed_at: DateTime.utc_now(),
-            locked_by: nil,
-            locked_at: nil,
-            lock_token: nil
-          )
-          |> Repo.update(config)
-
-          :ok
+          fail_unrecorded(config, execution, Executor.storable_error(reason))
         end
     end
+  end
+
+  defp fail_unrecorded(config, execution, error) do
+    with {:ok, failed} <-
+           execution
+           |> Ecto.Changeset.change(
+             status: :failed,
+             error: error,
+             completed_at: DateTime.utc_now(),
+             locked_by: nil,
+             locked_at: nil,
+             lock_token: nil
+           )
+           |> Repo.update(config) do
+      # The executor never got to tell a parent waiting on this run.
+      Executor.maybe_notify_parent(config, failed, :failed, error)
+    end
+
+    :ok
   end
 
   @impl true
@@ -226,24 +245,17 @@ defmodule Durable.Queue.Adapters.Postgres do
       from(w in WorkflowExecution,
         where: w.status == :running,
         where: not is_nil(w.locked_by),
-        where: w.locked_at < ^cutoff
+        where: w.locked_at < ^cutoff,
+        select: w.id
       )
 
-    {count, _} =
-      Repo.update_all(
-        config,
-        query,
-        set: [
-          status: :pending,
-          locked_by: nil,
-          locked_at: nil,
-          # Clear the fencing token on release so the next claim stamps a fresh
-          # one and the fenced-out worker's token can never match again.
-          lock_token: nil
-        ]
-      )
-
-    {:ok, count}
+    # The attempt in flight died with its worker, so it counts against the
+    # step's retries. Left :running, a step that takes its node down would
+    # run again after every recovery, forever.
+    release_runs(config, query, :failed, %{
+      type: "worker_lost",
+      message: "the worker running this attempt stopped responding"
+    })
   rescue
     e -> {:error, Exception.message(e)}
   end
@@ -251,16 +263,33 @@ defmodule Durable.Queue.Adapters.Postgres do
   @impl true
   def release_node_jobs(%Config{} = config, node_id) when is_binary(node_id) do
     query =
-      from(w in WorkflowExecution, where: w.status == :running and w.locked_by == ^node_id)
-
-    {count, _} =
-      Repo.update_all(config, query,
-        set: [status: :pending, locked_by: nil, locked_at: nil, lock_token: nil]
+      from(w in WorkflowExecution,
+        where: w.status == :running and w.locked_by == ^node_id,
+        select: w.id
       )
 
-    {:ok, count}
+    # A deploy isn't the step's fault: :snoozed doesn't use an attempt.
+    release_runs(config, query, :snoozed, %{
+      type: "node_stopped",
+      message: "the node stopped before this attempt finished"
+    })
   rescue
     e -> {:error, Exception.message(e)}
+  end
+
+  # Back to :pending with the lock cleared, and the attempts those runs had
+  # in flight closed with them. Clearing the fencing token means the next claim
+  # stamps a fresh one, and the old worker's can never match again.
+  defp release_runs(config, query, step_status, error) do
+    Repo.transaction(config, fn ->
+      {count, ids} =
+        Repo.update_all(config, query,
+          set: [status: :pending, locked_by: nil, locked_at: nil, lock_token: nil]
+        )
+
+      StepRunner.close_running(config, ids, step_status, error)
+      count
+    end)
   end
 
   @impl true
@@ -270,8 +299,10 @@ defmodule Durable.Queue.Adapters.Postgres do
     # Two zombie classes:
     #
     #   1. :waiting workflows with no pending inputs or events to ever unblock them.
-    #   2. :compensating workflows with no actively running compensation step
-    #      (Bug M-1: the compensation handler crashed mid-rollback).
+    #   2. :compensating workflows whose lock went stale (Bug M-1: the
+    #      compensation crashed mid-rollback). A live compensation's worker
+    #      heartbeats, so its lock stays fresh; a step row left :running says
+    #      nothing, because a killed compensation leaves exactly that.
     #
     # Executions with a healthy lock heartbeat are excluded — those are still
     # being actively processed by some worker.
@@ -307,12 +338,6 @@ defmodule Durable.Queue.Adapters.Postgres do
         where: w.status == :compensating,
         where: w.updated_at < ^cutoff,
         where: is_nil(w.locked_by) or w.locked_at < ^cutoff,
-        where:
-          not exists(
-            from(s in StepExecution,
-              where: s.workflow_id == parent_as(:workflow).id and s.status == :running
-            )
-          ),
         select: w.id
       )
 
@@ -330,10 +355,10 @@ defmodule Durable.Queue.Adapters.Postgres do
         "detected_at" => DateTime.to_iso8601(now)
       }
 
-      {count, _} =
+      {count, zombies} =
         Repo.update_all(
           config,
-          from(w in WorkflowExecution, where: w.id in ^zombie_ids),
+          from(w in WorkflowExecution, where: w.id in ^zombie_ids, select: w),
           set: [
             status: :failed,
             error: zombie_error,
@@ -343,6 +368,9 @@ defmodule Durable.Queue.Adapters.Postgres do
             updated_at: now
           ]
         )
+
+      StepRunner.close_running(config, zombie_ids, :failed, zombie_error)
+      Enum.each(zombies, &Executor.maybe_notify_parent(config, &1, :failed, zombie_error))
 
       Logger.warning(
         "[Durable] Zombie recovery marked #{count} workflow(s) as :failed: #{inspect(zombie_ids)}"
@@ -432,8 +460,9 @@ defmodule Durable.Queue.Adapters.Postgres do
   # Fencing-aware heartbeat. When the worker passes the token it claimed with,
   # a refresh that touches 0 rows is classified: `:fenced` means another worker
   # now owns this row (running with a different token) and the caller should
-  # abort to avoid a double-execution; `:not_found` is a benign miss (the row
-  # completed/suspended/cancelled, or was released but not yet reclaimed).
+  # abort to avoid a double-execution; `:cancelled` means the caller should stop
+  # the step; `:not_found` is a benign miss (the row completed/suspended, or was
+  # released but not yet reclaimed).
   def heartbeat(%Config{} = config, job_id, lock_token) when is_binary(job_id) do
     do_heartbeat(config, job_id, lock_token)
   end
@@ -444,7 +473,7 @@ defmodule Durable.Queue.Adapters.Postgres do
     base =
       from(w in WorkflowExecution,
         where: w.id == ^job_id,
-        where: w.status == :running
+        where: w.status in [:running, :compensating]
       )
 
     guarded =
@@ -457,12 +486,22 @@ defmodule Durable.Queue.Adapters.Postgres do
       is_nil(lock_token) -> {:error, :not_found}
       true -> classify_lost_lock(config, job_id, lock_token)
     end
+  rescue
+    # A pool refusing requests for a few seconds mustn't cost the step in
+    # flight. The next tick tries again; the stale timeout covers a real outage.
+    e -> {:error, Exception.message(e)}
+  catch
+    :exit, reason -> {:error, reason}
   end
 
   defp classify_lost_lock(config, job_id, lock_token) do
     case Repo.get(config, WorkflowExecution, job_id) do
-      %WorkflowExecution{status: :running, lock_token: current} when current != lock_token ->
+      %WorkflowExecution{status: status, lock_token: current}
+      when status in [:running, :compensating] and current != lock_token ->
         {:error, :fenced}
+
+      %WorkflowExecution{status: :cancelled} ->
+        {:error, :cancelled}
 
       _ ->
         {:error, :not_found}
@@ -528,6 +567,7 @@ defmodule Durable.Queue.Adapters.Postgres do
       input: decode_json(job.input),
       context: decode_json(job.context),
       scheduled_at: job.scheduled_at,
+      ready_at: job.ready_at,
       current_step: job.current_step,
       lock_token: decode_uuid(job.lock_token)
     }

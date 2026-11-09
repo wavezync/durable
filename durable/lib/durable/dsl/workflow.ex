@@ -42,6 +42,10 @@ defmodule Durable.DSL.Workflow do
     `period` before it runs, and each start with the same key in that time
     gives it the newer input and restarts the wait, up to `timeout` after the
     first start. `timeout` is optional
+  - `:log_metadata` - A function of a step's data returning a keyword list, set
+    as `Logger.metadata/1` before every attempt, on top of the `:workflow`,
+    `:workflow_id`, `:step` and `:attempt` Durable always sets:
+    `log_metadata: fn data -> [account_id: data["account_id"]] end`
 
   """
 
@@ -116,7 +120,7 @@ defmodule Durable.DSL.Workflow do
     end
   end
 
-  @workflow_opts [:timeout, :queue, :reuse, :on_duplicate, :debounce]
+  @workflow_opts [:timeout, :queue, :reuse, :on_duplicate, :debounce, :log_metadata]
 
   # Literal values are checked here; anything computed is checked when a run starts.
   @allowed_values %{
