@@ -14,13 +14,14 @@ import {
   Scale, Droplet, LayoutDashboard, Bot, Sparkles, ChevronRight,
 } from '@lucide/astro';
 import { macroCalls, night } from '../code-theme';
-import { section } from '../docs';
+import { packageMeta, section } from '../docs';
 
 const readme = (await getEntry('docs', 'docs'))!.body!;
 const dashboard = (await getEntry('docs', 'docs/dashboard'))!.body!;
-const install = section(readme, '## Installation').code;
-const dep = /\{:durable, "[^"]+"\}/.exec(install)![0];
+// From mix.exs, which the release bumps, so these can't fall behind the README.
+const { dep } = packageMeta('docs')!;
 const version = /~> ([\d.]+)/.exec(dep)![1];
+const install = section(readme, '## Installation').code.replace(/\{:durable, "[^"]+"\}/, dep);
 const steps = [
   { icon: Package, title: 'Add the dependency', code: install },
   { icon: DatabaseZap, title: 'Add a migration', code: section(readme, '### 1. Create Migration').code },
