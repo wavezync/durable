@@ -32,7 +32,7 @@ A durable, resumable workflow engine for Elixir. Similar to Temporal/Inngest.
 
 ```elixir
 def deps do
-  [{:durable, "~> 1.3"}]
+  [{:durable, "~> 1.5"}]
 end
 ```
 

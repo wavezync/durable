@@ -14,7 +14,7 @@ Add the package, then mount it at the top level of your router, outside any
 
 ```elixir
 # mix.exs
-{:durable_dashboard, "~> 1.2"}
+{:durable_dashboard, "~> 1.3"}
 
 # router.ex
 defmodule MyAppWeb.Router do
