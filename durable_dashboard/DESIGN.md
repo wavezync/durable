@@ -138,6 +138,8 @@ Status is **shape + color + label**, everywhere — `<.status_pill>`,
 | Status                | Shape            | Color          | Label                |
 | --------------------- | ---------------- | -------------- | -------------------- |
 | `pending`             | dashed ring      | `off`          | Pending              |
+| `retrying`            | dashed ring      | `warning`      | Retrying             |
+| `snoozed`             | hollow ring      | `off`          | Snoozed              |
 | `running`             | disc, pulsing    | `primary`      | Running              |
 | `waiting`             | hollow ring      | `warning`      | Waiting              |
 | `completed`           | disc             | `success`      | Completed            |
@@ -156,6 +158,11 @@ Status is **shape + color + label**, everywhere — `<.status_pill>`,
 To add a status: update this table, `Core.status_meta/1`, the `st-*` class in
 `index.css`, and the React node tone helpers. If they disagree, the table
 wins.
+
+**Retrying and Snoozed are what the operator sees of a `pending` run** that is
+due later because of a step: `Trace.parked/2` reads the reason from the step's
+last execution. Retrying is amber because something failed; Snoozed is grey
+because nothing did. Filters still say `pending`, the status stored on the run.
 
 ## 5. Component primitives — `Components.Core` API contract
 
@@ -215,10 +222,17 @@ A run's status in a list row: the §4 mark + label, the step it's on or
 stopped at ("◆ Failed at `authorize_card`"), and its error on a second line,
 muted. No tint, so a column of them stays quiet: a completed run's label is
 neutral, and only states that need a look (running, waiting, failed, rolled
-back) take their color. Reads `:status`, `:current_step` and `:error`.
+back) take their color. Reads `:status`, `:current_step` and `:error`, plus
+`:parked`, `:home_queue` and `:runs_after_id` when the row has them.
+
+A parked run counts down: "◌ Retrying at `charge_card` in 12s · 2 of 5" over
+its error, "○ Snoozed at `render_pdf` for 48s" over its reason. A pending run
+that is part-way through says what's next ("Pending next `run_ocr`"), and why
+it's held when that's known ("Waiting for a slot on ocr", "Waiting for run
+`3f2a91c4` to finish"). Pass `now` where the page ticks.
 
 ```heex
-<.run_status run={row} />
+<.run_status run={row} now={@now} />
 ```
 
 Use it wherever a table or list has one row per run; keep `<.status_pill>`
@@ -580,12 +594,23 @@ One run, one page — header, banner, facts, then a view switch.
   neutral banner: "Debounced: starts 13:42:10 unless the key is added again;
   at the latest 13:46:00" (`local_time`; the latest is its first start plus
   the debounce `timeout`).
-- **Facts strip**: started, duration, queued for, attempts, trigger (and
-  what triggered it), queue · node, child runs, and for a keyed run the key
-  (with the run it came from) and "re-added 3× · last 41s ago", and for a
-  run with events kept for it (`send_event(..., buffer: true)`, a keyed start
-  with `on_duplicate: {:send_event, name}`) "Kept events 1 · article_updated"
-  — one line, mono values.
+- **A parked run says what it's waiting for.** Amber for a retry, with "Show
+  error": "`charge_card` failed on attempt 2 of 5 and tries again in 12s:
+  gateway timeout". Neutral for the rest: "`render_pdf` snoozed until
+  14:02:10: another export is running. A snooze doesn't use an attempt.";
+  "`run_ocr` is waiting for a slot on ocr. The run goes back to documents
+  after this step, unless the next step names a queue."; and for
+  `on_duplicate: :run_again`, "Waiting for run `3f2a91c4` to finish, then runs
+  with the newest input. Newer starts replace this input." with "Open that
+  run". The status pill in the header says Retrying or Snoozed too.
+- **Facts strip**: started, duration, queued for, attempts (a "snoozed 3×"
+  line under it when the steps snoozed), trigger (and what triggered it),
+  queue · node (a "home queue documents" line under it while a step's queue
+  has the run), tags (each a link to Runs filtered by it), child runs, and for
+  a keyed run the key (with the run it came from) and "re-added 3× · last 41s
+  ago", and for a run with events kept for it (`send_event(..., buffer:
+  true)`, a keyed start with `on_duplicate: {:send_event, name}`) "Kept events
+  1 · article_updated" — mono values, one line each.
 - **Views**: Trace (default), Graph, Logs, Context, Family, Key. Family shows
   only when the run has a family, Key only when it has a key. URL:
   `/executions/:id/:view?step=&pane=`, so "this step's error" is a link.
@@ -611,7 +636,8 @@ side by side:
   newest first. Each row is the run id (a link), its status pill and one
   sentence on its part in the key's history: "Holds the key · took it 10:41",
   "Failed at `fetch_article`, so the key could move", "Replaced by
-  `9c1e77a0`", "Released by alice · 2d ago". The panel's subtitle is the
+  `9c1e77a0`", "Released by alice · 2d ago", "Runs after `3f2a91c4` with the
+  newest input". The panel's subtitle is the
   workflow's policy, `reuse: :after_failure`.
 
 Empty state: "Nobody added `article:42` again."
@@ -621,10 +647,14 @@ Empty state: "Nobody added `article:42` again."
 One row per step — the run's own plus its direct children's (parallel
 branches, called workflows) indented one level — on the run's wall-clock
 window, Honeycomb/Jaeger style. Each **attempt is a bar**; the gap between
-attempts is drawn and named: **backoff** after a failure, **wait** after a
-suspension. Compensations sort last in their own lane. Bars have a 6 px
-floor so a 1 ms step stays clickable. While the run is live the window
-ends at `now` and the page ticks every 500 ms.
+attempts is drawn and named: **backoff** after a failure, **snoozed** after a
+snooze, **wait** after a suspension. A gap wide enough for its name carries
+it above the line ("snoozed 30s"). A snooze is a grey bar but not an attempt:
+the row counts them apart ("×2 · snoozed 3×"). While a run is parked the gap
+runs on to `now`, and the step reads Retrying or Snoozed. Compensations sort
+last in their own lane. Bars have a 6 px floor so a 1 ms step stays clickable.
+While the run is live the window ends at `now` and the page ticks every
+500 ms.
 
 Clicking a row opens the **inspector** beside the waterfall with panes:
 Error, Input, Output, Logs, Attempts. The error pane's tab is
@@ -645,11 +675,16 @@ stack; the pane says so by its type ("Returned {:error, …}").
 
 Saved views as a tab strip with counts (All, Failed, Running, Waiting,
 Cancelled), then the query bar (search grammar from `RunSearch`: id prefix,
-`step:`, `error:`, `input.path:value`, `schedule:`, `key:`). Columns: run,
-status (`<.run_status>`, which says where it is and why), started,
+`step:`, `error:`, `input.path:value`, `schedule:`, `key:`, `tag:`). Columns:
+run, status (`<.run_status>`, which says where it is and why), started,
 duration, steps (with retries), trigger, queue · node. A keyed run shows its
 key after the run id ("3f2a91c4 · article:42 · holds key", mono, muted), so
 keys need no column and rows stay two lines.
+
+**Tags are chips after the key** (`<.badge>`, mono): the first two, then "+N"
+with the rest in its tooltip. Clicking one adds it to the query bar as
+`tag:account:7`, so chips sit outside the row's link. While a row is parked the
+list ticks once a second so its countdown stays true.
 
 **Nothing moves under the pointer.**
 - Columns have fixed widths (`table-fixed` + a `colgroup`); Run and Status
@@ -738,7 +773,7 @@ through it — a funnel you read left to right.
   mid-flow) — they're shown as they are.
 - **A card** is the step's kind glyph (circle step, diamond decision, fork
   parallel, split branch) + mono name, a note only when there's something to
-  say (retry policy, "may jump to …"), then two lines: `N reached · p95`,
+  say (retry policy, its `queue:`, "may jump to …"), then two lines: `N reached · p95`,
   `N gave up · %` (a link to those runs) and `% retried` in amber. A
   traffic bar closes it: width = reached ÷ peak, the share that gave up in
   `--chart-fail`, the rest `--chart-ok`. Border turns destructive past 5%.
@@ -818,7 +853,8 @@ Three views: **Needs input**, **Waiting for events**, **Sleeping**.
 - **Schedules** (`/schedules`): one row per schedule — switch (admin), name
   (links to its page) over its cadence in words with the cron as a code chip
   (`DurableDashboard.Cron`: "Every day at 09:00", "Weekdays at 09:30"; raw
-  expression only when it can't say), workflow, **recent runs as status
+  expression only when it can't say) and, when it starts runs with a workflow
+  key, a `<.key_chip>` after the cron, workflow, **recent runs as status
   marks** oldest → newest (each a link), next run ("in 42s", "due now", "Off",
   or "Turned off" in destructive), last run (cron or Run now, whichever is
   newer) and Run now (operator → opens the new run). A failing schedule says

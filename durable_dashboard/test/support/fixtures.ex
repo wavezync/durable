@@ -127,6 +127,53 @@ defmodule DurableDashboard.Fixtures do
     end
   end
 
+  defmodule Retrying do
+    @moduledoc false
+    use Durable
+
+    workflow "charge_with_retries" do
+      step(
+        :charge_card,
+        [retry: [max_attempts: 5, backoff: :constant, base: :timer.hours(1)]],
+        fn _data -> {:error, %{reason: "gateway timeout"}} end
+      )
+    end
+  end
+
+  defmodule Snoozing do
+    @moduledoc false
+    use Durable
+
+    workflow "render_export" do
+      step(:render_pdf, fn _data ->
+        {:snooze, :timer.hours(1), "another export is running"}
+      end)
+    end
+  end
+
+  defmodule OnStepQueue do
+    @moduledoc false
+    use Durable
+
+    workflow "import_document" do
+      step(:prepare, fn data -> {:ok, data} end)
+      step(:run_ocr, [queue: :ocr], fn data -> {:ok, data} end)
+    end
+  end
+
+  defmodule RunsAgain do
+    @moduledoc false
+    use Durable
+    use Durable.Wait
+
+    workflow "rebuild_index", on_duplicate: :run_again do
+      step(:await, fn data ->
+        _ = wait_for_event("go", timeout: hours(1))
+        {:ok, data}
+      end)
+    end
+  end
+
   @doc "Starts `module`'s workflow with `input` and runs it inline; returns the run id."
   def run!(module, input \\ %{}) do
     {:ok, id} = Executor.start_workflow(module, input, inline: true)

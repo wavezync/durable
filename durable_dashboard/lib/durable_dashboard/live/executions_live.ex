@@ -34,11 +34,13 @@ defmodule DurableDashboard.Live.ExecutionsLive do
   @filters_id "executions-filters"
   @per_page 25
   @refresh_ms 1_000
+  @tick_ms 1_000
 
   @workflow_kinds [
     :workflow_started,
     :workflow_resumed,
     :workflow_waiting,
+    :workflow_parked,
     :workflow_completed,
     :workflow_failed,
     :workflow_cancelled,
@@ -86,6 +88,7 @@ defmodule DurableDashboard.Live.ExecutionsLive do
        selected: MapSet.new(),
        bulk_result: nil,
        refresh: nil,
+       tick: nil,
        rows: [],
        held: nil
      )}
@@ -135,6 +138,9 @@ defmodule DurableDashboard.Live.ExecutionsLive do
   def handle_info(:refresh, socket),
     do: {:noreply, socket |> assign(refresh: nil) |> load_rows(:live)}
 
+  def handle_info(:tick, socket),
+    do: {:noreply, socket |> assign(tick: nil, now: DateTime.utc_now()) |> schedule_tick()}
+
   def handle_info({:execution_filters, patch}, socket) do
     {:noreply, patch_query(socket, Map.merge(socket.assigns.query, patch))}
   end
@@ -175,6 +181,15 @@ defmodule DurableDashboard.Live.ExecutionsLive do
   end
 
   def handle_event("show-latest", _params, socket), do: {:noreply, load_rows(socket)}
+
+  # A chip on a row adds its tag to the query bar; clicking it twice changes nothing.
+  def handle_event("filter-tag", %{"tag" => tag}, socket) do
+    query = socket.assigns.query
+    terms = query.q |> RunSearch.tokens() |> Enum.map(& &1.raw)
+    term = RunSearch.term("tag", tag)
+    q = if term in terms, do: query.q, else: Enum.join(terms ++ [term], " ")
+    {:noreply, patch_query(socket, %{query | q: q})}
+  end
 
   def handle_event("dismiss-result", _params, socket),
     do: {:noreply, assign(socket, bulk_result: nil)}
@@ -379,25 +394,39 @@ defmodule DurableDashboard.Live.ExecutionsLive do
                     />
                   </td>
                   <td class="h-12 px-3">
-                    <.link
-                      navigate={DPath.execution(@base_path, row.id)}
-                      class="flex min-w-0 flex-col leading-tight"
-                      data-tip-title={row.workflow_name}
-                      data-tip="Open the run · its trace, logs and context"
-                      data-tip-meta={row.id}
-                    >
-                      <span :if={!@workflow_name} class="truncate font-medium">{row.workflow_name}</span>
-                      <span class={["truncate font-mono text-xs", if(@workflow_name, do: "text-foreground", else: "text-muted-foreground")]}>
-                        {short(row.id)}<span
-                          :if={row[:key]}
-                          class="text-muted-foreground"
-                          data-tip-title="Workflow key"
-                          data-tip={if row.holds_key, do: "This run holds it", else: "Another run holds it now, or none"}
-                        > · {row.key}{if row.holds_key, do: " · holds key"}</span>
-                      </span>
-                    </.link>
+                    <%!-- The tags are buttons, so they can't sit inside the link. --%>
+                    <div class="flex min-w-0 flex-col leading-tight">
+                      <.link
+                        :if={!@workflow_name}
+                        navigate={DPath.execution(@base_path, row.id)}
+                        tabindex="-1"
+                        class="truncate font-medium"
+                        data-tip-title={row.workflow_name}
+                        data-tip="Open the run · its trace, logs and context"
+                        data-tip-meta={row.id}
+                      >
+                        {row.workflow_name}
+                      </.link>
+                      <div class="flex min-w-0 items-center gap-1.5">
+                        <.link
+                          navigate={DPath.execution(@base_path, row.id)}
+                          class={["min-w-0 truncate font-mono text-xs", if(@workflow_name, do: "text-foreground", else: "text-muted-foreground")]}
+                          data-tip-title={row.workflow_name}
+                          data-tip="Open the run · its trace, logs and context"
+                          data-tip-meta={row.id}
+                        >
+                          {short(row.id)}<span
+                            :if={row[:key]}
+                            class="text-muted-foreground"
+                            data-tip-title="Workflow key"
+                            data-tip={if row.holds_key, do: "This run holds it", else: "Another run holds it now, or none"}
+                          > · {row.key}{if row.holds_key, do: " · holds key"}</span>
+                        </.link>
+                        <.tag_chips tags={row[:tags] || []} />
+                      </div>
+                    </div>
                   </td>
-                  <td class="px-3"><Core.run_status run={row} /></td>
+                  <td class="px-3"><Core.run_status run={row} now={@now} /></td>
                   <td class="whitespace-nowrap px-3 font-mono text-xs">
                     <Core.local_time at={row.inserted_at} format="datetime" />
                   </td>
@@ -506,6 +535,37 @@ defmodule DurableDashboard.Live.ExecutionsLive do
         </p>
       </div>
     </Layouts.app>
+    """
+  end
+
+  attr :tags, :list, required: true
+
+  # The first two, then how many more, so a heavily tagged run stays on its row.
+  defp tag_chips(assigns) do
+    {shown, rest} = Enum.split(assigns.tags, 2)
+    assigns = assign(assigns, shown: shown, rest: rest)
+
+    ~H"""
+    <button
+      :for={tag <- @shown}
+      type="button"
+      phx-click="filter-tag"
+      phx-value-tag={tag}
+      class="shrink-0 rounded-[5px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background"
+      data-tip-title="Tag"
+      data-tip="Show the runs with this tag"
+      data-tip-meta={tag}
+    >
+      <Core.badge class="max-w-[120px] truncate font-mono hover:text-foreground">{tag}</Core.badge>
+    </button>
+    <span
+      :if={@rest != []}
+      class="shrink-0"
+      data-tip-title="More tags"
+      data-tip={Enum.join(@rest, " · ")}
+    >
+      <Core.badge class="font-mono">+{length(@rest)}</Core.badge>
+    </span>
     """
   end
 
@@ -628,6 +688,12 @@ defmodule DurableDashboard.Live.ExecutionsLive do
       "data-tip-meta": node
     ]
 
+  defp queue_tip(%{home_queue: home} = row) when is_binary(home),
+    do: [
+      "data-tip-title": "Queue #{row.queue}",
+      "data-tip": "A step moved it here · its home queue is #{home}"
+    ]
+
   defp queue_tip(row),
     do: ["data-tip-title": "Queue #{row.queue}", "data-tip": "The queue its jobs go through"]
 
@@ -649,7 +715,7 @@ defmodule DurableDashboard.Live.ExecutionsLive do
   # Fixed widths, so live updates and paging never move a column; Status, and
   # Run when it names the workflow, share what's left.
   defp col_class("Run", nil), do: nil
-  defp col_class("Run", _name), do: "w-[120px]"
+  defp col_class("Run", _name), do: "w-[240px]"
   defp col_class("Trigger", _name), do: "w-[180px]"
   defp col_class("Started", _name), do: "w-[184px]"
   defp col_class("Duration", _name), do: "w-[80px]"
@@ -705,22 +771,33 @@ defmodule DurableDashboard.Live.ExecutionsLive do
     {rows, total} =
       Durable.Query.list_executions_with_total(filters ++ [limit: @per_page, offset: offset])
 
-    fresh = attach_step_stats(rows, durable)
+    fresh = rows |> attach_step_stats(durable) |> attach_parked(durable)
     {rows, held} = if mode == :live, do: reconcile(socket.assigns.rows, fresh), else: {fresh, nil}
 
-    assign(socket,
+    socket
+    |> assign(
       rows: rows,
       held: held,
       total: total,
       status_counts: Durable.Query.count_by_status(filters),
       now: DateTime.utc_now()
     )
+    |> schedule_tick()
   end
 
   defp schedule_refresh(%{assigns: %{refresh: nil}} = socket),
     do: assign(socket, refresh: Process.send_after(self(), :refresh, @refresh_ms))
 
   defp schedule_refresh(socket), do: socket
+
+  # Only while a row is counting down.
+  defp schedule_tick(%{assigns: %{tick: nil, rows: rows}} = socket) do
+    if connected?(socket) and Enum.any?(rows, & &1[:parked]),
+      do: assign(socket, tick: Process.send_after(self(), :tick, @tick_ms)),
+      else: socket
+  end
+
+  defp schedule_tick(socket), do: socket
 
   @doc """
   Merges a live refresh into the rows on screen without moving them: when the
@@ -812,6 +889,32 @@ defmodule DurableDashboard.Live.ExecutionsLive do
       {steps, failures} = Map.get(stats, row.id, {0, 0})
       Map.merge(row, %{step_count: steps, failures: failures})
     end)
+  end
+
+  # Why a run that's due later isn't running: its newest step execution, in one
+  # query for the page. Only runs that are part-way through can be parked.
+  defp attach_parked(rows, durable) do
+    ids =
+      for %{status: :pending, scheduled_at: %DateTime{}, current_step: step} = row <- rows,
+          step != nil,
+          do: row.id
+
+    last = last_executions(ids, durable)
+    Enum.map(rows, &Map.put(&1, :parked, Trace.parked(&1, last[&1.id])))
+  end
+
+  defp last_executions([], _durable), do: %{}
+
+  defp last_executions(ids, durable) do
+    Durable.Repo.all(
+      Durable.Config.get(durable),
+      from(s in StepExecution,
+        where: s.workflow_id in ^ids,
+        distinct: s.workflow_id,
+        order_by: [asc: s.workflow_id, desc: s.inserted_at]
+      )
+    )
+    |> Map.new(&{&1.workflow_id, &1})
   end
 
   defp fetch_workflows(durable) do

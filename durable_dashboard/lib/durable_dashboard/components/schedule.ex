@@ -104,6 +104,7 @@ defmodule DurableDashboard.Components.Schedule do
       <span :if={@words} class="text-subtle-foreground">{@words}</span>
       <code class="ml-1 rounded-[4px] bg-secondary px-1.5 py-px font-mono text-[11px]">{@schedule.cron_expression}</code>
       <span :if={@schedule.timezone not in ["UTC", "Etc/UTC"]}> · {@schedule.timezone}</span>
+      <Core.key_chip key={@schedule.key} class="ml-1" />
     </span>
     """
   end

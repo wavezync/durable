@@ -65,6 +65,7 @@ defmodule DurableDashboard.Components.Data.ExecutionFilters do
      "type input.<path>:<value>, then ↵"},
     {"schedule", "schedule:", "runs a schedule started", nil},
     {"key", "key:", "runs started with a workflow key", "type a key such as article:42, then ↵"},
+    {"tag", "tag:", "runs started with a tag", "type a tag such as account:7, then ↵"},
     {"since", "since:", "started in the last 15m … 30d", nil},
     {"id", "id:", "a run id, or its first characters", "type an id or its start, then ↵"}
   ]

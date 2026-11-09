@@ -5,7 +5,15 @@
 // extra would imply the React side is taking on responsibilities the
 // LiveView already owns.
 
-export type StepStatus = "pending" | "running" | "completed" | "failed" | "waiting" | "cancelled";
+export type StepStatus =
+  | "pending"
+  | "running"
+  | "completed"
+  | "failed"
+  | "waiting"
+  | "cancelled"
+  | "retrying"
+  | "snoozed";
 
 // Types the server (`graph_builder.ex`) emits. `start`/`end` are synthesized
 // client-side in `graph-layout.ts`; `child_workflow` is a step that ran as

@@ -17,6 +17,25 @@ defmodule DurableDashboard.StructureTest do
   defp definition(steps, compensations \\ %{}),
     do: %Workflow{name: "w", module: __MODULE__, steps: steps, compensations: compensations}
 
+  test "a step's note says its retries and its queue, when it has them" do
+    built =
+      Structure.build(
+        definition([
+          step(:plain),
+          step(:ocr, :step, %{queue: :ocr}),
+          step(:both, :step, %{queue: "ocr", retry: %{max_attempts: 3, backoff: :linear}})
+        ]),
+        [],
+        0
+      )
+
+    assert Enum.map(built.nodes, & &1.note) == [
+             nil,
+             "queue ocr",
+             "up to 3 attempts · linear backoff · queue ocr"
+           ]
+  end
+
   test "steps carry traffic; compensations attach to the step they undo" do
     definition =
       definition(

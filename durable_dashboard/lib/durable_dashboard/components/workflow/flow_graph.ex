@@ -88,7 +88,7 @@ defmodule DurableDashboard.Components.Workflow.FlowGraph do
   # ============================================================================
 
   defp build_graph(%{kind: :flow, workflow: workflow, steps: steps} = assigns) do
-    case definition_for(workflow) do
+    case GraphBuilder.definition_for(workflow) do
       {:ok, definition} ->
         opts = [
           current_workflow_id: workflow.id,
@@ -99,6 +99,7 @@ defmodule DurableDashboard.Components.Workflow.FlowGraph do
         definition
         |> GraphBuilder.build()
         |> GraphBuilder.overlay_status(steps, opts)
+        |> mark_retrying(assigns[:parked])
         |> mark_selected(assigns[:selected])
         |> normalize()
 
@@ -108,6 +109,20 @@ defmodule DurableDashboard.Components.Workflow.FlowGraph do
   end
 
   defp build_graph(_), do: %{nodes: [], edges: []}
+
+  # The step's last execution failed, but it isn't finished: it runs again.
+  defp mark_retrying(graph, %{status: :retrying, exec_id: id}) do
+    nodes =
+      Enum.map(graph.nodes, fn node ->
+        if node.data[:step_execution_id] == id,
+          do: put_in(node, [:data, :status], "retrying"),
+          else: node
+      end)
+
+    %{graph | nodes: nodes}
+  end
+
+  defp mark_retrying(graph, _parked), do: graph
 
   defp mark_selected(graph, %{ids: ids}) do
     nodes =
@@ -150,36 +165,6 @@ defmodule DurableDashboard.Components.Workflow.FlowGraph do
         %{}
     end
   end
-
-  defp definition_for(%{workflow_module: module_str, workflow_name: name}) do
-    module = Module.safe_concat([module_str])
-
-    # In dev mode modules are lazy-loaded; `function_exported?/3` returns
-    # false for an existing-but-not-yet-loaded module. Load it explicitly
-    # so the exports check is meaningful.
-    _ = Code.ensure_loaded(module)
-
-    cond do
-      function_exported?(module, :__workflow_definition__, 1) ->
-        case module.__workflow_definition__(name) do
-          {:ok, definition} -> {:ok, definition}
-          _ -> :error
-        end
-
-      function_exported?(module, :__default_workflow__, 0) ->
-        case module.__default_workflow__() do
-          {:ok, definition} -> {:ok, definition}
-          _ -> :error
-        end
-
-      true ->
-        :error
-    end
-  rescue
-    _ -> :error
-  end
-
-  defp definition_for(_), do: :error
 
   # ReactFlow-shaped: stringify atoms in node ids, types, and data keys so
   # JSON round-trips cleanly to the JS island.

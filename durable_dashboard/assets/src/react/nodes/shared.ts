@@ -26,6 +26,7 @@ export function toneFor(status: string | undefined): Tone {
         iconBg: "bg-destructive/10",
       };
     case "waiting":
+    case "retrying":
       return { border: "border-warning/50", iconColor: "text-warning", iconBg: "bg-warning/10" };
     default:
       return { border: "border-border", iconColor: "text-muted-foreground", iconBg: "bg-muted/60" };
@@ -47,6 +48,8 @@ const WORDS: Record<string, string> = {
   completed: "Completed",
   failed: "Failed",
   cancelled: "Cancelled",
+  retrying: "Retrying",
+  snoozed: "Snoozed",
 };
 
 /** The status-dot class for the dashboard's shared `st-dot` marks. */
@@ -89,6 +92,10 @@ function outcome(node: NodeData): string {
       return "Running now";
     case "waiting":
       return "Waiting · resumes on its event, input or timer";
+    case "retrying":
+      return "Failed · runs again when its backoff ends";
+    case "snoozed":
+      return "Snoozed · runs again when it's due";
     default:
       return "Hasn't run yet";
   }

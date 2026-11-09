@@ -33,6 +33,7 @@ defmodule DurableDashboard.Live.WorkflowLive do
   alias DurableDashboard.Components.Workflow.FlowGraph
   alias DurableDashboard.Layouts
   alias DurableDashboard.Path, as: DPath
+  alias DurableDashboard.RunSearch
   alias DurableDashboard.Trace
   alias Phoenix.LiveView.JS
 
@@ -40,6 +41,7 @@ defmodule DurableDashboard.Live.WorkflowLive do
     :workflow_started,
     :workflow_resumed,
     :workflow_waiting,
+    :workflow_parked,
     :workflow_completed,
     :workflow_failed,
     :workflow_cancelled,
@@ -305,6 +307,7 @@ defmodule DurableDashboard.Live.WorkflowLive do
           action_error={@action_error}
           key_info={@key_info}
           release_confirm?={@release_confirm?}
+          parked={@parked}
         />
         <.rerun_editor :if={@rerun_editor} input={@rerun_editor} />
         <.banner
@@ -314,6 +317,8 @@ defmodule DurableDashboard.Live.WorkflowLive do
           pending_inputs={@pending_inputs}
           base_path={@base_path}
           view={@view}
+          parked={@parked}
+          now={@now}
         />
         <.key_banner :if={@key_info} workflow={@workflow} info={@key_info} base_path={@base_path} />
         <.facts
@@ -349,6 +354,7 @@ defmodule DurableDashboard.Live.WorkflowLive do
               picked={@graph_pick}
               base_path={@base_path}
               key_info={@key_info}
+              parked={@parked}
             />
           </section>
 
@@ -377,6 +383,7 @@ defmodule DurableDashboard.Live.WorkflowLive do
   attr :action_error, :string, default: nil
   attr :steps, :list, default: []
   attr :key_info, :map, default: nil
+  attr :parked, :map, default: nil
   attr :release_confirm?, :boolean, default: false
 
   defp run_header(assigns) do
@@ -394,7 +401,7 @@ defmodule DurableDashboard.Live.WorkflowLive do
     ~H"""
     <header class="flex flex-wrap items-center justify-between gap-3">
       <div class="flex min-w-0 flex-wrap items-center gap-3">
-        <Core.status_pill status={@workflow.status} />
+        <Core.status_pill status={(@parked && @parked.status) || @workflow.status} />
         <Core.heading level={1}>{@workflow.workflow_name}</Core.heading>
         <Core.code copy={to_string(@workflow.id)} class="text-muted-foreground">{@workflow.id}</Core.code>
         <Core.key_chip
@@ -545,6 +552,8 @@ defmodule DurableDashboard.Live.WorkflowLive do
   attr :pending_inputs, :list, required: true
   attr :base_path, :string, required: true
   attr :view, :atom, required: true
+  attr :parked, :map, default: nil
+  attr :now, :any, default: nil
 
   defp banner(%{workflow: %{status: status}} = assigns)
        when status in [:failed, :compensated, :compensation_failed] do
@@ -645,6 +654,60 @@ defmodule DurableDashboard.Live.WorkflowLive do
     """
   end
 
+  defp banner(%{parked: %{status: :retrying} = parked} = assigns) do
+    assigns =
+      assign(assigns,
+        left: Trace.time_left(parked.at, assigns.now),
+        row: Enum.find(assigns.trace.rows, &(parked.exec_id in &1.ids))
+      )
+
+    ~H"""
+    <div class="mt-4 flex items-center gap-3 rounded-[10px] border border-warning/35 bg-warning/10 px-3.5 py-3">
+      <Core.status_dot status={:retrying} />
+      <p class="min-w-0 flex-1">
+        <span class="font-mono font-medium">{@parked.step}</span>
+        failed on attempt {Trace.attempts_used(@parked)} and tries again {if @left, do: "in #{@left}", else: "as soon as a worker is free"}<span :if={@parked.reason}>: <span class="font-mono">{@parked.reason}</span></span>
+      </p>
+      <.link
+        :if={@row}
+        patch={run_path(@base_path, @workflow.id, :trace, step: @row.key, pane: "error")}
+        class="shrink-0 text-xs font-medium text-primary hover:underline"
+      >
+        Show error
+      </.link>
+    </div>
+    """
+  end
+
+  defp banner(%{parked: %{status: :snoozed}} = assigns) do
+    ~H"""
+    <div class="mt-4 flex items-center gap-3 rounded-[10px] border border-border bg-secondary px-3.5 py-3">
+      <Core.status_dot status={:snoozed} />
+      <p class="min-w-0 flex-1">
+        <span class="font-mono font-medium">{@parked.step}</span>
+        snoozed until <Core.local_time at={@parked.at} format="time" /><span :if={@parked.reason}>: {@parked.reason}</span>.
+        A snooze doesn't use an attempt.
+      </p>
+    </div>
+    """
+  end
+
+  # On a step's own `queue:`, waiting its turn there.
+  defp banner(%{workflow: %{status: :pending, home_queue: home}} = assigns)
+       when is_binary(home) do
+    ~H"""
+    <div class="mt-4 flex items-center gap-3 rounded-[10px] border border-border bg-secondary px-3.5 py-3">
+      <Core.status_dot status={:pending} />
+      <p class="min-w-0 flex-1">
+        <span class="font-mono font-medium">{Trace.display_name(@workflow.current_step || "")}</span>
+        is waiting for a slot on <span class="font-mono">{@workflow.queue}</span>. The run goes back to
+        <span class="font-mono">{@workflow.home_queue}</span>
+        after this step, unless the next step names a queue.
+      </p>
+    </div>
+    """
+  end
+
   defp banner(assigns), do: ~H""
 
   # ---- Key banner ---------------------------------------------------------------
@@ -691,6 +754,26 @@ defmodule DurableDashboard.Live.WorkflowLive do
 
   # The cancelled banner already names the run that replaced this one.
   defp key_banner(%{workflow: %{error: %{"replaced_by" => _}}} = assigns), do: ~H""
+
+  # `on_duplicate: :run_again`: it goes once the key's holder has finished.
+  defp key_banner(%{workflow: %{status: :pending, runs_after_id: id}} = assigns)
+       when is_binary(id) do
+    ~H"""
+    <div class="mt-4 flex items-center gap-3 rounded-[10px] border border-border bg-secondary px-3.5 py-3">
+      <Core.status_dot status={:pending} />
+      <p class="min-w-0 flex-1">
+        Waiting for run <KeyTab.run_link id={@workflow.runs_after_id} base_path={@base_path} /> to finish,
+        then runs with the newest input. Newer starts replace this input.
+      </p>
+      <.link
+        navigate={DPath.execution(@base_path, @workflow.runs_after_id)}
+        class="shrink-0 text-xs font-medium text-primary hover:underline"
+      >
+        Open that run
+      </.link>
+    </div>
+    """
+  end
 
   # A debounced run that hasn't started: when it will, and the latest it can.
   defp key_banner(
@@ -784,9 +867,11 @@ defmodule DurableDashboard.Live.WorkflowLive do
   defp facts(assigns) do
     w = assigns.workflow
     attempts = assigns.trace.rows |> Enum.map(& &1.attempts) |> Enum.sum()
+    snoozes = assigns.trace.rows |> Enum.map(& &1.snoozes) |> Enum.sum()
 
     assigns =
       assign(assigns,
+        snoozes: if(snoozes > 0, do: "snoozed #{snoozes}×"),
         duration: run_duration(w, assigns.now),
         duration_tip:
           if(w.status in @live_statuses,
@@ -820,7 +905,7 @@ defmodule DurableDashboard.Live.WorkflowLive do
       >
         {@queued}
       </.fact>
-      <.fact label="Attempts" tip="Every try of every step, retries included">{@attempts}</.fact>
+      <.fact label="Attempts" tip="Every try of every step, retries included · a snooze isn't one" sub={@snoozes}>{@attempts}</.fact>
       <.fact label="Trigger" mono={false} tip={trigger_tip(@workflow)}>
         <.trigger workflow={@workflow} base_path={@base_path} />
       </.fact>
@@ -828,8 +913,15 @@ defmodule DurableDashboard.Live.WorkflowLive do
         label="Queue · node"
         tip="The queue it runs on · and, while running, the node holding it"
         meta={@workflow.locked_by}
+        sub={@workflow.home_queue && "home queue #{@workflow.home_queue}"}
       >
         {@workflow.queue}{if @workflow.locked_by && @workflow.status == :running, do: " · " <> short_node(@workflow.locked_by)}
+      </.fact>
+      <.fact :if={@workflow.tags != []} label="Tags" tip="What it was started with · open one for the other runs with it">
+        <span :for={{tag, index} <- Enum.with_index(@workflow.tags)}>{if index > 0, do: " · "}<.link
+            navigate={runs_with_tag(@base_path, tag)}
+            class="hover:text-primary hover:underline"
+          >{tag}</.link></span>
       </.fact>
       <.fact
         :if={@workflow.deadline_at && @workflow.status in [:pending, :running, :waiting]}
@@ -876,6 +968,7 @@ defmodule DurableDashboard.Live.WorkflowLive do
   attr :mono, :boolean, default: true
   attr :tip, :string, default: nil
   attr :meta, :string, default: nil
+  attr :sub, :string, default: nil, doc: "a second, quieter line under the value"
   slot :inner_block, required: true
 
   defp fact(assigns) do
@@ -890,6 +983,7 @@ defmodule DurableDashboard.Live.WorkflowLive do
       <dd class={["truncate text-[13px] font-medium", @mono && "font-mono"]}>
         {render_slot(@inner_block)}
       </dd>
+      <dd :if={@sub} class="truncate text-xs text-muted-foreground">{@sub}</dd>
     </div>
     """
   end
@@ -1003,6 +1097,7 @@ defmodule DurableDashboard.Live.WorkflowLive do
   attr :picked, :boolean, default: false, doc: "graph: a step was clicked (`?step=`)"
   attr :base_path, :string, required: true
   attr :key_info, :map, default: nil
+  attr :parked, :map, default: nil
 
   defp view_body(%{view: :trace} = assigns) do
     ~H"""
@@ -1022,6 +1117,7 @@ defmodule DurableDashboard.Live.WorkflowLive do
         family={@family}
         selected={@picked && @selected}
         base_path={@base_path}
+        parked={@parked}
       />
     </div>
     """
@@ -1154,6 +1250,14 @@ defmodule DurableDashboard.Live.WorkflowLive do
               ×{row.attempts}
             </span>
             <span
+              :if={row.snoozes > 0}
+              class="shrink-0 whitespace-nowrap text-xs text-muted-foreground"
+              data-tip-title={"Snoozed #{row.snoozes}×"}
+              data-tip="The step asked to run again later · a snooze doesn't use an attempt"
+            >
+              snoozed {row.snoozes}×
+            </span>
+            <span
               :if={row.child_workflow_id}
               class="text-xs text-muted-foreground"
               data-tip="This step started a run of its own · open it from Output"
@@ -1177,6 +1281,10 @@ defmodule DurableDashboard.Live.WorkflowLive do
               data-tip={seg.tip}
               data-tip-meta={seg.meta}
             >
+              <span
+                :if={seg.label}
+                class="absolute inset-x-0 bottom-full truncate pb-px text-center text-[11px] leading-none text-muted-foreground"
+              >{seg.label}</span>
             </span>
           </span>
           <span
@@ -1193,7 +1301,8 @@ defmodule DurableDashboard.Live.WorkflowLive do
         <span class="inline-flex items-center gap-1.5"><span class="h-2 w-3.5 rounded-sm bg-chart-ok"></span>Completed</span>
         <span class="inline-flex items-center gap-1.5"><span class="h-2 w-3.5 rounded-sm bg-chart-fail"></span>Failed attempt</span>
         <span class="inline-flex items-center gap-1.5"><span class="h-2 w-3.5 rounded-sm bg-primary"></span>Running</span>
-        <span class="inline-flex items-center gap-1.5"><span class="h-0 w-3.5 border-t-2 border-dashed border-muted-foreground"></span>Backoff</span>
+        <span class="inline-flex items-center gap-1.5"><span class="h-2 w-3.5 rounded-sm bg-off"></span>Snoozed</span>
+        <span class="inline-flex items-center gap-1.5"><span class="h-0 w-3.5 border-t-2 border-dashed border-muted-foreground"></span>Backoff or snooze</span>
         <span class="inline-flex items-center gap-1.5"><span class="h-0 w-3.5 border-t-2 border-dashed border-warning"></span>Waiting</span>
         <span class="inline-flex items-center gap-1.5"><span class="h-2 w-3.5 rounded-sm bg-comp"></span>Compensation</span>
       </div>
@@ -1208,7 +1317,9 @@ defmodule DurableDashboard.Live.WorkflowLive do
   defp segment_class(:running),
     do: "top-[10px] h-3.5 min-w-[3px] rounded-[3px] bg-primary animate-pulse"
 
-  defp segment_class(:backoff), do: "top-[16px] border-t-2 border-dashed border-muted-foreground"
+  defp segment_class(kind) when kind in [:backoff, :snoozed],
+    do: "top-[16px] border-t-2 border-dashed border-muted-foreground"
+
   defp segment_class(:wait), do: "top-[16px] border-t-2 border-dashed border-warning"
   defp segment_class(_), do: "top-[10px] h-3.5 min-w-[3px] rounded-[3px] bg-off"
 
@@ -1383,7 +1494,7 @@ defmodule DurableDashboard.Live.WorkflowLive do
           <span
             :if={exec.error}
             class="truncate font-mono text-xs text-muted-foreground"
-            data-tip-title={Trace.error_parts(exec.error).type || "Error"}
+            data-tip-title={if exec.status == :snoozed, do: "Reason", else: Trace.error_parts(exec.error).type || "Error"}
             data-tip={Trace.error_parts(exec.error).message}
           >
             {error_line(Trace.error_parts(exec.error))}
@@ -1473,6 +1584,7 @@ defmodule DurableDashboard.Live.WorkflowLive do
   defp error_line(%{type: type, message: message}), do: "#{type}: #{message}"
 
   defp attempt_label(%{status: :waiting}), do: "Suspended"
+  defp attempt_label(%{status: :snoozed}), do: "Snoozed"
   defp attempt_label(exec), do: "Attempt #{exec.attempt}"
 
   defp kind_tip(%{compensation?: true}), do: "Undoes an earlier step after a later one failed"
@@ -1505,6 +1617,10 @@ defmodule DurableDashboard.Live.WorkflowLive do
   defp row_summary(%{status: :completed} = row),
     do: "Completed in #{Trace.format_ms(row.duration_ms)}"
 
+  defp row_summary(%{status: :retrying} = row),
+    do: "Failed on #{Format.count(row.attempts, "attempt")} · runs again when its backoff ends"
+
+  defp row_summary(%{status: :snoozed}), do: "Snoozed — runs again when it's due"
   defp row_summary(%{status: :running}), do: "Running now"
   defp row_summary(%{status: :waiting}), do: "Suspended — waiting to resume"
   defp row_summary(row), do: String.capitalize(to_string(row.status))
@@ -1523,7 +1639,10 @@ defmodule DurableDashboard.Live.WorkflowLive do
     failed_row =
       trace.rows |> Enum.filter(&(&1.status == :failed and not &1.compensation?)) |> List.last()
 
-    assign(socket, trace: trace, failed_row: failed_row)
+    # `steps` is oldest first and also holds the rest of the family's.
+    last = steps |> Enum.filter(&(&1.workflow_id == workflow.id)) |> List.last()
+
+    assign(socket, trace: trace, failed_row: failed_row, parked: Trace.parked(workflow, last))
   end
 
   # The selected row comes from `?step=`, defaulting to the failed step, then
@@ -1558,15 +1677,16 @@ defmodule DurableDashboard.Live.WorkflowLive do
   defp panes(row) do
     logs = Enum.reduce(row.execs, 0, &(&2 + length(&1.logs || [])))
 
-    if(row.latest.error, do: [{"error", "Error"}], else: []) ++
+    if(row.latest.error && row.latest.status != :snoozed, do: [{"error", "Error"}], else: []) ++
       [
         {"input", "Input"},
         {"output", "Output"},
         {"logs", "Logs (#{logs})"},
-        {"attempts", "Attempts (#{length(row.execs)})"}
+        {"attempts", "Attempts (#{row.attempts})"}
       ]
   end
 
+  defp default_pane(%{latest: %{status: :snoozed}}), do: "attempts"
   defp default_pane(%{latest: %{error: error}}) when not is_nil(error), do: "error"
   defp default_pane(_row), do: "output"
 
@@ -1588,6 +1708,7 @@ defmodule DurableDashboard.Live.WorkflowLive do
       kept_events: [],
       trace: %{rows: [], ticks: [], span_ms: 0, live?: false},
       failed_row: nil,
+      parked: nil,
       key_info: nil,
       selected: nil,
       family: %{root: nil, parent: nil, children: [], related_ids: []}
@@ -1728,6 +1849,9 @@ defmodule DurableDashboard.Live.WorkflowLive do
 
     Trace.format_ms(max(DateTime.diff(finish, started, :millisecond), 0))
   end
+
+  defp runs_with_tag(base, tag),
+    do: DPath.executions(base) <> "?" <> URI.encode_query(q: RunSearch.term("tag", tag))
 
   defp queued_for(%{started_at: nil}), do: "—"
 

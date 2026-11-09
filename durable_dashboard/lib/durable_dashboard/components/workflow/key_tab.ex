@@ -48,7 +48,7 @@ defmodule DurableDashboard.Components.Workflow.KeyTab do
               w.key == ^run.key,
           order_by: [desc: w.holds_key, desc: w.inserted_at],
           limit: 50,
-          select: map(w, [:id, :status, :holds_key, :inserted_at, :current_step])
+          select: map(w, [:id, :status, :holds_key, :inserted_at, :current_step, :runs_after_id])
         )
       )
 
@@ -460,6 +460,8 @@ defmodule DurableDashboard.Components.Workflow.KeyTab do
 
     ~H"""
     <%= cond do %>
+      <% @run.status == :pending and @run.runs_after_id != nil -> %>
+        Runs after <.run_link id={@run.runs_after_id} base_path={@base_path} /> with the newest input
       <% @released -> %>
         Released{if by = @released.details["by"], do: " by #{by}"} · <Core.relative_time at={@released.at} />
       <% @moved && @moved.details["replaced"] -> %>

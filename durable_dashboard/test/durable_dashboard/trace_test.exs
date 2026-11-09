@@ -40,6 +40,109 @@ defmodule DurableDashboard.TraceTest do
     |> Map.drop([:from, :to])
   end
 
+  @snoozed %{"type" => "snoozed", "message" => "busy", "snooze_ms" => 1_000}
+
+  describe "snoozes" do
+    test "a snooze is a bar and a named gap, but not an attempt" do
+      steps = [
+        step("render", status: :snoozed, error: @snoozed, from: 0, to: 10),
+        step("render", status: :snoozed, error: @snoozed, from: 2_010, to: 2_020),
+        step("render", status: :completed, from: 4_020, to: 4_030)
+      ]
+
+      %{rows: [row]} = Trace.build(run(), steps, [], t(4_030))
+
+      assert {row.attempts, row.snoozes, row.status} == {1, 2, :completed}
+      assert row.duration_ms == 10
+      assert Enum.map(row.segments, & &1.kind) == [:other, :snoozed, :other, :snoozed, :ok]
+
+      [bar, gap | _] = row.segments
+      assert gap.label == "snoozed 2s"
+      assert bar.title =~ "Snoozed"
+      assert bar.meta == "busy"
+      assert bar.label == nil
+    end
+
+    test "a narrow gap has no room for its name" do
+      steps = [
+        step("render", status: :failed, from: 0, to: 10),
+        step("render", attempt: 2, status: :completed, from: 11, to: 1_000)
+      ]
+
+      %{rows: [%{segments: [_bar, gap, _next]}]} = Trace.build(run(), steps, [], t(1_000))
+      assert gap.kind == :backoff
+      assert gap.label == nil
+    end
+
+    test "error_parts reads a snooze's reason, and says nothing without one" do
+      assert %{message: "busy", type: nil} = Trace.error_parts(@snoozed)
+      assert %{message: nil} = Trace.error_parts(%{"type" => "snoozed", "snooze_ms" => 5})
+    end
+  end
+
+  describe "a parked run" do
+    defp parked_run(step \\ "charge"),
+      do: run(status: :pending, scheduled_at: t(5_000), current_step: step)
+
+    defp failed(attrs \\ []) do
+      step("charge", [status: :failed, attempt: 2, error: %{"message" => "timeout"}] ++ attrs)
+    end
+
+    test "parked/2 names a retry" do
+      assert %{status: :retrying, step: "charge", attempt: 2, max: nil, reason: "timeout"} =
+               Trace.parked(parked_run(), failed())
+    end
+
+    test "parked/2 names a snooze" do
+      snoozed = step("charge", status: :snoozed, error: @snoozed)
+      assert %{status: :snoozed, reason: "busy", at: at} = Trace.parked(parked_run(), snoozed)
+      assert at == t(5_000)
+    end
+
+    test "parked/2 is nil when something else explains the wait" do
+      assert Trace.parked(parked_run(), nil) == nil
+      assert Trace.parked(parked_run("other"), failed()) == nil
+      assert Trace.parked(parked_run(), step("charge", status: :completed)) == nil
+      # Due now: an operator's retry, or a step's queue.
+      assert Trace.parked(%{parked_run() | scheduled_at: nil}, failed()) == nil
+      assert Trace.parked(%{parked_run() | status: :running}, failed()) == nil
+    end
+
+    test "the step reads Retrying and its gap runs on to now" do
+      %{rows: [row]} = Trace.build(parked_run(), [failed(from: 0, to: 100)], [], t(3_000))
+
+      assert row.status == :retrying
+      assert [%{kind: :fail}, %{kind: :backoff, width: width}] = row.segments
+      assert width > 90
+    end
+
+    test "a compensating run's failed step isn't going to run again" do
+      run = run(status: :compensating, current_step: "charge")
+      %{rows: [row]} = Trace.build(run, [failed(from: 0, to: 100)], [], t(3_000))
+
+      assert row.status == :failed
+      assert [%{kind: :fail}] = row.segments
+    end
+
+    test "a child run's step with the same name isn't the parked one" do
+      child = failed(from: 0, to: 100) |> Map.put(:workflow_id, "child-1")
+      %{rows: [row]} = Trace.build(parked_run(), [child], ["child-1"], t(3_000))
+      assert row.status == :failed
+    end
+
+    test "time_left is what's left, and nil once it's due" do
+      assert Trace.time_left(t(12_400), t(0)) == "12s"
+      assert Trace.time_left(t(90_000), t(0)) == "1m 30s"
+      assert Trace.time_left(t(0), t(0)) == nil
+      assert Trace.time_left(t(0), t(5)) == nil
+    end
+
+    test "attempts_used leaves out a budget it doesn't know" do
+      assert Trace.attempts_used(%{attempt: 2, max: 5}) == "2 of 5"
+      assert Trace.attempts_used(%{attempt: 2, max: nil}) == "2"
+    end
+  end
+
   test "one row per step in start order, one bar per attempt, backoff between failures" do
     steps = [
       step("reserve", from: 0, to: 100),

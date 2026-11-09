@@ -425,6 +425,12 @@
 .st-scheduled {
   border: 1.5px dashed var(--off);
 }
+.st-retrying {
+  border: 1.5px dashed var(--warning);
+}
+.st-snoozed {
+  border: 2px solid var(--off);
+}
 .st-cancelled {
   width: 9px;
   height: 2px;

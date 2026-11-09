@@ -183,10 +183,21 @@ defmodule DurableDashboard.Components.Workflow.Structure do
     end
   end
 
-  defp note(%{opts: %{retry: %{max_attempts: n} = retry}}),
-    do: "up to #{n} attempts · #{retry[:backoff] || :exponential} backoff"
+  defp note(%{opts: opts}) do
+    parts =
+      case opts do
+        %{retry: %{max_attempts: n} = retry} ->
+          ["up to #{n} attempts · #{retry[:backoff] || :exponential} backoff"]
 
-  defp note(_step), do: nil
+        _ ->
+          []
+      end
+
+    case parts ++ if(opts[:queue], do: ["queue #{opts[:queue]}"], else: []) do
+      [] -> nil
+      parts -> Enum.join(parts, " · ")
+    end
+  end
 
   defp clause_label(:_), do: "otherwise"
   defp clause_label(value) when is_atom(value), do: Atom.to_string(value)
