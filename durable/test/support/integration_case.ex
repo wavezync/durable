@@ -11,6 +11,8 @@ defmodule Durable.IntegrationCase do
   use ExUnit.CaseTemplate
 
   alias Durable.IntegrationProbe
+  import Ecto.Query, only: [from: 2]
+
   alias Durable.IntegrationRepo
   alias Durable.Storage.Schemas.WorkflowExecution
 
@@ -54,6 +56,21 @@ defmodule Durable.IntegrationCase do
   defp truncate_after_test, do: truncate!()
 
   def get(id), do: IntegrationRepo.get!(WorkflowExecution, id)
+
+  @doc """
+  Puts a run's deadline in the past. For a test that needs a run to get
+  somewhere and then time out: with a short real `timeout:`, a slow machine
+  passes the deadline first and the run never gets there.
+  """
+  def expire!(id) do
+    {1, _} =
+      IntegrationRepo.update_all(
+        from(w in WorkflowExecution, where: w.id == ^id),
+        set: [deadline_at: DateTime.add(DateTime.utc_now(), -1, :second)]
+      )
+
+    :ok
+  end
 
   def await_status(id, status, timeout \\ 10_000) do
     Durable.DataCase.assert_eventually(

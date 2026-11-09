@@ -312,13 +312,17 @@ defmodule DurableDashboard.Trace do
 
     %{
       type: error["type"] && to_string(error["type"]),
-      message: if(message, do: to_string(message), else: Jason.encode!(details)),
+      message: message_text(message, details),
       details: if(message && details != %{}, do: details),
       frames: frames
     }
   end
 
   def error_parts(error), do: %{type: nil, message: inspect(error), details: nil, frames: []}
+
+  defp message_text(nil, details) when details == %{}, do: nil
+  defp message_text(nil, details), do: Jason.encode!(details)
+  defp message_text(message, _details), do: to_string(message)
 
   # "(my_app 0.1.0) lib/my_app/carrier.ex:48: MyApp.Carrier.ship/2" — the app
   # is optional; a line that isn't a frame is kept as it is.

@@ -179,6 +179,18 @@ defmodule DurableDashboard.Live.RunPageLiveTest do
     end
   end
 
+  test "a step that cancels its run isn't shown as an error", %{conn: conn} do
+    id = Fixtures.run!(Fixtures.StepCancels)
+    assert Fixtures.get_run!(id).status == :cancelled
+
+    {:ok, view, html} = live(conn, dash("/executions/#{id}"))
+
+    assert html =~ "record deleted"
+    refute has_element?(view, "[aria-label='Step details'] a", "Error")
+    assert has_element?(view, "[aria-label='Step details'] [aria-current=page]", "Attempts")
+    refute has_element?(view, "[class*=destructive]")
+  end
+
   test "an unknown run id says so", %{conn: conn} do
     {:ok, _view, html} = live(conn, dash("/executions/#{Ecto.UUID.generate()}"))
     assert html =~ "Run not found"

@@ -329,7 +329,7 @@ defmodule Durable.Integration.StepQueuesTest do
       id = start!(W.TimesOutOnOcr)
 
       assert_eventually(fn -> get(id).queue == "ocr" end)
-      Process.sleep(350)
+      expire!(id)
       sweep()
       assert get(id).status == :pending
 
@@ -352,7 +352,7 @@ defmodule Durable.Integration.StepQueuesTest do
       assert_eventually(fn -> get(id).queue == "nobody" end)
       assert get(id).status == :pending
 
-      Process.sleep(350)
+      expire!(id)
       sweep()
 
       run = await_status(id, :compensated)
@@ -363,7 +363,7 @@ defmodule Durable.Integration.StepQueuesTest do
     test "a slow compensation runs in a worker, so the sweep carries on" do
       id = start!(W.StuckSlowSaga)
       assert_eventually(fn -> get(id).queue == "nobody" end)
-      Process.sleep(350)
+      expire!(id)
 
       TimeoutWorker.check_timeouts(Durable)
       assert_eventually(fn -> Probe.hits(:slow_release) == 1 end)

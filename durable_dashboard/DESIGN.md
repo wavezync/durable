@@ -658,7 +658,9 @@ While the run is live the window ends at `now` and the page ticks every
 
 Clicking a row opens the **inspector** beside the waterfall with panes:
 Error, Input, Output, Logs, Attempts. The error pane's tab is
-destructive-tinted so a failure is findable without reading.
+destructive-tinted so a failure is findable without reading. A snoozed or
+cancelled step isn't a failure, so it has no Error pane: the inspector opens
+on Attempts, which gives its reason.
 
 The Error pane shows the type, the message, any other fields, then the
 **stack**, innermost call first. Each frame wraps onto two lines (the

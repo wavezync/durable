@@ -379,7 +379,7 @@ defmodule Durable.Integration.RunControlTest do
   defmodule UndoAfterDeadline do
     use Durable
 
-    workflow "rc_undo_after_deadline", timeout: 100 do
+    workflow "rc_undo_after_deadline", timeout: :timer.hours(1) do
       step(:book, [compensate: :unbook], fn data -> {:ok, Map.put(data, "booking", "B1")} end)
       step(:charge, [queue: :nobody], fn data -> {:ok, data} end)
 
@@ -1425,7 +1425,7 @@ defmodule Durable.Integration.RunControlTest do
     test "has the run's data when it ran out of time" do
       id = start!(UndoAfterDeadline)
       assert_eventually(fn -> get(id).queue == "nobody" end)
-      Process.sleep(150)
+      expire!(id)
       TimeoutWorker.check_timeouts(Durable)
 
       await_status(id, :compensated, 5_000)
