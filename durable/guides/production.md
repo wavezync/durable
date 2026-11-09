@@ -16,7 +16,8 @@ them as ratios, not as a forecast.
   database at every level.
 - **Give Durable a PubSub**, so new work starts at once and you can poll less.
 - **Make steps safe to run twice.** Delivery is at least once.
-- **Drain on shutdown**, or each deploy leaves runs stuck for minutes.
+- **Give nodes time to stop.** Your platform's shutdown limit should be longer
+  than Durable's grace period, 15 seconds by default.
 - **Tune autovacuum** for the two busiest tables.
 - **Report metrics**, and alert on the handful that matter.
 
@@ -177,42 +178,6 @@ REINDEX INDEX CONCURRENTLY
 Avoid `VACUUM FULL` on a live system. It locks the table, so claims stop until it
 finishes.
 
-### If a queue builds a deep backlog
-
-Claiming sorts every ready run in the queue, so its cost grows with the backlog:
-
-| Ready runs in the queue | One claim | With the index below |
-|---|---|---|
-| 100 | 0.4 ms | |
-| 10,000 | 11 ms | |
-| 100,000 | 83 ms | 0.3 ms |
-| 500,000 | 400 ms | 0.3 ms |
-
-Every poll with a free slot pays this cost. If a queue regularly holds tens of
-thousands of ready runs, add this index:
-
-```elixir
-defmodule MyApp.Repo.Migrations.AddDurableClaimIndex do
-  use Ecto.Migration
-
-  @disable_ddl_transaction true
-  @disable_migration_lock true
-
-  def change do
-    create_if_not_exists(
-      index(
-        :workflow_executions,
-        ["queue", "priority DESC", "scheduled_at ASC NULLS FIRST", "inserted_at ASC"],
-        prefix: "durable",
-        name: :workflow_executions_claim_index,
-        where: "status = 'pending'",
-        concurrently: true
-      )
-    )
-  end
-end
-```
-
 ## Connections
 
 A worker holds a connection only while it runs a query, not for the length of a
@@ -248,6 +213,8 @@ PgBouncer in transaction mode. A PgBouncer older than 1.24 needs `prepare:
   when a run starts or resumes, so a longer interval only delays work that comes
   due later: sleeps, retries, snoozes and delayed starts. Between nodes, this needs
   your cluster connected.
+- **A deep backlog doesn't slow claiming.** A claim took under a millisecond at
+  100 ready runs and at 500,000.
 - **Workers-only and web-only nodes work.** `queue_enabled: false` lets a node
   start runs without working them.
 - **Pause a queue in an incident** with `Durable.pause_queue(:name)`. It applies
@@ -255,36 +222,20 @@ PgBouncer in transaction mode. A PgBouncer older than 1.24 needs `prepare:
 
 ## Deploys
 
-### Drain on shutdown
+### Give nodes time to stop
 
-Workers don't finish their step when a node stops. The run stays `running` with
-its lock until the lock goes stale, 300 seconds by default, and a sweep that runs
-every 60 seconds puts it back on the queue. That's up to about six minutes for
-each run caught by a deploy, and the step runs again from the start.
+When a node stops, Durable stops claiming on every queue and waits for running
+work to finish or park, for up to `shutdown_grace_period` (15 seconds by default).
+Keep your platform's shutdown limit longer than that. In Kubernetes that's
+`terminationGracePeriodSeconds`, which is 30 seconds by default.
 
-To avoid that, stop claiming and wait for running steps before the app shuts
-down:
+Anything still running when the time is up is killed, the same as a crash. The
+run stays `running` until its lock goes stale, 300 seconds by default, and a sweep
+that runs every 60 seconds puts it back on the queue. That's up to about six
+minutes, and the step runs again from the start.
 
-```elixir
-# lib/my_app/application.ex
-@impl true
-def prep_stop(state) do
-  tasks =
-    for queue <- Map.keys(Durable.Config.queues()) do
-      Task.async(fn -> Durable.Queue.Manager.drain(Durable, queue, 25_000) end)
-    end
-
-  Task.await_many(tasks, 30_000)
-  state
-end
-```
-
-Set your platform's shutdown grace period longer than this. In Kubernetes that's
-`terminationGracePeriodSeconds`, which is 30 seconds by default. Skip this on
-nodes with `queue_enabled: false`.
-
-A step that outlasts the timeout falls back to the takeover above. If your steps
-run long, you can shorten that with a smaller `stale_lock_timeout`, keeping it
+If your steps run long, raise `shutdown_grace_period` along with your platform's
+limit, or shorten the takeover with a smaller `stale_lock_timeout`, keeping it
 several times `heartbeat_interval`. A worker whose lock was taken over is fenced
 out, so two copies can't both record a result.
 
@@ -303,7 +254,8 @@ mix ecto.migrate
 ```
 
 Migrate before the new code starts, because a node can fail to boot against an
-older schema. `mix durable.migrations -r MyApp.Repo --check` fails when the
+older schema. A migration that adds an index blocks inserts on that table while it
+builds. The latest one took under a second on a table of a million runs. `mix durable.migrations -r MyApp.Repo --check` fails when the
 database is behind, so you can put it in a deploy gate. The dashboard's Settings
 page shows the same thing.
 
@@ -339,9 +291,9 @@ These are the ones worth an alert:
 | Watch | Where | Means |
 |---|---|---|
 | Oldest ready run | `oldest_ready_at` from `Durable.Stats.queues/1` | Work is waiting longer than it should: add capacity, or look for a stuck queue |
-| Ready backlog | `ready` from `Durable.Stats.queues/1` | Not keeping up. Past about 10,000, claims get slower too |
+| Ready backlog | `ready` from `Durable.Stats.queues/1` | You're not keeping up with what's being started |
 | Failed runs | `durable.workflow.stop.count`, `status: :failed` | The usual signal, per workflow |
-| Recovered runs | `durable.queue.stale_recovered.count` | Expected around a deploy without a drain. Otherwise a node crashed |
+| Recovered runs | `durable.queue.stale_recovered.count` | A node crashed, or a deploy killed work that outlasted the grace period |
 | Fenced workers | `durable.queue.worker_fenced.count` | A run was taken over while its worker was still going, usually because heartbeats weren't getting through |
 | Failed acks | `[:durable, :queue, :ack_failed]` event | A finished job couldn't be released after retries |
 | Turned-off schedules | `schedule_disabled` in `Durable.Activity.list/1` | A cron schedule kept failing and stopped firing |
