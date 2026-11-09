@@ -34,13 +34,12 @@ defmodule Durable.Query do
         query
       end
 
-    case Repo.one(config, query) do
-      nil ->
-        {:error, :not_found}
+    case Repo.id?(workflow_id) && Repo.one(config, query) do
+      %WorkflowExecution{} = execution ->
+        {:ok, execution_to_map(execution, include_steps, include_logs)}
 
-      execution ->
-        result = execution_to_map(execution, include_steps, include_logs)
-        {:ok, result}
+      _not_a_run ->
+        {:error, :not_found}
     end
   end
 
@@ -58,6 +57,7 @@ defmodule Durable.Query do
   - `:trigger_ref` - What it points at: a schedule's name, or the run a rerun copied
   - `:error_contains` - Case-insensitive text anywhere in the run's error
   - `:key` - Runs started with this workflow key (the holder has `holds_key: true`)
+  - `:tag` - Runs started with this tag (`Durable.start(..., tags: [...])`)
   - `:input` - Map of dotted input paths to exact values, e.g.
     `%{"order_id" => "ORD-1042"}`
   - `:limit` - Maximum results (default: 50)
@@ -68,8 +68,8 @@ defmodule Durable.Query do
   @spec list_executions(keyword()) :: [map()]
   def list_executions(filters \\ []) do
     config = get_config(filters)
-    limit = Keyword.get(filters, :limit, 50)
-    offset = Keyword.get(filters, :offset, 0)
+    limit = max(Keyword.get(filters, :limit, 50), 0)
+    offset = max(Keyword.get(filters, :offset, 0), 0)
 
     query =
       from(w in WorkflowExecution,
@@ -159,7 +159,12 @@ defmodule Durable.Query do
         group_by: [w.workflow_module, w.workflow_name, w.key]
       )
 
+    filters = if bad_filter?(filters), do: [nothing: true], else: filters
+
     Enum.reduce(filters, query, fn
+      {:nothing, true}, q ->
+        from(w in q, where: false)
+
       {:workflow_name, name}, q when is_binary(name) and name != "" ->
         from(w in q, where: w.workflow_name == ^name)
 
@@ -293,6 +298,10 @@ defmodule Durable.Query do
   """
   @spec list_child_executions(String.t(), keyword()) :: [map()]
   def list_child_executions(parent_workflow_id, opts \\ []) do
+    if Repo.id?(parent_workflow_id), do: children_of(parent_workflow_id, opts), else: []
+  end
+
+  defp children_of(parent_workflow_id, opts) do
     config = get_config(opts)
 
     query =
@@ -493,11 +502,40 @@ defmodule Durable.Query do
     Config.get(durable_name)
   end
 
+  @doc false
+  # The runs matching `filters`, as a query, for callers that act on them
+  # (Durable.cancel_all/2).
+  @spec executions_query(keyword()) :: Ecto.Query.t()
+  def executions_query(filters), do: apply_filters(from(w in WorkflowExecution), filters)
+
+  # A value Postgres can't hold can't match a run.
   defp apply_filters(query, filters) do
+    if bad_filter?(filters),
+      do: from(w in query, where: false),
+      else: reduce_filters(query, filters)
+  end
+
+  defp bad_filter?(filters) do
+    Enum.any?(filters, fn
+      {:input, fields} when is_map(fields) -> Enum.any?(fields, &bad_input_field?/1)
+      {_name, value} -> Repo.bad_text?(value)
+    end)
+  end
+
+  defp bad_input_field?({path, value}), do: not comparable?(path) or not comparable?(value)
+
+  defp comparable?(value) when is_binary(value) or is_atom(value),
+    do: not Repo.bad_text?(value)
+
+  defp comparable?(value), do: is_number(value)
+
+  defp reduce_filters(query, filters) do
     Enum.reduce(filters, query, fn
+      # Runs store Atom.to_string(module) ("Elixir.MyApp.Orders"); accept the
+      # inspect/1 form too.
       {:workflow, module}, q when is_atom(module) ->
-        module_str = inspect(module)
-        from(w in q, where: w.workflow_module == ^module_str)
+        names = [Atom.to_string(module), inspect(module)]
+        from(w in q, where: w.workflow_module in ^names)
 
       {:workflow_name, name}, q ->
         from(w in q, where: w.workflow_name == ^name)
@@ -553,6 +591,9 @@ defmodule Durable.Query do
       {:key, key}, q when is_binary(key) and key != "" ->
         from(w in q, where: w.key == ^key)
 
+      {:tag, tag}, q when is_binary(tag) and tag != "" ->
+        from(w in q, where: fragment("? @> ?", w.tags, ^[tag]))
+
       # Case-insensitive substring of the stored error (type, message, or any
       # field a step returned in `{:error, map}`).
       {:error_contains, text}, q when is_binary(text) and text != "" ->
@@ -591,6 +632,7 @@ defmodule Durable.Query do
       trigger_ref: execution.trigger_ref,
       key: execution.key,
       holds_key: execution.holds_key,
+      tags: execution.tags,
       locked_by: execution.locked_by,
       scheduled_at: execution.scheduled_at,
       started_at: execution.started_at,

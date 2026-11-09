@@ -286,6 +286,116 @@ defmodule Durable.Testing do
       """)
   end
 
+  @doc """
+  Returns the runs of the workflow in `module` that were started, oldest
+  first. With queue processing off, nothing runs them, so this checks what
+  code started without running the workflow:
+
+      Orders.place(order)
+      assert [run] = all_started(Fulfilment)
+      assert run.input == %{"order_id" => 42}
+
+  Parallel branches aren't included; child workflows are.
+
+  ## Options
+
+  - `:input` - only runs whose input contains this map. `%{"order_id" => 42}`
+    matches an input that has more keys too
+  - `:key` - only runs started with this `key:`
+  - `:durable` - the Durable instance (default `Durable`)
+  """
+  @spec all_started(module(), keyword()) :: [WorkflowExecution.t()]
+  def all_started(module, opts \\ []) do
+    opts = Keyword.validate!(opts, [:input, :key, :durable])
+
+    # A branch is a run whose parent runs the same workflow, as in steps/2.
+    # ponytail: a workflow that call_workflows itself looks like a branch too.
+    branch_parent =
+      from(p in WorkflowExecution,
+        where:
+          p.id == parent_as(:run).parent_workflow_id and
+            p.workflow_module == parent_as(:run).workflow_module and
+            p.workflow_name == parent_as(:run).workflow_name
+      )
+
+    query =
+      from(w in WorkflowExecution,
+        as: :run,
+        where: w.workflow_module == ^Atom.to_string(module),
+        where: not exists(branch_parent),
+        order_by: [asc: w.inserted_at]
+      )
+
+    query =
+      Enum.reduce(opts, query, fn
+        {:input, input}, q -> where(q, [w], fragment("? @> ?", w.input, type(^input, :map)))
+        {:key, key}, q -> where(q, [w], w.key == ^key)
+        {:durable, _}, q -> q
+      end)
+
+    Repo.all(config(opts), query)
+  end
+
+  @doc """
+  Asserts that a run of the workflow in `module` was started, matching the
+  `:input` and `:key` options of `all_started/2`. Returns the oldest match,
+  which can then be drained:
+
+      Orders.place(order)
+
+      assert_started(Fulfilment, input: %{"order_id" => 42}, key: "order:42")
+      |> drain()
+      |> assert_status(:completed)
+  """
+  @spec assert_started(module(), keyword()) :: WorkflowExecution.t()
+  def assert_started(module, opts \\ []) do
+    case all_started(module, opts) do
+      [run | _] ->
+        run
+
+      [] ->
+        flunk("""
+        Expected a run of #{inspect(module)} to be started#{filters(opts)}
+        #{started_list(module, opts)}
+        """)
+    end
+  end
+
+  @doc """
+  Asserts that no run of the workflow in `module` was started, matching the
+  `:input` and `:key` options of `all_started/2`.
+  """
+  @spec refute_started(module(), keyword()) :: :ok
+  def refute_started(module, opts \\ []) do
+    case all_started(module, opts) do
+      [] ->
+        :ok
+
+      runs ->
+        flunk("""
+        Expected no run of #{inspect(module)} to be started#{filters(opts)}, got #{length(runs)}
+        #{Enum.map_join(runs, "\n", &describe_started/1)}
+        """)
+    end
+  end
+
+  defp filters(opts) do
+    case Keyword.take(opts, [:input, :key]) do
+      [] -> ""
+      filters -> " with " <> inspect(filters)
+    end
+  end
+
+  defp started_list(module, opts) do
+    case all_started(module, Keyword.take(opts, [:durable])) do
+      [] -> "No run of #{inspect(module)} was started."
+      runs -> "Runs that were started:\n" <> Enum.map_join(runs, "\n", &describe_started/1)
+    end
+  end
+
+  defp describe_started(run),
+    do: "  #{run.id} key: #{inspect(run.key)} input: #{inspect(run.input)}"
+
   defp config(opts), do: Config.get(Keyword.get(opts, :durable, Durable))
 
   defp run_id(%{id: id}), do: id

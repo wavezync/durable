@@ -122,6 +122,31 @@ defmodule Durable.QueryTest do
     end
   end
 
+  defmodule Orders do
+    use Durable
+
+    workflow "orders" do
+      step(:a, fn data -> {:ok, data} end)
+    end
+  end
+
+  defmodule Refunds do
+    use Durable
+
+    workflow "refunds" do
+      step(:a, fn data -> {:ok, data} end)
+    end
+  end
+
+  describe "workflow filter" do
+    test "matches the runs of a workflow module" do
+      {:ok, id} = Durable.start(Orders, %{})
+      {:ok, _} = Durable.start(Refunds, %{})
+
+      assert [%{id: ^id}] = Query.list_executions(workflow: Orders)
+    end
+  end
+
   describe "id / id_prefix / status-list / time filters" do
     test "id selects an exact execution", %{repo: repo} do
       a = insert_exec(repo, %{workflow_name: "a"})

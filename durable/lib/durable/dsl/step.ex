@@ -12,8 +12,7 @@ defmodule Durable.DSL.Step do
   If/when this DSL gains an iteration primitive (e.g. `each/3` to run a step
   once per item in a list), design with **context isolation per iteration**.
   Parallel-style shared context across concurrent iterations creates races on
-  `put_context/2` writes; isolated contexts avoid that class of bug. See
-  `docs/bug-reports/2026-04-13-follow-up-audit.md`.
+  `put_context/2` writes; isolated contexts avoid that class of bug.
 
   ## Usage
 
@@ -38,14 +37,23 @@ defmodule Durable.DSL.Step do
     - `:max_attempts` - Maximum retry attempts (default: 1)
     - `:backoff` - Backoff strategy: `:exponential`, `:linear`, `:constant`
     - `:base` - Base delay in ms (default: 1000)
-    - `:max_backoff` - Maximum backoff in ms (default: 30000)
+    - `:max_backoff` - Maximum backoff in ms (default: 3_600_000, 1 hour)
+
+    Between attempts the run is parked: it goes back on its queue until the
+    backoff has passed, so the wait holds no worker. Each attempt starts with
+    the data the last one got, and what it wrote with `put_context/2`.
   - `:timeout` - How long one attempt may run, in milliseconds. A slower
     attempt is stopped and fails with a `"timeout"` error, which is retried
     like any error. A step with a timeout, or in a workflow with one, runs in
     a separate process: its body sees the same context and captured logs,
     but `self()` is not the worker.
   - `:compensate` - Name of compensation function for saga pattern
-  - `:queue` - Override queue for this step
+  - `:queue` - The queue this step runs on. The run moves there before the
+    step and takes a slot from that queue's `:concurrency`, which is per node.
+    The next step without a `:queue` goes back to the queue the run started
+    on. Moving costs one more claim, so with no `:pubsub` configured it waits
+    up to that queue's `:poll_interval`. A run on a queue no live node polls
+    waits there until the workflow's `:timeout`, if it has one. In a `parallel` block each branch is its own run on this queue
 
   """
 
@@ -53,7 +61,25 @@ defmodule Durable.DSL.Step do
   Defines a step within a workflow.
 
   The step receives the previous step's output (or workflow input for the first step)
-  and must return `{:ok, data}` or `{:error, reason}`.
+  and returns one of:
+
+  - `{:ok, data}` - Done; `data` goes to the next step
+  - `{:error, reason}` - Failed; retried while attempts are left
+  - `{:fail, reason}` - Failed, and not retried: the run fails now and its
+    compensations run
+  - `{:snooze, ms}` or `{:snooze, ms, reason}` - Run the step again in `ms`
+    milliseconds, without using an attempt. The run is parked meanwhile, like
+    between retries. Snoozes have no limit; the workflow's `timeout:` is what
+    stops a step that snoozes forever
+  - `{:cancel, reason}` - The run is cancelled now, like `Durable.cancel/2`:
+    no retries, no compensations. A `call_workflow` child's parent gets it as
+    an error. In a `parallel` step the whole workflow holding the block is
+    cancelled
+  - `{:cancel, reason, scope: scope}` - Choose what's cancelled: `:run` (only
+    the run the step is in, so in a `parallel` step only that branch, which
+    the block sees as an error), `:workflow` (the workflow the step is written
+    in; the default) or `:root` (the top run of the tree, through
+    `call_workflow` and `start_workflow` parents, and every run under it)
 
   ## Examples
 
@@ -207,7 +233,10 @@ defmodule Durable.DSL.Step do
   @doc """
   Defines a compensation handler for saga pattern.
 
-  Compensations receive the current data and return `{:ok, data}`.
+  Compensations receive the current data and return `{:ok, data}`. Returning
+  `{:error, reason}` or raising marks the compensation failed once its retries
+  run out, and `{:fail, reason}` marks it failed with no retries. The run then
+  ends `:compensation_failed`.
 
   ## Examples
 

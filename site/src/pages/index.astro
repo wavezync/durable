@@ -76,7 +76,11 @@ const faq = [
   },
   {
     q: 'What does Durable need to run?',
-    a: 'An Elixir app and an Ecto repo. Out of the box, runs are stored in PostgreSQL and workers claim them with FOR UPDATE SKIP LOCKED. The queue is a pluggable adapter, so other backends can be added.',
+    a: 'An Elixir app and an Ecto repo. Out of the box, runs are stored in PostgreSQL 13 or newer and workers claim them with FOR UPDATE SKIP LOCKED. The queue is a pluggable adapter, so other backends can be added.',
+  },
+  {
+    q: 'Can I use PgBouncer?',
+    a: 'Yes. Durable works on direct connections and behind PgBouncer in transaction mode, because it uses no session features such as LISTEN/NOTIFY. A PgBouncer older than 1.24 needs prepare: :unnamed on your repo.',
   },
   {
     q: 'What happens if a node crashes in the middle of a step?',
@@ -211,6 +215,7 @@ const faqLd = {
         <li class="rise" style="--d: 0ms"><Check size={16} />A library, not a service</li>
         <li class="rise" style="--d: 90ms"><Check size={16} />Uses your Ecto repo</li>
         <li class="rise" style="--d: 180ms"><Check size={16} />Pluggable queue adapter</li>
+        <li class="rise" style="--d: 270ms"><Check size={16} />Direct or through PgBouncer</li>
       </ul>
       <ol class="install">
         {steps.map((s, i) => (

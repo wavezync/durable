@@ -59,7 +59,6 @@ defmodule Durable.Supervisor do
 
   * `:repo` - The Ecto repo module (required)
   * `:name` - Instance name (default: `Durable`)
-  * `:prefix` - Database schema prefix (default: `"durable"`)
   * `:queues` - Queue configuration
   * `:queue_enabled` - Enable/disable queue processing (default: `true`)
 
@@ -110,6 +109,7 @@ defmodule Durable.Supervisor do
           {Durable.NodeRegistry, config: config},
           {Durable.Queue.Sampler, config: config}
         ] ++
+        if(config.pubsub, do: [{Durable.Queue.CommitWaker, config}], else: []) ++
         if(config.prune, do: [{Durable.Pruner, config: config}], else: [])
 
     children =

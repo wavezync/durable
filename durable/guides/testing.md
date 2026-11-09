@@ -124,8 +124,8 @@ away, so a run that sleeps for a day finishes in milliseconds.
 
 ## Retries
 
-Retries skip their backoff during a drain. `attempt` on the step's latest row
-says how many attempts it took:
+Retries skip their backoff during a drain, and snoozes end right away.
+`attempt` on the step's latest row says how many attempts it took:
 
 ```elixir
 test "retries a flaky gateway" do
@@ -161,6 +161,25 @@ assert_step(run, :compensate_cancel_flight)
 Drain also runs the child workflows that a run starts, with `call_workflow/3`
 or `start_workflow/3`, and resumes the parent once a child is done. Use
 `Durable.list_children/2` to inspect them.
+
+## Started Runs
+
+To test that your code starts a workflow, without running it, check what was
+started. With queue processing off, a started run just waits:
+
+```elixir
+test "placing an order starts fulfilment" do
+  Orders.place(%{id: 42})
+
+  assert_started(MyApp.Fulfilment, input: %{"order_id" => 42}, key: "order:42")
+  refute_started(MyApp.Refund)
+end
+```
+
+`:input` matches a subset, so `%{"order_id" => 42}` also matches an input
+with more keys. `assert_started/2` returns the run, so you can drain it
+next. `all_started/2` returns every run of the workflow, oldest first.
+Parallel branches aren't included.
 
 ## Scheduled Workflows
 

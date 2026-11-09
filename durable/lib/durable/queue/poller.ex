@@ -16,6 +16,7 @@ defmodule Durable.Queue.Poller do
   require Logger
 
   alias Durable.Config
+  alias Durable.PubSub, as: DurablePubSub
   alias Durable.Queue.Adapter
   alias Durable.Queue.Worker
 
@@ -26,9 +27,7 @@ defmodule Durable.Queue.Poller do
     :poll_interval,
     :worker_supervisor,
     :node_id,
-    :active_jobs,
-    :worker_refs,
-    :job_tokens,
+    :workers,
     :paused,
     :timer_ref
   ]
@@ -40,8 +39,7 @@ defmodule Durable.Queue.Poller do
           poll_interval: pos_integer(),
           worker_supervisor: atom() | pid(),
           node_id: String.t(),
-          active_jobs: MapSet.t(String.t()),
-          worker_refs: %{reference() => String.t()},
+          workers: %{pid() => %{ref: reference(), job_id: String.t(), token: String.t() | nil}},
           paused: boolean(),
           timer_ref: reference() | nil
         }
@@ -118,12 +116,14 @@ defmodule Durable.Queue.Poller do
       poll_interval: Keyword.get(opts, :poll_interval, @default_poll_interval),
       worker_supervisor: worker_supervisor,
       node_id: config.node_id,
-      active_jobs: MapSet.new(),
-      worker_refs: %{},
-      job_tokens: %{},
+      workers: %{},
       paused: false,
       timer_ref: nil
     }
+
+    # A start or resume on this queue wakes us (Durable.PubSub.wake/2), so a
+    # long poll_interval doesn't delay new work. No-op without a PubSub.
+    _ = DurablePubSub.subscribe(config, DurablePubSub.queue_topic(config, queue_name))
 
     # Start polling
     state = schedule_poll(state, 0)
@@ -151,7 +151,7 @@ defmodule Durable.Queue.Poller do
   def handle_call({:drain, timeout}, from, state) do
     state = %{state | paused: true}
 
-    if MapSet.size(state.active_jobs) == 0 do
+    if state.workers == %{} do
       {:reply, :ok, state}
     else
       # Wait for jobs to complete
@@ -171,7 +171,7 @@ defmodule Durable.Queue.Poller do
       queue_name: state.queue_name,
       concurrency: state.concurrency,
       poll_interval: state.poll_interval,
-      active_jobs: MapSet.size(state.active_jobs),
+      active_jobs: map_size(state.workers),
       paused: state.paused,
       node_id: state.node_id
     }
@@ -196,33 +196,34 @@ defmodule Durable.Queue.Poller do
     {:noreply, state}
   end
 
+  # Poll now, between scheduled polls. A burst of wakes stops polling once
+  # every slot is taken.
   @impl true
-  def handle_info({:job_complete, job_id, result, duration_ms}, state) do
-    Logger.debug(
-      "Job #{job_id} completed with result=#{inspect(result)} duration=#{duration_ms}ms"
-    )
-
-    state = handle_job_completion(state, job_id, result)
+  def handle_info({:durable_wake, _queue}, state) do
+    state = if state.paused, do: state, else: poll_and_process(state)
     {:noreply, state}
   end
 
   @impl true
-  def handle_info({:DOWN, ref, :process, _pid, reason}, state) do
-    case Map.get(state.worker_refs, ref) do
-      nil ->
+  def handle_info({:job_complete, worker, job_id, result, duration_ms}, state) do
+    Logger.debug(
+      "Job #{job_id} completed with result=#{inspect(result)} duration=#{duration_ms}ms"
+    )
+
+    state = handle_job_completion(state, worker, result)
+    {:noreply, state}
+  end
+
+  @impl true
+  def handle_info({:DOWN, _ref, :process, worker, reason}, state) do
+    case Map.pop(state.workers, worker) do
+      {nil, _workers} ->
         {:noreply, state}
 
-      job_id ->
+      {%{job_id: job_id}, workers} ->
         Logger.warning("Worker for job #{job_id} crashed: #{inspect(reason)}")
         # Job remains locked in DB, will be recovered by stale lock recovery
-        state = %{
-          state
-          | active_jobs: MapSet.delete(state.active_jobs, job_id),
-            worker_refs: Map.delete(state.worker_refs, ref),
-            job_tokens: Map.delete(state.job_tokens, job_id)
-        }
-
-        {:noreply, state}
+        {:noreply, %{state | workers: workers}}
     end
   end
 
@@ -231,7 +232,7 @@ defmodule Durable.Queue.Poller do
     elapsed = System.monotonic_time(:millisecond) - start_time
 
     cond do
-      MapSet.size(state.active_jobs) == 0 ->
+      state.workers == %{} ->
         GenServer.reply(from, :ok)
         {:noreply, state}
 
@@ -248,7 +249,7 @@ defmodule Durable.Queue.Poller do
   # Private functions
 
   defp poll_and_process(state) do
-    available_slots = state.concurrency - MapSet.size(state.active_jobs)
+    available_slots = state.concurrency - map_size(state.workers)
 
     if available_slots > 0 do
       adapter = Adapter.default_adapter()
@@ -272,12 +273,10 @@ defmodule Durable.Queue.Poller do
 
         emit_job_claimed_telemetry(job, state.node_id)
 
-        %{
-          state
-          | active_jobs: MapSet.put(state.active_jobs, job.id),
-            worker_refs: Map.put(state.worker_refs, ref, job.id),
-            job_tokens: Map.put(state.job_tokens, job.id, job[:lock_token])
-        }
+        # Keyed by worker: a run parked a moment ago can be claimed again before
+        # its last worker has reported back.
+        worker = %{ref: ref, job_id: job.id, token: job[:lock_token]}
+        %{state | workers: Map.put(state.workers, pid, worker)}
 
       {:error, reason} ->
         Logger.error("Failed to start worker for job #{job.id}: #{inspect(reason)}")
@@ -285,13 +284,32 @@ defmodule Durable.Queue.Poller do
     end
   end
 
-  defp handle_job_completion(state, job_id, result) do
+  defp handle_job_completion(state, worker, result) do
+    case Map.pop(state.workers, worker) do
+      {nil, _workers} ->
+        state
+
+      {%{ref: ref, job_id: job_id, token: token}, workers} ->
+        safely_settle_job(state.config, job_id, token, result)
+        Process.demonitor(ref, [:flush])
+        %{state | workers: workers}
+    end
+  end
+
+  # A row that can't be read mustn't take the poller, and its other workers,
+  # down with it. Stale-lock recovery deals with the run.
+  defp safely_settle_job(config, job_id, token, result) do
+    settle_job(config, job_id, token, result)
+  rescue
+    error -> Logger.error("Couldn't settle job #{job_id}: #{Exception.message(error)}")
+  end
+
+  defp settle_job(config, job_id, token, result) do
     adapter = Adapter.default_adapter()
-    token = Map.get(state.job_tokens, job_id)
 
     case result do
       :ok ->
-        adapter.ack(state.config, job_id, token)
+        adapter.ack(config, job_id, token)
 
       :waiting ->
         # Job is waiting for sleep/event/input - don't ack, leave as-is
@@ -304,27 +322,8 @@ defmodule Durable.Queue.Poller do
         :ok
 
       {:error, reason} ->
-        adapter.nack(state.config, job_id, reason, token)
+        adapter.nack(config, job_id, reason, token)
     end
-
-    # Find and remove the monitor ref for this job
-    {ref, worker_refs} =
-      Enum.find_value(state.worker_refs, {nil, state.worker_refs}, fn {ref, id} ->
-        if id == job_id do
-          {ref, Map.delete(state.worker_refs, ref)}
-        else
-          false
-        end
-      end)
-
-    if ref, do: Process.demonitor(ref, [:flush])
-
-    %{
-      state
-      | active_jobs: MapSet.delete(state.active_jobs, job_id),
-        worker_refs: worker_refs,
-        job_tokens: Map.delete(state.job_tokens, job_id)
-    }
   end
 
   defp schedule_poll(state, delay) do

@@ -38,6 +38,7 @@ defmodule Durable.Orchestration do
   alias Durable.Config
   alias Durable.Context
   alias Durable.Executor
+  alias Durable.PubSub, as: DurablePubSub
   alias Durable.Repo
   alias Durable.Storage.Schemas.WorkflowExecution
 
@@ -140,7 +141,7 @@ defmodule Durable.Orchestration do
       {:ok, Map.get(context, fire_key)}
     else
       # Create child and continue (no throw)
-      {:ok, child_id} = create_child_execution(module, input, parent_id, opts)
+      {:ok, child_id} = create_child_execution(module, input, parent_id, [wake: true] ++ opts)
       Context.put_context(fire_key, child_id)
       record_call_child(child_id, :fire, ref)
       {:ok, child_id}
@@ -197,7 +198,8 @@ defmodule Durable.Orchestration do
       %{status: :completed} = child ->
         parse_child_result(build_result_payload(:completed, child.context))
 
-      %{status: status} = child when status in [:failed, :cancelled, :compensation_failed] ->
+      %{status: status} = child
+      when status in [:failed, :cancelled, :compensated, :compensation_failed] ->
         parse_child_result(build_result_payload(:failed, child.error))
 
       _child ->
@@ -217,13 +219,22 @@ defmodule Durable.Orchestration do
 
     {:ok, workflow_def} = get_child_workflow_def(module, opts)
 
+    safe_input =
+      case Executor.storable_input(input) do
+        {:ok, map} ->
+          map
+
+        {:error, :invalid_input} ->
+          raise ArgumentError, "child input must be a map: #{inspect(input)}"
+      end
+
     attrs = %{
       workflow_module: Atom.to_string(module),
       workflow_name: workflow_def.name,
       status: :pending,
       queue: Keyword.get(opts, :queue, "default") |> to_string(),
-      priority: Keyword.get(opts, :priority, 0),
-      input: input,
+      priority: Keyword.get(opts, :priority) || 0,
+      input: safe_input,
       context: %{},
       parent_workflow_id: parent_id,
       trigger: :parent
@@ -233,6 +244,9 @@ defmodule Durable.Orchestration do
       %WorkflowExecution{}
       |> WorkflowExecution.changeset(attrs)
       |> Repo.insert(config)
+
+    # A child its parent waits for is woken once the parent is listening.
+    if Keyword.get(opts, :wake, false), do: DurablePubSub.wake(config, execution)
 
     # For inline execution (testing), execute the child immediately
     if Keyword.get(opts, :inline, false) do

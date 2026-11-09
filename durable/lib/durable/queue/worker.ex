@@ -112,7 +112,7 @@ defmodule Durable.Queue.Worker do
     emit_telemetry(state.job, result, duration_ms)
 
     # Notify poller of completion
-    send(state.poller_pid, {:job_complete, state.job.id, result, duration_ms})
+    send(state.poller_pid, {:job_complete, self(), state.job.id, result, duration_ms})
 
     {:stop, :normal, state}
   end
@@ -131,7 +131,7 @@ defmodule Durable.Queue.Worker do
     emit_telemetry(state.job, {:error, error}, duration_ms)
 
     # Notify poller of failure
-    send(state.poller_pid, {:job_complete, state.job.id, {:error, error}, duration_ms})
+    send(state.poller_pid, {:job_complete, self(), state.job.id, {:error, error}, duration_ms})
 
     {:stop, :normal, state}
   end
@@ -204,7 +204,7 @@ defmodule Durable.Queue.Worker do
       workflow_id: state.job.id
     )
 
-    send(state.poller_pid, {:job_complete, state.job.id, :fenced, duration_ms})
+    send(state.poller_pid, {:job_complete, self(), state.job.id, :fenced, duration_ms})
 
     {:stop, :normal, %{state | heartbeat_timer: nil}}
   end

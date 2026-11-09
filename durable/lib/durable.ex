@@ -68,7 +68,6 @@ defmodule Durable do
 
   * `:repo` - The Ecto repo module (required)
   * `:name` - Instance name for multiple Durable instances (default: `Durable`)
-  * `:prefix` - PostgreSQL schema name (default: `"durable"`)
   * `:queues` - Queue configuration map
   * `:queue_enabled` - Enable/disable queue processing (default: `true`)
 
@@ -195,17 +194,24 @@ defmodule Durable do
     instead of creating another. A string of 1 to 255 bytes. Whether a key
     can be used again after its run finishes is the workflow's `reuse:`
     option. See the Workflow keys guide.
+  - `:tags` - Labels for the run, such as `["account:7"]`, to find runs across
+    workflows with `list_executions(tag: ...)` and stop them with
+    `cancel_all/2`. Child runs don't inherit them; cancelling a run cancels
+    its children anyway
   - `:on_duplicate` - What to do when the key is taken (the default is the
     workflow's, else `:use_existing`):
     - `:use_existing` - return `{:ok, holder_id}`
     - `:error` - return `{:error, {:key_taken, holder_id}}`
     - `:cancel_existing` - cancel the running holder and start a new run with
       this input, returning `{:ok, new_id}`
+    - `:run_again` - leave one run waiting behind the running holder, with the
+      newest input, returning `{:ok, waiting_id}`. It runs once the holder
+      ends, if `reuse:` lets the key go
     - `{:send_event, name}` - send this input to the running holder as event
       `name` (kept until it waits for it) and return `{:ok, holder_id}`
 
-    Only `:cancel_existing` creates a run; nothing is broadcast or run
-    inline for the others. A finished holder that the workflow's `reuse:`
+    Only `:cancel_existing` and `:run_again` create a run; nothing is
+    broadcast or run inline for the others. A finished holder that the workflow's `reuse:`
     keeps answers `:cancel_existing` and `{:send_event, name}` with
     `{:error, {:key_taken, holder_id}}`.
 
@@ -218,6 +224,10 @@ defmodule Durable do
   - `{:error, %Ecto.Changeset{}}` for an invalid key, and
     `{:error, :key_contended}` in the rare case the key changed hands three
     times while this start ran
+  - `{:error, :invalid_input}` for input that isn't a map
+
+  Raises `ArgumentError` for a `:key`, `:tags` or `:queue` that PostgreSQL can't
+  store, such as text with a NUL character.
 
   ## Examples
 
@@ -238,6 +248,30 @@ defmodule Durable do
   @spec start(module(), map(), keyword()) :: {:ok, String.t()} | {:error, term()}
   def start(module, input, opts \\ []) do
     Durable.Executor.start_workflow(module, input, opts)
+  end
+
+  @doc """
+  Starts several runs at once: one `{module, input}` or `{module, input, opts}`
+  per run, with `opts` (the options of `start/3`) applying to every item under
+  the item's own.
+
+  All the starts share one transaction, the caller's if it is in one, so they
+  commit together. Keys are checked for every item, as `start/3` checks them,
+  and each item gets its own result, in order.
+
+  ## Examples
+
+      Durable.start_many([
+        {ImportRow, %{"row" => 1}, key: "import:9:row:1"},
+        {ImportRow, %{"row" => 2}, key: "import:9:row:2"}
+      ], tags: ["import:9"])
+      #=> [{:ok, id1}, {:ok, id2}]
+
+  """
+  @spec start_many([{module(), map()} | {module(), map(), keyword()}], keyword()) ::
+          [{:ok, String.t()} | {:error, term()}]
+  def start_many(items, opts \\ []) do
+    Durable.Executor.start_many(items, opts)
   end
 
   @doc """
@@ -264,9 +298,13 @@ defmodule Durable do
   ## Filters
 
   - `:workflow` - Filter by workflow module
-  - `:status` - Filter by status
+  - `:status` - Filter by status, or a list of statuses
   - `:queue` - Filter by queue
+  - `:key` - Runs started with this workflow key
+  - `:tag` - Runs started with this tag, across workflows
   - `:limit` - Maximum number of results (default: `50`)
+
+  `Durable.Query.list_executions/1` lists every filter.
 
   ## Examples
 
@@ -298,6 +336,24 @@ defmodule Durable do
   @spec cancel(String.t(), String.t() | nil) :: :ok | {:error, term()}
   def cancel(workflow_id, reason \\ nil) do
     Durable.Executor.cancel_workflow(workflow_id, reason)
+  end
+
+  @doc """
+  Cancels every pending, running or waiting run that matches `filters`, the
+  filters of `list_executions/1`, one by one as `cancel/2` would (children
+  included). Returns `{:ok, count}`. At least one filter is required.
+
+  ## Examples
+
+      # An account was closed: stop everything started for it
+      {:ok, 3} = Durable.cancel_all([tag: "account:7"], "account closed")
+
+      {:ok, _} = Durable.cancel_all([workflow: MyApp.Export, status: :waiting])
+
+  """
+  @spec cancel_all(keyword(), String.t() | nil) :: {:ok, non_neg_integer()}
+  def cancel_all(filters, reason \\ nil) do
+    Durable.Executor.cancel_all(filters, reason)
   end
 
   @doc """
@@ -653,7 +709,6 @@ defmodule Durable do
 
   * `:repo` - The Ecto repo module (required)
   * `:name` - Instance name (default: `Durable`)
-  * `:prefix` - Database schema prefix (default: `"durable"`)
   * `:queues` - Queue configuration
 
   See `Durable.Config` for the complete list of options.

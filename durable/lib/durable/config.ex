@@ -9,8 +9,19 @@ defmodule Durable.Config do
 
   * `:repo` - The Ecto repo module to use for persistence (required)
   * `:name` - Instance name for multiple Durable instances (default: `Durable`)
-  * `:prefix` - PostgreSQL schema name for table isolation (default: `"durable"`)
-  * `:queues` - Queue configuration map (default: `%{default: [concurrency: 10, poll_interval: 1000]}`)
+  * `:prefix` - PostgreSQL schema name. Only `"durable"` is supported for now:
+    the schemas are bound to it, so another value would write runs to one
+    schema and poll for them in another.
+  * `:queues` - Queue configuration map (default: `%{default: [concurrency: 10, poll_interval: 1000]}`).
+    `concurrency` is per node. `poll_interval` is how often an idle queue
+    checks for work, in milliseconds. With a `:pubsub`, a start or resume
+    wakes the queue's pollers at once, on every node in the cluster, so a long
+    interval only delays runs that come due later: sleeps, retries, snoozes
+    and delayed starts.
+  * `:pubsub` - Phoenix.PubSub for lifecycle broadcasts and waking pollers:
+    a server name, `:start` for Durable's own, or `nil` (default). A start
+    inside your own transaction wakes them when it commits. Without a PubSub,
+    runs are claimed on the next poll
   * `:queue_enabled` - Enable/disable queue processing (default: `true`)
   * `:stale_lock_timeout` - Seconds before a lock is considered stale (default: `300`)
   * `:heartbeat_interval` - Milliseconds between worker heartbeats (default: `30_000`)
@@ -28,10 +39,6 @@ defmodule Durable.Config do
          default: [concurrency: 10],
          high_priority: [concurrency: 20, poll_interval: 500]
        }}
-
-      # Multiple instances with different prefixes
-      {Durable, repo: MyApp.Repo, name: :workflows_a, prefix: "durable_a"}
-      {Durable, repo: MyApp.Repo, name: :workflows_b, prefix: "durable_b"}
 
   """
 
@@ -85,9 +92,9 @@ defmodule Durable.Config do
       doc: "Instance name for multiple Durable instances"
     ],
     prefix: [
-      type: :string,
+      type: {:in, ["durable"]},
       default: "durable",
-      doc: "PostgreSQL schema name for table isolation"
+      doc: "PostgreSQL schema name; only \"durable\" is supported for now"
     ],
     queues: [
       type: :map,
@@ -140,7 +147,8 @@ defmodule Durable.Config do
       type: :atom,
       default: nil,
       doc:
-        "Phoenix.PubSub server name for lifecycle broadcasts. " <>
+        "Phoenix.PubSub server name for lifecycle broadcasts, which also wake a " <>
+          "queue's pollers when a run starts or resumes. " <>
           "Pass an atom like `MyApp.PubSub` to reuse a PubSub started by the host app. " <>
           "Pass `:start` to have Durable start its own (named after the instance). " <>
           "Leave as `nil` to disable broadcasting (default)."

@@ -26,9 +26,12 @@ defmodule Durable.Keys do
   alias Durable.Storage.Schemas.WorkflowExecution
 
   @holder_target {:unsafe_fragment, "(workflow_module, workflow_name, key) WHERE holds_key"}
+  @waiting_target {:unsafe_fragment,
+                   "(workflow_module, workflow_name, key) " <>
+                     "WHERE runs_after_id IS NOT NULL AND status = 'pending'"}
   @rounds 3
   @max_input_bytes 16_384
-  @modes [:use_existing, :error, :cancel_existing]
+  @modes [:use_existing, :error, :cancel_existing, :run_again]
   # Statuses `Durable.cancel/2` can cancel; a compensating run finishes its rollback.
   @cancellable [:pending, :running, :waiting]
 
@@ -43,6 +46,11 @@ defmodule Durable.Keys do
     end
 
     with {:ok, value} <- Keyword.fetch(opts, :on_duplicate), do: validate_on_duplicate!(value)
+
+    for {opt, value} <- Keyword.take(opts, [:key, :queue, :tags]), Repo.bad_text?(value) do
+      raise ArgumentError, "#{opt}: can't be stored: #{inspect(value)}"
+    end
+
     :ok
   end
 
@@ -56,7 +64,7 @@ defmodule Durable.Keys do
   def validate_on_duplicate!(value) do
     raise ArgumentError,
           "invalid on_duplicate: #{inspect(value)}; expected :use_existing, :error, " <>
-            ":cancel_existing or {:send_event, event_name}"
+            ":cancel_existing, :run_again or {:send_event, event_name}"
   end
 
   @doc false
@@ -132,6 +140,12 @@ defmodule Durable.Keys do
           Map.get(workflow_def.opts, :on_duplicate, :use_existing)
       )
 
+    if mode == :run_again and reuse(workflow_def) == :never do
+      raise ArgumentError,
+            "on_duplicate: :run_again can't run again with reuse: :never: " <>
+              "no run after the first may take the key"
+    end
+
     ctx = %{
       config: config,
       entry: entry(changeset),
@@ -144,8 +158,24 @@ defmodule Durable.Keys do
     # One transaction so a release (or a replaced holder's cancel) and the
     # insert that follows land together. Nothing in here raises on a taken
     # key, and nothing rolls back, so a caller's own transaction stays usable.
-    {:ok, result} = Repo.transaction(config, fn -> claim(ctx, @rounds, nil) end)
+    {:ok, result} =
+      Repo.transaction(config, fn ->
+        lock_key(config, ctx.entry)
+        claim(ctx, @rounds, nil)
+      end)
+
     finish(ctx, result)
+  end
+
+  # Every change to who holds a key takes this first, so a start and a run taking
+  # over from a finished holder can't lock the same rows in opposite orders.
+  defp lock_key(config, %{workflow_module: module, workflow_name: name, key: key}) do
+    {:ok, _} =
+      Repo.query(config, "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [
+        "durable_key:#{module}:#{name}:#{key}"
+      ])
+
+    :ok
   end
 
   defp claim(_ctx, 0, _moved), do: :contended
@@ -185,8 +215,28 @@ defmodule Durable.Keys do
           do: {:debounced, holder},
           else: claim(ctx, rounds - 1, moved)
 
+      ctx.mode == :run_again ->
+        run_again(ctx, holder, rounds, moved)
+
       ctx.mode == :cancel_existing and holder.status in @cancellable ->
         replace(ctx, holder, rounds, moved)
+
+      true ->
+        {:taken, holder}
+    end
+  end
+
+  # run_again: a holder that hasn't started takes the newer input; one that's
+  # going gets a run waiting behind it. A closed holder `reuse:` keeps is taken.
+  defp run_again(ctx, holder, rounds, moved) do
+    cond do
+      unstarted?(holder) ->
+        if refresh_unstarted(ctx, holder),
+          do: {:refreshed, holder},
+          else: claim(ctx, rounds - 1, moved)
+
+      holder.status in WorkflowExecution.open_statuses() ->
+        run_after(ctx, holder, rounds, moved)
 
       true ->
         {:taken, holder}
@@ -201,7 +251,70 @@ defmodule Durable.Keys do
   end
 
   defp debouncing?(%{debounce: nil}, _holder), do: false
-  defp debouncing?(_ctx, holder), do: holder.status == :pending and is_nil(holder.locked_by)
+  defp debouncing?(_ctx, holder), do: unstarted?(holder)
+
+  # Never claimed. A parked retry or snooze is :pending and unlocked too, but
+  # it has started.
+  defp unstarted?(holder),
+    do: holder.status == :pending and is_nil(holder.locked_by) and is_nil(holder.started_at)
+
+  defp unstarted_holder(holder_id) do
+    from(w in WorkflowExecution,
+      where:
+        w.id == ^holder_id and w.holds_key and w.status == :pending and is_nil(w.locked_by) and
+          is_nil(w.started_at)
+    )
+  end
+
+  defp refresh_unstarted(ctx, holder) do
+    {count, _} =
+      Repo.update_all(ctx.config, unstarted_holder(holder.id),
+        set: [input: ctx.entry.input, updated_at: DateTime.utc_now()]
+      )
+
+    count == 1
+  end
+
+  # on_duplicate: :run_again with the holder going: one run waits for it to
+  # end (runs_after_id, which the claim query honours), without the key. A
+  # later start gives that run the newest input. Its deadline counts from when
+  # it takes the key.
+  defp run_after(ctx, holder, rounds, moved) do
+    waiting =
+      %{ctx.entry | holds_key: false, deadline_at: nil} |> Map.put(:runs_after_id, holder.id)
+
+    case Repo.insert_all(ctx.config, WorkflowExecution, [waiting],
+           on_conflict: :nothing,
+           conflict_target: @waiting_target,
+           returning: true
+         ) do
+      {1, [run]} ->
+        {:waiting, run, holder}
+
+      {0, _} ->
+        case refresh_waiting(ctx) do
+          nil -> claim(ctx, rounds - 1, moved)
+          id -> {:waiting_refreshed, id, holder}
+        end
+    end
+  end
+
+  defp refresh_waiting(%{config: config, entry: entry}) do
+    {_, ids} =
+      Repo.update_all(
+        config,
+        from(w in WorkflowExecution,
+          where:
+            w.workflow_module == ^entry.workflow_module and
+              w.workflow_name == ^entry.workflow_name and w.key == ^entry.key and
+              not is_nil(w.runs_after_id) and w.status == :pending and is_nil(w.locked_by),
+          select: w.id
+        ),
+        set: [input: entry.input, updated_at: DateTime.utc_now()]
+      )
+
+    List.first(ids)
+  end
 
   # Gives the newer input to a debounced run that hasn't been claimed, and
   # pushes its start back by `period`, but not past `timeout` after the first
@@ -218,10 +331,7 @@ defmodule Durable.Keys do
     {count, _} =
       Repo.update_all(
         ctx.config,
-        from(w in WorkflowExecution,
-          where:
-            w.id == ^holder.id and w.holds_key and w.status == :pending and is_nil(w.locked_by)
-        ),
+        unstarted_holder(holder.id),
         set: [
           input: ctx.entry.input,
           scheduled_at: at,
@@ -289,6 +399,18 @@ defmodule Durable.Keys do
         record_duplicate(ctx, holder, :debounced)
         {:duplicate, holder.id, :use_existing}
 
+      {:refreshed, holder} ->
+        record_duplicate(ctx, holder, :run_again)
+        {:duplicate, holder.id, :use_existing}
+
+      {:waiting, run, holder} ->
+        record_duplicate(ctx, holder, :run_again, %{runs_after: run.id})
+        {:ok, run}
+
+      {:waiting_refreshed, id, holder} ->
+        record_duplicate(ctx, holder, :run_again, %{runs_after: id})
+        {:duplicate, id, :use_existing}
+
       {:taken, holder} ->
         answer(ctx, holder)
 
@@ -349,6 +471,7 @@ defmodule Durable.Keys do
             :workflow_module,
             :workflow_name,
             :locked_by,
+            :started_at,
             :inserted_at
           ])
       )
@@ -370,6 +493,72 @@ defmodule Durable.Keys do
       )
 
     count == 1
+  end
+
+  @doc false
+  # A run that waited behind a holder (run_again) was claimed, so that holder
+  # has ended. It takes the key by the start rules: `{:ok, run}` holding it,
+  # `{:behind, holder_id}` when another run took the key meanwhile (wait for
+  # that one instead), or `{:kept, holder_id}` when `reuse:` keeps it.
+  @spec take_waiting(Config.t(), WorkflowExecution.t(), Durable.Definition.Workflow.t()) ::
+          {:ok, WorkflowExecution.t()} | {:behind, String.t()} | {:kept, String.t()}
+  def take_waiting(config, run, workflow_def) do
+    {:ok, result} =
+      Repo.transaction(config, fn ->
+        lock_key(config, run)
+        do_take_waiting(config, run, workflow_def, @rounds)
+      end)
+
+    case result do
+      {:ok, taken, from} ->
+        if from, do: record(config, "key_handed_off", taken, %{key: run.key, from: from.id})
+        {:ok, taken}
+
+      other ->
+        other
+    end
+  end
+
+  defp do_take_waiting(config, run, _workflow_def, 0),
+    do: {:behind, holder_id(config, run) || run.runs_after_id}
+
+  defp do_take_waiting(config, run, workflow_def, rounds) do
+    reuse = reuse(workflow_def)
+
+    case holder(config, run) do
+      nil ->
+        hold(config, run, workflow_def, nil, rounds)
+
+      holder ->
+        cond do
+          holder.status in WorkflowExecution.open_statuses() ->
+            {:behind, holder.id}
+
+          holder.status not in WorkflowExecution.reusable_statuses(reuse) ->
+            {:kept, holder.id}
+
+          release_closed(config, holder, reuse) ->
+            hold(config, run, workflow_def, holder, rounds)
+
+          true ->
+            do_take_waiting(config, run, workflow_def, rounds - 1)
+        end
+    end
+  end
+
+  defp hold(config, run, workflow_def, from, rounds) do
+    run
+    |> Ecto.Changeset.change(
+      holds_key: true,
+      runs_after_id: nil,
+      deadline_at: Executor.deadline(workflow_def, DateTime.utc_now())
+    )
+    |> Ecto.Changeset.unique_constraint(:key, name: :workflow_executions_key_holder_index)
+    |> Repo.update(config, mode: :savepoint)
+    |> case do
+      {:ok, taken} -> {:ok, taken, from}
+      {:error, _} -> do_take_waiting(config, run, workflow_def, rounds - 1)
+    end
   end
 
   @doc false
@@ -433,8 +622,8 @@ defmodule Durable.Keys do
   def release(workflow_id, opts) do
     config = Config.get(Keyword.get(opts, :durable, Durable))
 
-    case Repo.get(config, WorkflowExecution, workflow_id) do
-      nil ->
+    case Repo.id?(workflow_id) && Repo.get(config, WorkflowExecution, workflow_id) do
+      not_a_run when not_a_run in [nil, false] ->
         {:error, :not_found}
 
       %{holds_key: false} ->

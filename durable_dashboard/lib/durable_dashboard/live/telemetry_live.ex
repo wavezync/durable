@@ -43,9 +43,11 @@ defmodule DurableDashboard.Live.TelemetryLive do
      [
        {[:durable, :step, :start], "system_time",
         "workflow, workflow_id, step, step_type, attempt, max_attempts"},
-       {[:durable, :step, :stop], "duration", "+ result: ok | error | suspended; error"},
+       {[:durable, :step, :stop], "duration",
+        "+ result: ok | error | suspended | snoozed | cancelled; error"},
        {[:durable, :step, :exception], "duration", "+ kind, reason, stacktrace"},
-       {[:durable, :step, :retry], "backoff_ms", "step metadata + error"}
+       {[:durable, :step, :retry], "backoff_ms", "step metadata + error"},
+       {[:durable, :step, :snooze], "snooze_ms", "step metadata + reason"}
      ]},
     {"Compensations",
      [
@@ -94,6 +96,7 @@ defmodule DurableDashboard.Live.TelemetryLive do
     [:durable, :step, :stop] => "An attempt ends · ok, error or suspended",
     [:durable, :step, :exception] => "A step raises",
     [:durable, :step, :retry] => "A failed attempt is retried after backoff_ms",
+    [:durable, :step, :snooze] => "A step snoozes: it runs again after snooze_ms, same attempt",
     [:durable, :compensation, :start] => "An undo step begins",
     [:durable, :compensation, :stop] => "An undo step ends",
     [:durable, :compensation, :exception] => "An undo step raises",

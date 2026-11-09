@@ -19,9 +19,27 @@ defmodule Durable.Executor.StepRunner do
 
   import Ecto.Query, only: [from: 2]
 
+  # A date or a decimal is a map to Elixir, but JSON stores it as a scalar, and
+  # a run's data has to come back as an object.
+  @scalars [Date, DateTime, NaiveDateTime, Time, Decimal]
+  defguardp is_run_data(term)
+            when is_map(term) and
+                   not (is_struct(term) and :erlang.map_get(:__struct__, term) in @scalars)
+
+  @suspending [
+    :sleep,
+    :wait_for_event,
+    :wait_for_input,
+    :wait_for_any,
+    :wait_for_all,
+    :call_workflow
+  ]
+
   @type result ::
           {:ok, map()}
           | {:error, any()}
+          | {:cancel, String.t(), :run | :workflow | :root | nil}
+          | {:park, non_neg_integer()}
           | {:decision, atom(), map()}
           | {:sleep, keyword()}
           | {:wait_for_event, keyword()}
@@ -87,14 +105,12 @@ defmodule Durable.Executor.StepRunner do
   defp execute_with_retry(step, data, workflow_id, attempt, max_attempts, config, deadline) do
     # Set current step for logging/observability
     Context.set_current_step(step.name)
+    Context.set_attempt(attempt, max_attempts)
 
     # Set current data in process dictionary for wait functions to access.
-    # On retry attempts (attempt > 1) we MERGE rather than overwrite so that
-    # put_context/2 writes from the prior failed attempt remain visible to
-    # the user step body — matching the cumulative-context contract that
-    # save_data_as_context/3 enforces between sequential steps.
-    prior_ctx = if attempt > 1, do: Process.get(:durable_context, %{}), else: %{}
-    Process.put(:durable_context, Map.merge(prior_ctx, data))
+    # A retry runs after the run was parked, from a context that already holds
+    # the failed attempt's put_context/2 writes.
+    Process.put(:durable_context, data)
 
     # Create step execution record
     {:ok, step_exec} = create_step_execution(config, workflow_id, step, attempt)
@@ -123,7 +139,6 @@ defmodule Durable.Executor.StepRunner do
     result_ctx = %{
       step: step,
       step_exec: step_exec,
-      data: data,
       logs: logs,
       duration_ms: duration_ms,
       attempt: attempt,
@@ -138,7 +153,7 @@ defmodule Durable.Executor.StepRunner do
   defp run_body(step, data) do
     Step.execute(step, data)
   catch
-    :throw, value -> {:throw, value}
+    :throw, {kind, _opts} = suspension when kind in @suspending -> {:throw, suspension}
     kind, reason -> {:error, Durable.Executor.caught_error(kind, reason, __STACKTRACE__)}
   end
 
@@ -218,19 +233,22 @@ defmodule Durable.Executor.StepRunner do
     }
   end
 
-  @suspending [
-    :sleep,
-    :wait_for_event,
-    :wait_for_input,
-    :wait_for_any,
-    :wait_for_all,
-    :call_workflow
-  ]
+  @cancel_scopes [:run, :workflow, :root]
 
-  defp step_outcome({:ok, data}) when is_map(data), do: %{result: :ok}
+  defp step_outcome({:ok, data}) when is_run_data(data), do: %{result: :ok}
   defp step_outcome({:goto, _target, _data}), do: %{result: :ok}
   defp step_outcome({:throw, {kind, _opts}}) when kind in @suspending, do: %{result: :suspended}
   defp step_outcome({:error, error}), do: %{result: :error, error: error_summary(error)}
+  defp step_outcome({:fail, error}), do: %{result: :error, error: error_summary(error)}
+  defp step_outcome({:snooze, ms}) when is_integer(ms) and ms >= 0, do: %{result: :snoozed}
+
+  defp step_outcome({:snooze, ms, _reason}) when is_integer(ms) and ms >= 0,
+    do: %{result: :snoozed}
+
+  defp step_outcome({:cancel, _reason}), do: %{result: :cancelled}
+
+  defp step_outcome({:cancel, _reason, [scope: scope]}) when scope in @cancel_scopes,
+    do: %{result: :cancelled}
 
   defp step_outcome(_other),
     do: %{result: :error, error: %{type: "invalid_return", message: "unexpected step result"}}
@@ -239,7 +257,9 @@ defmodule Durable.Executor.StepRunner do
   defp error_summary(error), do: %{type: "error", message: inspect(error)}
 
   # Handle step result from pipeline model
-  defp handle_result({:ok, new_data}, ctx) when is_map(new_data) do
+  defp handle_result({:ok, new_data}, ctx) when is_run_data(new_data) do
+    new_data = without_sleep_marker(new_data)
+
     %{step: step, step_exec: step_exec, logs: logs, duration_ms: duration_ms, config: config} =
       ctx
 
@@ -260,6 +280,8 @@ defmodule Durable.Executor.StepRunner do
   # Handle decision with goto
   defp handle_result({:goto, target, new_data}, ctx)
        when is_atom(target) and is_map(new_data) do
+    new_data = without_sleep_marker(new_data)
+
     %{step_exec: step_exec, logs: logs, duration_ms: duration_ms, config: config} = ctx
 
     decision_output = %{
@@ -291,12 +313,12 @@ defmodule Durable.Executor.StepRunner do
     {wait_type, opts}
   end
 
-  # Handle errors with retry
+  # An error with attempts left parks the run until the backoff has passed,
+  # freeing the worker; the next claim runs the next attempt.
   defp handle_result({:error, error}, ctx) do
     %{
       step: step,
       step_exec: step_exec,
-      data: data,
       logs: logs,
       duration_ms: duration_ms,
       attempt: attempt,
@@ -305,11 +327,8 @@ defmodule Durable.Executor.StepRunner do
       config: config
     } = ctx
 
-    # Normalize error to map format for database storage
-    normalized_error = normalize_error_for_storage(error)
-
     if attempt < max_attempts and not past?(deadline) do
-      {:ok, _} = fail_step_execution(config, step_exec, normalized_error, logs, duration_ms)
+      {:ok, _} = fail_step_execution(config, step_exec, error, logs, duration_ms)
 
       retry_opts = get_retry_opts(step)
       backoff_strategy = Map.get(retry_opts, :backoff, :exponential)
@@ -323,22 +342,28 @@ defmodule Durable.Executor.StepRunner do
         |> Map.put(:error, error_summary(error))
       )
 
-      Backoff.pause(backoff_ms)
-
-      execute_with_retry(
-        step,
-        data,
-        step_exec.workflow_id,
-        attempt + 1,
-        max_attempts,
-        config,
-        deadline
-      )
+      {:park, backoff_ms}
     else
-      {:ok, _} = fail_step_execution(config, step_exec, normalized_error, logs, duration_ms)
-      {:error, error}
+      give_up(error, ctx)
     end
   end
+
+  # The step asks to run again later, without using an attempt.
+  defp handle_result({:snooze, ms}, ctx) when is_integer(ms) and ms >= 0,
+    do: snooze(ms, nil, ctx)
+
+  defp handle_result({:snooze, ms, reason}, ctx) when is_integer(ms) and ms >= 0,
+    do: snooze(ms, reason_text(reason), ctx)
+
+  # The step says retrying won't help: fail now, whatever attempts are left.
+  defp handle_result({:fail, error}, ctx), do: give_up(error, ctx)
+
+  # The step says the run should stop: the executor cancels the scope's run
+  # (nil = the default for where the step runs).
+  defp handle_result({:cancel, reason}, ctx), do: cancel(reason, nil, ctx)
+
+  defp handle_result({:cancel, reason, [scope: scope]}, ctx) when scope in @cancel_scopes,
+    do: cancel(reason, scope, ctx)
 
   # Handle invalid return (not {:ok, map} or {:goto, ...})
   defp handle_result(other, ctx) do
@@ -347,12 +372,63 @@ defmodule Durable.Executor.StepRunner do
     error = %{
       type: "invalid_step_return",
       message:
-        "Step must return {:ok, map} or {:goto, :step, map} or {:error, reason}, got: #{inspect(other)}"
+        "Step must return {:ok, map}, {:goto, :step, map}, {:error, reason}, " <>
+          "{:fail, reason}, {:snooze, ms}, {:snooze, ms, reason}, {:cancel, reason} or " <>
+          "{:cancel, reason, scope: :run | :workflow | :root}, " <>
+          "got: #{inspect(other)}"
     }
 
     {:ok, _} = fail_step_execution(config, step_exec, error, logs, duration_ms)
     {:error, error}
   end
+
+  # The marker is for the step that slept. Carried on in the data, it would
+  # reach a parallel branch's input and overwrite that branch's own marker, so
+  # the branch would sleep again every time it woke.
+  defp without_sleep_marker(data),
+    do: Map.drop(data, [:__sleep_satisfied__, "__sleep_satisfied__"])
+
+  defp give_up(error, ctx) do
+    %{step_exec: step_exec, logs: logs, duration_ms: duration_ms, config: config} = ctx
+    {:ok, _} = fail_step_execution(config, step_exec, error, logs, duration_ms)
+    {:error, error}
+  end
+
+  defp cancel(reason, scope, ctx) do
+    %{step_exec: step_exec, logs: logs, duration_ms: duration_ms, config: config} = ctx
+    reason = reason_text(reason)
+    error = %{type: "cancelled", message: reason}
+    {:ok, _} = fail_step_execution(config, step_exec, error, logs, duration_ms, :cancelled)
+    {:cancel, reason, scope}
+  end
+
+  defp snooze(ms, reason, ctx) do
+    %{step: step, step_exec: step_exec, logs: logs, duration_ms: duration_ms, config: config} =
+      ctx
+
+    %{attempt: attempt, max_attempts: max_attempts} = ctx
+
+    error =
+      if reason,
+        do: %{type: "snoozed", message: reason, snooze_ms: ms},
+        else: %{type: "snoozed", snooze_ms: ms}
+
+    {:ok, _} = fail_step_execution(config, step_exec, error, logs, duration_ms, :snoozed)
+
+    :telemetry.execute(
+      [:durable, :step, :snooze],
+      %{snooze_ms: ms},
+      config
+      |> step_span_meta(step_exec.workflow_id, step, attempt, max_attempts)
+      |> Map.put(:reason, reason)
+    )
+
+    {:park, ms}
+  end
+
+  defp reason_text(reason) when is_binary(reason), do: reason
+  defp reason_text(reason) when is_atom(reason), do: Atom.to_string(reason)
+  defp reason_text(reason), do: inspect(reason)
 
   defp handle_step_success(config, step, step_exec, new_data, logs, duration_ms) do
     stored_output =
@@ -446,18 +522,19 @@ defmodule Durable.Executor.StepRunner do
     end
   end
 
-  defp fail_step_execution(config, step_exec, error, logs, duration_ms) do
+  defp fail_step_execution(config, step_exec, error, logs, duration_ms, status \\ :failed) do
     # Sanitize the error map — exception payloads frequently carry tuples
     # (e.g., FunctionClauseError args), PIDs, refs, and functions in the
     # stacktrace area, none of which can survive a JSONB write. Mirror the
     # defense applied to workflow-level mark_failed in lib/durable/executor.ex.
-    safe_error = Durable.Executor.sanitize_for_json(error)
+    safe_error = Durable.Executor.storable_error(error)
 
     case step_exec
-         |> StepExecution.fail_changeset(safe_error, logs, duration_ms)
+         |> StepExecution.fail_changeset(safe_error, logs, duration_ms, status)
          |> Repo.update(config) do
       {:ok, updated} = ok ->
-        DurablePubSub.broadcast_step(config, :step_failed, step_event(updated))
+        kind = :"step_#{status}"
+        DurablePubSub.broadcast_step(config, kind, step_event(updated))
         ok
 
       other ->
@@ -484,25 +561,14 @@ defmodule Durable.Executor.StepRunner do
   # sanitization handles deeply-nested tuples / PIDs / refs / functions —
   # the previous shallow implementation only flattened top-level shapes and
   # let nested tuples crash JSONB encoding.
-  defp serialize_output(nil), do: nil
+  @doc false
+  @spec serialize_output(term()) :: map() | nil
+  def serialize_output(nil), do: nil
 
-  defp serialize_output(output) when is_map(output) do
-    Durable.Executor.sanitize_for_json(output)
+  def serialize_output(output) do
+    case Durable.Executor.sanitize_for_json(output) do
+      map when is_map(map) and not is_struct(map) -> map
+      value -> %{value: value}
+    end
   end
-
-  defp serialize_output(output) do
-    %{value: Durable.Executor.sanitize_for_json(output)}
-  end
-
-  # Normalize error to map format for database storage
-  # The error field in StepExecution expects a map
-  defp normalize_error_for_storage(error) when is_map(error), do: error
-
-  defp normalize_error_for_storage(error) when is_binary(error),
-    do: %{type: "error", message: error}
-
-  defp normalize_error_for_storage(error) when is_atom(error),
-    do: %{type: "error", message: Atom.to_string(error)}
-
-  defp normalize_error_for_storage(error), do: %{type: "error", message: inspect(error)}
 end

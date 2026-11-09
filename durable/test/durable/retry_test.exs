@@ -35,7 +35,7 @@ defmodule Durable.RetryTest do
     |> repo.insert!()
   end
 
-  test "the in-process retry loop still drives a flaky step to success" do
+  test "a flaky step is retried until it succeeds" do
     config = Config.get(Durable)
     repo = config.repo
 
@@ -80,6 +80,32 @@ defmodule Durable.RetryTest do
 
     execution = repo.get!(WorkflowExecution, execution.id)
     assert execution.status == :failed
+  end
+
+  test "a step can read its attempt number" do
+    {:ok, execution} = create_and_execute_workflow(AttemptAwareWorkflow, %{})
+
+    assert execution.status == :completed
+    assert execution.context["seen"] == [[1, 3, false], [2, 3, false], [3, 3, true]]
+    assert execution.context["plain"] == [1, 1, true]
+  end
+end
+
+defmodule AttemptAwareWorkflow do
+  use Durable
+  use Durable.Helpers
+  use Durable.Context
+
+  workflow "attempt_aware_wf" do
+    step(:charge, [retry: [max_attempts: 3, backoff: :constant, base: 1]], fn data ->
+      seen = get_context(:seen, []) ++ [[attempt(), max_attempts(), last_attempt?()]]
+      put_context(:seen, seen)
+      if last_attempt?(), do: {:ok, assign(data, :seen, seen)}, else: {:error, :again}
+    end)
+
+    step(:plain, fn data ->
+      {:ok, assign(data, :plain, [attempt(), max_attempts(), last_attempt?()])}
+    end)
   end
 end
 

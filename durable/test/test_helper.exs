@@ -6,7 +6,9 @@
 # (FOR UPDATE SKIP LOCKED, FOR UPDATE row locks) that the shared SQL Sandbox
 # structurally cannot. They truncate tables, so they must run in isolation —
 # excluded from the default suite, run with `mix test --only integration`.
-ExUnit.start(exclude: [:integration])
+# `:fuzz` tests do the same with generated inputs: `mix test --only fuzz`, with
+# FUZZ_RUNS=n for more cases and `--seed` to replay a failure.
+ExUnit.start(exclude: [:integration, :fuzz])
 
 Ecto.Adapters.SQL.Sandbox.mode(Durable.TestRepo, :manual)
 

@@ -37,6 +37,12 @@ defmodule Durable.Queue.Control do
   end
 
   defp put_paused_at(config, queue, paused_at) do
+    if Repo.bad_text?(queue),
+      do: {:error, :invalid_queue},
+      else: upsert_paused_at(config, queue, paused_at)
+  end
+
+  defp upsert_paused_at(config, queue, paused_at) do
     now = DateTime.utc_now()
 
     %Queue{name: to_string(queue), paused_at: paused_at}

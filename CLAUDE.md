@@ -31,6 +31,8 @@ mix precommit         # Runs: format, compile --warnings-as-errors, credo --stri
 
 ## Architecture
 
+[ARCHITECTURE.md](ARCHITECTURE.md) explains how it works and the rules to keep. [PLAN.md](PLAN.md) is what's next.
+
 ```
 lib/durable/
 ├── config.ex               # Configuration management (NimbleOptions, persistent_term)
@@ -117,13 +119,15 @@ children = [
 
 - `:repo` - Your Ecto repo module (required)
 - `:name` - Instance name for multi-tenancy (default: `Durable`)
-- `:prefix` - PostgreSQL schema name (default: `"durable"`)
+- `:prefix` - PostgreSQL schema name; only `"durable"` is supported for now
 - `:queues` - Queue configs (default: `%{default: [concurrency: 10, poll_interval: 1000]}`)
 - `:queue_enabled` - Enable queue processing (default: `true`)
 - `:stale_lock_timeout` - Seconds before lock is stale (default: `300`)
 - `:heartbeat_interval` - Worker heartbeat interval in ms (default: `30_000`)
 
 ## Testing
+
+`mix test` runs the fast suite. Two more run live pollers on real connections and are excluded by default: `mix test --only integration` and `mix test --only fuzz` (`FUZZ_RUNS=n` for more cases, `--seed` to replay a failure). Set `INTEGRATION_DB_PORT` to run them through PgBouncer in transaction mode, which CI also does.
 
 Tests use `Ecto.Adapters.SQL.Sandbox` for isolation. The postgres adapter tests are in `test/durable/queue/adapters/postgres_test.exs`.
 

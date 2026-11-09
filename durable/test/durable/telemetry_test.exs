@@ -84,6 +84,7 @@ defmodule Durable.TelemetryTest do
   end
 
   test "a failing step: an error stop per attempt, a retry event between, a failed run" do
+    # The retry parks the run, so each attempt is its own segment.
     {:ok, _run} = create_and_execute_workflow(Steps, %{"fail_at" => 1})
     events = drain()
 
@@ -94,7 +95,9 @@ defmodule Durable.TelemetryTest do
              of(events, [:durable, :step, :retry])
 
     assert backoff >= 0
-    assert [{_, %{status: :failed}}] = of(events, [:durable, :workflow, :stop])
+
+    assert [{_, %{status: :waiting}}, {_, %{status: :failed}}] =
+             of(events, [:durable, :workflow, :stop])
   end
 
   test "a run cancelled mid-segment stops as :superseded" do
@@ -176,9 +179,11 @@ defmodule Durable.TelemetryTest do
         assert length(closes) == 1
       end
 
-      # The run's reported status is the persisted one (a cancel shows up as
-      # the segment being superseded).
-      [{_, %{status: reported}}] = of(events, [:durable, :workflow, :stop])
+      # The run's last reported status is the persisted one (a cancel shows up
+      # as the segment being superseded); a parked retry ends a segment early.
+      segments = of(events, [:durable, :workflow, :stop])
+      {_, %{status: reported}} = List.last(segments)
+      assert Enum.all?(Enum.drop(segments, -1), &match?({_, %{status: :waiting}}, &1))
       persisted = Config.get(Durable).repo.get!(WorkflowExecution, run.id).status
       assert reported == if(persisted == :cancelled, do: :superseded, else: persisted)
 

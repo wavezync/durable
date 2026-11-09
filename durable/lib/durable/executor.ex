@@ -27,6 +27,9 @@ defmodule Durable.Executor do
 
   require Logger
 
+  # Context key a parked run records its atom keys under (see park/3).
+  @atom_keys "__atom_keys__"
+
   @doc """
   Starts a new workflow execution.
 
@@ -52,15 +55,73 @@ defmodule Durable.Executor do
 
     Keys.validate_start_opts!(opts)
 
-    with {:ok, workflow_def} <- get_workflow_definition(module, opts) do
+    with {:ok, workflow_def} <- get_workflow_definition(module, opts),
+         {:ok, safe_input} <- storable_input(input) do
       config
-      |> create_execution(module, workflow_def, input, opts)
+      |> create_execution(module, workflow_def, safe_input, opts)
       |> started(config, opts)
     end
   end
 
+  @doc false
+  @spec storable_input(term()) :: {:ok, map()} | {:error, :invalid_input}
+  def storable_input(input) when not is_map(input), do: {:error, :invalid_input}
+
+  def storable_input(input) do
+    case sanitize_for_json(input) do
+      map when not is_struct(map) -> {:ok, map}
+      _scalar -> {:error, :invalid_input}
+    end
+  end
+
+  @doc """
+  Starts one run per `{module, input}` or `{module, input, opts}` item, in one
+  transaction (the caller's, if it is in one). `opts` applies to every item,
+  under the item's own options. Returns one result per item, in order, each
+  what `start_workflow/3` would have returned: keys are checked item by item.
+  """
+  @spec start_many([{module(), map()} | {module(), map(), keyword()}], keyword()) ::
+          [{:ok, String.t()} | {:error, term()}]
+  def start_many(items, opts \\ []) do
+    config = Config.get(Keyword.get(opts, :durable, Durable))
+
+    # ponytail: one insert per item, so keys and on_duplicate: are checked;
+    # an insert_all for unkeyed items if thousands per call ever matter.
+    {:ok, results} =
+      Repo.transaction(config, fn ->
+        Enum.map(items, fn
+          {module, input} ->
+            start_workflow(module, input, [wake: false] ++ opts)
+
+          {module, input, item_opts} ->
+            start_workflow(module, input, [wake: false] ++ Keyword.merge(opts, item_opts))
+        end)
+      end)
+
+    wake_committed(config, results)
+    results
+  end
+
+  # One wake per queue, once the batch has committed.
+  defp wake_committed(config, results) do
+    ids = for {:ok, id} <- results, do: id
+    now = DateTime.utc_now()
+
+    config
+    |> Repo.all(
+      from(w in WorkflowExecution,
+        where: w.id in ^ids and w.status == :pending,
+        where: is_nil(w.scheduled_at) or w.scheduled_at <= ^now,
+        distinct: w.queue,
+        select: %{status: w.status, queue: w.queue}
+      )
+    )
+    |> Enum.each(&DurablePubSub.wake(config, &1))
+  end
+
   defp started({:ok, execution}, config, opts) do
     DurablePubSub.broadcast_workflow(config, :workflow_started, workflow_event(execution))
+    if Keyword.get(opts, :wake, true), do: DurablePubSub.wake(config, execution)
 
     # For inline/synchronous execution (useful for testing)
     if Keyword.get(opts, :inline, false) do
@@ -84,10 +145,20 @@ defmodule Durable.Executor do
   """
   @spec cancel_workflow(String.t(), String.t() | nil, keyword()) :: :ok | {:error, term()}
   def cancel_workflow(workflow_id, reason \\ nil, opts \\ []) do
+    if Repo.id?(workflow_id),
+      do: cancel_run(workflow_id, reason, opts),
+      else: {:error, :not_found}
+  end
+
+  defp cancel_run(workflow_id, reason, opts) do
     durable_name = Keyword.get(opts, :durable, Durable)
     config = Config.get(durable_name)
 
-    error = if reason, do: %{type: "cancelled", message: reason}, else: %{type: "cancelled"}
+    error =
+      storable_error(
+        if reason, do: %{type: "cancelled", message: reason}, else: %{type: "cancelled"}
+      )
+
     now = DateTime.utc_now()
 
     # One conditional UPDATE, so a run that finishes concurrently can't be
@@ -123,6 +194,34 @@ defmodule Durable.Executor do
   end
 
   @doc """
+  Cancels every pending, running or waiting run that matches `filters` (those
+  of `Durable.Query.list_executions/1`, without `:limit` and `:offset`), one
+  by one as `cancel_workflow/3` would. Returns how many it cancelled.
+  """
+  @spec cancel_all(keyword(), String.t() | nil) :: {:ok, non_neg_integer()}
+  def cancel_all(filters, reason \\ nil) do
+    {durable, filters} = Keyword.pop(filters, :durable, Durable)
+    filters = Keyword.drop(filters, [:limit, :offset])
+
+    # Guard against cancel_all([]) cancelling every run there is.
+    if filters == [] do
+      raise ArgumentError, "Durable.cancel_all/2 needs at least one filter, such as tag:"
+    end
+
+    ids =
+      Repo.all(
+        Config.get(durable),
+        filters
+        |> Durable.Query.executions_query()
+        |> where([w], w.status in [:pending, :running, :waiting])
+        |> select([w], w.id)
+      )
+
+    # A cancel cascades to children, which may be in `ids` too.
+    {:ok, Enum.count(ids, &(cancel_workflow(&1, reason, durable: durable) == :ok))}
+  end
+
+  @doc """
   Resumes a failed workflow at the step that failed.
 
   Completed steps are not re-run: the run continues from its saved context,
@@ -141,6 +240,7 @@ defmodule Durable.Executor do
          :ok <- ensure_retryable(execution.status),
          {:ok, retried} <- reset_for_retry(config, execution) do
       DurablePubSub.broadcast_workflow(config, :workflow_retried, workflow_event(retried))
+      DurablePubSub.wake(config, retried)
       {:ok, workflow_id}
     end
   end
@@ -319,7 +419,7 @@ defmodule Durable.Executor do
         String.to_existing_atom(execution.workflow_module),
         Keyword.get(opts, :input, execution.input),
         workflow: execution.workflow_name,
-        queue: execution.queue,
+        queue: execution.home_queue || execution.queue,
         priority: execution.priority,
         durable: durable,
         trigger: :rerun,
@@ -330,6 +430,37 @@ defmodule Durable.Executor do
         on_duplicate: :error
       )
     end
+  end
+
+  # Moves a run past its deadline off a queue no live node polls, from the
+  # timeout sweep: to the queue it came from if that one is polled, else to one
+  # that is. The claim there fails it before its next step, so its compensations
+  # run in a worker, under that queue's limits, and not in the sweep. The update
+  # goes through the row's status and queue, so it can't overlap a poller or
+  # another node's sweep. A parallel branch has no deadline check; its parent's
+  # timeout cancels it. With no polled queue anywhere it stays until a node
+  # shows up.
+  @doc false
+  @spec expire_unclaimed(String.t(), [String.t()], Config.t()) :: term()
+  def expire_unclaimed(workflow_id, polled, %Config{} = config) do
+    with {:ok, execution} <- load_execution(config, workflow_id),
+         false <- parallel_branch?(execution),
+         {:ok, _workflow_def} <- get_workflow_definition_from_execution(execution),
+         home = execution.home_queue || execution.queue,
+         queue when is_binary(queue) <- Enum.find([home, "default" | polled], &(&1 in polled)),
+         {1, _} <- hand_over(config, execution, queue, if(queue != home, do: home)) do
+      DurablePubSub.wake(config, %{status: :pending, queue: queue})
+    end
+  end
+
+  defp hand_over(config, execution, queue, home_queue) do
+    Repo.update_all(
+      config,
+      from(w in WorkflowExecution,
+        where: w.id == ^execution.id and w.status == :pending and w.queue == ^execution.queue
+      ),
+      set: [queue: queue, home_queue: home_queue, scheduled_at: nil]
+    )
   end
 
   @doc """
@@ -343,6 +474,7 @@ defmodule Durable.Executor do
     with {:ok, execution} <- load_execution(config, workflow_id),
          true <- execution.status in [:pending, :running] || {:error, :superseded},
          {:ok, workflow_def} <- get_workflow_definition_from_execution(execution),
+         {:ok, execution} <- take_waiting_key(config, execution, workflow_def),
          resumed = execution.current_step != nil,
          {:ok, execution} <- mark_running(config, execution) do
       # Set workflow ID for logging/observability
@@ -400,7 +532,7 @@ defmodule Durable.Executor do
       # Pipeline model: start with workflow input or restored context
       initial_data =
         if execution.context != %{} do
-          atomize_keys(execution.context)
+          restore_keys(execution.context)
         else
           execution.input
         end
@@ -415,10 +547,26 @@ defmodule Durable.Executor do
     end
   end
 
+  defp string_keys(map), do: Map.new(map, fn {key, value} -> {to_string(key), value} end)
+
+  # Top-level context keys come back from JSON as strings. A run parked by a
+  # retry or snooze recorded which of them were atoms, so the next attempt gets
+  # the same data the last one did (a first step still reads input["id"]).
+  # Any other resume makes them all atoms.
+  defp restore_keys(%{@atom_keys => atom_keys} = context) do
+    context
+    |> Map.delete(@atom_keys)
+    |> Map.new(fn {key, value} ->
+      if key in atom_keys, do: {Context.known_key(key), value}, else: {key, value}
+    end)
+  end
+
+  defp restore_keys(context), do: atomize_keys(context)
+
   # Atomize top-level keys in map (for context restored from DB)
   defp atomize_keys(map) when is_map(map) do
     Map.new(map, fn
-      {key, value} when is_binary(key) -> {String.to_atom(key), value}
+      {key, value} when is_binary(key) -> {Context.known_key(key), value}
       {key, value} -> {key, value}
     end)
   end
@@ -428,7 +576,9 @@ defmodule Durable.Executor do
 
   ## Options
 
-  - `:inline` - If true, execute synchronously instead of via queue (default: false)
+  - `:inline` - If true, execute synchronously instead of via queue (default: false).
+    Runs until the run finishes or parks: a retry, snooze, wait or move to a
+    step's queue is left for the queue
   - `:durable` - The Durable instance name (default: Durable)
   """
   @spec resume_workflow(String.t(), map(), keyword()) :: {:ok, String.t()} | {:error, term()}
@@ -441,7 +591,9 @@ defmodule Durable.Executor do
 
     with {:ok, execution} <- load_execution(config, workflow_id),
          true <- execution.status == :waiting || {:error, :not_waiting},
-         {:ok, _} <- mark_resumed(config, execution, safe_additional) do
+         {:ok, resumed} <- mark_resumed(config, execution, safe_additional) do
+      DurablePubSub.wake(config, resumed)
+
       # For inline/synchronous execution (useful for testing)
       if Keyword.get(opts, :inline, false) do
         execute_workflow(workflow_id, config)
@@ -505,13 +657,14 @@ defmodule Durable.Executor do
       workflow_name: workflow_def.name,
       status: :pending,
       queue: (opts[:queue] || workflow_def.opts[:queue] || "default") |> to_string(),
-      priority: Keyword.get(opts, :priority, 0),
+      priority: Keyword.get(opts, :priority) || 0,
       input: input,
       context: %{},
       scheduled_at: scheduled_at,
       trigger: Keyword.get(opts, :trigger, :api),
       trigger_ref: Keyword.get(opts, :trigger_ref),
-      deadline_at: deadline(workflow_def, scheduled_at)
+      deadline_at: deadline(workflow_def, scheduled_at),
+      tags: Keyword.get(opts, :tags) || []
     }
 
     case Keyword.fetch(opts, :key) do
@@ -527,15 +680,63 @@ defmodule Durable.Executor do
   end
 
   defp load_execution(config, workflow_id) do
-    case Repo.get(config, WorkflowExecution, workflow_id) do
-      nil -> {:error, :not_found}
-      execution -> {:ok, execution}
+    case Repo.id?(workflow_id) && Repo.get(config, WorkflowExecution, workflow_id) do
+      %WorkflowExecution{} = execution -> {:ok, execution}
+      _not_a_run -> {:error, :not_found}
     end
   end
 
   # started_at is the first start: a run resumed after a wait keeps it, so
   # queue wait (ready → started) and run duration (started → finished) aren't
   # measured from the last resume.
+  # A run_again run waits behind its key's holder (runs_after_id), and the
+  # claim query skips it until that holder has ended. Now it takes the key.
+  # If another run took the key meanwhile it waits behind that one instead,
+  # unless a newer start already waits there (that one has the newer input,
+  # so this one is cancelled). If `reuse:` keeps the key, it's cancelled.
+  defp take_waiting_key(_config, %{runs_after_id: nil} = execution, _workflow_def),
+    do: {:ok, execution}
+
+  defp take_waiting_key(config, execution, workflow_def) do
+    case Keys.take_waiting(config, execution, workflow_def) do
+      {:ok, taken} ->
+        {:ok, taken}
+
+      {:behind, holder_id} ->
+        wait_behind(config, execution, holder_id)
+
+      {:kept, holder_id} ->
+        stop_waiting(
+          config,
+          execution,
+          "the key is kept by reuse: #{Keys.reuse(workflow_def)} " <>
+            "(held by #{String.slice(holder_id, 0, 8)})"
+        )
+    end
+  end
+
+  defp wait_behind(config, execution, holder_id) do
+    execution
+    |> Ecto.Changeset.change(
+      status: :pending,
+      runs_after_id: holder_id,
+      locked_by: nil,
+      locked_at: nil
+    )
+    |> Ecto.Changeset.unique_constraint(:key, name: :workflow_executions_runs_after_index)
+    |> cas_update(config)
+    |> case do
+      {:ok, waiting} -> {:waiting, waiting}
+      {:error, :superseded} = superseded -> superseded
+      {:error, _taken} -> stop_waiting(config, execution, "a newer start is waiting for the key")
+    end
+  end
+
+  defp stop_waiting(config, execution, reason) do
+    _ = cancel_workflow(execution.id, reason, durable: config.name)
+    {:error, :superseded}
+  end
+
   defp mark_running(config, execution) do
     started_at = execution.started_at || DateTime.utc_now()
 
@@ -615,9 +816,7 @@ defmodule Durable.Executor do
     # Get workflow definition for compensation lookup
     {:ok, workflow_def} = get_workflow_definition_from_execution(execution)
 
-    # A resumed run picks up at its current step, found by name.
-    {_already_completed, steps_to_run} =
-      Enum.split_while(steps, &(execution.current_step not in [nil, Atom.to_string(&1.name)]))
+    steps_to_run = steps_to_resume(steps, execution.current_step)
 
     if steps_to_run == [] and execution.current_step != nil do
       # The deployed definition no longer has the step this run stopped at.
@@ -633,6 +832,34 @@ defmodule Durable.Executor do
       run_steps(steps, steps_to_run, execution, workflow_def, config, initial_data)
     end
   end
+
+  # A resumed run picks up at its current step, found by name. The steps of
+  # every branch clause sit side by side in the definition, so a run that
+  # stopped inside a branch goes on with the rest of its own clause and then
+  # whatever follows the block.
+  defp steps_to_resume(steps, nil), do: steps
+
+  defp steps_to_resume(steps, current) do
+    rest = Enum.drop_while(steps, &(Atom.to_string(&1.name) != current))
+
+    case Enum.find(steps, &(&1.type == :branch and named?(&1.opts[:all_steps], current))) do
+      nil ->
+        rest
+
+      branch ->
+        rest_of_clause(branch, current, steps) ++
+          Enum.reject(rest, &(&1.name in branch.opts[:all_steps]))
+    end
+  end
+
+  defp rest_of_clause(branch, current, steps) do
+    branch.opts[:clauses]
+    |> Enum.find_value(fn {_pattern, names} -> if named?(names, current), do: names end)
+    |> Enum.drop_while(&(Atom.to_string(&1) != current))
+    |> Enum.map(fn name -> Enum.find(steps, &(&1.name == name)) end)
+  end
+
+  defp named?(names, current), do: Enum.any?(names, &(Atom.to_string(&1) == current))
 
   defp run_steps(steps, steps_to_run, execution, workflow_def, config, initial_data) do
     # Build step index for validation
@@ -683,6 +910,9 @@ defmodule Durable.Executor do
 
       error = resume_failure(execution) ->
         fail_at(execution, step, error, workflow_def, config)
+
+      queue = queue_move(step, execution) ->
+        move_to_queue(config, execution, step, queue, data)
 
       true ->
         dispatch_step(step, remaining_steps, execution, step_index, workflow_def, config, data)
@@ -761,6 +991,12 @@ defmodule Durable.Executor do
 
       {:error, error} ->
         handle_step_failure(exec, error, workflow_def, config)
+
+      {:cancel, reason, scope} ->
+        cancel_from_step(config, exec, reason, scope)
+
+      {:park, delay_ms} ->
+        park(config, exec, delay_ms)
     end
   end
 
@@ -834,17 +1070,58 @@ defmodule Durable.Executor do
       wait_type: :single
     }
 
-    {:ok, _} =
-      %PendingEvent{}
-      |> PendingEvent.changeset(attrs)
-      |> Repo.insert(config)
+    {execution, _event} = enter_wait(config, execution, fn -> insert_event!(config, attrs) end)
 
-    {:ok, execution} =
-      execution
-      |> Ecto.Changeset.change(status: :waiting, scheduled_at: nil)
-      |> cas_update!(config)
-
+    settle_child(config, child_id)
     {:waiting, execution}
+  end
+
+  # Commits a wait's rows and the run's :waiting status together, so whoever
+  # answers the wait finds a run it can resume or finds no wait at all, never a
+  # wait on a run that's still :running. Returns the waiting run and what
+  # `insert_wait` returned.
+  defp enter_wait(config, execution, insert_wait) do
+    {:ok, entered} =
+      Repo.transaction(config, fn ->
+        wait = insert_wait.()
+
+        {:ok, waiting} =
+          execution
+          |> Ecto.Changeset.change(status: :waiting, scheduled_at: nil)
+          |> cas_update!(config)
+
+        {waiting, wait}
+      end)
+
+    entered
+  end
+
+  defp insert_event!(config, attrs) do
+    {:ok, event} = %PendingEvent{} |> PendingEvent.changeset(attrs) |> Repo.insert(config)
+    event
+  end
+
+  # A child that finished before the parent's event existed had no one to tell,
+  # so tell it now. A child's finish commits before it looks for the event and
+  # this reads the child after the event commits, so one of the two sees the
+  # other. A child that hasn't finished is woken only now, once its parent is
+  # ready to hear from it.
+  defp settle_child(config, child_id) do
+    child = Repo.get(config, WorkflowExecution, child_id)
+
+    case child do
+      %{status: :completed} ->
+        notify_orchestration_parent(config, child, :completed, child.context)
+
+      %{status: :cancelled} ->
+        notify_orchestration_parent(config, child, :cancelled, child.error)
+
+      %{status: status} when status in [:failed, :compensated, :compensation_failed] ->
+        notify_orchestration_parent(config, child, :failed, child.error)
+
+      _still_going ->
+        DurablePubSub.wake(config, child)
+    end
   end
 
   # The branch's `on:` value. The DSL stores the function as `body_fn`; older
@@ -973,13 +1250,20 @@ defmodule Durable.Executor do
   end
 
   defp execute_branch_steps_sequential(
-         [step | rest],
+         [step | _] = steps,
          execution,
          step_index,
          workflow_def,
          config,
          data
        ) do
+    case queue_move(step, execution) do
+      nil -> run_branch_step(steps, execution, step_index, workflow_def, config, data)
+      queue -> move_to_queue(config, execution, step, queue, data)
+    end
+  end
+
+  defp run_branch_step([step | rest], execution, step_index, workflow_def, config, data) do
     {:ok, exec} = update_current_step(config, execution, step.name)
 
     case StepRunner.execute(step, data, exec.id, config, exec.deadline_at) do
@@ -1000,25 +1284,10 @@ defmodule Durable.Executor do
         {:ok, exec} = save_data_as_context(config, exec, new_data)
         {:decision, exec, target_step, new_data}
 
-      {:sleep, opts} ->
+      {wait_type, opts}
+      when wait_type in [:sleep, :wait_for_event, :wait_for_input, :wait_for_any, :wait_for_all] ->
         {:ok, exec} = save_data_as_context(config, exec, data)
-        {:waiting, handle_sleep(config, exec, opts) |> elem(1)}
-
-      {:wait_for_event, opts} ->
-        {:ok, exec} = save_data_as_context(config, exec, data)
-        {:waiting, handle_wait_for_event(config, exec, opts) |> elem(1)}
-
-      {:wait_for_input, opts} ->
-        {:ok, exec} = save_data_as_context(config, exec, data)
-        {:waiting, handle_wait_for_input(config, exec, opts) |> elem(1)}
-
-      {:wait_for_any, opts} ->
-        {:ok, exec} = save_data_as_context(config, exec, data)
-        {:waiting, handle_wait_for_any(config, exec, opts) |> elem(1)}
-
-      {:wait_for_all, opts} ->
-        {:ok, exec} = save_data_as_context(config, exec, data)
-        {:waiting, handle_wait_for_all(config, exec, opts) |> elem(1)}
+        handle_wait_result(config, exec, wait_type, opts)
 
       {:call_workflow, opts} ->
         {:ok, exec} = save_data_as_context(config, exec, data)
@@ -1026,6 +1295,12 @@ defmodule Durable.Executor do
 
       {:error, error} ->
         handle_step_failure(exec, error, workflow_def, config)
+
+      {:cancel, reason, scope} ->
+        cancel_from_step(config, exec, reason, scope)
+
+      {:park, delay_ms} ->
+        park(config, exec, delay_ms)
     end
   end
 
@@ -1086,7 +1361,24 @@ defmodule Durable.Executor do
   end
 
   # Fan-out: create child workflow executions for each parallel step and wait
+  # In one transaction: a branch that a worker could claim while the parent was
+  # still writing its events would finish with no one to tell, and the parent
+  # would wait forever. Pollers are woken once the branches can be seen.
   defp fan_out_parallel(exec, ordered_steps, data, config, error_strategy) do
+    {:ok, waiting} =
+      Repo.transaction(config, fn ->
+        open_parallel_block(exec, ordered_steps, data, config, error_strategy)
+      end)
+
+    ordered_steps
+    |> Enum.map(&to_string(&1.opts[:queue] || exec.queue || "default"))
+    |> Enum.uniq()
+    |> Enum.each(&DurablePubSub.wake(config, %{status: :pending, queue: &1}))
+
+    {:waiting, waiting}
+  end
+
+  defp open_parallel_block(exec, ordered_steps, data, config, error_strategy) do
     parent_queue = exec.queue || "default"
 
     # Create child executions for each parallel step
@@ -1148,7 +1440,7 @@ defmodule Durable.Executor do
       )
       |> cas_update!(config)
 
-    {:waiting, exec}
+    exec
   end
 
   # Create a child workflow execution for a single parallel step
@@ -1180,6 +1472,12 @@ defmodule Durable.Executor do
   end
 
   # Execute a single parallel step (called when a child execution is picked up)
+  # The marker stays in the saved context: without it, a branch that wakes up
+  # would run as a whole workflow and repeat every step after the block.
+  defp save_branch_context(config, execution, data, step_name) do
+    save_data_as_context(config, execution, Map.put(data, "__parallel_step", step_name))
+  end
+
   defp execute_parallel_step(execution, workflow_def, config) do
     step_name_str =
       Map.get(execution.context, "__parallel_step") ||
@@ -1205,7 +1503,7 @@ defmodule Durable.Executor do
       # what the user sees.
       inherited =
         execution.context
-        |> Map.drop(["__parallel_step", :__parallel_step])
+        |> Map.drop(["__parallel_step", :__parallel_step, @atom_keys])
         |> atomize_keys()
 
       input = atomize_keys(execution.input)
@@ -1216,15 +1514,21 @@ defmodule Durable.Executor do
           mark_completed(config, execution, output_data)
 
         {:error, error} ->
-          mark_failed(config, execution, normalize_error(error))
+          mark_failed(config, execution, error)
+
+        {:cancel, reason, scope} ->
+          cancel_from_step(config, execution, reason, scope)
+
+        {:park, delay_ms} ->
+          park(config, execution, delay_ms)
 
         {wait_type, wait_opts}
         when wait_type in [:sleep, :wait_for_event, :wait_for_input, :wait_for_any, :wait_for_all] ->
-          {:ok, exec} = save_data_as_context(config, execution, data)
+          {:ok, exec} = save_branch_context(config, execution, data, step_name_str)
           handle_wait_result(config, exec, wait_type, wait_opts)
 
         {:call_workflow, call_opts} ->
-          {:ok, exec} = save_data_as_context(config, execution, data)
+          {:ok, exec} = save_branch_context(config, execution, data, step_name_str)
           handle_call_workflow(config, exec, call_opts)
 
         {:decision, _target, _data} ->
@@ -1282,7 +1586,7 @@ defmodule Durable.Executor do
 
     if effective_strategy == :fail_fast && errors != [] do
       {_key, {:error, first_error}} = hd(errors)
-      handle_step_failure(exec, normalize_error(first_error), workflow_def, config)
+      handle_step_failure(exec, first_error, workflow_def, config)
     else
       handle_parallel_completion(results, clean_ctx, into_fn, %{
         remaining_steps: remaining_steps,
@@ -1376,7 +1680,7 @@ defmodule Durable.Executor do
         end
 
       {:error, error} ->
-        handle_step_failure(exec, normalize_error(error), workflow_def, config)
+        handle_step_failure(exec, error, workflow_def, config)
     end
   end
 
@@ -1544,8 +1848,7 @@ defmodule Durable.Executor do
     #
     # Rationale: Context is cumulative. Before this change, put_context/2
     # writes were silently dropped unless the user also returned those keys,
-    # which made the put_context API a footgun (see bug report C-1,
-    # 2026-04-13-follow-up-audit.md).
+    # which made the put_context API a footgun.
     process_ctx = Process.get(:durable_context, %{})
 
     # Merge preserving key shapes: step return wins over prior writes on
@@ -1558,34 +1861,14 @@ defmodule Durable.Executor do
       process_ctx
       |> Map.merge(data)
       |> sanitize_for_json()
-      |> drop_consumed_sleep_marker(execution.current_step)
+      # The waker's marker is for the step that slept. Kept, it would overwrite a
+      # parallel branch's own marker through its input, and a later visit to the
+      # same step would skip its sleep.
+      |> Map.drop([:__sleep_satisfied__, "__sleep_satisfied__"])
 
     execution
     |> Ecto.Changeset.change(context: merged)
     |> cas_update!(config)
-  end
-
-  # The SleepWaker stamps `__sleep_satisfied__ => <step_name>` into context so
-  # the woken step's `sleep/1`/`schedule_at/1` returns instead of re-throwing.
-  # Once that step completes we drop the marker — otherwise it lives in context
-  # forever and any later re-entry of the SAME step name (a loop/`each` body, or
-  # a `decision` goto that revisits it) would see the stale marker and silently
-  # skip its sleep. The marker is therefore a strict one-shot keyed to the step
-  # that consumed it. (Handles both atom and string key shapes since context can
-  # arrive atomized from the process dict or string-keyed from a step return.)
-  defp drop_consumed_sleep_marker(context, current_step) when is_binary(current_step) do
-    context
-    |> drop_marker_if_step(:__sleep_satisfied__, current_step)
-    |> drop_marker_if_step("__sleep_satisfied__", current_step)
-  end
-
-  defp drop_consumed_sleep_marker(context, _current_step), do: context
-
-  defp drop_marker_if_step(context, key, current_step) do
-    case Map.get(context, key) do
-      ^current_step -> Map.delete(context, key)
-      _ -> context
-    end
   end
 
   defp mark_completed(config, execution, final_data) do
@@ -1617,7 +1900,7 @@ defmodule Durable.Executor do
     # Postgres JSONB can't store those, so we recursively replace unencodable
     # leaves with their inspect/1 string. If save STILL fails we fall back to
     # a minimal diagnostic error so the workflow is never left as a zombie.
-    safe_error = sanitize_for_json(error)
+    safe_error = storable_error(error)
 
     result =
       try do
@@ -1686,14 +1969,25 @@ defmodule Durable.Executor do
     %{type: type, message: message, stacktrace: Exception.format_stacktrace(stacktrace)}
   end
 
+  # An error as a map Jason can encode, whatever a step or compensation returned.
+  @doc false
+  @spec storable_error(term()) :: map()
+  def storable_error(error) do
+    case error |> normalize_error() |> sanitize_for_json() do
+      map when is_map(map) and not is_struct(map) -> map
+      # A date or a decimal is JSON, but not the object the column has to load.
+      other -> %{type: "error", message: inspect(other)}
+    end
+  end
+
+  @json_scalars [Date, DateTime, NaiveDateTime, Time, Decimal]
+
   # Recursively convert a term into something Jason can encode. Tuples become
   # lists, non-Date/DateTime atoms pass through, and anything else exotic
   # (PIDs, ports, functions, refs) is replaced by its inspect/1 form.
   @doc false
   @spec sanitize_for_json(term()) :: term()
-  def sanitize_for_json(%module{} = struct)
-      when module in [Date, DateTime, NaiveDateTime, Time, Decimal],
-      do: struct
+  def sanitize_for_json(%module{} = struct) when module in @json_scalars, do: struct
 
   def sanitize_for_json(%_{} = struct),
     do: sanitize_for_json(Map.from_struct(struct))
@@ -1703,23 +1997,32 @@ defmodule Durable.Executor do
   end
 
   def sanitize_for_json(list) when is_list(list) do
-    Enum.map(list, &sanitize_for_json/1)
+    if List.improper?(list), do: inspect(list), else: Enum.map(list, &sanitize_for_json/1)
   end
 
   def sanitize_for_json(tuple) when is_tuple(tuple) do
     tuple |> Tuple.to_list() |> Enum.map(&sanitize_for_json/1)
   end
 
-  def sanitize_for_json(term)
-      when is_binary(term) or is_number(term) or is_boolean(term) or is_nil(term),
-      do: term
+  def sanitize_for_json(term) when is_binary(term), do: storable_string(term)
 
-  def sanitize_for_json(term) when is_atom(term), do: term
+  def sanitize_for_json(term) when is_number(term) or is_boolean(term) or is_nil(term), do: term
+
+  def sanitize_for_json(term) when is_atom(term) do
+    string = Atom.to_string(term)
+    if String.contains?(string, <<0>>), do: storable_string(string), else: term
+  end
 
   def sanitize_for_json(term), do: inspect(term)
 
-  defp sanitize_json_key(k) when is_atom(k) or is_binary(k), do: k
+  defp sanitize_json_key(k) when is_binary(k), do: storable_string(k)
+  defp sanitize_json_key(k) when is_atom(k), do: sanitize_for_json(k)
   defp sanitize_json_key(k), do: inspect(k)
+
+  # jsonb can't hold a NUL, and JSON can't hold bytes that aren't UTF-8.
+  defp storable_string(string) do
+    if String.valid?(string), do: String.replace(string, <<0>>, "\uFFFD"), else: inspect(string)
+  end
 
   # ============================================================================
   # Parent Notification (Orchestration)
@@ -1777,6 +2080,7 @@ defmodule Durable.Executor do
 
     multi =
       Ecto.Multi.new()
+      |> lock_run(parent_id)
       |> Ecto.Multi.update(:event, PendingEvent.receive_changeset(pending_event, payload))
       |> Ecto.Multi.run(:wait_group, fn repo, _ ->
         WaitGroup.add_event_locked(
@@ -1795,8 +2099,8 @@ defmodule Durable.Executor do
       end)
 
     case Repo.transaction(config, multi) do
-      {:ok, _} ->
-        :ok
+      {:ok, %{parent: parent}} ->
+        DurablePubSub.wake(config, parent)
 
       {:error, stage, reason, _} ->
         Logger.error(
@@ -1881,16 +2185,36 @@ defmodule Durable.Executor do
     end
   end
 
+  @doc false
+  # Everything that changes a wait and its run takes the run's row first. In any
+  # other order, two of them can deadlock.
+  @spec lock_run(Ecto.Multi.t(), String.t()) :: Ecto.Multi.t()
+  def lock_run(multi, workflow_id) do
+    Ecto.Multi.run(multi, :locked_run, fn repo, _changes ->
+      {:ok,
+       repo.one(
+         from(w in WorkflowExecution,
+           where: w.id == ^workflow_id,
+           lock: "FOR UPDATE",
+           select: w.id
+         )
+       )}
+    end)
+  end
+
   defp atomic_fulfill_event_and_resume_parent(config, pending_event, parent, result_context) do
     safe_context = sanitize_for_json(result_context)
 
     multi =
       Ecto.Multi.new()
+      |> lock_run(parent.id)
       |> Ecto.Multi.update(
         :event,
         PendingEvent.receive_changeset(pending_event, pending_event.payload || %{})
       )
       |> Ecto.Multi.run(:parent, fn repo, _changes ->
+        # The lock makes the child's own notice and settle_child/2 take turns,
+        # so the second one sees the parent moved on.
         case repo.get(WorkflowExecution, parent.id) do
           nil ->
             {:error, :parent_not_found}
@@ -1916,8 +2240,8 @@ defmodule Durable.Executor do
       end)
 
     case Repo.transaction(config, multi) do
-      {:ok, _} ->
-        :ok
+      {:ok, %{parent: parent}} ->
+        DurablePubSub.wake(config, parent)
 
       {:error, stage, reason, _} ->
         Logger.error(
@@ -1960,8 +2284,47 @@ defmodule Durable.Executor do
   def after_cancel(config, cancelled) do
     DurablePubSub.broadcast_workflow(config, :workflow_cancelled, workflow_event(cancelled))
     cancel_child_workflows(config, cancelled.id)
+    # A parent waiting on this run would otherwise wait forever.
+    maybe_notify_parent(config, cancelled, :cancelled, cancelled.error)
     :ok
   end
+
+  # A step returned {:cancel, reason, scope}. Cancel the scope's run as
+  # Durable.cancel/2 would (the cascade reaches every run under it), then this
+  # run, which the cascade misses when the target or a run in between already
+  # finished. Cancelling clears the lock token, so the worker's ack/nack is a
+  # no-op. A parallel step defaults to :workflow: a cancelled branch would
+  # otherwise fail a :fail_fast parent and run its compensations.
+  defp cancel_from_step(config, execution, reason, scope) do
+    scope = scope || if(parallel_branch?(execution), do: :workflow, else: :run)
+    target = cancel_target(config, execution, scope)
+    _ = cancel_workflow(target.id, reason, durable: config.name)
+    _ = cancel_workflow(execution.id, reason, durable: config.name)
+    {:error, %{type: "cancelled", message: reason}}
+  end
+
+  # :run stays put; :workflow climbs out of parallel branches; :root climbs
+  # to the run with no parent.
+  defp cancel_target(config, execution, scope) do
+    with true <- climbs?(scope, execution),
+         %WorkflowExecution{} = parent <- parent_run(config, execution) do
+      cancel_target(config, parent, scope)
+    else
+      _ -> execution
+    end
+  end
+
+  defp climbs?(:run, _execution), do: false
+  defp climbs?(:workflow, execution), do: parallel_branch?(execution)
+  defp climbs?(:root, _execution), do: true
+
+  defp parent_run(_config, %{parent_workflow_id: nil}), do: nil
+  defp parent_run(config, %{parent_workflow_id: id}), do: Repo.get(config, WorkflowExecution, id)
+
+  defp parallel_branch?(execution),
+    do:
+      Map.has_key?(execution.context, "__parallel_step") or
+        Map.has_key?(execution.context, :__parallel_step)
 
   defp cancel_child_workflows(config, parent_id) do
     query =
@@ -1986,7 +2349,7 @@ defmodule Durable.Executor do
     # `error` is a map column: a step's `{:error, "declined"}` must become a
     # map here, or the failed/compensated write is rejected and the run stays
     # :running.
-    error = error |> normalize_error() |> sanitize_for_json()
+    error = storable_error(error)
 
     # Get the compensation stack from completed steps
     compensation_stack = build_compensation_stack(execution.id, workflow_def, config)
@@ -2043,6 +2406,10 @@ defmodule Durable.Executor do
       |> WorkflowExecution.compensating_changeset()
       |> cas_update!(config)
 
+    # A run that failed as it resumed (a parallel failure, its deadline, a
+    # timed-out input) hasn't run a step in this process, so its data isn't here.
+    if Context.context() == %{}, do: Process.put(:durable_context, restore_keys(exec.context))
+
     # Run each compensation, collecting results
     results =
       Enum.map(compensation_stack, fn {step_name, compensation} ->
@@ -2058,34 +2425,91 @@ defmodule Durable.Executor do
     # Check if any compensations failed
     failed_count = Enum.count(results, &(&1.result.status == "failed"))
 
-    if failed_count > 0 do
-      # Some compensations failed
-      {:ok, _exec} =
-        exec
-        |> WorkflowExecution.compensation_failed_changeset(results, original_error)
-        |> Ecto.Changeset.change(locked_by: nil, locked_at: nil, scheduled_at: nil)
-        |> Repo.update(config)
-
-      {:error, original_error}
-    else
-      # All compensations succeeded
-      {:ok, _exec} =
+    finished =
+      if failed_count > 0 do
+        WorkflowExecution.compensation_failed_changeset(exec, results, original_error)
+      else
         exec
         |> WorkflowExecution.compensated_changeset(results)
-        |> Ecto.Changeset.change(
-          locked_by: nil,
-          locked_at: nil,
-          scheduled_at: nil,
-          error: original_error
-        )
-        |> Repo.update(config)
+        |> Ecto.Changeset.change(error: original_error)
+      end
 
-      {:error, original_error}
-    end
+    {:ok, finished} =
+      finished
+      |> Ecto.Changeset.change(locked_by: nil, locked_at: nil, scheduled_at: nil)
+      |> Repo.update(config)
+
+    maybe_notify_parent(config, finished, :failed, original_error)
+    {:error, original_error}
   end
 
   defp format_compensation_result({:ok, _output}), do: %{status: "completed"}
   defp format_compensation_result({:error, error}), do: %{status: "failed", error: error}
+
+  # A retry or a snooze: back to :pending until `delay_ms` from now (no later
+  # than the run's deadline), with the worker freed. The claim query skips the
+  # row until then, and the next claim carries on at the same step.
+  #
+  # The next attempt starts from the context this one ended with: the stored
+  # context (which keeps a parallel branch's marker) plus the attempt's own,
+  # put_context/2 writes included. Keys are strings, so an atom and a string
+  # copy of one key can't both be stored.
+  defp park(config, execution, delay_ms) do
+    at = DateTime.add(DateTime.utc_now(), delay_ms, :millisecond)
+    deadline = execution.deadline_at
+    at = if deadline && DateTime.after?(at, deadline), do: deadline, else: at
+
+    release(config, execution, Process.get(:durable_context, %{}), scheduled_at: at)
+  end
+
+  # Where this step has to run, when that isn't where the run is now: its own
+  # `queue:`, or the queue the run started on. A branch only picks a clause, so
+  # it runs where it is, and the clause's steps move for themselves.
+  defp queue_move(%{type: :branch}, _execution), do: nil
+
+  defp queue_move(step, execution) do
+    queue = to_string(step.opts[:queue] || execution.home_queue || execution.queue)
+    if queue != execution.queue, do: queue
+  end
+
+  # Hands the run to another queue before `step`, so the step takes a slot
+  # there. No `scheduled_at`: a run already under way sorts with the runs that
+  # are ready now, oldest first, not behind them.
+  defp move_to_queue(config, execution, step, queue, data) do
+    home = execution.home_queue || execution.queue
+
+    {:waiting, moved} =
+      release(config, execution, data,
+        queue: queue,
+        home_queue: if(queue != home, do: home),
+        current_step: Atom.to_string(step.name),
+        scheduled_at: nil
+      )
+
+    DurablePubSub.wake(config, moved)
+    {:waiting, moved}
+  end
+
+  # Back to :pending with the worker freed, keeping `data` for the next claim.
+  defp release(config, execution, data, attrs) do
+    atom_keys = for {key, _} <- data, is_atom(key), do: Atom.to_string(key)
+
+    context =
+      execution.context
+      |> string_keys()
+      |> Map.merge(string_keys(data))
+      |> Map.put(@atom_keys, atom_keys)
+
+    {:ok, execution} =
+      execution
+      |> Ecto.Changeset.change(
+        [context: sanitize_for_json(context), status: :pending, locked_by: nil, locked_at: nil] ++
+          attrs
+      )
+      |> cas_update!(config)
+
+    {:waiting, execution}
+  end
 
   defp handle_sleep(config, execution, opts) do
     wake_at = calculate_wake_time(opts)
@@ -2122,15 +2546,7 @@ defmodule Durable.Executor do
       wait_type: :single
     }
 
-    {:ok, _pending_event} =
-      %PendingEvent{}
-      |> PendingEvent.changeset(attrs)
-      |> Repo.insert(config)
-
-    {:ok, execution} =
-      execution
-      |> Ecto.Changeset.change(status: :waiting, scheduled_at: nil)
-      |> cas_update!(config)
+    {execution, _event} = enter_wait(config, execution, fn -> insert_event!(config, attrs) end)
 
     # An event sent before the run got here (`send_event(..., buffer: true)`,
     # a keyed start with `on_duplicate: {:send_event, name}`) resumes it now.
@@ -2157,15 +2573,11 @@ defmodule Durable.Executor do
       on_timeout: Keyword.get(opts, :on_timeout, :resume)
     }
 
-    {:ok, pending_input} =
-      %PendingInput{}
-      |> PendingInput.changeset(attrs)
-      |> Repo.insert(config)
-
-    {:ok, execution} =
-      execution
-      |> Ecto.Changeset.change(status: :waiting, scheduled_at: nil)
-      |> cas_update!(config)
+    {execution, pending_input} =
+      enter_wait(config, execution, fn ->
+        {:ok, input} = %PendingInput{} |> PendingInput.changeset(attrs) |> Repo.insert(config)
+        input
+      end)
 
     DurablePubSub.broadcast_workflow(config, :workflow_waiting, workflow_event(execution))
     DurablePubSub.broadcast_input(config, :input_requested, pending_input_event(pending_input))
@@ -2195,33 +2607,27 @@ defmodule Durable.Executor do
       timeout_value: serialize_timeout_value(Keyword.get(opts, :timeout_value))
     }
 
-    {:ok, wait_group} =
-      %WaitGroup{}
-      |> WaitGroup.changeset(group_attrs)
-      |> Repo.insert(config)
+    {execution, _group} =
+      enter_wait(config, execution, fn ->
+        {:ok, wait_group} =
+          %WaitGroup{}
+          |> WaitGroup.changeset(group_attrs)
+          |> Repo.insert(config)
 
-    # Create pending event records for each event in the group
-    Enum.each(event_names, fn event_name ->
-      event_attrs = %{
-        workflow_id: execution.id,
-        event_name: event_name,
-        step_name: execution.current_step,
-        wait_group_id: wait_group.id,
-        wait_type: wait_type,
-        timeout_at: timeout_at,
-        timeout_value: serialize_timeout_value(Keyword.get(opts, :timeout_value))
-      }
+        for event_name <- event_names do
+          insert_event!(config, %{
+            workflow_id: execution.id,
+            event_name: event_name,
+            step_name: execution.current_step,
+            wait_group_id: wait_group.id,
+            wait_type: wait_type,
+            timeout_at: timeout_at,
+            timeout_value: serialize_timeout_value(Keyword.get(opts, :timeout_value))
+          })
+        end
 
-      {:ok, _} =
-        %PendingEvent{}
-        |> PendingEvent.changeset(event_attrs)
-        |> Repo.insert(config)
-    end)
-
-    {:ok, execution} =
-      execution
-      |> Ecto.Changeset.change(status: :waiting, scheduled_at: nil)
-      |> cas_update!(config)
+        wait_group
+      end)
 
     {:waiting, execution}
   end
@@ -2268,7 +2674,7 @@ defmodule Durable.Executor do
   # their inspect/1 form so Postgrex never crashes on encode.
   defp serialize_timeout_value(nil), do: nil
 
-  defp serialize_timeout_value(value) when is_map(value),
+  defp serialize_timeout_value(value) when is_map(value) and not is_struct(value),
     do: sanitize_for_json(value)
 
   defp serialize_timeout_value(value) when is_atom(value),

@@ -278,6 +278,7 @@ defmodule Durable.Scheduler do
       Durable.Executor.start_workflow(module, schedule.input,
         workflow: schedule.workflow_name,
         queue: String.to_atom(schedule.queue),
+        key: schedule.key,
         durable: config.name,
         trigger: :schedule,
         trigger_ref: schedule.name
@@ -297,6 +298,16 @@ defmodule Durable.Scheduler do
               "Failed to update run times for schedule #{schedule.name}: #{inspect(reason)}"
             )
         end
+
+      {:error, {:key_taken, holder_id}} ->
+        # The workflow's on_duplicate: :error refused the start: the last run
+        # still holds the key. That's this fire being skipped, not a failure,
+        # so move on to the next one (Activity has the duplicate).
+        {:ok, _} = API.mark_run(schedule, config)
+
+        Logger.info(
+          "Skipped schedule #{schedule.name}: key #{schedule.key} is held by #{holder_id}"
+        )
 
       {:error, reason} ->
         Logger.error("Failed to start workflow for schedule #{schedule.name}: #{inspect(reason)}")

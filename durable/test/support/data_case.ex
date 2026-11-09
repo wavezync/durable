@@ -248,8 +248,21 @@ defmodule Durable.DataCase do
       |> WorkflowExecution.changeset(attrs)
       |> repo.insert()
 
-    Executor.execute_workflow(execution.id, config)
-    {:ok, repo.get!(WorkflowExecution, execution.id)}
+    {:ok, execute_while_pending(execution.id)}
+  end
+
+  @doc """
+  Executes the run, again and again while it's still `:pending` (a retry or
+  snooze parked it), as the queue would. Returns the reloaded run.
+  """
+  def execute_while_pending(id, rounds \\ 50) do
+    config = Config.get(Durable)
+    Executor.execute_workflow(id, config)
+    run = config.repo.get!(WorkflowExecution, id)
+
+    if run.status == :pending and rounds > 1,
+      do: execute_while_pending(id, rounds - 1),
+      else: run
   end
 
   @doc "Loads all `StepExecution` rows for a workflow, oldest first."

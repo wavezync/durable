@@ -99,6 +99,7 @@ defmodule Durable.MixProject do
         "CHANGELOG.md",
         "guides/ai_workflows.md",
         "guides/branching.md",
+        "guides/coming_from_oban.md",
         "guides/compensations.md",
         "guides/orchestration.md",
         "guides/parallel.md",

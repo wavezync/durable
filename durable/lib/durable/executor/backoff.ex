@@ -18,14 +18,10 @@ defmodule Durable.Executor.Backoff do
         }
 
   @default_base 1_000
-  # Backoff is currently an in-process `Process.sleep/1` that blocks the worker
-  # and holds the job lock for its duration. A multi-minute (let alone 1-hour)
-  # default would pin a queue concurrency slot and risk crossing the stale-lock
-  # timeout. Cap the default well under `stale_lock_timeout` (300s). Callers
-  # that genuinely want longer, durable backoff should set `max_backoff`
-  # explicitly — and ideally a future re-enqueue-based backoff will lift this
-  # ceiling without blocking a worker.
-  @default_max_backoff 30_000
+  # A step's retry parks the run instead of blocking the worker, so a long
+  # backoff costs nothing. Compensations still retry in-process: they pass a
+  # lower cap (see CompensationRunner).
+  @default_max_backoff 3_600_000
 
   @doc """
   Calculates the delay before the next retry attempt.
@@ -39,9 +35,7 @@ defmodule Durable.Executor.Backoff do
   ## Options
 
   - `:base` - Base delay in milliseconds (default: 1000)
-  - `:max_backoff` - Maximum delay in milliseconds (default: 30000 = 30s).
-    Kept low because the backoff blocks the worker in-process; raise it only
-    if your `stale_lock_timeout` comfortably exceeds the chosen ceiling.
+  - `:max_backoff` - Maximum delay in milliseconds (default: 3_600_000 = 1 hour)
 
   ## Examples
 

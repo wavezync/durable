@@ -87,6 +87,16 @@ compensate :handler_name, [retry: [max_attempts: 3, backoff: :exponential]], fn 
 end
 ```
 
+### What a Compensation Returns
+
+| Return | Result |
+|--------|--------|
+| `{:error, reason}`, or a raise | Failed once its retries run out |
+| `{:fail, reason}` | Failed now, no retries |
+| Anything else | Done |
+
+If a compensation fails, the others still run and the run ends `:compensation_failed`. The reason is in `compensation_results` and on the compensation's step execution.
+
 ## Workflow Status States
 
 | Status | Description |

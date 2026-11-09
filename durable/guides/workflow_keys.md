@@ -88,9 +88,10 @@ Durable.start(SendInvoice, %{"id" => "INV-2208"}, key: "invoice:INV-2208", on_du
 | `:use_existing` (default) | `{:ok, new_id}` | `{:ok, holder_id}` |
 | `:error` | `{:ok, new_id}` | `{:error, {:key_taken, holder_id}}` |
 | `:cancel_existing` | `{:ok, new_id}` | cancels the holder, `{:ok, new_id}` |
+| `:run_again` | `{:ok, new_id}` | one run waits behind the holder, `{:ok, waiting_id}` |
 | `{:send_event, name}` | `{:ok, new_id}` | sends the input to the holder, `{:ok, holder_id}` |
 
-`:cancel_existing` and `{:send_event, name}` are about a holder that's still going; see [Updates That Arrive While a Run Is Going](#updates-that-arrive-while-a-run-is-going). A finished holder that `reuse:` keeps answers both with `{:error, {:key_taken, holder_id}}`, since there's nothing to cancel or send to.
+`:cancel_existing`, `:run_again` and `{:send_event, name}` are about a holder that's still going; see [Updates That Arrive While a Run Is Going](#updates-that-arrive-while-a-run-is-going). A finished holder that `reuse:` keeps answers both with `{:error, {:key_taken, holder_id}}`, since there's nothing to cancel or send to.
 
 Other results:
 
@@ -159,6 +160,7 @@ If the newer input matters, pick one of these:
 | The run to read the latest data when it gets there | Pass ids, not content (see Choosing a Key) |
 | Every revision processed | Put the revision in the key |
 | The newest input to win, starting over | `on_duplicate: :cancel_existing` |
+| One more run after the holder, with the newest input | `on_duplicate: :run_again` |
 | The running run to take the new input itself | `on_duplicate: {:send_event, name}` |
 | A burst of updates to become one run with the last input | `debounce:` |
 | The producer to decide | `on_duplicate: :error` |
@@ -171,6 +173,28 @@ Durable.start(ProcessArticle, %{"id" => 42, "rev" => 8}, key: "article:42", on_d
 ```
 
 The holder is cancelled and gives up its key in one step, and a new run starts with the new input. It works under any `reuse:`, `:never` included, because the holder hadn't finished. The cancel is the same as `Durable.cancel/2`: a step already running finishes but its result is dropped, no later step runs, and compensations don't run. The cancelled run's error says which run replaced it. A compensating holder can't be cancelled, so that start returns `{:error, {:key_taken, holder_id}}`. This is Temporal's TERMINATE_EXISTING, and Inngest's singleton `cancel` mode.
+
+### Run Once More After It: `:run_again`
+
+```elixir
+workflow "rebuild_index", on_duplicate: :run_again do
+```
+
+The account's index is being rebuilt when the user edits again. With `:use_existing` that start is dropped, and the index misses the edit. With `:run_again` it leaves one run waiting behind the holder, without the key:
+
+```elixir
+Durable.start(RebuildIndex, %{"v" => 2}, key: "account:7")  #=> {:ok, waiting_id}
+Durable.start(RebuildIndex, %{"v" => 3}, key: "account:7")  #=> {:ok, waiting_id}, now with v3
+```
+
+However many starts arrive, one run waits, with the newest input. When the holder ends, however it ends, the waiting run takes the key and runs. So no start is lost, one run holds the key, and at most one waits behind it.
+
+- `reuse:` still decides. A failed holder lets the waiting run go under the default `:after_close`. If `reuse:` keeps the key (`:after_failure` and the holder completed), the waiting run is cancelled, and its error says why. `:run_again` with `reuse: :never` fails the compile.
+- A holder that no worker has picked up yet takes the newer input itself, as with `debounce:`, so nothing waits behind a run that hasn't started.
+- If another start took the key between the holder ending and the waiting run starting, the waiting run waits behind that run instead.
+- The waiting run's `timeout:` counts from when it takes the key. Its `runs_after_id` is the run it waits for.
+
+In Oban this takes a job that finishes, checks for new work and snoozes to go again.
 
 ### Hand the Input to the Running Run: `{:send_event, name}`
 
@@ -222,16 +246,27 @@ Once a worker has picked the run up, the next start is an ordinary duplicate and
 
 ## Watching Keys
 
-- **Activity**: `Durable.Activity.list(kinds: ["key_duplicate"])`. The kinds are `"key_duplicate"` (its `outcome` says what the start did: `use_existing`, `error`, `cancel_existing`, `send_event` or `debounced`), `"key_handed_off"` (a start took the key from a finished or replaced run), `"key_released"` and `"key_retaken"` (a retry took its key back). Each has `details.key` and `details.workflow`. Activity is kept for a week.
+- **Activity**: `Durable.Activity.list(kinds: ["key_duplicate"])`. The kinds are `"key_duplicate"` (its `outcome` says what the start did: `use_existing`, `error`, `cancel_existing`, `run_again` (with `runs_after` when a run waits), `send_event` or `debounced`), `"key_handed_off"` (a start took the key from a finished or replaced run), `"key_released"` and `"key_retaken"` (a retry took its key back). Each has `details.key` and `details.workflow`. Activity is kept for a week.
 - **Stats**: `Durable.Stats.keys(workflow: "process_article")` returns keys held, re-adds by outcome, dropped inputs, hand-offs, re-adds over time and the keys re-added most.
 - **Telemetry**: `[:durable, :key, :duplicate]`, `[:durable, :key, :handoff]` and `[:durable, :key, :release]`. See `Durable.Telemetry`.
 - **Query**: `Durable.list_executions(key: "article:42")` returns every run started with the key; the holder has `holds_key: true`.
 - **Query**: `Durable.Query.list_keys(workflow_name: "process_article")` lists keys with their holder, how many runs used each, and re-adds in the last day.
 - **Dashboard**: the Keys page lists every key and its holder. A run's Key view lists its re-adds and every run with its key, and the workflow page has a Keys section. Search Runs with `key:article:42`.
 
+## Cron Schedules
+
+A schedule fires on time even if its last run hasn't finished, so a cleanup every 5 minutes that takes 6 starts a second copy beside the first. Give the schedule a key:
+
+```elixir
+@schedule cron: "*/5 * * * *", key: "cleanup"
+workflow "cleanup" do
+```
+
+(or `Durable.schedule(MyApp.Cleanup, "*/5 * * * *", key: "cleanup")`). Every fire starts with that key, so a fire while the last run still holds it follows the workflow's `on_duplicate:`. With the default `:use_existing` it starts nothing, and Activity records a `"key_duplicate"`. With `:error` the fire is skipped the same way, and it doesn't count toward the schedule's failures. `Durable.trigger_schedule/2` uses the key too.
+
 ## Things to Know
 
-- **Keys aren't inherited.** Parallel branches, `call_workflow` children and cron schedule fires start without a key.
+- **Keys aren't inherited.** Parallel branches and `call_workflow` children start without a key. A cron schedule fire starts without one unless the schedule has a `key:` (next section).
 - **Runs started before the upgrade** have no key and never hold one.
 - **Upgrading** adds two columns and three indexes (`mix durable.gen.upgrade`, then migrate). Creating the indexes scans the runs table and blocks inserts into it while it runs, so on a large table, deploy at a quiet time.
 - **One key, one workflow.** There's no lookup by key across workflows.

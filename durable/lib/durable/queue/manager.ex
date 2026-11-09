@@ -137,15 +137,18 @@ defmodule Durable.Queue.Manager do
         {DynamicSupervisor, name: worker_sup_name, strategy: :one_for_one},
 
         # Poller for this queue
-        {Poller,
-         [
-           config: config,
-           queue_name: queue_str,
-           concurrency: Keyword.get(opts, :concurrency, 10),
-           poll_interval: Keyword.get(opts, :poll_interval, 1000),
-           worker_supervisor: worker_sup_name,
-           name: poller_name(queue_str, config.name)
-         ]}
+        Supervisor.child_spec(
+          {Poller,
+           [
+             config: config,
+             queue_name: queue_str,
+             concurrency: Keyword.get(opts, :concurrency, 10),
+             poll_interval: Keyword.get(opts, :poll_interval, 1000),
+             worker_supervisor: worker_sup_name,
+             name: poller_name(queue_str, config.name)
+           ]},
+          id: {Poller, queue_str}
+        )
       ]
     end)
   end
@@ -166,7 +169,7 @@ defmodule Durable.Queue.Manager do
   end
 
   defp poller_name(queue_name, durable_name) do
-    Module.concat([durable_name, Queue, Poller, camelize(queue_name)])
+    Module.concat([durable_name, Queue, :Poller, camelize(queue_name)])
   end
 
   defp camelize(string) do

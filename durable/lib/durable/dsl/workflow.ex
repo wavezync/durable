@@ -26,7 +26,8 @@ defmodule Durable.DSL.Workflow do
     running is stopped (and not retried), and a waiting run is woken to fail.
     Steps in a run with a timeout run in their own process; see the step
     `:timeout` option.
-  - `:queue` - The queue runs start on unless `Durable.start/3` names one
+  - `:queue` - The queue runs start on unless `Durable.start/3` names one. A
+    step's own `:queue` moves the run for that step
   - `:reuse` - When a start with a `key:` may run again after the run holding
     that key has finished: `:after_close` (default, after any finish),
     `:after_failure` (only after it failed, was cancelled or rolled back; a
@@ -34,7 +35,8 @@ defmodule Durable.DSL.Workflow do
   - `:on_duplicate` - What `Durable.start/3` does when the key is taken,
     unless the call says otherwise: `:use_existing` (default, `{:ok, holder_id}`),
     `:error` (`{:error, {:key_taken, holder_id}}`), `:cancel_existing` (replace
-    the running holder with a new run) or `{:send_event, name}` (send the new
+    the running holder with a new run), `:run_again` (run once more after the
+    holder ends, with the newest input) or `{:send_event, name}` (send the new
     input to the running holder as an event)
   - `:debounce` - `[period: ms, timeout: ms]`: a start with a `key:` waits
     `period` before it runs, and each start with the same key in that time
@@ -119,7 +121,7 @@ defmodule Durable.DSL.Workflow do
   # Literal values are checked here; anything computed is checked when a run starts.
   @allowed_values %{
     reuse: [:after_close, :after_failure, :never],
-    on_duplicate: [:use_existing, :error, :cancel_existing]
+    on_duplicate: [:use_existing, :error, :cancel_existing, :run_again]
   }
 
   defp validate_workflow_opts!(opts, name) when is_list(opts) do
@@ -130,6 +132,12 @@ defmodule Durable.DSL.Workflow do
         end)
 
         validate_debounce!(Keyword.get(opts, :debounce), name)
+
+        if opts[:on_duplicate] == :run_again and opts[:reuse] == :never do
+          raise ArgumentError,
+                "on_duplicate: :run_again can't run again with reuse: :never " <>
+                  "for workflow #{inspect(name)}: no run after the first may take the key"
+        end
 
       unknown ->
         raise ArgumentError,

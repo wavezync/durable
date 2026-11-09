@@ -20,7 +20,10 @@ A durable, resumable workflow engine for Elixir. Similar to Temporal/Inngest.
 - **Parallel** - Run steps concurrently with result collection
 - **Compensations** - Saga pattern with automatic rollback
 - **Cron Scheduling** - Recurring workflows with cron expressions
-- **Reliability** - Automatic retries with exponential/linear/constant backoff
+- **Reliability** - Automatic retries with exponential/linear/constant backoff, waiting off the worker
+- **Run control** - Snooze, fail now or cancel from a step
+- **Step queues** - Give a step its own queue and concurrency limit
+- **Bulk starts and tags** - Start many runs in one transaction, then find or cancel them by tag
 - **Orchestration** - Parent/child workflow composition
 - **Workflow keys** - At most one run per key, so duplicate starts return the existing run
 - **Persistence** - PostgreSQL-backed execution state
@@ -32,6 +35,8 @@ def deps do
   [{:durable, "~> 1.0"}]
 end
 ```
+
+Durable needs PostgreSQL 13 or newer.
 
 ## Quick Start
 
@@ -347,6 +352,10 @@ end
 {Durable, repo: MyApp.Repo, scheduled_modules: [MyApp.DailyReport]}
 ```
 
+Add `key: "daily_sales_report"` to `@schedule` so a fire while the last run
+is still going doesn't start a second copy. See
+[Workflow keys](guides/workflow_keys.md#cron-schedules).
+
 ### Delayed & Scheduled Execution
 
 Sleep, schedule for specific times, and wait for events.
@@ -473,7 +482,7 @@ end
 # Fire-and-forget: start child and continue
 {:ok, child_id} = start_workflow(MyApp.EmailWorkflow, %{"to" => email}, ref: :welcome)
 
-# call_workflow also works inside parallel blocks (executed inline)
+# call_workflow also works inside parallel blocks: each branch waits for its child
 parallel do
   step :payment, fn data ->
     case call_workflow(MyApp.PaymentWorkflow, %{"amount" => data.total}, ref: :pay) do
@@ -501,7 +510,9 @@ workflow "process_order", timeout: hours(2), queue: :orders do
   sleeps included. A run past it fails with a `"timeout"` error and runs its
   compensations: a step still running is stopped, and a waiting run is woken
   to fail (within the timeout worker's one-minute sweep).
-- `:queue` — the queue runs start on unless `Durable.start/3` names one.
+- `:queue` — the queue runs start on unless `Durable.start/3` names one. A
+  step's own `queue:` moves the run for that step (see
+  [Step Queues](#step-queues)).
 - `:reuse` — whether a `key:` can start again after its run finished:
   `:after_close` (default), `:after_failure` or `:never`. See
   [Workflow keys](guides/workflow_keys.md).
@@ -514,6 +525,89 @@ workflow "process_order", timeout: hours(2), queue: :orders do
 
 Unknown options fail the compile.
 
+### Retries
+
+```elixir
+use Durable.Context
+
+step :charge, [retry: [max_attempts: 5, backoff: :exponential]], fn ctx ->
+  attempt()        # 1..5
+  max_attempts()   # 5
+  last_attempt?()  # true on attempt 5: an error now fails the step
+  ...
+end
+```
+
+A step without `retry:` gets one attempt. The attempt count carries over
+when a run resumes after a crash, and starts again after `Durable.retry/2`.
+
+Between attempts the run is parked: it goes back on its queue until the
+backoff has passed (up to `max_backoff`, 1 hour by default), so a long wait
+holds no worker.
+
+To wait and try again without using an attempt, snooze:
+
+```elixir
+step :export, fn ctx ->
+  if Exports.running?(ctx.account_id),
+    do: {:snooze, seconds(60), "another export is running"},
+    else: {:ok, assign(ctx, :file, Exports.run(ctx.account_id))}
+end
+```
+
+When retrying won't help, stop now:
+
+```elixir
+step :download, [retry: [max_attempts: 5]], fn ctx ->
+  case Downloader.fetch(ctx.url) do
+    {:ok, file} -> {:ok, assign(ctx, :file, file)}
+    {:error, :gone} -> {:fail, "the file is gone"}     # fails now, compensations run
+    {:error, :deleted} -> {:cancel, "record deleted"}  # cancelled now, like Durable.cancel/2
+    {:error, reason} -> {:error, reason}               # retried
+  end
+end
+```
+
+`{:cancel, reason}` cancels the workflow the step is written in. A
+`call_workflow` parent gets it as an error. Pass a scope to cancel less or more:
+
+```elixir
+{:cancel, reason, scope: :run}   # in a parallel step: only this branch, an error in the block's results
+{:cancel, reason, scope: :root}  # the top run of the tree, through call_workflow parents, and all under it
+```
+
+### Step Queues
+
+Give a step its own queue to cap how many runs are in that step at once:
+
+```elixir
+# queues: %{documents: [concurrency: 20], downloads: [concurrency: 80],
+#           ocr: [concurrency: 10], llm: [concurrency: 20]}
+workflow "import_document", queue: :documents do
+  step :download,  [queue: :downloads], fn ctx -> ... end
+  step :ocr,       [queue: :ocr],       fn ctx -> ... end
+  step :summarize, [queue: :llm],       fn ctx -> ... end
+  step :save,                           fn ctx -> ... end  # back on :documents
+end
+```
+
+The run moves to the step's queue before the step and takes a slot there. The
+next step without a `queue:` goes back to the queue the run started on. A
+retry, snooze or wait stays on the step's queue, and compensations run on the
+queue the run is on when it fails.
+
+- `concurrency` is per node: `ocr: [concurrency: 10]` on three nodes allows 30
+  OCR steps at once. For an exact total, list the queue in `:queues` only on
+  the nodes that should run it.
+- Every queue a step names needs a poller on some node, and so does the queue
+  the run starts on, even if its first step moves it. A run on a queue no live
+  node polls waits there. Past its `timeout:`, the timeout worker's one-minute
+  sweep hands it back to the queue it came from, or to another that's polled,
+  and it fails there, compensations included.
+- Each move is one more claim. With `:pubsub` configured it happens as soon as
+  a slot is free; without it, within that queue's `poll_interval`.
+- A finished run's `queue` is the last one it was on.
+
 ### Errors
 
 When a step fails, its execution keeps what went wrong as `error`:
@@ -524,12 +618,41 @@ When a step fails, its execution keeps what went wrong as `error`:
 - **Exited** (a `GenServer.call` timeout, a linked process going down) —
   `type: "exit"`, a readable `message` (`Exception.format_exit/1`) and the
   `stacktrace`. Throws are kept the same way.
-- **Returned** — `{:error, reason}` from the step: `reason` itself (a map is
-  stored as-is), with no stack, because nothing was raised.
+- **Returned** — `{:error, reason}` from the step: `reason` itself, with no
+  stack, because nothing was raised. A map is stored as it is, and anything
+  JSON can't hold is stored in a readable form.
 
 The same applies to compensations and to a branch's `on:` function. A
 failed run's `error` is its failing step's. The stack is as deep as the
 VM's `:backtrace_depth` (8 frames by default; Phoenix dev raises it to 20).
+
+### Production Settings
+
+Two defaults suit development more than production:
+
+- **Pruning is off** (`prune: nil`), so finished runs and their steps stay
+  forever.
+- **Every log line a step writes is stored** with its step, at every level.
+
+Something like this keeps the tables small:
+
+```elixir
+# In the supervision tree
+{Durable,
+ repo: MyApp.Repo,
+ prune: [
+   completed: :timer.hours(24 * 7),
+   cancelled: :timer.hours(24 * 7),
+   failed: :timer.hours(24 * 30)
+ ]}
+
+# config/prod.exs
+config :durable, log_capture: [levels: [:warning, :error]]
+```
+
+Durable uses no session features, so it works on direct connections and
+behind PgBouncer in transaction mode. A PgBouncer older than 1.24 needs
+`prepare: :unnamed` on your repo.
 
 ### API
 
@@ -537,9 +660,13 @@ VM's `:backtrace_depth` (8 frames by default; Phoenix dev raises it to 20).
 Durable.start(Module, input)
 Durable.start(Module, input, queue: :priority, scheduled_at: datetime)
 Durable.start(Module, input, key: "article:42")   # at most one run per key
+Durable.start(Module, input, tags: ["account:7"]) # labels, to find runs across workflows
+Durable.start_many([{Module, input, key: "row:1"}, {Module, input2}])  # one transaction, keys checked
 Durable.get_execution(id)
 Durable.list_executions(workflow: Module, status: :running)
+Durable.list_executions(tag: "account:7")
 Durable.cancel(id, "reason")
+Durable.cancel_all([tag: "account:7"], "account closed")  # every open run that matches
 Durable.send_event(id, "event", payload)
 Durable.send_event(id, "event", payload, buffer: true)  # keep it until the run waits
 Durable.provide_input(id, "input_name", data)
@@ -634,6 +761,7 @@ option list and design notes.
 - [Orchestration](guides/orchestration.md) - Parent/child workflow composition
 - [Workflow keys](guides/workflow_keys.md) - One run per key, duplicate starts, reuse policies
 - [Testing](guides/testing.md) - Run and assert on workflows in ExUnit
+- [Coming from Oban](guides/coming_from_oban.md) - What maps to what, and what works differently
 
 ## License
 

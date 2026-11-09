@@ -21,7 +21,8 @@ defmodule Durable.Telemetry do
       `:trigger`, `:resumed` (false on a run's first segment)
     * `[:durable, :workflow, :stop]` — `%{duration, monotonic_time}`; adds
       `:status`: `:completed`, `:failed`, `:compensated`,
-      `:compensation_failed`, `:waiting` (suspended) or `:superseded`
+      `:compensation_failed`, `:waiting` (suspended: a wait, or a retry or
+      snooze that parked the run) or `:superseded`
       (cancelled or reclaimed by another node mid-segment)
     * `[:durable, :workflow, :exception]` — the executor itself crashed;
       adds `:kind`, `:reason`, `:stacktrace`
@@ -33,11 +34,14 @@ defmodule Durable.Telemetry do
 
     * `[:durable, :step, :start]` — metadata `:workflow_id`, `:workflow`,
       `:step`, `:step_type`, `:attempt`, `:max_attempts`
-    * `[:durable, :step, :stop]` — adds `:result` (`:ok`, `:error` or
-      `:suspended`) and, for errors, `:error` (`%{type, message}`)
+    * `[:durable, :step, :stop]` — adds `:result` (`:ok`, `:error`,
+      `:suspended`, `:snoozed` or `:cancelled`) and, for errors, `:error`
+      (`%{type, message}`)
     * `[:durable, :step, :exception]`
     * `[:durable, :step, :retry]` — `%{backoff_ms}`; the step metadata plus
-      `:error`, emitted before sleeping for the next attempt
+      `:error`, emitted as the run parks until the next attempt
+    * `[:durable, :step, :snooze]` — `%{snooze_ms}`; the step metadata plus
+      `:reason` (`nil` for `{:snooze, ms}`)
 
   ## Compensations
 
@@ -92,6 +96,7 @@ defmodule Durable.Telemetry do
     [:durable, :step, :stop],
     [:durable, :step, :exception],
     [:durable, :step, :retry],
+    [:durable, :step, :snooze],
     [:durable, :compensation, :start],
     [:durable, :compensation, :stop],
     [:durable, :compensation, :exception],

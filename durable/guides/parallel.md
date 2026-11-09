@@ -327,7 +327,7 @@ end
 
 ## Calling Child Workflows in Parallel
 
-You can use `call_workflow` inside parallel steps. Child workflows execute **inline (synchronously)** within the parallel task — no suspend/resume needed.
+You can use `call_workflow` inside parallel steps. Each branch is its own run, so it waits for its child the way any run does, and the child can sleep or wait too.
 
 ```elixir
 parallel on_error: :complete_all do
@@ -347,15 +347,22 @@ parallel on_error: :complete_all do
 end
 ```
 
-**Note:** Child workflows that use waits (`sleep`, `wait_for_event`, etc.) are not supported inside parallel blocks — they will return an error. Only synchronously-completing children work here.
-
 See the [Orchestration Guide](orchestration.md) for more details on `call_workflow`.
+
+## Waiting in a Branch
+
+Each branch is its own run, so it can do anything a run can: retry, snooze, `sleep`, `wait_for_event`, `wait_for_input` or `call_workflow`. The parent waits for it without holding a worker. To send a branch an event, use the branch's own id:
+
+```elixir
+[branch | _] = Durable.list_children(parent_id)
+Durable.send_event(branch.id, "go", %{})
+```
 
 ## How It Works
 
-1. The parallel block starts all steps concurrently as separate tasks
+1. Each step in the block becomes its own run on the queue: the step's `queue:`, or the parent's
 2. Each step receives a copy of the current context (steps are isolated)
-3. When all steps complete, results are collected into `__results__` map
+3. The parent waits without holding a worker, and collects the results into the `__results__` map when the block is done
 4. If `into:` is provided, it transforms the results
 5. Execution continues to the next step
 

@@ -142,7 +142,7 @@ defmodule Durable.LogCapture.Handler do
     meta
     |> Map.new(fn
       {k, v} when is_atom(k) -> {k, v}
-      {k, v} when is_binary(k) -> {String.to_atom(k), v}
+      {k, v} when is_binary(k) -> {Durable.Context.known_key(k), v}
       {k, v} -> {k, v}
     end)
   end

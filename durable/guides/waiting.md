@@ -169,7 +169,7 @@ end
 
 ### `wait_for_all/2` - All Events Required
 
-Wait for all specified events. Returns `%{event_name => payload}`.
+Wait for all specified events. Returns `%{event_name => payload}`. A name is an atom key if your code mentions that atom, and a string key otherwise.
 
 ```elixir
 workflow "multi_approval" do
@@ -209,6 +209,8 @@ Durable.Wait.send_event(
   %{status: "success", transaction_id: "txn_123"}
 )
 ```
+
+`send_event` returns `:ok` once the waiting run has the event. If nothing is waiting for it, it returns `{:error, :not_found}` and the event isn't kept, unless you pass `buffer: true`. Any payload counts as an answer, `nil` included. An event for a `wait_for_any` that already has its answer returns `:ok` and does nothing.
 
 ## Human-in-the-Loop
 
@@ -600,6 +602,8 @@ step :prepare_and_wait, fn ctx ->
   {:ok, ctx}
 end
 ```
+
+After a wait, the run's data comes back from JSON. A top-level key comes back as an atom if your code mentions that atom anywhere. Otherwise it stays a string, so read a generated key like `"item_123"` with `ctx["item_123"]`.
 
 ### Use Convenience Wrappers
 

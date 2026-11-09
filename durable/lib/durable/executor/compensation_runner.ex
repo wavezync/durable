@@ -17,6 +17,7 @@ defmodule Durable.Executor.CompensationRunner do
   alias Durable.Context
   alias Durable.Definition.Compensation
   alias Durable.Executor.Backoff
+  alias Durable.Executor.StepRunner
   alias Durable.Repo
   alias Durable.Storage.Schemas.StepExecution
 
@@ -77,8 +78,7 @@ defmodule Durable.Executor.CompensationRunner do
 
     result =
       try do
-        output = Compensation.execute(compensation, Context.context())
-        {:ok, output}
+        compensation |> Compensation.execute(Context.context()) |> outcome()
       catch
         kind, reason -> {:error, Durable.Executor.caught_error(kind, reason, __STACKTRACE__)}
       end
@@ -94,32 +94,39 @@ defmodule Durable.Executor.CompensationRunner do
         {:ok, _} = complete_step_execution(config, step_exec, output, logs, duration_ms)
         {:ok, output}
 
-      {:error, error} ->
-        if attempt < max_attempts do
-          # Mark this attempt as failed
-          {:ok, _} = fail_step_execution(config, step_exec, error, logs, duration_ms)
+      {:error, error} when attempt < max_attempts ->
+        # Mark this attempt as failed
+        {:ok, _} = fail_step_execution(config, step_exec, error, logs, duration_ms)
 
-          # Calculate backoff and sleep
-          retry_opts = get_retry_opts(compensation)
-          backoff_strategy = Map.get(retry_opts, :backoff, :exponential)
-          Backoff.sleep(backoff_strategy, attempt, retry_opts)
+        # Calculate backoff and sleep
+        # ponytail: compensations still retry in-process, holding the worker
+        # and lock, so their backoff stays under stale_lock_timeout. Park
+        # them like steps if long compensation backoffs are ever needed.
+        retry_opts = compensation |> get_retry_opts() |> Map.put_new(:max_backoff, 30_000)
+        backoff_strategy = Map.get(retry_opts, :backoff, :exponential)
+        Backoff.sleep(backoff_strategy, attempt, retry_opts)
 
-          # Retry
-          execute_with_retry(
-            compensation,
-            workflow_id,
-            compensating_step,
-            attempt + 1,
-            max_attempts,
-            config
-          )
-        else
-          # All retries exhausted
-          {:ok, _} = fail_step_execution(config, step_exec, error, logs, duration_ms)
-          {:error, error}
-        end
+        # Retry
+        execute_with_retry(
+          compensation,
+          workflow_id,
+          compensating_step,
+          attempt + 1,
+          max_attempts,
+          config
+        )
+
+      {_out_of_retries_or_fail, error} ->
+        {:ok, _} = fail_step_execution(config, step_exec, error, logs, duration_ms)
+        {:error, error}
     end
   end
+
+  # A rollback that reports an error didn't happen. As in a step, {:error, _}
+  # retries and {:fail, _} gives up now; any other return counts as done.
+  defp outcome({:error, reason}), do: {:error, Durable.Executor.storable_error(reason)}
+  defp outcome({:fail, reason}), do: {:fail, Durable.Executor.storable_error(reason)}
+  defp outcome(output), do: {:ok, output}
 
   defp get_max_attempts(%Compensation{opts: opts}) do
     case Map.get(opts, :retry) do
@@ -166,7 +173,7 @@ defmodule Durable.Executor.CompensationRunner do
   end
 
   defp complete_step_execution(config, step_exec, output, logs, duration_ms) do
-    serializable_output = serialize_output(output)
+    serializable_output = StepRunner.serialize_output(output)
 
     step_exec
     |> StepExecution.complete_changeset(serializable_output, logs, duration_ms)
@@ -178,13 +185,4 @@ defmodule Durable.Executor.CompensationRunner do
     |> StepExecution.fail_changeset(error, logs, duration_ms)
     |> Repo.update(config)
   end
-
-  defp serialize_output(nil), do: nil
-  defp serialize_output(output) when is_map(output), do: output
-  defp serialize_output(output) when is_list(output), do: %{value: output}
-  defp serialize_output(output) when is_binary(output), do: %{value: output}
-  defp serialize_output(output) when is_number(output), do: %{value: output}
-  defp serialize_output(output) when is_atom(output), do: %{value: Atom.to_string(output)}
-  defp serialize_output(output) when is_tuple(output), do: %{value: Tuple.to_list(output)}
-  defp serialize_output(output), do: %{value: inspect(output)}
 end

@@ -41,6 +41,7 @@ defmodule Durable.Wait do
   """
 
   alias Durable.Config
+  alias Durable.Context
   alias Durable.PubSub, as: DurablePubSub
   alias Durable.Repo
   alias Durable.Storage.Schemas.{PendingEvent, PendingInput, WaitGroup, WorkflowExecution}
@@ -171,6 +172,13 @@ defmodule Durable.Wait do
     end
   end
 
+  # What a wait got, if it has been answered. The name is in the context as an
+  # atom or a string, depending on whether the atom existed when the run came
+  # back. A nil payload is still an answer.
+  defp answer(context, name) do
+    with :error <- Map.fetch(context, Context.known_key(name)), do: Map.fetch(context, name)
+  end
+
   # ============================================================================
   # Event Waiting
   # ============================================================================
@@ -223,13 +231,9 @@ defmodule Durable.Wait do
   @spec wait_for_event(String.t(), keyword()) :: term()
   def wait_for_event(event_name, opts \\ []) do
     # Check if we're resuming with event data already in context
-    # Context keys are atoms (converted from strings when restored from DB)
-    context = Process.get(:durable_context, %{})
-    key = String.to_atom(event_name)
-
-    case Map.get(context, key) do
-      nil -> throw({:wait_for_event, Keyword.put(opts, :event_name, event_name)})
-      data -> data
+    case answer(Process.get(:durable_context, %{}), event_name) do
+      {:ok, data} -> data
+      :error -> throw({:wait_for_event, Keyword.put(opts, :event_name, event_name)})
     end
   end
 
@@ -256,16 +260,16 @@ defmodule Durable.Wait do
   @spec wait_for_any([String.t()], keyword()) :: {String.t(), term()}
   def wait_for_any(event_names, opts \\ []) when is_list(event_names) do
     # Check if we're resuming with event data already in context
-    # Context keys are atoms (converted from strings when restored from DB)
     context = Process.get(:durable_context, %{})
 
     # Find first matching event in context (convert string names to atoms)
-    case Enum.find(event_names, fn name -> Map.has_key?(context, String.to_atom(name)) end) do
+    case Enum.find(event_names, &(answer(context, &1) != :error)) do
       nil ->
         throw({:wait_for_any, Keyword.merge(opts, event_names: event_names, wait_type: :any)})
 
       event_name ->
-        {event_name, Map.get(context, String.to_atom(event_name))}
+        {:ok, data} = answer(context, event_name)
+        {event_name, data}
     end
   end
 
@@ -293,15 +297,16 @@ defmodule Durable.Wait do
   @spec wait_for_all([String.t()], keyword()) :: map()
   def wait_for_all(event_names, opts \\ []) when is_list(event_names) do
     # Check if we're resuming with all events already in context
-    # Context keys are atoms (converted from strings when restored from DB)
     context = Process.get(:durable_context, %{})
-    atom_names = Enum.map(event_names, &String.to_atom/1)
+    answers = Enum.map(event_names, &answer(context, &1))
 
     # Check if all events are in context
-    if Enum.all?(atom_names, fn name -> Map.has_key?(context, name) end) do
-      Map.take(context, atom_names)
-    else
+    if :error in answers do
       throw({:wait_for_all, Keyword.merge(opts, event_names: event_names, wait_type: :all)})
+    else
+      event_names
+      |> Enum.zip(answers)
+      |> Map.new(fn {name, {:ok, data}} -> {Context.known_key(name), data} end)
     end
   end
 
@@ -344,13 +349,9 @@ defmodule Durable.Wait do
   @spec wait_for_input(String.t(), keyword()) :: term()
   def wait_for_input(input_name, opts \\ []) do
     # Check if we're resuming with input data already in context
-    # Context keys are atoms (converted from strings when restored from DB)
-    context = Process.get(:durable_context, %{})
-    key = String.to_atom(input_name)
-
-    case Map.get(context, key) do
-      nil -> throw({:wait_for_input, Keyword.put(opts, :input_name, input_name)})
-      data -> data
+    case answer(Process.get(:durable_context, %{}), input_name) do
+      {:ok, data} -> data
+      :error -> throw({:wait_for_input, Keyword.put(opts, :input_name, input_name)})
     end
   end
 
@@ -624,7 +625,8 @@ defmodule Durable.Wait do
     # JSONB persistence in PendingInput.response or workflow.context.
     safe_data = Durable.Executor.sanitize_for_json(data)
 
-    with {:ok, pending} <- find_pending_input(config, workflow_id, input_name),
+    with :ok <- answerable(workflow_id, input_name),
+         {:ok, pending} <- find_pending_input(config, workflow_id, input_name),
          {:ok, completed} <- complete_pending_input(config, pending, safe_data),
          {:ok, _} <-
            Durable.Executor.resume_workflow(workflow_id, %{input_name => safe_data}, opts) do
@@ -663,15 +665,43 @@ defmodule Durable.Wait do
     # Sanitize at the API boundary — same rationale as provide_input/4.
     safe_payload = Durable.Executor.sanitize_for_json(payload)
 
-    if Keyword.get(opts, :buffer, false),
-      do: send_or_buffer(config, workflow_id, event_name, safe_payload),
-      else: deliver_to_waiter(config, workflow_id, event_name, safe_payload)
+    with :ok <- answerable(workflow_id, event_name) do
+      if Keyword.get(opts, :buffer, false),
+        do: send_or_buffer(config, workflow_id, event_name, safe_payload),
+        else: deliver_to_waiter(config, workflow_id, event_name, safe_payload)
+    end
+  end
+
+  # An id or a name that couldn't be in the database has no one waiting on it.
+  defp answerable(workflow_id, name) do
+    if Repo.id?(workflow_id) and not Repo.bad_text?(name), do: :ok, else: {:error, :not_found}
   end
 
   defp deliver_to_waiter(config, workflow_id, event_name, safe_payload) do
-    with {:ok, pending_event} <- find_pending_event(config, workflow_id, event_name) do
-      deliver(config, workflow_id, event_name, pending_event, safe_payload)
+    case find_pending_event(config, workflow_id, event_name) do
+      {:ok, pending_event} ->
+        deliver(config, workflow_id, event_name, pending_event, safe_payload)
+
+      {:error, :not_found} = not_found ->
+        if late_for_group?(config, workflow_id, event_name), do: :ok, else: not_found
     end
+  end
+
+  # An event for a wait_for_any that already has its answer is a no-op, not an
+  # error: the sender can't know which event got there first.
+  defp late_for_group?(config, workflow_id, event_name) do
+    query =
+      from(p in PendingEvent,
+        join: g in WaitGroup,
+        on: g.id == p.wait_group_id,
+        where:
+          p.workflow_id == ^workflow_id and p.event_name == ^event_name and
+            g.status == :completed,
+        limit: 1,
+        select: true
+      )
+
+    Repo.one(config, query) == true
   end
 
   defp deliver(config, workflow_id, event_name, pending_event, safe_payload) do
@@ -693,8 +723,8 @@ defmodule Durable.Wait do
       )
 
     case Repo.transaction(config, multi) do
-      {:ok, _} ->
-        :ok
+      {:ok, %{resume: resumed}} ->
+        DurablePubSub.wake(config, resumed)
 
       {:error, stage, reason, _} ->
         require Logger
@@ -802,6 +832,7 @@ defmodule Durable.Wait do
          resume_payload
        ) do
     Ecto.Multi.new()
+    |> Durable.Executor.lock_run(workflow_id)
     |> Ecto.Multi.update(
       :event,
       PendingEvent.receive_changeset(pending_event, storable_payload)
@@ -826,6 +857,8 @@ defmodule Durable.Wait do
     with {:ok, wg_result} <-
            WaitGroup.add_event_locked(repo, wait_group_id, event_name, payload) do
       if wg_result.just_completed do
+        close_group_events(repo, wait_group_id)
+
         Durable.Executor.resume_parent_in_multi(
           repo,
           wg_result.wait_group.workflow_id,
@@ -835,6 +868,15 @@ defmodule Durable.Wait do
         {:ok, %{no_op: true, wait_group: wg_result.wait_group}}
       end
     end
+  end
+
+  # wait_for_any leaves the events that didn't fire. Open, they'd still take an
+  # event, and clash with a later wait on the same name.
+  defp close_group_events(repo, wait_group_id) do
+    repo.update_all(
+      from(p in PendingEvent, where: p.wait_group_id == ^wait_group_id and p.status == :pending),
+      set: [status: :cancelled, completed_at: DateTime.utc_now()]
+    )
   end
 
   # ============================================================================
@@ -956,8 +998,13 @@ defmodule Durable.Wait do
 
     query =
       case Keyword.get(filters, :event_name) do
-        nil -> query
-        event_name -> from(p in query, where: p.event_name == ^event_name)
+        nil ->
+          query
+
+        event_name ->
+          if Repo.bad_text?(event_name),
+            do: from(p in query, where: false),
+            else: from(p in query, where: p.event_name == ^event_name)
       end
 
     Repo.all(config, query)
@@ -1025,10 +1072,10 @@ defmodule Durable.Wait do
   end
 
   defp get_waiting_execution(config, workflow_id) do
-    case Repo.get(config, WorkflowExecution, workflow_id) do
-      nil -> {:error, :not_found}
+    case Repo.id?(workflow_id) && Repo.get(config, WorkflowExecution, workflow_id) do
       %{status: :waiting} = execution -> {:ok, execution}
-      _ -> {:error, :not_waiting}
+      %WorkflowExecution{} -> {:error, :not_waiting}
+      _not_a_run -> {:error, :not_found}
     end
   end
 
