@@ -22,6 +22,7 @@ defmodule Durable.Fuzz.ApiTest do
     FunctionClauseError,
     Protocol.UndefinedError,
     Ecto.Query.CastError,
+    Ecto.QueryError,
     DBConnection.EncodeError
   ]
 

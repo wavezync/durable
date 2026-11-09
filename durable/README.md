@@ -644,10 +644,8 @@ Something like this keeps the tables small:
 config :durable, log_capture: [levels: [:warning, :error]]
 ```
 
-Each node holds one Postgres connection outside the repo's pool, so a run
-started inside your own transaction is claimed the moment it commits. Through
-PgBouncer in transaction mode that wake doesn't arrive, and the run waits for
-the next poll instead.
+Durable uses no session features, so it runs behind PgBouncer in transaction
+mode. A PgBouncer older than 1.24 needs `prepare: :unnamed` on your repo.
 
 ### API
 

@@ -36,6 +36,7 @@ defmodule Durable.PubSub do
   """
 
   alias Durable.Config
+  alias Durable.Queue.CommitWaker
   alias Durable.Repo
 
   @type kind ::
@@ -209,26 +210,30 @@ defmodule Durable.PubSub do
 
   def wake(_config, _run), do: :ok
 
-  @doc false
-  # The Postgres channel that wakes a queue's pollers. Hashed so it always fits
-  # the 63-byte limit: a name over it would abort the caller's transaction.
-  @spec wake_channel(Config.t(), String.t()) :: String.t()
-  def wake_channel(%Config{prefix: prefix}, queue) do
-    "durable_" <> Base.encode16(:erlang.md5("#{prefix}:#{queue}"), case: :lower)
+  # A broadcast from inside a transaction reaches the pollers before they can
+  # see the run, so that one waits for the commit.
+  defp signal(%Config{repo: repo} = config, queue) do
+    cond do
+      is_nil(server(config)) -> :ok
+      repo.in_transaction?() -> wake_after_commit(config, queue)
+      true -> broadcast_wake(config, queue)
+    end
   end
 
-  # A broadcast from inside a transaction reaches the pollers before they can
-  # see the run. Postgres delivers a NOTIFY at commit and drops it on rollback.
-  # ponytail: NOTIFY takes a global lock at commit, which is why only this path
-  # uses it. Apps committing starts at a very high rate may want to start
-  # outside their transaction.
-  defp signal(%Config{repo: repo} = config, queue) do
-    if repo.in_transaction?() do
-      _ = Repo.query(config, "SELECT pg_notify($1, '')", [wake_channel(config, queue)])
-      :ok
-    else
-      broadcast(config, queue_topic(config, queue), {:durable_wake, queue})
+  defp wake_after_commit(config, queue) do
+    with {:ok, %{rows: [[transaction]]}} <-
+           Repo.query(config, "SELECT pg_current_xact_id()::text") do
+      CommitWaker.watch(config, transaction, queue)
     end
+
+    :ok
+  end
+
+  @doc false
+  @spec broadcast_wake(Config.t(), String.t()) :: :ok
+  def broadcast_wake(%Config{} = config, queue) do
+    broadcast(config, queue_topic(config, queue), {:durable_wake, queue})
+    :ok
   end
 
   defp due?(nil), do: true

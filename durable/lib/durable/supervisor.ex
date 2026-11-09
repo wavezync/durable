@@ -109,6 +109,7 @@ defmodule Durable.Supervisor do
           {Durable.NodeRegistry, config: config},
           {Durable.Queue.Sampler, config: config}
         ] ++
+        if(config.pubsub, do: [{Durable.Queue.CommitWaker, config}], else: []) ++
         if(config.prune, do: [{Durable.Pruner, config: config}], else: [])
 
     children =

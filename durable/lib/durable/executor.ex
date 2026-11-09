@@ -91,10 +91,10 @@ defmodule Durable.Executor do
       Repo.transaction(config, fn ->
         Enum.map(items, fn
           {module, input} ->
-            start_workflow(module, input, opts)
+            start_workflow(module, input, [wake: false] ++ opts)
 
           {module, input, item_opts} ->
-            start_workflow(module, input, Keyword.merge(opts, item_opts))
+            start_workflow(module, input, [wake: false] ++ Keyword.merge(opts, item_opts))
         end)
       end)
 
@@ -102,8 +102,7 @@ defmodule Durable.Executor do
     results
   end
 
-  # Each start's own wake went out before the commit, when no poller could see
-  # its run yet.
+  # One wake per queue, once the batch has committed.
   defp wake_committed(config, results) do
     ids = for {:ok, id} <- results, do: id
     now = DateTime.utc_now()
@@ -122,7 +121,7 @@ defmodule Durable.Executor do
 
   defp started({:ok, execution}, config, opts) do
     DurablePubSub.broadcast_workflow(config, :workflow_started, workflow_event(execution))
-    DurablePubSub.wake(config, execution)
+    if Keyword.get(opts, :wake, true), do: DurablePubSub.wake(config, execution)
 
     # For inline/synchronous execution (useful for testing)
     if Keyword.get(opts, :inline, false) do

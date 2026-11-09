@@ -53,6 +53,7 @@ defmodule Durable.Integration.MultiNodeTest do
   test "a start inside a transaction wakes another node's poller when it commits" do
     a = start_node!(:node_a, %{documents: 1}, poll_interval: :timer.hours(1))
     b = start_node!(:node_b, %{default: 2, ocr: 2}, poll_interval: :timer.hours(1))
+    connect_nodes!([a, b])
 
     id = :erpc.call(a, Durable.IntegrationCase, :start_in_transaction, [W.QuickOnOcr, %{}])
 

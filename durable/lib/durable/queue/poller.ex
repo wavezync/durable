@@ -59,7 +59,6 @@ defmodule Durable.Queue.Poller do
   - `:concurrency` - Maximum concurrent workers (default: 10)
   - `:poll_interval` - Milliseconds between polls (default: 1000)
   - `:worker_supervisor` - The DynamicSupervisor for workers (required)
-  - `:notifications` - The `Postgrex.Notifications` process to listen on (required)
   """
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts) do
@@ -125,15 +124,6 @@ defmodule Durable.Queue.Poller do
     # A start or resume on this queue wakes us (Durable.PubSub.wake/2), so a
     # long poll_interval doesn't delay new work. No-op without a PubSub.
     _ = DurablePubSub.subscribe(config, DurablePubSub.queue_topic(config, queue_name))
-
-    # One sent from inside a transaction comes through Postgres, at its commit.
-    # `:eventually` means Postgres isn't reachable yet; the listen applies once
-    # it is.
-    {_ok_or_eventually, _ref} =
-      Postgrex.Notifications.listen(
-        Keyword.fetch!(opts, :notifications),
-        DurablePubSub.wake_channel(config, queue_name)
-      )
 
     # Start polling
     state = schedule_poll(state, 0)
@@ -212,11 +202,6 @@ defmodule Durable.Queue.Poller do
   def handle_info({:durable_wake, _queue}, state) do
     state = if state.paused, do: state, else: poll_and_process(state)
     {:noreply, state}
-  end
-
-  @impl true
-  def handle_info({:notification, _pid, _ref, _channel, _payload}, state) do
-    handle_info({:durable_wake, state.queue_name}, state)
   end
 
   @impl true

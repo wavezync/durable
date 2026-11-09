@@ -16,7 +16,8 @@ config :durable, Durable.IntegrationRepo,
   username: "postgres",
   password: "postgres",
   hostname: "localhost",
-  port: 54321,
+  # Point this at a PgBouncer to run the live suites through a connection pooler.
+  port: String.to_integer(System.get_env("INTEGRATION_DB_PORT", "54321")),
   database: "durable_test#{System.get_env("MIX_TEST_PARTITION")}",
   pool_size: 10
 

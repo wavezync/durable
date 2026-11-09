@@ -4,6 +4,8 @@ defmodule Durable.Integration.RunControlTest do
   """
   use Durable.IntegrationCase, async: false
 
+  alias Durable.Config
+  alias Durable.Queue.CommitWaker
   alias Durable.Queue.Poller
   alias Durable.Wait.{SleepWaker, TimeoutWorker}
 
@@ -1166,13 +1168,13 @@ defmodule Durable.Integration.RunControlTest do
     end
   end
 
-  describe "the listener behind commit-time wakes" do
+  describe "waking on commit" do
     defmodule DownRepo do
       @moduledoc false
       use Ecto.Repo, otp_app: :durable, adapter: Ecto.Adapters.Postgres
     end
 
-    test "doesn't stop Durable booting while Postgres is down" do
+    test "doesn't stop Durable booting, or fall over, while Postgres is down" do
       Application.put_env(:durable, DownRepo,
         hostname: "localhost",
         port: 1,
@@ -1186,74 +1188,72 @@ defmodule Durable.Integration.RunControlTest do
 
       assert {:ok, _} =
                start_supervised(
-                 {Durable, repo: DownRepo, name: DownInstance, queues: queue_opts(%{default: 1})}
+                 {Durable,
+                  repo: DownRepo,
+                  name: DownInstance,
+                  pubsub: :start,
+                  queues: queue_opts(%{default: 1})}
                )
 
-      listener = Process.whereis(DownInstance.Queue.Notifications)
+      waker = Process.whereis(DownInstance.Queue.CommitWaker)
       poller = Process.whereis(DownInstance.Queue.Poller.Default)
+      assert is_pid(waker) and is_pid(poller)
 
-      # Long enough for many polls and a failed reconnect.
-      Process.sleep(2_500)
+      CommitWaker.watch(Config.get(DownInstance), "1", "default")
 
-      assert Process.whereis(DownInstance.Queue.Notifications) == listener
+      # Long enough for many polls and failed checks.
+      Process.sleep(1_000)
+
+      assert Process.whereis(DownInstance.Queue.CommitWaker) == waker
       assert Process.whereis(DownInstance.Queue.Poller.Default) == poller
     end
 
-    test "comes back after Postgres drops its connection" do
-      start_durable!(%{default: 5}, poll_interval: :timer.hours(1))
-      Process.sleep(150)
+    test "survives a query it can't even attempt" do
+      config = Config.new!(repo: DownRepo, name: NeverStarted)
+      waker = start_supervised!({CommitWaker, config})
 
-      [[old_pid]] = listener_pids()
-      IntegrationRepo.query!("SELECT pg_terminate_backend($1)", [old_pid])
-      assert_eventually(fn -> match?([[pid]] when pid != old_pid, listener_pids()) end, 8_000, 50)
+      CommitWaker.watch(config, "1", "default")
+      Process.sleep(100)
 
-      {:ok, id} = in_slow_transaction(fn -> start!(Quick) end)
-      await_status(id, :completed, 3_000)
+      assert Process.alive?(waker)
     end
 
-    defp listener_pids do
-      IntegrationRepo.query!("""
-      SELECT pid FROM pg_stat_activity
-      WHERE datname = current_database() AND query LIKE '%LISTEN "%' AND pid <> pg_backend_pid()
-      """).rows
-    end
-
-    test "gone for good, leaves the run to the next poll" do
+    test "losing a wake leaves the run to the next poll" do
       start_durable!(%{default: 5}, poll_interval: 300)
 
-      :ok =
-        Supervisor.terminate_child(Durable.Queue.Manager, Postgrex.Notifications)
+      {:ok, id} =
+        in_slow_transaction(fn ->
+          id = start!(Quick)
+          GenServer.stop(CommitWaker.name(Config.get(Durable)))
+          id
+        end)
 
-      {:ok, id} = in_slow_transaction(fn -> start!(Quick) end)
       await_status(id, :completed, 3_000)
     end
 
-    test "fits a queue name longer than a Postgres channel can be" do
-      long = String.duplicate("q", 100)
-      start_durable!(%{String.to_atom(long) => 2}, poll_interval: :timer.hours(1))
-      Process.sleep(150)
+    test "gives up on a transaction that stays open past the limit" do
+      start_durable!(%{default: 5}, poll_interval: :timer.hours(1))
+      config = Config.get(Durable)
+      waker = Process.whereis(CommitWaker.name(config))
 
-      {:ok, id} = in_slow_transaction(fn -> start!(Quick, %{}, queue: long) end)
-      await_status(id, :completed, 3_000)
-    end
-
-    test "uses a channel per queue and per prefix" do
-      config = Durable.Config.get(Durable)
-      channel = &Durable.PubSub.wake_channel/2
-
-      assert channel.(config, "a") != channel.(config, "b")
-      assert channel.(config, "a") != channel.(%{config | prefix: "other"}, "a")
+      {:ok, _} =
+        IntegrationRepo.transaction(fn ->
+          %{rows: [[transaction]]} = IntegrationRepo.query!("SELECT pg_current_xact_id()::text")
+          CommitWaker.watch(config, transaction, "default", 0)
+          assert_eventually(fn -> :sys.get_state(waker).watched == %{} end, 2_000, 10)
+        end)
     end
   end
 
-  describe "with no PubSub and a poll interval too long to help" do
+  describe "with no PubSub" do
     setup do
-      start_durable!(%{default: 5}, poll_interval: :timer.hours(1), pubsub: nil)
-      Process.sleep(150)
+      start_durable!(%{default: 5}, poll_interval: 200, pubsub: nil)
       :ok
     end
 
-    test "a start inside a transaction is still claimed when it commits" do
+    test "there's nothing to wake, and the next poll claims a start from a transaction" do
+      assert Process.whereis(CommitWaker.name(Config.get(Durable))) == nil
+
       {:ok, id} = in_slow_transaction(fn -> start!(Quick) end)
       await_status(id, :completed, 3_000)
     end

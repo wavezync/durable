@@ -115,19 +115,7 @@ defmodule Durable.Queue.Manager do
         {Registry, keys: :unique, name: registry_name(config.name)},
 
         # Stale job recovery
-        {StaleJobRecovery, config: config},
-
-        # Delivers wakes sent from inside a transaction, at its commit. It logs
-        # each failed reconnect, so it doesn't retry at Postgrex's 500 ms.
-        # ponytail: Postgrex crashes this if a poller dies while it's
-        # disconnected. Its restart loses the other pollers' listens, so those
-        # wakes wait for the next poll until the pollers restart.
-        {Postgrex.Notifications,
-         Keyword.merge(config.repo.config(),
-           name: notifications_name(config.name),
-           auto_reconnect: true,
-           reconnect_backoff: 2_000
-         )}
+        {StaleJobRecovery, config: config}
       ] ++ build_queue_children(config)
 
     Logger.info(
@@ -157,7 +145,6 @@ defmodule Durable.Queue.Manager do
              concurrency: Keyword.get(opts, :concurrency, 10),
              poll_interval: Keyword.get(opts, :poll_interval, 1000),
              worker_supervisor: worker_sup_name,
-             notifications: notifications_name(config.name),
              name: poller_name(queue_str, config.name)
            ]},
           id: {Poller, queue_str}
@@ -168,10 +155,6 @@ defmodule Durable.Queue.Manager do
 
   defp manager_name(durable_name) do
     Module.concat([durable_name, Queue, Manager])
-  end
-
-  defp notifications_name(durable_name) do
-    Module.concat([durable_name, Queue, Notifications])
   end
 
   defp registry_name(durable_name) do
