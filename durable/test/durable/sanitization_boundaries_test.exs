@@ -13,7 +13,6 @@ defmodule Durable.SanitizationBoundariesTest do
     H-4  StepRunner.serialize_output    → StepExecution.output
     H-7  Executor.resume_workflow/3     → WorkflowExecution.context
 
-  See docs/bug-reports/2026-04-13-follow-up-audit.md for context.
   """
 
   use Durable.DataCase, async: false

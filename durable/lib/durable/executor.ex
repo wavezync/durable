@@ -1848,8 +1848,7 @@ defmodule Durable.Executor do
     #
     # Rationale: Context is cumulative. Before this change, put_context/2
     # writes were silently dropped unless the user also returned those keys,
-    # which made the put_context API a footgun (see bug report C-1,
-    # 2026-04-13-follow-up-audit.md).
+    # which made the put_context API a footgun.
     process_ctx = Process.get(:durable_context, %{})
 
     # Merge preserving key shapes: step return wins over prior writes on

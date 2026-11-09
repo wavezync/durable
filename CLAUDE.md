@@ -31,6 +31,8 @@ mix precommit         # Runs: format, compile --warnings-as-errors, credo --stri
 
 ## Architecture
 
+[ARCHITECTURE.md](ARCHITECTURE.md) explains how it works and the rules to keep. [PLAN.md](PLAN.md) is what's next.
+
 ```
 lib/durable/
 ├── config.ex               # Configuration management (NimbleOptions, persistent_term)

@@ -12,8 +12,7 @@ defmodule Durable.DSL.Step do
   If/when this DSL gains an iteration primitive (e.g. `each/3` to run a step
   once per item in a list), design with **context isolation per iteration**.
   Parallel-style shared context across concurrent iterations creates races on
-  `put_context/2` writes; isolated contexts avoid that class of bug. See
-  `docs/bug-reports/2026-04-13-follow-up-audit.md`.
+  `put_context/2` writes; isolated contexts avoid that class of bug.
 
   ## Usage
 
