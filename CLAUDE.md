@@ -124,6 +124,7 @@ children = [
 - `:queue_enabled` - Enable queue processing (default: `true`)
 - `:stale_lock_timeout` - Seconds before lock is stale (default: `300`)
 - `:heartbeat_interval` - Worker heartbeat interval in ms (default: `30_000`)
+- `:shutdown_grace_period` - Ms a stopping node waits for running work (default: `15_000`)
 
 ## Testing
 

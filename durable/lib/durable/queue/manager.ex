@@ -27,6 +27,7 @@ defmodule Durable.Queue.Manager do
 
   alias Durable.Config
   alias Durable.Queue.Adapter
+  alias Durable.Queue.Drainer
   alias Durable.Queue.Poller
   alias Durable.Queue.StaleJobRecovery
 
@@ -116,7 +117,7 @@ defmodule Durable.Queue.Manager do
 
         # Stale job recovery
         {StaleJobRecovery, config: config}
-      ] ++ build_queue_children(config)
+      ] ++ build_queue_children(config) ++ drainer(config)
 
     Logger.info(
       "Queue manager #{inspect(config.name)} starting with queues: #{inspect(Map.keys(config.queues))}"
@@ -126,6 +127,10 @@ defmodule Durable.Queue.Manager do
   end
 
   # Private functions
+
+  # Last, so it's the first child stopped. See `Durable.Queue.Drainer`.
+  defp drainer(%Config{shutdown_grace_period: 0}), do: []
+  defp drainer(%Config{} = config), do: [{Drainer, config}]
 
   defp build_queue_children(%Config{} = config) do
     Enum.flat_map(config.queues, fn {queue_name, opts} ->

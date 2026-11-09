@@ -152,7 +152,10 @@ defmodule Durable.IntegrationCase do
     :global.sync()
 
     {:ok, supervisor} =
-      Supervisor.start_link([IntegrationRepo, {Durable, durable_opts}], strategy: :one_for_one)
+      Supervisor.start_link(
+        [IntegrationRepo, {Durable, Keyword.put_new(durable_opts, :shutdown_grace_period, 0)}],
+        strategy: :one_for_one
+      )
 
     Process.unlink(supervisor)
     :ok

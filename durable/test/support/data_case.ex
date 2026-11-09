@@ -167,6 +167,8 @@ defmodule Durable.DataCase do
       |> Keyword.put_new(:queues, %{default: [concurrency: 1, poll_interval: 50]})
       |> Keyword.put_new(:stale_lock_timeout, 300)
       |> Keyword.put_new(:heartbeat_interval, 100)
+      # A test that stops a node mid-step means to.
+      |> Keyword.put_new(:shutdown_grace_period, 0)
 
     name = Keyword.fetch!(opts, :name)
 

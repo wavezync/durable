@@ -25,6 +25,10 @@ defmodule Durable.Config do
   * `:queue_enabled` - Enable/disable queue processing (default: `true`)
   * `:stale_lock_timeout` - Seconds before a lock is considered stale (default: `300`)
   * `:heartbeat_interval` - Milliseconds between worker heartbeats (default: `30_000`)
+  * `:shutdown_grace_period` - Milliseconds a stopping node waits for its running
+    work to finish or park, with no new claims (default: `15_000`, `0` to not
+    wait). Keep your platform's shutdown limit longer than this. Anything still
+    running then is taken over after `:stale_lock_timeout`
   * `:log_level` - Log level for Ecto queries, or `false` to disable (default: `false`)
 
   ## Examples
@@ -50,6 +54,7 @@ defmodule Durable.Config do
           queue_enabled: boolean(),
           stale_lock_timeout: pos_integer(),
           heartbeat_interval: pos_integer(),
+          shutdown_grace_period: non_neg_integer(),
           scheduled_modules: [module()],
           scheduler_interval: pos_integer(),
           sleep_waker_interval: pos_integer(),
@@ -69,6 +74,7 @@ defmodule Durable.Config do
     :queue_enabled,
     :stale_lock_timeout,
     :heartbeat_interval,
+    :shutdown_grace_period,
     :scheduled_modules,
     :scheduler_interval,
     :sleep_waker_interval,
@@ -115,6 +121,11 @@ defmodule Durable.Config do
       type: :pos_integer,
       default: 30_000,
       doc: "Milliseconds between worker heartbeats"
+    ],
+    shutdown_grace_period: [
+      type: :non_neg_integer,
+      default: 15_000,
+      doc: "Milliseconds a stopping node waits for its running work to finish or park"
     ],
     scheduled_modules: [
       type: {:list, :atom},

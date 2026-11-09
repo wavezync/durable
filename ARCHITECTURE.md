@@ -29,9 +29,10 @@ Durable.Supervisor
 │   the rest only when queue_enabled is true
 ├── Queue.Manager
 │   ├── StaleJobRecovery    every 60 s
-│   └── for each queue
-│       ├── DynamicSupervisor → Worker → Task (one per claimed run)
-│       └── Poller
+│   ├── for each queue
+│   │   ├── DynamicSupervisor → Worker → Task (one per claimed run)
+│   │   └── Poller
+│   └── Drainer             stopped first; lets running work finish on every queue at once
 ├── Wait.TimeoutWorker      every 60 s
 ├── Wait.SleepWaker
 └── Scheduler               every 60 s by default
@@ -106,6 +107,8 @@ All tables live in the `durable` schema.
 | A wait past its timeout | `TimeoutWorker` |
 
 A step can run again after a crash, so steps should be idempotent. Delivery is at least once.
+
+A node that stops cleanly needs none of this for work that finishes within `shutdown_grace_period`: `Queue.Drainer` stops claiming and waits for it.
 
 ## Rules to keep
 
