@@ -4,6 +4,12 @@ All notable changes to this package. Versions follow [Semantic
 Versioning](https://semver.org); entries come from [Conventional
 Commits](https://www.conventionalcommits.org).
 
+## [1.2.1](https://github.com/wavezync/durable/compare/durable_dashboard-v1.2.0...durable_dashboard-v1.2.1) - 2026-11-09
+
+### Bug fixes
+
+- A cancelled step isn't shown as an error ([f548cfa](https://github.com/wavezync/durable/commit/f548cfa65df7d6acacd64697989aed679fdb90f5))
+
 ## [1.2.0](https://github.com/wavezync/durable/compare/durable_dashboard-v1.1.1...durable_dashboard-v1.2.0) - 2026-11-09
 
 ### Features
