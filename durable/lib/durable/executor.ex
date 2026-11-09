@@ -1471,6 +1471,12 @@ defmodule Durable.Executor do
   end
 
   # Execute a single parallel step (called when a child execution is picked up)
+  # The marker stays in the saved context: without it, a branch that wakes up
+  # would run as a whole workflow and repeat every step after the block.
+  defp save_branch_context(config, execution, data, step_name) do
+    save_data_as_context(config, execution, Map.put(data, "__parallel_step", step_name))
+  end
+
   defp execute_parallel_step(execution, workflow_def, config) do
     step_name_str =
       Map.get(execution.context, "__parallel_step") ||
@@ -1517,11 +1523,11 @@ defmodule Durable.Executor do
 
         {wait_type, wait_opts}
         when wait_type in [:sleep, :wait_for_event, :wait_for_input, :wait_for_any, :wait_for_all] ->
-          {:ok, exec} = save_data_as_context(config, execution, data)
+          {:ok, exec} = save_branch_context(config, execution, data, step_name_str)
           handle_wait_result(config, exec, wait_type, wait_opts)
 
         {:call_workflow, call_opts} ->
-          {:ok, exec} = save_data_as_context(config, execution, data)
+          {:ok, exec} = save_branch_context(config, execution, data, step_name_str)
           handle_call_workflow(config, exec, call_opts)
 
         {:decision, _target, _data} ->
@@ -1855,34 +1861,14 @@ defmodule Durable.Executor do
       process_ctx
       |> Map.merge(data)
       |> sanitize_for_json()
-      |> drop_consumed_sleep_marker(execution.current_step)
+      # The waker's marker is for the step that slept. Kept, it would overwrite a
+      # parallel branch's own marker through its input, and a later visit to the
+      # same step would skip its sleep.
+      |> Map.drop([:__sleep_satisfied__, "__sleep_satisfied__"])
 
     execution
     |> Ecto.Changeset.change(context: merged)
     |> cas_update!(config)
-  end
-
-  # The SleepWaker stamps `__sleep_satisfied__ => <step_name>` into context so
-  # the woken step's `sleep/1`/`schedule_at/1` returns instead of re-throwing.
-  # Once that step completes we drop the marker — otherwise it lives in context
-  # forever and any later re-entry of the SAME step name (a loop/`each` body, or
-  # a `decision` goto that revisits it) would see the stale marker and silently
-  # skip its sleep. The marker is therefore a strict one-shot keyed to the step
-  # that consumed it. (Handles both atom and string key shapes since context can
-  # arrive atomized from the process dict or string-keyed from a step return.)
-  defp drop_consumed_sleep_marker(context, current_step) when is_binary(current_step) do
-    context
-    |> drop_marker_if_step(:__sleep_satisfied__, current_step)
-    |> drop_marker_if_step("__sleep_satisfied__", current_step)
-  end
-
-  defp drop_consumed_sleep_marker(context, _current_step), do: context
-
-  defp drop_marker_if_step(context, key, current_step) do
-    case Map.get(context, key) do
-      ^current_step -> Map.delete(context, key)
-      _ -> context
-    end
   end
 
   defp mark_completed(config, execution, final_data) do
@@ -2094,6 +2080,7 @@ defmodule Durable.Executor do
 
     multi =
       Ecto.Multi.new()
+      |> lock_run(parent_id)
       |> Ecto.Multi.update(:event, PendingEvent.receive_changeset(pending_event, payload))
       |> Ecto.Multi.run(:wait_group, fn repo, _ ->
         WaitGroup.add_event_locked(
@@ -2418,6 +2405,10 @@ defmodule Durable.Executor do
       execution
       |> WorkflowExecution.compensating_changeset()
       |> cas_update!(config)
+
+    # A run that failed as it resumed (a parallel failure, its deadline, a
+    # timed-out input) hasn't run a step in this process, so its data isn't here.
+    if Context.context() == %{}, do: Process.put(:durable_context, restore_keys(exec.context))
 
     # Run each compensation, collecting results
     results =

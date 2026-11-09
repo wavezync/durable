@@ -218,6 +218,13 @@ defmodule Durable.HostileValuesTest do
     assert is_list(Durable.list_executions(offset: -1))
   end
 
+  test "a prefix the schemas aren't bound to is refused at boot, not left to hang" do
+    assert {:error, %NimbleOptions.ValidationError{key: :prefix}} =
+             Config.new(repo: TestRepo, prefix: "other")
+
+    assert {:ok, %{prefix: "durable"}} = Config.new(repo: TestRepo)
+  end
+
   test "sanitizing leaves nothing Postgres or JSON would reject" do
     for term <- ["a\0b", <<0xFF>>, :"a\0", %{"k\0" => 1}, %{<<0xFF>> => 1}, [1 | 2]] do
       safe = Executor.sanitize_for_json(term)

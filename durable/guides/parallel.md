@@ -347,8 +347,6 @@ parallel on_error: :complete_all do
 end
 ```
 
-**Note:** Child workflows that use waits (`sleep`, `wait_for_event`, etc.) are not supported inside parallel blocks — they will return an error. Only synchronously-completing children work here.
-
 See the [Orchestration Guide](orchestration.md) for more details on `call_workflow`.
 
 ## How It Works

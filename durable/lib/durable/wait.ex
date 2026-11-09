@@ -677,9 +677,30 @@ defmodule Durable.Wait do
   end
 
   defp deliver_to_waiter(config, workflow_id, event_name, safe_payload) do
-    with {:ok, pending_event} <- find_pending_event(config, workflow_id, event_name) do
-      deliver(config, workflow_id, event_name, pending_event, safe_payload)
+    case find_pending_event(config, workflow_id, event_name) do
+      {:ok, pending_event} ->
+        deliver(config, workflow_id, event_name, pending_event, safe_payload)
+
+      {:error, :not_found} = not_found ->
+        if late_for_group?(config, workflow_id, event_name), do: :ok, else: not_found
     end
+  end
+
+  # An event for a wait_for_any that already has its answer is a no-op, not an
+  # error: the sender can't know which event got there first.
+  defp late_for_group?(config, workflow_id, event_name) do
+    query =
+      from(p in PendingEvent,
+        join: g in WaitGroup,
+        on: g.id == p.wait_group_id,
+        where:
+          p.workflow_id == ^workflow_id and p.event_name == ^event_name and
+            g.status == :completed,
+        limit: 1,
+        select: true
+      )
+
+    Repo.one(config, query) == true
   end
 
   defp deliver(config, workflow_id, event_name, pending_event, safe_payload) do

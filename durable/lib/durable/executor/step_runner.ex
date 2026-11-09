@@ -258,6 +258,8 @@ defmodule Durable.Executor.StepRunner do
 
   # Handle step result from pipeline model
   defp handle_result({:ok, new_data}, ctx) when is_run_data(new_data) do
+    new_data = without_sleep_marker(new_data)
+
     %{step: step, step_exec: step_exec, logs: logs, duration_ms: duration_ms, config: config} =
       ctx
 
@@ -278,6 +280,8 @@ defmodule Durable.Executor.StepRunner do
   # Handle decision with goto
   defp handle_result({:goto, target, new_data}, ctx)
        when is_atom(target) and is_map(new_data) do
+    new_data = without_sleep_marker(new_data)
+
     %{step_exec: step_exec, logs: logs, duration_ms: duration_ms, config: config} = ctx
 
     decision_output = %{
@@ -377,6 +381,12 @@ defmodule Durable.Executor.StepRunner do
     {:ok, _} = fail_step_execution(config, step_exec, error, logs, duration_ms)
     {:error, error}
   end
+
+  # The marker is for the step that slept. Carried on in the data, it would
+  # reach a parallel branch's input and overwrite that branch's own marker, so
+  # the branch would sleep again every time it woke.
+  defp without_sleep_marker(data),
+    do: Map.drop(data, [:__sleep_satisfied__, "__sleep_satisfied__"])
 
   defp give_up(error, ctx) do
     %{step_exec: step_exec, logs: logs, duration_ms: duration_ms, config: config} = ctx

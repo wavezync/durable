@@ -131,7 +131,7 @@ defmodule Durable.FuzzScripts do
     end
 
     for event <- IntegrationRepo.all(pending.(PendingEvent)),
-        not String.starts_with?(event.event_name, "never_") do
+        not String.starts_with?(event.event_name, ["never_", "__"]) do
       Durable.send_event(id, event.event_name, %{"got" => 1})
     end
 

@@ -9,7 +9,9 @@ defmodule Durable.Config do
 
   * `:repo` - The Ecto repo module to use for persistence (required)
   * `:name` - Instance name for multiple Durable instances (default: `Durable`)
-  * `:prefix` - PostgreSQL schema name for table isolation (default: `"durable"`)
+  * `:prefix` - PostgreSQL schema name. Only `"durable"` is supported for now:
+    the schemas are bound to it, so another value would write runs to one
+    schema and poll for them in another.
   * `:queues` - Queue configuration map (default: `%{default: [concurrency: 10, poll_interval: 1000]}`).
     `concurrency` is per node. `poll_interval` is how often an idle queue
     checks for work, in milliseconds. With a `:pubsub`, a start or resume
@@ -35,10 +37,6 @@ defmodule Durable.Config do
          default: [concurrency: 10],
          high_priority: [concurrency: 20, poll_interval: 500]
        }}
-
-      # Multiple instances with different prefixes
-      {Durable, repo: MyApp.Repo, name: :workflows_a, prefix: "durable_a"}
-      {Durable, repo: MyApp.Repo, name: :workflows_b, prefix: "durable_b"}
 
   """
 
@@ -92,9 +90,9 @@ defmodule Durable.Config do
       doc: "Instance name for multiple Durable instances"
     ],
     prefix: [
-      type: :string,
+      type: {:in, ["durable"]},
       default: "durable",
-      doc: "PostgreSQL schema name for table isolation"
+      doc: "PostgreSQL schema name; only \"durable\" is supported for now"
     ],
     queues: [
       type: :map,

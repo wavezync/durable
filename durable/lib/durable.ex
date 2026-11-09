@@ -68,7 +68,6 @@ defmodule Durable do
 
   * `:repo` - The Ecto repo module (required)
   * `:name` - Instance name for multiple Durable instances (default: `Durable`)
-  * `:prefix` - PostgreSQL schema name (default: `"durable"`)
   * `:queues` - Queue configuration map
   * `:queue_enabled` - Enable/disable queue processing (default: `true`)
 
@@ -706,7 +705,6 @@ defmodule Durable do
 
   * `:repo` - The Ecto repo module (required)
   * `:name` - Instance name (default: `Durable`)
-  * `:prefix` - Database schema prefix (default: `"durable"`)
   * `:queues` - Queue configuration
 
   See `Durable.Config` for the complete list of options.

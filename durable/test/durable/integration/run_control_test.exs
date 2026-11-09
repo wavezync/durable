@@ -4,6 +4,9 @@ defmodule Durable.Integration.RunControlTest do
   """
   use Durable.IntegrationCase, async: false
 
+  alias Durable.Queue.Poller
+  alias Durable.Wait.{SleepWaker, TimeoutWorker}
+
   alias Durable.Storage.Schemas.ScheduledWorkflow
 
   defmodule Quick do
@@ -228,6 +231,158 @@ defmodule Durable.Integration.RunControlTest do
     workflow "rc_asks" do
       step(:a, fn data ->
         wait_for_input("approve")
+        {:ok, data}
+      end)
+    end
+  end
+
+  defmodule SleepingBranch do
+    use Durable
+    use Durable.Wait
+
+    workflow "rc_sleeping_branch" do
+      parallel do
+        step(:sleeper, fn data ->
+          sleep(1)
+          Probe.here(:branch_done)
+          {:ok, data}
+        end)
+
+        step(:quick, fn data ->
+          Probe.here(:quick)
+          {:ok, data}
+        end)
+      end
+
+      step(:after_block, fn data ->
+        Probe.here(:after_block)
+        {:ok, data}
+      end)
+    end
+  end
+
+  defmodule SleepsBeforeSleepingBranch do
+    use Durable
+    use Durable.Wait
+
+    workflow "rc_sleeps_before_branch" do
+      step(:first, fn data ->
+        sleep(1)
+        {:ok, data}
+      end)
+
+      parallel do
+        step(:sleeper, fn data ->
+          sleep(1)
+          Probe.here(:branch_done)
+          {:ok, data}
+        end)
+      end
+
+      step(:after_block, fn data ->
+        Probe.here(:after_block)
+        {:ok, data}
+      end)
+    end
+  end
+
+  defmodule WaitingBranch do
+    use Durable
+    use Durable.Wait
+
+    workflow "rc_waiting_branch" do
+      parallel do
+        step(:waiter, fn data ->
+          wait_for_event("go")
+          Probe.here(:branch_done)
+          {:ok, data}
+        end)
+      end
+
+      step(:after_block, fn data ->
+        Probe.here(:after_block)
+        {:ok, data}
+      end)
+    end
+  end
+
+  defmodule ChildSleeps do
+    use Durable
+    use Durable.Wait
+
+    workflow "rc_child_sleeps" do
+      step(:nap, fn data ->
+        sleep(1)
+        {:ok, data}
+      end)
+    end
+  end
+
+  defmodule BranchCallsChildThatSleeps do
+    use Durable
+    use Durable.Orchestration
+
+    workflow "rc_branch_calls_sleeper" do
+      parallel do
+        step(:caller, fn data ->
+          {:ok, _result} = call_workflow(ChildSleeps, %{}, ref: :nap)
+          Probe.here(:branch_done)
+          {:ok, data}
+        end)
+      end
+
+      step(:after_block, fn data ->
+        Probe.here(:after_block)
+        {:ok, data}
+      end)
+    end
+  end
+
+  defmodule UndoAfterBranchFails do
+    use Durable
+
+    workflow "rc_undo_after_branch_fails" do
+      step(:book, [compensate: :unbook], fn data -> {:ok, Map.put(data, "booking", "B1")} end)
+
+      parallel do
+        step(:charge, fn _data -> {:fail, "declined"} end)
+      end
+
+      compensate(:unbook, fn data ->
+        Probe.put(:undone_with, data["booking"] || data[:booking])
+        {:ok, data}
+      end)
+    end
+  end
+
+  defmodule UndoAfterInputTimesOut do
+    use Durable
+    use Durable.Wait
+
+    workflow "rc_undo_after_input_times_out" do
+      step(:book, [compensate: :unbook], fn data -> {:ok, Map.put(data, "booking", "B1")} end)
+
+      step(:approve, fn data ->
+        wait_for_input("approve", timeout: 1, on_timeout: :fail)
+        {:ok, data}
+      end)
+
+      compensate(:unbook, fn data ->
+        Probe.put(:undone_with, data["booking"] || data[:booking])
+        {:ok, data}
+      end)
+    end
+  end
+
+  defmodule UndoAfterDeadline do
+    use Durable
+
+    workflow "rc_undo_after_deadline", timeout: 100 do
+      step(:book, [compensate: :unbook], fn data -> {:ok, Map.put(data, "booking", "B1")} end)
+      step(:charge, [queue: :nobody], fn data -> {:ok, data} end)
+
+      compensate(:unbook, fn data ->
+        Probe.put(:undone_with, data["booking"] || data[:booking])
         {:ok, data}
       end)
     end
@@ -1136,13 +1291,101 @@ defmodule Durable.Integration.RunControlTest do
         put_in(state.workers[earlier], %{ref: ref, job_id: id, token: nil})
       end)
 
-      assert Durable.Queue.Poller.status(poller).active_jobs == 2
+      assert Poller.status(poller).active_jobs == 2
 
       send(poller, {:job_complete, earlier, id, :waiting, 1})
 
-      assert Durable.Queue.Poller.status(poller).active_jobs == 1
+      assert Poller.status(poller).active_jobs == 1
       :ok = Probe.set({:go, 1})
       await_status(id, :completed, 3_000)
+    end
+  end
+
+  describe "a parallel branch that waits" do
+    setup do
+      start_durable!(%{default: 5})
+      :ok
+    end
+
+    defp finish_with_waker(id) do
+      assert_eventually(
+        fn ->
+          SleepWaker.wake_now(Durable)
+          get(id).status == :completed
+        end,
+        8_000,
+        20
+      )
+    end
+
+    test "that sleeps runs only its own step, and what follows runs once" do
+      id = start!(SleepingBranch)
+      finish_with_waker(id)
+
+      assert Probe.hits(:branch_done) == 1
+      assert Probe.hits(:quick) == 1
+      assert Probe.hits(:after_block) == 1
+    end
+
+    test "that sleeps after an earlier step slept finishes" do
+      id = start!(SleepsBeforeSleepingBranch)
+      finish_with_waker(id)
+
+      assert Probe.hits(:branch_done) == 1
+      assert Probe.hits(:after_block) == 1
+    end
+
+    test "that waits for an event gets it, and what follows runs once" do
+      id = start!(WaitingBranch)
+      assert_eventually(fn -> match?([%{status: :waiting}], children_of(id)) end)
+
+      [branch] = children_of(id)
+      assert Durable.send_event(branch.id, "go", %{}) == :ok
+      await_status(id, :completed, 5_000)
+
+      assert Probe.hits(:branch_done) == 1
+      assert Probe.hits(:after_block) == 1
+    end
+
+    test "that calls a child which sleeps finishes" do
+      id = start!(BranchCallsChildThatSleeps)
+      finish_with_waker(id)
+
+      assert Probe.hits(:branch_done) == 1
+      assert Probe.hits(:after_block) == 1
+    end
+  end
+
+  describe "a compensation after a run fails as it resumes" do
+    setup do
+      start_durable!(%{default: 5})
+      :ok
+    end
+
+    test "has the run's data when a parallel branch failed" do
+      id = start!(UndoAfterBranchFails)
+      await_status(id, :compensated, 5_000)
+      assert Probe.fetch(:undone_with) == "B1"
+    end
+
+    test "has the run's data when an input timed out" do
+      id = start!(UndoAfterInputTimesOut)
+      assert_eventually(fn -> get(id).status == :waiting end)
+      Process.sleep(5)
+      TimeoutWorker.check_timeouts(Durable)
+
+      await_status(id, :compensated, 5_000)
+      assert Probe.fetch(:undone_with) == "B1"
+    end
+
+    test "has the run's data when it ran out of time" do
+      id = start!(UndoAfterDeadline)
+      assert_eventually(fn -> get(id).queue == "nobody" end)
+      Process.sleep(150)
+      TimeoutWorker.check_timeouts(Durable)
+
+      await_status(id, :compensated, 5_000)
+      assert Probe.fetch(:undone_with) == "B1"
     end
   end
 

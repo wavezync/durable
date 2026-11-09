@@ -115,6 +115,131 @@ defmodule Durable.FuzzWorkflows do
     end
   end
 
+  # Branch, parallel, a child workflow and goto in one run.
+  defmodule TreeChild do
+    @moduledoc false
+    use Durable
+
+    alias Durable.FuzzWorkflows, as: F
+
+    workflow "fuzz_tree_child" do
+      step(:book, [compensate: :unbook], fn d -> {:ok, d} end)
+      step(:work, fn d -> F.tree_child(d) end)
+      compensate(:unbook, fn d -> {:ok, d} end)
+    end
+  end
+
+  defmodule Tree do
+    @moduledoc false
+    use Durable
+    use Durable.Orchestration
+
+    alias Durable.FuzzWorkflows, as: F
+
+    workflow "fuzz_tree" do
+      step(:first, [compensate: :undo_first], fn d -> F.tree(:first, d) end)
+
+      branch on: fn d -> F.tree_path(d) end do
+        "a" ->
+          step(:a1, [queue: :q_a, retry: [max_attempts: 3, backoff: :constant, base: 1]], fn d ->
+            F.tree(:a1, d)
+          end)
+
+          step(:a2, fn d -> F.tree(:a2, d) end)
+
+        "b" ->
+          step(:b1, [retry: [max_attempts: 3, backoff: :constant, base: 1]], fn d ->
+            F.tree(:b1, d)
+          end)
+
+        _ ->
+          step(:c1, [queue: :q_b], fn d -> F.tree(:c1, d) end)
+      end
+
+      parallel do
+        step(:p1, [queue: :q_a], fn d -> F.tree(:p1, d) end)
+        step(:p2, [queue: :q_b], fn d -> F.tree(:p2, d) end)
+        step(:p3, fn d -> F.tree(:p3, d) end)
+      end
+
+      step(:call, fn d ->
+        case call_workflow(Durable.FuzzWorkflows.TreeChild, %{"case" => F.case_of(d)},
+               ref: :child
+             ) do
+          {:ok, _result} -> F.tree(:call, d)
+          {:error, _reason} -> {:fail, "child didn't finish"}
+        end
+      end)
+
+      decision(:route, fn d -> F.tree_route(d) end)
+
+      step(:skipped, fn d -> F.tree(:skipped, d) end)
+      step(:last, fn d -> F.tree(:last, d) end)
+
+      compensate(:undo_first, fn d ->
+        Durable.IntegrationProbe.note({F.case_of(d), :undo, :first})
+        {:ok, d}
+      end)
+    end
+  end
+
+  def tree_path(data), do: Probe.fetch(case_of(data)).path
+
+  def tree_route(data) do
+    case_id = case_of(data)
+
+    if Probe.fetch(case_id).route == :last do
+      Probe.note({case_id, :route, :goto})
+      {:goto, :last, data}
+    else
+      {:ok, data}
+    end
+  end
+
+  def tree_child(data) do
+    case Probe.fetch(case_of(data)).child do
+      :ok -> {:ok, data}
+      :fail -> {:fail, "child failed"}
+      :cancel -> {:cancel, "child cancelled"}
+    end
+  end
+
+  def tree(step, data) do
+    case_id = case_of(data)
+    Probe.note({case_id, step, :enter})
+    perform(Map.get(Probe.fetch(case_id).steps, step, :ok), step, case_id, data)
+  end
+
+  defmodule Keyed do
+    @moduledoc false
+    use Durable
+
+    workflow "fuzz_keyed", on_duplicate: :use_existing do
+      step(:work, fn d -> Durable.FuzzWorkflows.keyed(d) end)
+    end
+  end
+
+  defmodule KeyedAgain do
+    @moduledoc false
+    use Durable
+
+    workflow "fuzz_keyed_again", on_duplicate: :run_again do
+      step(:work, fn d -> Durable.FuzzWorkflows.keyed(d) end)
+    end
+  end
+
+  def keyed(data) do
+    key = data[:fuzz_key] || data["fuzz_key"]
+    n = data[:n] || data["n"]
+
+    Probe.inside([{:key, key}], fn ->
+      Probe.note({:key_ran, key, n})
+      Process.sleep(data[:ms] || data["ms"])
+    end)
+
+    {:ok, data}
+  end
+
   def scripted(step, queue, data) do
     case_id = case_of(data)
     %{steps: steps} = Probe.fetch(case_id)

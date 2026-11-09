@@ -160,8 +160,24 @@ defmodule Durable.Keys do
     # One transaction so a release (or a replaced holder's cancel) and the
     # insert that follows land together. Nothing in here raises on a taken
     # key, and nothing rolls back, so a caller's own transaction stays usable.
-    {:ok, result} = Repo.transaction(config, fn -> claim(ctx, @rounds, nil) end)
+    {:ok, result} =
+      Repo.transaction(config, fn ->
+        lock_key(config, ctx.entry)
+        claim(ctx, @rounds, nil)
+      end)
+
     finish(ctx, result)
+  end
+
+  # Every change to who holds a key takes this first, so a start and a run taking
+  # over from a finished holder can't lock the same rows in opposite orders.
+  defp lock_key(config, %{workflow_module: module, workflow_name: name, key: key}) do
+    {:ok, _} =
+      Repo.query(config, "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [
+        "durable_key:#{module}:#{name}:#{key}"
+      ])
+
+    :ok
   end
 
   defp claim(_ctx, 0, _moved), do: :contended
@@ -490,7 +506,10 @@ defmodule Durable.Keys do
           {:ok, WorkflowExecution.t()} | {:behind, String.t()} | {:kept, String.t()}
   def take_waiting(config, run, workflow_def) do
     {:ok, result} =
-      Repo.transaction(config, fn -> do_take_waiting(config, run, workflow_def, @rounds) end)
+      Repo.transaction(config, fn ->
+        lock_key(config, run)
+        do_take_waiting(config, run, workflow_def, @rounds)
+      end)
 
     case result do
       {:ok, taken, from} ->
