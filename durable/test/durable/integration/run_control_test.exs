@@ -1092,6 +1092,60 @@ defmodule Durable.Integration.RunControlTest do
     end
   end
 
+  describe "two things answering the same wait" do
+    setup do
+      start_durable!(%{default: 5})
+      :ok
+    end
+
+    test "don't deadlock when one holds the run's row and is about to touch the event" do
+      id = start!(Waits)
+      assert_eventually(fn -> get(id).status == :waiting end)
+
+      holder =
+        Task.async(fn ->
+          IntegrationRepo.transaction(fn ->
+            IntegrationRepo.one(
+              from(w in WorkflowExecution, where: w.id == ^id, lock: "FOR UPDATE", select: w.id)
+            )
+
+            Process.sleep(300)
+            IntegrationRepo.update_all(Durable.Storage.Schemas.PendingEvent, set: [payload: %{}])
+          end)
+        end)
+
+      Process.sleep(100)
+      assert Durable.send_event(id, "go", %{}) == :ok
+      assert {:ok, _} = Task.await(holder)
+      await_status(id, :completed, 3_000)
+    end
+  end
+
+  describe "a poller's slots" do
+    test "aren't freed for a run claimed again before its last worker reported" do
+      start_durable!(%{default: 2}, poll_interval: :timer.hours(1))
+      poller = Process.whereis(Durable.Queue.Poller.Default)
+
+      id = start!(Held)
+      assert_eventually(fn -> Probe.hits(:held) == 1 end)
+
+      earlier = spawn(fn -> Process.sleep(:infinity) end)
+      ref = Process.monitor(earlier)
+
+      :sys.replace_state(poller, fn state ->
+        put_in(state.workers[earlier], %{ref: ref, job_id: id, token: nil})
+      end)
+
+      assert Durable.Queue.Poller.status(poller).active_jobs == 2
+
+      send(poller, {:job_complete, earlier, id, :waiting, 1})
+
+      assert Durable.Queue.Poller.status(poller).active_jobs == 1
+      :ok = Probe.set({:go, 1})
+      await_status(id, :completed, 3_000)
+    end
+  end
+
   describe "going into a wait" do
     setup do
       start_durable!(%{default: 5})

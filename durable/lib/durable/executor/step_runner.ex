@@ -26,6 +26,15 @@ defmodule Durable.Executor.StepRunner do
             when is_map(term) and
                    not (is_struct(term) and :erlang.map_get(:__struct__, term) in @scalars)
 
+  @suspending [
+    :sleep,
+    :wait_for_event,
+    :wait_for_input,
+    :wait_for_any,
+    :wait_for_all,
+    :call_workflow
+  ]
+
   @type result ::
           {:ok, map()}
           | {:error, any()}
@@ -144,7 +153,7 @@ defmodule Durable.Executor.StepRunner do
   defp run_body(step, data) do
     Step.execute(step, data)
   catch
-    :throw, value -> {:throw, value}
+    :throw, {kind, _opts} = suspension when kind in @suspending -> {:throw, suspension}
     kind, reason -> {:error, Durable.Executor.caught_error(kind, reason, __STACKTRACE__)}
   end
 
@@ -225,15 +234,6 @@ defmodule Durable.Executor.StepRunner do
   end
 
   @cancel_scopes [:run, :workflow, :root]
-
-  @suspending [
-    :sleep,
-    :wait_for_event,
-    :wait_for_input,
-    :wait_for_any,
-    :wait_for_all,
-    :call_workflow
-  ]
 
   defp step_outcome({:ok, data}) when is_run_data(data), do: %{result: :ok}
   defp step_outcome({:goto, _target, _data}), do: %{result: :ok}

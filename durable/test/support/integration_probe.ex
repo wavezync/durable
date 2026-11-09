@@ -39,6 +39,20 @@ defmodule Durable.IntegrationProbe do
   def put(key, value), do: GenServer.call(@name, {:put, key, value})
   def fetch(key), do: GenServer.call(@name, {:fetch, key})
 
+  @doc "Like `here/1`, without looking up the queue. Returns its count so far."
+  def note(label), do: GenServer.call(@name, {:here, label, nil})
+
+  @doc "Runs `fun` counted under each of `groups`, to find their peaks."
+  def inside(groups, fun) do
+    for group <- groups, do: GenServer.call(@name, {:enter, group, group})
+
+    try do
+      fun.()
+    after
+      for group <- groups, do: GenServer.call(@name, {:leave, group})
+    end
+  end
+
   def set(flag), do: GenServer.call(@name, {:set, flag})
   def set?(flag), do: GenServer.call(@name, {:set?, flag})
   def hits(label), do: GenServer.call(@name, {:hits, label})

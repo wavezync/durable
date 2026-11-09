@@ -58,6 +58,56 @@ defmodule Durable.HostileValuesTest do
     end
   end
 
+  defmodule AnyThenSameName do
+    use Durable
+    use Durable.Wait
+
+    workflow "hostile_any_then_same_name" do
+      step(:a, fn data ->
+        wait_for_any(["x", "y"])
+        {:ok, data}
+      end)
+
+      step(:b, fn data ->
+        wait_for_event("y")
+        {:ok, data}
+      end)
+    end
+  end
+
+  test "an event wait_for_any didn't need is closed, and doesn't clash with a later wait" do
+    config = Config.get(Durable)
+    {:ok, id} = Executor.start_workflow(AnyThenSameName, %{}, inline: true)
+
+    assert Durable.send_event(id, "x", %{}) == :ok
+    Executor.execute_workflow(id, config)
+    assert %{status: :waiting, current_step: "b"} = TestRepo.get!(WorkflowExecution, id)
+
+    assert Durable.send_event(id, "y", %{}) == :ok
+    Executor.execute_workflow(id, config)
+    assert TestRepo.get!(WorkflowExecution, id).status == :completed
+  end
+
+  defmodule ThrowsOnce do
+    use Durable
+    use Durable.Context
+
+    workflow "hostile_throws_once" do
+      step(:a, [retry: [max_attempts: 2, backoff: :constant, base: 1]], fn data ->
+        if attempt() == 1, do: throw(:boom), else: {:ok, data}
+      end)
+    end
+  end
+
+  test "a step that throws is retried, like one that raises" do
+    config = Config.get(Durable)
+    {:ok, id} = Executor.start_workflow(ThrowsOnce, %{}, inline: true)
+
+    assert %{status: :pending} = TestRepo.get!(WorkflowExecution, id)
+    Executor.execute_workflow(id, config)
+    assert TestRepo.get!(WorkflowExecution, id).status == :completed
+  end
+
   defp sweep do
     worker = TimeoutWorker.worker_name(Durable)
     TimeoutWorker.check_timeouts(Durable)

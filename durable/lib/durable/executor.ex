@@ -2198,18 +2198,36 @@ defmodule Durable.Executor do
     end
   end
 
+  @doc false
+  # Everything that changes a wait and its run takes the run's row first. In any
+  # other order, two of them can deadlock.
+  @spec lock_run(Ecto.Multi.t(), String.t()) :: Ecto.Multi.t()
+  def lock_run(multi, workflow_id) do
+    Ecto.Multi.run(multi, :locked_run, fn repo, _changes ->
+      {:ok,
+       repo.one(
+         from(w in WorkflowExecution,
+           where: w.id == ^workflow_id,
+           lock: "FOR UPDATE",
+           select: w.id
+         )
+       )}
+    end)
+  end
+
   defp atomic_fulfill_event_and_resume_parent(config, pending_event, parent, result_context) do
     safe_context = sanitize_for_json(result_context)
 
     multi =
       Ecto.Multi.new()
+      |> lock_run(parent.id)
       |> Ecto.Multi.update(
         :event,
         PendingEvent.receive_changeset(pending_event, pending_event.payload || %{})
       )
       |> Ecto.Multi.run(:parent, fn repo, _changes ->
-        # The event's update above makes the child's own notice and
-        # settle_child/2 take turns, so the second one sees the parent moved on.
+        # The lock makes the child's own notice and settle_child/2 take turns,
+        # so the second one sees the parent moved on.
         case repo.get(WorkflowExecution, parent.id) do
           nil ->
             {:error, :parent_not_found}

@@ -322,6 +322,7 @@ defmodule Durable.Wait.TimeoutWorker do
 
     multi =
       Ecto.Multi.new()
+      |> Executor.lock_run(workflow_id)
       |> Ecto.Multi.update(:pending, pending_changeset)
       |> Ecto.Multi.run(:workflow, fn repo, _changes ->
         case repo.get(WorkflowExecution, workflow_id) do
@@ -431,6 +432,7 @@ defmodule Durable.Wait.TimeoutWorker do
 
     multi =
       Ecto.Multi.new()
+      |> Executor.lock_run(wait_group.workflow_id)
       |> Ecto.Multi.update(:wait_group, WaitGroup.timeout_changeset(wait_group))
       |> Ecto.Multi.update_all(
         :pending_events,

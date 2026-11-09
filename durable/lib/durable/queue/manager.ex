@@ -186,7 +186,7 @@ defmodule Durable.Queue.Manager do
   end
 
   defp poller_name(queue_name, durable_name) do
-    Module.concat([durable_name, Queue, Poller, camelize(queue_name)])
+    Module.concat([durable_name, Queue, :Poller, camelize(queue_name)])
   end
 
   defp camelize(string) do

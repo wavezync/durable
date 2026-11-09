@@ -810,6 +810,7 @@ defmodule Durable.Wait do
          resume_payload
        ) do
     Ecto.Multi.new()
+    |> Durable.Executor.lock_run(workflow_id)
     |> Ecto.Multi.update(
       :event,
       PendingEvent.receive_changeset(pending_event, storable_payload)
@@ -834,6 +835,8 @@ defmodule Durable.Wait do
     with {:ok, wg_result} <-
            WaitGroup.add_event_locked(repo, wait_group_id, event_name, payload) do
       if wg_result.just_completed do
+        close_group_events(repo, wait_group_id)
+
         Durable.Executor.resume_parent_in_multi(
           repo,
           wg_result.wait_group.workflow_id,
@@ -843,6 +846,15 @@ defmodule Durable.Wait do
         {:ok, %{no_op: true, wait_group: wg_result.wait_group}}
       end
     end
+  end
+
+  # wait_for_any leaves the events that didn't fire. Open, they'd still take an
+  # event, and clash with a later wait on the same name.
+  defp close_group_events(repo, wait_group_id) do
+    repo.update_all(
+      from(p in PendingEvent, where: p.wait_group_id == ^wait_group_id and p.status == :pending),
+      set: [status: :cancelled, completed_at: DateTime.utc_now()]
+    )
   end
 
   # ============================================================================
