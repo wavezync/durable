@@ -180,9 +180,16 @@ defmodule Durable.Scheduler do
       Logger.debug("Found #{length(due_schedules)} due schedule(s)")
     end
 
-    Enum.each(due_schedules, fn schedule ->
-      execute_schedule(schedule, config)
-    end)
+    Enum.each(due_schedules, &execute_safely(&1, config))
+  end
+
+  # A schedule that raises is that schedule's failure, and the rest still run.
+  # A refused connection is nobody's: it ends this check, counting against none.
+  defp execute_safely(schedule, config) do
+    execute_schedule(schedule, config)
+  rescue
+    error in DBConnection.ConnectionError -> reraise error, __STACKTRACE__
+    error -> record_failure(schedule, config, Exception.message(error))
   end
 
   defp execute_schedule(schedule, config) do
@@ -298,7 +305,7 @@ defmodule Durable.Scheduler do
         Logger.debug("Schedule #{schedule.name} was fired by another node")
 
       {:error, reason} ->
-        Logger.error("Failed to start workflow for schedule #{schedule.name}: #{inspect(reason)}")
+        record_failure(schedule, config, "Failed to start workflow: #{inspect(reason)}")
     end
   end
 

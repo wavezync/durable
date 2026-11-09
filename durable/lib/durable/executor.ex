@@ -34,6 +34,9 @@ defmodule Durable.Executor do
   # What 1.5.0 recorded on a park instead. Kept for runs parked over an upgrade.
   @atom_keys "__atom_keys__"
 
+  # A run in one of these is over, so no worker can be running an attempt of it.
+  @ended [:completed, :failed, :cancelled, :compensated, :compensation_failed]
+
   @doc """
   Starts a new workflow execution.
 
@@ -1896,7 +1899,8 @@ defmodule Durable.Executor do
 
   # Inside the step loop there is nothing left to do once superseded, so
   # unwind straight to run_until_superseded/3.
-  defp cas_update!(changeset, config) do
+  @doc false
+  def cas_update!(changeset, config) do
     case cas_update(changeset, config) do
       {:error, :superseded} -> throw(:durable_superseded)
       result -> result
@@ -2557,11 +2561,19 @@ defmodule Durable.Executor do
   def attempt_died(job, error, %Config{} = config) do
     {:ok, run} = load_execution(config, job.id)
 
-    if run.lock_token == job[:lock_token] and run.status in [:running, :compensating] do
-      closed = StepRunner.close_running(config, [run.id], :failed, error)
-      if run.status == :running and closed > 0, do: requeue(config, run), else: {:error, error}
-    else
-      :fenced
+    cond do
+      run.lock_token == job[:lock_token] and run.status in [:running, :compensating] ->
+        closed = StepRunner.close_running(config, [run.id], :failed, error)
+        if run.status == :running and closed > 0, do: requeue(config, run), else: {:error, error}
+
+      # Ended while this attempt ran (a cancel, say, clears the lock). No other
+      # worker can have a row open, and nobody else will close this one.
+      run.status in @ended ->
+        StepRunner.close_running(config, [run.id], :failed, error)
+        :fenced
+
+      true ->
+        :fenced
     end
   end
 

@@ -435,7 +435,14 @@ defmodule Durable.Scheduler.API do
         from(s in ScheduledWorkflow,
           where: s.id == ^schedule.id and s.next_run_at == ^schedule.next_run_at and s.enabled
         ),
-        set: [last_run_at: now, next_run_at: next_run, updated_at: now]
+        set: [
+          last_run_at: now,
+          next_run_at: next_run,
+          updated_at: now,
+          consecutive_failures: 0,
+          last_error: nil,
+          last_error_at: nil
+        ]
       )
 
     count == 1

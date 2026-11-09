@@ -109,7 +109,7 @@ defmodule Durable.IntegrationCase do
     ensure_distributed!()
 
     peer = %{
-      name: name,
+      name: unique_node_name(name),
       host: ~c"127.0.0.1",
       args: [~c"-setcookie", Atom.to_charlist(Node.get_cookie())]
     }
@@ -173,10 +173,21 @@ defmodule Durable.IntegrationCase do
     id
   end
 
-  @doc "Waits for the nodes to see each other, so a broadcast reaches them all."
+  @doc "Connects the nodes and waits until a broadcast from any of them reaches them all."
   def connect_nodes!(nodes) do
     for a <- nodes, b <- nodes, a != b, do: true = :erpc.call(a, Node, :connect, [b])
-    Process.sleep(300)
+    Durable.DataCase.assert_eventually(fn -> Enum.all?(nodes, &pubsub_reaches?(&1, nodes)) end)
+  end
+
+  # Connected isn't enough: each node's PubSub joins its group a moment later.
+  defp pubsub_reaches?(from, nodes) do
+    groups = :erpc.call(from, :pg, :which_groups, [Phoenix.PubSub])
+
+    groups != [] and
+      Enum.all?(groups, fn group ->
+        members = :erpc.call(from, :pg, :get_members, [Phoenix.PubSub, group])
+        nodes -- Enum.map(members, &node/1) == []
+      end)
   end
 
   @doc "Kills a node the way a crash would: no shutdown, no clean-up."
@@ -194,7 +205,10 @@ defmodule Durable.IntegrationCase do
   defp ensure_distributed! do
     unless Node.alive?() do
       {_, 0} = System.cmd("epmd", ["-daemon"])
-      {:ok, _} = Node.start(:"durable_test@127.0.0.1", :longnames)
+      {:ok, _} = Node.start(:"#{unique_node_name(:durable_test)}@127.0.0.1", :longnames)
     end
   end
+
+  # epmd allows a name once per host, so two test runs on one machine can't share one.
+  defp unique_node_name(name), do: :"#{name}_#{System.pid()}"
 end

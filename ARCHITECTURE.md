@@ -103,12 +103,14 @@ All tables live in the `durable` schema.
 
 | Situation | What recovers it |
 |---|---|
-| `running`, lock not refreshed for `stale_lock_timeout` (300 s) | `StaleJobRecovery` closes the attempt as failed and sets the run back to `pending`, and the old worker is fenced out by its `lock_token` |
+| `running`, lock not refreshed for `stale_lock_timeout` (300 s) | `StaleJobRecovery` closes the attempt as failed (`worker_lost`) and sets the run back to `pending`, and the old worker is fenced out by its `lock_token` |
 | `waiting` with nothing left that could wake it | `StaleJobRecovery` marks it failed |
 | `compensating`, lock not refreshed for `stale_lock_timeout` | `StaleJobRecovery` marks it failed |
 | A wait past its timeout | `TimeoutWorker` |
 
-A crash uses one of the step's attempts. With attempts left the step runs again, so steps should be idempotent: delivery is at least once. With none left (one attempt is the default) the next claim fails the run the normal way.
+A step whose process dies uses one of its attempts. With attempts left the step runs again, so steps should be idempotent: delivery is at least once. With none left (one attempt is the default) the next claim fails the run the normal way.
+
+A lost worker uses no attempt, because the step may be fine: one outage can take every lock at once. The step runs again, and after three `worker_lost` rows the next claim fails the run, so a step that takes its node down can't loop forever.
 
 A node that stops cleanly needs none of this. `Queue.Drainer` stops claiming, and each run finishes its current step and goes back on its queue through the same path as a step's `queue:`. What's still running when `shutdown_grace_period` ends goes back on its queue before its worker is killed, with its lock token cleared. That doesn't use an attempt.
 
@@ -120,7 +122,7 @@ Each of these was learned from a real bug. Breaking one brings it back.
 2. **Lock order.** Any transaction that changes a wait and its run locks the run first (`Executor.lock_run/2`).
 3. **Keys.** Any change to who holds a key takes the per-key advisory lock first (`Keys.lock_key/2`).
 4. **Commit a wait with its status.** Never write a wait's rows and `waiting` in separate statements (`enter_wait/3`).
-5. **Writes to a run go through the compare-and-set** (`cas_update/3`), so a cancel or a takeover wins over a worker that's still running.
+5. **Writes to a run, and how an attempt ended, go through the compare-and-set** (`cas_update/3`), so a cancel or a takeover wins over a worker that's still running.
 6. **Everything stored is made storable first.** Use `sanitize_for_json/1`, `storable_error/1`, `storable_input/1` or `serialize_output/1`. A date or decimal in a `:map` column makes the row unreadable.
 7. **Don't make atoms from stored text.** Use `Context.known_key/1`. Atoms are never freed.
 8. **A wake is only a hint.** Losing one must cost no more than the next poll.

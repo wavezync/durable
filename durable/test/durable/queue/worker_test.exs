@@ -135,6 +135,9 @@ defmodule Durable.Queue.WorkerTest do
       assert exec_before.locked_by != nil
       locked_at_before = exec_before.locked_at
 
+      # Otherwise the poller can reclaim the run between the sweep and the check.
+      :ok = Durable.pause_queue(:default)
+
       Process.exit(worker_pid, :kill)
 
       # The worker death never sends {:done, _}.

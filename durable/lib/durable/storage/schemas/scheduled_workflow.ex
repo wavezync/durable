@@ -86,14 +86,6 @@ defmodule Durable.Storage.Schemas.ScheduledWorkflow do
   end
 
   @doc """
-  Creates a changeset for updating the last/next run times.
-  """
-  def run_changeset(scheduled_workflow, last_run_at, next_run_at) do
-    scheduled_workflow
-    |> cast(%{last_run_at: last_run_at, next_run_at: next_run_at}, [:last_run_at, :next_run_at])
-  end
-
-  @doc """
   Creates a changeset for enabling/disabling a scheduled workflow.
   """
   def enable_changeset(scheduled_workflow, enabled) do
@@ -139,30 +131,6 @@ defmodule Durable.Storage.Schemas.ScheduledWorkflow do
       :auto_disabled_at,
       :next_run_at
     ])
-  end
-
-  @doc """
-  Creates a changeset that records a successful trigger. Resets
-  `consecutive_failures` to 0 and clears the last_error fields.
-  """
-  def success_changeset(scheduled_workflow, last_run_at, next_run_at) do
-    cast(
-      scheduled_workflow,
-      %{
-        last_run_at: last_run_at,
-        next_run_at: next_run_at,
-        last_error: nil,
-        last_error_at: nil,
-        consecutive_failures: 0
-      },
-      [
-        :last_run_at,
-        :next_run_at,
-        :last_error,
-        :last_error_at,
-        :consecutive_failures
-      ]
-    )
   end
 
   @doc """

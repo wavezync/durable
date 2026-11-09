@@ -249,9 +249,9 @@ defmodule Durable.Queue.Adapters.Postgres do
         select: w.id
       )
 
-    # The attempt in flight died with its worker, so it counts against the
-    # step's retries. Left :running, a step that takes its node down would
-    # run again after every recovery, forever.
+    # The step may be fine: an outage or a frozen VM takes every lock at once.
+    # So this uses no attempt, but the row is closed and counted on its own
+    # (StepRunner), or a step that takes its node down would run forever.
     release_runs(config, query, :failed, %{
       type: "worker_lost",
       message: "the worker running this attempt stopped responding"
