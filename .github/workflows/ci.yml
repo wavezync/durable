@@ -103,8 +103,10 @@ jobs:
   # Live pollers, committed rows, the real clock and second BEAM nodes: what the
   # SQL Sandbox in the job above can't exercise. Fuzz generates its inputs from
   # the seed printed in the log: `mix test --only fuzz --seed N` replays a failure.
+  # Each runs direct and through PgBouncer in transaction mode, which is how many
+  # apps reach Postgres in production.
   integration:
-    name: Durable ${{ matrix.suite }}
+    name: Durable ${{ matrix.suite }} (${{ matrix.db_port == 6432 && 'PgBouncer' || 'direct' }})
     needs: changes
     if: needs.changes.outputs.durable == 'true' || needs.changes.outputs.ci == 'true' || github.event_name == 'push'
     runs-on: ubuntu-latest
@@ -114,6 +116,10 @@ jobs:
       fail-fast: false
       matrix:
         suite: [integration, fuzz]
+        db_port: [54321, 6432]
+
+    env:
+      INTEGRATION_DB_PORT: ${{ matrix.db_port }}
 
     services:
       postgres:
@@ -128,6 +134,19 @@ jobs:
           --health-interval=10s
           --health-timeout=5s
           --health-retries=5
+
+      pgbouncer:
+        image: edoburu/pgbouncer:v1.26.1-p0
+        env:
+          DB_HOST: postgres
+          DB_PORT: 5432
+          DB_USER: postgres
+          DB_PASSWORD: postgres
+          AUTH_TYPE: plain
+          POOL_MODE: transaction
+          LISTEN_PORT: 6432
+        ports:
+          - 6432:6432
 
     defaults:
       run:
