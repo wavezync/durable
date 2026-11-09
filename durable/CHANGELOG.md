@@ -4,6 +4,51 @@ All notable changes to this package. Versions follow [Semantic
 Versioning](https://semver.org); entries come from [Conventional
 Commits](https://www.conventionalcommits.org).
 
+## [1.3.0](https://github.com/wavezync/durable/compare/durable-v1.2.0...durable-v1.3.0) - 2026-11-09
+
+### Features
+
+- Stop a run from a step, and read the attempt number ([ccdd3ae](https://github.com/wavezync/durable/commit/ccdd3aef2924d01c67cc858c6ddf92048323b73a))
+- Choose what a step's {:cancel, reason} cancels ([44cf980](https://github.com/wavezync/durable/commit/44cf9802a5fd8475cc1f1166e8bca29a620bc1ec))
+- Assert_started, refute_started and all_started test helpers ([c839d8b](https://github.com/wavezync/durable/commit/c839d8bd6d0652e999d4673763f26d27b0fda7eb))
+- Park the run between retries, and let a step snooze ([bb7deee](https://github.com/wavezync/durable/commit/bb7deee19335adf1e83c65038e71b38714d0a380))
+- Cron schedules can start their runs with a key ([0523230](https://github.com/wavezync/durable/commit/0523230e3a6c4e9ca4ae662c9d8533d25848e03a))
+- Tag runs, find them by tag, and cancel_all ([53c4a0b](https://github.com/wavezync/durable/commit/53c4a0bcc1485dc6645808e510559bb90717bedf))
+- Start_many starts several runs in one transaction ([dfab38b](https://github.com/wavezync/durable/commit/dfab38bee79eed4894e121913394d1a375de4624))
+- On_duplicate: :run_again runs once more after the holder ([ca389fd](https://github.com/wavezync/durable/commit/ca389fd2d9368ff97c99cc69ac0728dfb8cc78f6))
+- Wake a queue's pollers when a run starts or resumes ([69e9a37](https://github.com/wavezync/durable/commit/69e9a37cfbaef397f25ac94500fa511d898a3924))
+- A step's queue: moves the run there for that step ([0f71b40](https://github.com/wavezync/durable/commit/0f71b40a452ff61e3d6c0fa109052de7d00678c1))
+- Tell subscribers when a run parks, and expose where it waits ([adb1b0a](https://github.com/wavezync/durable/commit/adb1b0a19ccd0f57c9ed768f15cf97274b637449))
+
+### Bug fixes
+
+- List_executions(workflow: Module) matched no runs ([55a97b7](https://github.com/wavezync/durable/commit/55a97b71e4cf47885ac1f659ba033ac9bbada0be))
+- A run resumed inside a branch stays on its own clause ([16f7886](https://github.com/wavezync/durable/commit/16f78868ec30e976d166f24d89d5c8c6eb438747))
+- Boot with more than one queue ([65d4069](https://github.com/wavezync/durable/commit/65d4069ba9b41b08dcd8c38e0b3eaf392be74959))
+- A rerun starts on the queue the run started on ([e057f1b](https://github.com/wavezync/durable/commit/e057f1b990986ff12ebf471d2ab0e4d2707f99ed))
+- Time out runs on a queue no live node polls ([6dc1fa2](https://github.com/wavezync/durable/commit/6dc1fa2d9f0588691de968bcb8219d78922625e5))
+- A parent no longer hangs on a child that ends early or compensates ([4ddb6af](https://github.com/wavezync/durable/commit/4ddb6af16948382dd674211327e4f12b153189cc))
+- Start_many wakes pollers after its commit ([6e48d26](https://github.com/wavezync/durable/commit/6e48d26ff68dec270517f1c60d4ff87d43456e92))
+- A compensation returning an error counts as failed ([5bebad4](https://github.com/wavezync/durable/commit/5bebad41aa60cbea7a8365c68e029ce05e82593c))
+- A wait commits together with the run's :waiting status ([115272e](https://github.com/wavezync/durable/commit/115272ebe4dd211fed032c5d29308ed76c467118))
+- A wake sent inside a transaction arrives at its commit ([30762e5](https://github.com/wavezync/durable/commit/30762e5ca97f6919bccb23b038db691d08c5cd04))
+- The timeout sweep no longer runs compensations itself ([9c5bc5d](https://github.com/wavezync/durable/commit/9c5bc5d263b04e0c17e6965f24f38039e7640edc))
+- No value a workflow hands over can poison a row ([3b52fa5](https://github.com/wavezync/durable/commit/3b52fa5a12d3bd4bcdf60931a8882c28c73a03cd))
+- Bad ids and text get an answer, not a database error ([d662012](https://github.com/wavezync/durable/commit/d6620129cc5ae38cb3cea5cc1269a6eca5b62df6))
+- Deadlock, leftover wait_for_any events and a slot race ([0119e69](https://github.com/wavezync/durable/commit/0119e69674352160d7703f5facebda43fbc1b49b))
+- A parallel branch that waits no longer repeats the workflow ([881a585](https://github.com/wavezync/durable/commit/881a58582a6c87e0be1554ca9f9675df4b3d3ec2))
+- Resuming a run no longer creates atoms, and nil is an answer ([3e0c1e9](https://github.com/wavezync/durable/commit/3e0c1e98de3bfe1f1ce1b5800377dd1a4dbe2739))
+- A child's input is checked, and a poller survives a bad row ([a388ec1](https://github.com/wavezync/durable/commit/a388ec19bca90f9efdadb35ddbdef659d32582d9))
+- Wake on commit without LISTEN, so PgBouncer works ([cb76895](https://github.com/wavezync/durable/commit/cb768957c9d3999940be949d6df7e3bec1ce8d8f))
+- A list or nil option can't reach the database as a raw error ([4b6ba7a](https://github.com/wavezync/durable/commit/4b6ba7a52f5bee30de77b9f049c71e1cdd0da994))
+
+### Documentation
+
+- Coming from Oban, production settings, and stale parallel notes ([651002a](https://github.com/wavezync/durable/commit/651002a61dd23d3832ad1748e239bce79d382eec))
+- State the PostgreSQL version Durable needs ([5d005a4](https://github.com/wavezync/durable/commit/5d005a4d8080909085501cfaec41c34e89815c71))
+- Bring the guides, README and website up to date ([ace3967](https://github.com/wavezync/durable/commit/ace3967a18fe8fef4432fdb5a6bca98552fb657f))
+- Replace agents/ and docs/bug-reports with ARCHITECTURE.md and PLAN.md [skip ci] ([36aaee6](https://github.com/wavezync/durable/commit/36aaee69e3c3e152c9bc1148770326bdd93bc88b))
+
 ## [1.2.0](https://github.com/wavezync/durable/compare/durable-v1.1.0...durable-v1.2.0) - 2026-11-06
 
 ### Features
