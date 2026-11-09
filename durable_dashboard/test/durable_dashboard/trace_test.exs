@@ -78,6 +78,10 @@ defmodule DurableDashboard.TraceTest do
       assert %{message: "busy", type: nil} = Trace.error_parts(@snoozed)
       assert %{message: nil} = Trace.error_parts(%{"type" => "snoozed", "snooze_ms" => 5})
     end
+
+    test "error_parts has no message to show for a cancel with no reason" do
+      assert %{message: nil, type: "cancelled"} = Trace.error_parts(%{"type" => "cancelled"})
+    end
   end
 
   describe "a parked run" do

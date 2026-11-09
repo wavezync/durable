@@ -70,6 +70,9 @@ defmodule DurableDashboard.Live.WorkflowLive do
   @live_statuses [:pending, :running, :waiting, :compensating]
   @finished_statuses [:completed, :failed, :cancelled, :compensated, :compensation_failed]
 
+  # Step statuses that keep their reason in the error column but aren't failures.
+  @not_failures [:snoozed, :cancelled]
+
   @impl true
   def mount(params, session, socket) do
     config = session["config"]
@@ -1581,6 +1584,7 @@ defmodule DurableDashboard.Live.WorkflowLive do
   end
 
   defp error_line(%{type: nil, message: message}), do: message
+  defp error_line(%{type: type, message: nil}), do: type
   defp error_line(%{type: type, message: message}), do: "#{type}: #{message}"
 
   defp attempt_label(%{status: :waiting}), do: "Suspended"
@@ -1677,7 +1681,10 @@ defmodule DurableDashboard.Live.WorkflowLive do
   defp panes(row) do
     logs = Enum.reduce(row.execs, 0, &(&2 + length(&1.logs || [])))
 
-    if(row.latest.error && row.latest.status != :snoozed, do: [{"error", "Error"}], else: []) ++
+    if(row.latest.error && row.latest.status not in @not_failures,
+      do: [{"error", "Error"}],
+      else: []
+    ) ++
       [
         {"input", "Input"},
         {"output", "Output"},
@@ -1686,7 +1693,7 @@ defmodule DurableDashboard.Live.WorkflowLive do
       ]
   end
 
-  defp default_pane(%{latest: %{status: :snoozed}}), do: "attempts"
+  defp default_pane(%{latest: %{status: status}}) when status in @not_failures, do: "attempts"
   defp default_pane(%{latest: %{error: error}}) when not is_nil(error), do: "error"
   defp default_pane(_row), do: "output"
 

@@ -127,6 +127,15 @@ defmodule DurableDashboard.Fixtures do
     end
   end
 
+  defmodule StepCancels do
+    @moduledoc false
+    use Durable
+
+    workflow "skip_deleted" do
+      step(:lookup, fn _data -> {:cancel, "record deleted"} end)
+    end
+  end
+
   defmodule Retrying do
     @moduledoc false
     use Durable
