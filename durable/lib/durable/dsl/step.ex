@@ -307,7 +307,7 @@ defmodule Durable.DSL.Step do
     condition_fn = Keyword.fetch!(opts, :on)
     clauses = extract_clauses(block)
 
-    {shape, _} = process_branch_clauses(clauses, 0)
+    {shape, _} = process_branch_clauses(clauses, 0, __CALLER__)
 
     branch_id =
       block_id(
@@ -316,7 +316,7 @@ defmodule Durable.DSL.Step do
         for({pattern, _, names, _} <- shape, do: {pattern_to_key(pattern), names})
       )
 
-    {clause_data, all_step_defs} = process_branch_clauses(clauses, branch_id)
+    {clause_data, all_step_defs} = process_branch_clauses(clauses, branch_id, __CALLER__)
 
     branch_clauses =
       Enum.map(clause_data, fn {pattern, idx, step_names, _step_defs} ->
@@ -401,13 +401,13 @@ defmodule Durable.DSL.Step do
     {pattern, body}
   end
 
-  defp process_branch_clauses(clauses, branch_id) do
+  defp process_branch_clauses(clauses, branch_id, env) do
     {clause_data, all_steps} =
       clauses
       |> Enum.with_index()
       |> Enum.map_reduce([], fn {{pattern, body}, idx}, acc_steps ->
         clause_name = pattern_to_clause_name(pattern)
-        steps = extract_steps_from_body(body, branch_id, clause_name)
+        steps = extract_steps_from_body(body, branch_id, clause_name, env)
         step_names = Enum.map(steps, fn {name, _, _} -> name end)
         {{pattern, idx, step_names, steps}, steps ++ acc_steps}
       end)
@@ -415,18 +415,23 @@ defmodule Durable.DSL.Step do
     {clause_data, Enum.reverse(all_steps)}
   end
 
-  defp extract_steps_from_body(body, branch_id, clause_name) do
+  defp extract_steps_from_body(body, branch_id, clause_name, env) do
     case body do
       {:__block__, _, statements} ->
-        Enum.flat_map(statements, &extract_step_call(&1, branch_id, clause_name))
+        Enum.flat_map(statements, &extract_step_call(&1, branch_id, clause_name, env))
 
       statement ->
-        extract_step_call(statement, branch_id, clause_name)
+        extract_step_call(statement, branch_id, clause_name, env)
     end
   end
 
   # step :name, fn data -> ... end
-  defp extract_step_call({:step, _meta, [name, {:fn, _, _} = body_fn]}, branch_id, clause_name)
+  defp extract_step_call(
+         {:step, _meta, [name, {:fn, _, _} = body_fn]},
+         branch_id,
+         clause_name,
+         _env
+       )
        when is_atom(name) do
     qualified_name = :"branch_#{branch_id}__#{clause_name}__#{name}"
 
@@ -443,7 +448,8 @@ defmodule Durable.DSL.Step do
   defp extract_step_call(
          {:step, _meta, [name, opts, {:fn, _, _} = body_fn]},
          branch_id,
-         clause_name
+         clause_name,
+         _env
        )
        when is_atom(name) and is_list(opts) do
     qualified_name = :"branch_#{branch_id}__#{clause_name}__#{name}"
@@ -460,7 +466,28 @@ defmodule Durable.DSL.Step do
     [{qualified_name, body_fn, step_opts}]
   end
 
-  defp extract_step_call(_other, _branch_id, _clause_name), do: []
+  # `_ -> nil`: a clause with nothing to do.
+  defp extract_step_call(nil, _branch_id, _clause_name, _env), do: []
+
+  defp extract_step_call(other, _branch_id, _clause_name, env),
+    do: not_a_step!(other, "branch clause", env)
+
+  # Quietly dropping it would skip whatever it was meant to do.
+  defp not_a_step!(ast, block, env) do
+    line =
+      case ast do
+        {_, meta, _} when is_list(meta) -> Keyword.get(meta, :line, env.line)
+        _ -> env.line
+      end
+
+    found = ast |> Macro.to_string() |> String.split("\n") |> hd()
+
+    raise CompileError,
+      file: env.file,
+      line: line,
+      description:
+        "a #{block} can only hold `step :name, fn data -> ... end`, but found: #{found}"
+  end
 
   defp pattern_to_clause_name({:_, _, _}), do: :default
   defp pattern_to_clause_name(atom) when is_atom(atom), do: atom
@@ -533,10 +560,12 @@ defmodule Durable.DSL.Step do
 
   """
   defmacro parallel(opts \\ [], do: block) do
-    shape = for {_, _, %{original_name: name}} <- extract_parallel_steps(block, 0), do: name
+    shape =
+      for {_, _, %{original_name: name}} <- extract_parallel_steps(block, 0, __CALLER__), do: name
+
     parallel_id = block_id(__CALLER__, :parallel, shape)
 
-    step_defs = extract_parallel_steps(block, parallel_id)
+    step_defs = extract_parallel_steps(block, parallel_id, __CALLER__)
     step_names = Enum.map(step_defs, fn {name, _, _} -> name end)
 
     error_strategy = Keyword.get(opts, :on_error, :fail_fast)
@@ -601,18 +630,22 @@ defmodule Durable.DSL.Step do
     end
   end
 
-  defp extract_parallel_steps(body, parallel_id) do
+  defp extract_parallel_steps(body, parallel_id, env) do
     case body do
       {:__block__, _, statements} ->
-        Enum.flat_map(statements, &extract_parallel_step_call(&1, parallel_id))
+        Enum.flat_map(statements, &extract_parallel_step_call(&1, parallel_id, env))
 
       statement ->
-        extract_parallel_step_call(statement, parallel_id)
+        extract_parallel_step_call(statement, parallel_id, env)
     end
   end
 
   # step :name, fn data -> ... end
-  defp extract_parallel_step_call({:step, _meta, [name, {:fn, _, _} = body_fn]}, parallel_id)
+  defp extract_parallel_step_call(
+         {:step, _meta, [name, {:fn, _, _} = body_fn]},
+         parallel_id,
+         _env
+       )
        when is_atom(name) do
     qualified_name = :"parallel_#{parallel_id}__#{name}"
 
@@ -628,7 +661,8 @@ defmodule Durable.DSL.Step do
   # step :name, [opts], fn data -> ... end
   defp extract_parallel_step_call(
          {:step, _meta, [name, opts, {:fn, _, _} = body_fn]},
-         parallel_id
+         parallel_id,
+         _env
        )
        when is_atom(name) and is_list(opts) do
     qualified_name = :"parallel_#{parallel_id}__#{name}"
@@ -651,7 +685,8 @@ defmodule Durable.DSL.Step do
   # step :name, returns: :key do fn data -> ... end end
   defp extract_parallel_step_call(
          {:step, _meta, [name, opts, [do: {:fn, _, _} = body_fn]]},
-         parallel_id
+         parallel_id,
+         _env
        )
        when is_atom(name) and is_list(opts) do
     qualified_name = :"parallel_#{parallel_id}__#{name}"
@@ -671,7 +706,8 @@ defmodule Durable.DSL.Step do
     [{qualified_name, body_fn, step_opts}]
   end
 
-  defp extract_parallel_step_call(_other, _parallel_id), do: []
+  defp extract_parallel_step_call(other, _parallel_id, env),
+    do: not_a_step!(other, "parallel block", env)
 
   # Normalize parallel step options (includes :returns)
   defp normalize_parallel_step_opts(opts) do

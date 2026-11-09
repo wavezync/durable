@@ -33,10 +33,14 @@ defmodule Durable.Executor.CompensationRunner do
   def execute(%Compensation{} = compensation, workflow_id, compensating_step, %Config{} = config) do
     max_attempts = get_max_attempts(compensation)
 
+    run_meta = Durable.Telemetry.run_meta()
+
     meta = %{
       durable: config.name,
       workflow_id: workflow_id,
-      workflow: Map.get(Durable.Telemetry.run_meta(), :workflow),
+      workflow: Map.get(run_meta, :workflow),
+      key: Map.get(run_meta, :key),
+      tags: Map.get(run_meta, :tags),
       compensation: compensation.name,
       step: compensating_step
     }
@@ -57,6 +61,8 @@ defmodule Durable.Executor.CompensationRunner do
          max_attempts,
          config
        ) do
+    Durable.Telemetry.put_log_metadata(workflow_id, compensation.name, attempt, Context.context())
+
     # Create step execution record for compensation
     {:ok, step_exec} =
       create_compensation_execution(

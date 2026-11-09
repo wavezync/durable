@@ -29,6 +29,8 @@ defmodule Durable.Scheduler.API do
   alias Durable.Repo
   alias Durable.Storage.Schemas.ScheduledWorkflow
 
+  require Logger
+
   @type schedule_opts :: [
           name: String.t(),
           workflow: String.t(),
@@ -314,7 +316,8 @@ defmodule Durable.Scheduler.API do
   the `scheduled_modules` config option.
 
   Uses upsert semantics: updates cron/timezone/input/queue but preserves
-  the enabled status and run times for existing schedules.
+  the enabled status for existing schedules. A new cron or time zone takes
+  effect now rather than after the old next run has fired.
 
   ## Examples
 
@@ -325,19 +328,20 @@ defmodule Durable.Scheduler.API do
   def register(module, opts \\ []) do
     durable_name = Keyword.get(opts, :durable, Durable)
 
+    register_schedules(module, declared_schedules(module), durable_name)
+  end
+
+  defp declared_schedules(module) do
     # Modules are lazy-loaded in dev; `function_exported?/3` returns false
     # for an existing-but-not-yet-loaded module, which would silently skip
     # registration at scheduler boot. Force the load first so the export
     # check is meaningful.
     _ = Code.ensure_loaded(module)
 
-    if function_exported?(module, :__schedules__, 0) do
-      schedules = module.__schedules__()
-      register_schedules(module, schedules, durable_name)
-    else
-      :ok
-    end
+    if function_exported?(module, :__schedules__, 0), do: module.__schedules__(), else: []
   end
+
+  defp schedule_name(schedule_def), do: schedule_def[:name] || schedule_def.workflow
 
   @doc """
   Registers schedules from multiple modules.
@@ -357,6 +361,51 @@ defmodule Durable.Scheduler.API do
     end)
   end
 
+  @doc """
+  Turns off schedules that came from `@schedule` in `modules` and that those
+  modules no longer declare. Called at boot, after registering them.
+
+  It only speaks for `modules`, so nodes with different `scheduled_modules` don't
+  turn off each other's. Schedules made with `Durable.schedule/3` are left alone,
+  and a schedule that's declared again comes back on.
+  """
+  @spec turn_off_removed([module()], keyword()) :: :ok
+  def turn_off_removed(modules, opts \\ []) when is_list(modules) do
+    config = Config.get(Keyword.get(opts, :durable, Durable))
+    module_names = Enum.map(modules, &inspect/1)
+
+    declared =
+      Enum.flat_map(modules, &Enum.map(declared_schedules(&1), fn s -> schedule_name(s) end))
+
+    {_count, names} =
+      Repo.update_all(
+        config,
+        from(s in ScheduledWorkflow,
+          where:
+            s.source == "code" and s.enabled and s.workflow_module in ^module_names and
+              s.name not in ^declared,
+          select: s.name
+        ),
+        set: [enabled: false, source: "removed", updated_at: DateTime.utc_now()]
+      )
+
+    report_removed(config, names)
+  end
+
+  defp report_removed(_config, []), do: :ok
+
+  defp report_removed(config, names) do
+    Logger.warning(
+      "[Durable.Scheduler] Turned off schedule(s) no longer declared with @schedule: " <>
+        Enum.join(names, ", ")
+    )
+
+    Durable.Activity.record(config, "schedule_removed",
+      count: length(names),
+      details: %{schedules: names}
+    )
+  end
+
   # ============================================================================
   # Internal: Used by Scheduler GenServer
   # ============================================================================
@@ -365,24 +414,31 @@ defmodule Durable.Scheduler.API do
   def get_due_schedules(config) do
     now = DateTime.utc_now()
 
-    query =
-      from(s in ScheduledWorkflow,
-        where: s.enabled == true and s.next_run_at <= ^now,
-        lock: "FOR UPDATE SKIP LOCKED"
-      )
-
-    Repo.all(config, query)
+    Repo.all(
+      config,
+      from(s in ScheduledWorkflow, where: s.enabled == true and s.next_run_at <= ^now)
+    )
   end
 
   @doc false
-  def mark_run(schedule, config) do
+  # Takes this fire for the calling node. One conditional UPDATE: of the nodes
+  # that saw the schedule due, Postgres lets exactly one move its next_run_at,
+  # and the others match no row. A false return means another node has it.
+  @spec claim_fire(ScheduledWorkflow.t(), Config.t()) :: boolean()
+  def claim_fire(%ScheduledWorkflow{} = schedule, %Config{} = config) do
     now = DateTime.utc_now()
-
     {:ok, next_run} = compute_next_run(schedule.cron_expression, schedule.timezone)
 
-    schedule
-    |> ScheduledWorkflow.run_changeset(now, next_run)
-    |> Repo.update(config)
+    {count, _} =
+      Repo.update_all(
+        config,
+        from(s in ScheduledWorkflow,
+          where: s.id == ^schedule.id and s.next_run_at == ^schedule.next_run_at and s.enabled
+        ),
+        set: [last_run_at: now, next_run_at: next_run, updated_at: now]
+      )
+
+    count == 1
   end
 
   # ============================================================================
@@ -521,8 +577,8 @@ defmodule Durable.Scheduler.API do
     attrs = %{}
 
     attrs =
-      if Keyword.has_key?(changes, :cron_expression) do
-        cron = Keyword.get(changes, :cron_expression)
+      if Keyword.has_key?(changes, :cron_expression) or Keyword.has_key?(changes, :timezone) do
+        cron = Keyword.get(changes, :cron_expression, schedule.cron_expression)
         timezone = Keyword.get(changes, :timezone, schedule.timezone)
 
         case compute_next_run(cron, timezone) do
@@ -593,7 +649,7 @@ defmodule Durable.Scheduler.API do
     workflow_name = schedule_def.workflow
     cron = schedule_def.cron
     timezone = schedule_def[:timezone] || "UTC"
-    name = schedule_def[:name] || workflow_name
+    name = schedule_name(schedule_def)
 
     with :ok <- validate_cron(cron),
          {:ok, next_run} <- compute_next_run(cron, timezone) do
@@ -606,6 +662,7 @@ defmodule Durable.Scheduler.API do
         input: schedule_def[:input] || %{},
         queue: to_string(schedule_def[:queue] || :default),
         key: schedule_def[:key],
+        source: "code",
         next_run_at: next_run
       }
 
@@ -618,9 +675,23 @@ defmodule Durable.Scheduler.API do
 
         existing ->
           existing
-          |> ScheduledWorkflow.upsert_changeset(attrs)
+          |> ScheduledWorkflow.upsert_changeset(upsert_attrs(existing, attrs))
           |> Repo.update(config)
       end
+    end
+  end
+
+  # The next run only changes if when it should run has.
+  defp upsert_attrs(existing, attrs) do
+    cond do
+      existing.source == "removed" ->
+        Map.put(attrs, :enabled, true)
+
+      existing.cron_expression != attrs.cron_expression or existing.timezone != attrs.timezone ->
+        attrs
+
+      true ->
+        Map.delete(attrs, :next_run_at)
     end
   end
 end

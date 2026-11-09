@@ -17,8 +17,8 @@ defmodule Durable.Telemetry do
   a new segment, possibly on another node. Each segment is one span.
 
     * `[:durable, :workflow, :start]` — `%{system_time, monotonic_time}`;
-      metadata `:workflow_id`, `:workflow`, `:workflow_module`, `:queue`,
-      `:trigger`, `:resumed` (false on a run's first segment)
+      metadata `:workflow_id`, `:workflow`, `:workflow_module`, `:queue`, `:key`,
+      `:tags`, `:trigger`, `:resumed` (false on a run's first segment)
     * `[:durable, :workflow, :stop]` — `%{duration, monotonic_time}`; adds
       `:status`: `:completed`, `:failed`, `:compensated`,
       `:compensation_failed`, `:waiting` (suspended: a wait, or a retry or
@@ -32,8 +32,8 @@ defmodule Durable.Telemetry do
   One span per attempt. A step that raises or returns an error is a normal
   `:stop` with `result: :error` — `:exception` means Durable itself failed.
 
-    * `[:durable, :step, :start]` — metadata `:workflow_id`, `:workflow`,
-      `:step`, `:step_type`, `:attempt`, `:max_attempts`
+    * `[:durable, :step, :start]` — metadata `:workflow_id`, `:workflow`, `:key`,
+      `:tags`, `:step`, `:step_type`, `:attempt`, `:max_attempts`
     * `[:durable, :step, :stop]` — adds `:result` (`:ok`, `:error`,
       `:suspended`, `:snoozed` or `:cancelled`) and, for errors, `:error`
       (`%{type, message}`)
@@ -46,8 +46,8 @@ defmodule Durable.Telemetry do
   ## Compensations
 
     * `[:durable, :compensation, :start | :stop | :exception]` — metadata
-      `:workflow_id`, `:workflow`, `:compensation`, `:step` (the step it
-      undoes); `:stop` adds `:result` (`:ok` or `:error`)
+      `:workflow_id`, `:workflow`, `:key`, `:tags`, `:compensation`, `:step`
+      (the step it undoes); `:stop` adds `:result` (`:ok` or `:error`)
 
   ## Queue, scheduler and waits
 
@@ -55,6 +55,8 @@ defmodule Durable.Telemetry do
     * `[:durable, :queue, :job_completed]` — `%{duration}`; `:job_id`,
       `:queue`, `:workflow_module`, `:workflow_name`, `:status`
     * `[:durable, :queue, :poll]` — `%{jobs_fetched}`; `:queue`, `:available_slots`
+    * `[:durable, :queue, :claim_failed]` — `%{count}`; a poll's claim query
+      failed. `:queue`, `:reason`
     * `[:durable, :queue, :heartbeat]` — `%{count}`; `:job_id`, `:queue`
     * `[:durable, :queue, :stale_recovered]`, `[:durable, :queue, :zombie_recovered]` — `%{count}`
     * `[:durable, :queue, :worker_fenced]` — `%{count, duration}`; `:job_id`, `:queue`
@@ -78,6 +80,13 @@ defmodule Durable.Telemetry do
       finished run. `:workflow`, `:key`, `:from`, `:to`
     * `[:durable, :key, :release]` — `%{count}`; `Durable.release_key/2`.
       `:workflow`, `:key`, `:workflow_id`, `:by`
+
+  ## Logs
+
+  Before each attempt of a step or compensation, `Logger.metadata/1` gets
+  `:workflow`, `:workflow_id`, `:step` and `:attempt`, plus whatever the
+  workflow's `log_metadata:` function returns for the step's data. Add the
+  ones you want to your Logger formatter's `:metadata`.
 
   ## Reporting
 
@@ -106,6 +115,7 @@ defmodule Durable.Telemetry do
     [:durable, :queue, :job_claimed],
     [:durable, :queue, :job_completed],
     [:durable, :queue, :poll],
+    [:durable, :queue, :claim_failed],
     [:durable, :queue, :heartbeat],
     [:durable, :queue, :stale_recovered],
     [:durable, :queue, :zombie_recovered],
@@ -245,10 +255,51 @@ defmodule Durable.Telemetry do
   # Run-level metadata, shared with the step and compensation spans that run
   # inside it (they only know the workflow id).
   @meta_key {__MODULE__, :run}
+  @log_fields_key {__MODULE__, :log_fields}
+  @log_keys_key {__MODULE__, :log_keys}
 
   @doc false
-  def put_run_meta(meta), do: Process.put(@meta_key, meta)
+  def put_run_meta(meta, log_fields \\ nil) do
+    Process.put(@log_fields_key, log_fields)
+    Process.put(@meta_key, meta)
+  end
 
   @doc false
   def run_meta, do: Process.get(@meta_key, %{})
+
+  @doc false
+  # Set before every attempt, since an attempt can land in a new process. A
+  # step's own `Logger.metadata/1` lasts only as long as that process does.
+  def put_log_metadata(workflow_id, step, attempt, data) do
+    fields =
+      [workflow: Map.get(run_meta(), :workflow), workflow_id: workflow_id] ++
+        [step: step, attempt: attempt] ++ log_fields(Process.get(@log_fields_key), data)
+
+    Process.put(@log_keys_key, Keyword.keys(fields))
+    Logger.metadata(fields)
+  end
+
+  @doc false
+  # A run executed inline leaves the caller's own metadata as it found it.
+  def clear_log_metadata do
+    Logger.metadata(Enum.map(Process.delete(@log_keys_key) || [], &{&1, nil}))
+  end
+
+  defp log_fields(nil, _data), do: []
+
+  # Metadata is a nicety: a function that fails costs the step nothing.
+  defp log_fields(fun, data) do
+    case fun.(data) do
+      fields when is_list(fields) -> if Keyword.keyword?(fields), do: fields, else: []
+      _other -> []
+    end
+  catch
+    kind, reason ->
+      Logger.warning(
+        "[Durable] log_metadata failed: #{Exception.format_banner(kind, reason)}",
+        @internal
+      )
+
+      []
+  end
 end

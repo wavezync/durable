@@ -538,8 +538,9 @@ step :charge, [retry: [max_attempts: 5, backoff: :exponential]], fn ctx ->
 end
 ```
 
-A step without `retry:` gets one attempt. The attempt count carries over
-when a run resumes after a crash, and starts again after `Durable.retry/2`.
+A step without `retry:` gets one attempt. An attempt whose process or node
+dies counts like any other. The count carries over when a run resumes after a
+crash, and starts again after `Durable.retry/2`.
 
 Between attempts the run is parked: it goes back on its queue until the
 backoff has passed (up to `max_backoff`, 1 hour by default), so a long wait

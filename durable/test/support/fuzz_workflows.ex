@@ -291,7 +291,7 @@ defmodule Durable.FuzzWorkflows do
   end
 
   defp perform({how, times}, step, case_id, data)
-       when how in [:error, :raise, :throw, :exit, :bad] do
+       when how in [:error, :raise, :throw, :exit, :bad, :linked, :killed] do
     if Context.attempt() <= times, do: misbehave(how), else: done(step, case_id, data)
   end
 
@@ -331,6 +331,10 @@ defmodule Durable.FuzzWorkflows do
   defp misbehave(:throw), do: throw(:boom)
   defp misbehave(:exit), do: exit(:boom)
   defp misbehave(:bad), do: :not_a_valid_return
+
+  # The two no try/catch in a step can see: its process dies with the attempt.
+  defp misbehave(:linked), do: Task.await(Task.async(fn -> raise "boom" end))
+  defp misbehave(:killed), do: Process.exit(self(), :kill)
 
   def case_of(data), do: data[:case] || data["case"]
 

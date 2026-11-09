@@ -5,16 +5,17 @@ defmodule Durable.Scheduler do
   This module runs as part of the Durable supervision tree and:
 
   - Polls every 60 seconds for due schedules
-  - Uses `FOR UPDATE SKIP LOCKED` for multi-node safety
+  - Claims each fire with one conditional update, for multi-node safety
   - Starts workflows via the normal queue system
-  - Updates last_run_at and next_run_at after each execution
+  - Updates last_run_at and next_run_at as it claims each fire
 
   ## Multi-Node Safety
 
   When running multiple Durable instances (e.g., multiple app nodes),
-  only one node will execute each scheduled workflow. This is achieved
-  using PostgreSQL's `FOR UPDATE SKIP LOCKED` clause, which allows
-  each node to atomically claim schedules without conflicts.
+  only one node starts each fire of a schedule. Each node that sees a schedule
+  due tries to move its `next_run_at` on from the value it read, and only the
+  one whose update matched a row starts the run. The update and the start
+  commit together, so a node that dies between them leaves the fire to the next.
 
   ## Configuration
 
@@ -126,14 +127,14 @@ defmodule Durable.Scheduler do
   @impl true
   def handle_info(:check, state) do
     state = %{state | timer_ref: nil}
-    process_due_schedules(state.config)
+    safely_process_due_schedules(state.config)
     state = schedule_check(state, state.interval)
     {:noreply, state}
   end
 
   @impl true
   def handle_cast(:check_schedules, state) do
-    process_due_schedules(state.config)
+    safely_process_due_schedules(state.config)
     {:noreply, state}
   end
 
@@ -155,11 +156,21 @@ defmodule Durable.Scheduler do
   defp register_modules(modules, durable_name) do
     case API.register_all(modules, durable: durable_name) do
       :ok ->
+        API.turn_off_removed(modules, durable: durable_name)
         Logger.info("Registered #{length(modules)} scheduled module(s)")
 
       {:error, reason} ->
         Logger.error("Failed to register scheduled modules: #{inspect(reason)}")
     end
+  end
+
+  # A busy pool mustn't take the scheduler down. The next check tries again.
+  defp safely_process_due_schedules(config) do
+    process_due_schedules(config)
+  rescue
+    error -> Logger.warning("[Durable.Scheduler] check failed: #{Exception.message(error)}")
+  catch
+    :exit, reason -> Logger.warning("[Durable.Scheduler] check failed: #{inspect(reason)}")
   end
 
   defp process_due_schedules(config) do
@@ -273,7 +284,36 @@ defmodule Durable.Scheduler do
   end
 
   defp start_workflow(schedule, module, config) do
-    # Start the workflow
+    case claim_and_start(schedule, module, config) do
+      {:ok, {:started, workflow_id}} ->
+        emit_schedule_triggered(schedule, workflow_id, config)
+        Logger.info("Triggered schedule #{schedule.name} -> workflow_id=#{workflow_id}")
+
+      {:ok, {:skipped, holder_id}} ->
+        Logger.info(
+          "Skipped schedule #{schedule.name}: key #{schedule.key} is held by #{holder_id}"
+        )
+
+      {:ok, :claimed_elsewhere} ->
+        Logger.debug("Schedule #{schedule.name} was fired by another node")
+
+      {:error, reason} ->
+        Logger.error("Failed to start workflow for schedule #{schedule.name}: #{inspect(reason)}")
+    end
+  end
+
+  # In one transaction, so a start that fails leaves the fire for the next check.
+  defp claim_and_start(schedule, module, config) do
+    Repo.transaction(config, fn ->
+      if API.claim_fire(schedule, config) do
+        start_claimed(schedule, module, config)
+      else
+        :claimed_elsewhere
+      end
+    end)
+  end
+
+  defp start_claimed(schedule, module, config) do
     result =
       Durable.Executor.start_workflow(module, schedule.input,
         workflow: schedule.workflow_name,
@@ -286,31 +326,16 @@ defmodule Durable.Scheduler do
 
     case result do
       {:ok, workflow_id} ->
-        # Update last_run_at and next_run_at
-        case API.mark_run(schedule, config) do
-          {:ok, _} ->
-            emit_schedule_triggered(schedule, workflow_id, config)
+        {:started, workflow_id}
 
-            Logger.info("Triggered schedule #{schedule.name} -> workflow_id=#{workflow_id}")
-
-          {:error, reason} ->
-            Logger.error(
-              "Failed to update run times for schedule #{schedule.name}: #{inspect(reason)}"
-            )
-        end
-
+      # The workflow's on_duplicate: :error refused the start: the last run
+      # still holds the key. That's this fire being skipped, not a failure,
+      # so move on to the next one (Activity has the duplicate).
       {:error, {:key_taken, holder_id}} ->
-        # The workflow's on_duplicate: :error refused the start: the last run
-        # still holds the key. That's this fire being skipped, not a failure,
-        # so move on to the next one (Activity has the duplicate).
-        {:ok, _} = API.mark_run(schedule, config)
-
-        Logger.info(
-          "Skipped schedule #{schedule.name}: key #{schedule.key} is held by #{holder_id}"
-        )
+        {:skipped, holder_id}
 
       {:error, reason} ->
-        Logger.error("Failed to start workflow for schedule #{schedule.name}: #{inspect(reason)}")
+        config.repo.rollback(reason)
     end
   end
 

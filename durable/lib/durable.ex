@@ -215,6 +215,8 @@ defmodule Durable do
     broadcast or run inline for the others. A finished holder that the workflow's `reuse:`
     keeps answers `:cancel_existing` and `{:send_event, name}` with
     `{:error, {:key_taken, holder_id}}`.
+  - `:return` - `:details` makes a success `{:ok, %{id: id, created: boolean}}`,
+    so a caller can tell a new run from a duplicate (default: `:id`)
 
   ## Returns
 
@@ -246,7 +248,8 @@ defmodule Durable do
       )
 
   """
-  @spec start(module(), map(), keyword()) :: {:ok, String.t()} | {:error, term()}
+  @spec start(module(), map(), keyword()) ::
+          {:ok, String.t() | %{id: String.t(), created: boolean()}} | {:error, term()}
   def start(module, input, opts \\ []) do
     Durable.Executor.start_workflow(module, input, opts)
   end
@@ -258,7 +261,9 @@ defmodule Durable do
 
   All the starts share one transaction, the caller's if it is in one, so they
   commit together. Keys are checked for every item, as `start/3` checks them,
-  and each item gets its own result, in order.
+  and each item gets its own result, in order. Two batches can name the same keys
+  in any order. If the batch's locks can't be taken, nothing is started and
+  every item gets `{:error, reason}`.
 
   ## Examples
 
@@ -270,7 +275,7 @@ defmodule Durable do
 
   """
   @spec start_many([{module(), map()} | {module(), map(), keyword()}], keyword()) ::
-          [{:ok, String.t()} | {:error, term()}]
+          [{:ok, String.t() | map()} | {:error, term()}]
   def start_many(items, opts \\ []) do
     Durable.Executor.start_many(items, opts)
   end
@@ -320,10 +325,11 @@ defmodule Durable do
   @doc """
   Cancels a pending, running or waiting workflow, and its child workflows.
 
-  The cancel is final: once it returns `:ok` the run stays `:cancelled`. A
-  running workflow stops at its next step boundary: the step already in
-  flight finishes and is recorded, but its output isn't merged into the run's
-  context and no later step runs. Cancelling does not run compensations.
+  The cancel is final: once it returns `:ok` the run stays `:cancelled` and no
+  later step runs. A step in flight is stopped at the worker's next heartbeat
+  (`:heartbeat_interval`, 30 s by default), killed like any process. To stop
+  cleanly before that, a step can check `Durable.Context.cancelled?/0` between
+  chunks of work. Cancelling does not run compensations.
 
   Returns `{:error, :already_completed}` if the run has already finished, and
   `{:error, :not_found}` for an unknown id.

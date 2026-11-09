@@ -15,6 +15,8 @@ does the same thing here.
 | `Oban.insert_all/2` | `Durable.start_many/2` (keys are still checked) |
 | `unique:` | A workflow key: `key: "order:42"` ([Workflow keys](workflow_keys.md)) |
 | `unique:` on a cron job | `@schedule cron: "...", key: "cleanup"` |
+| `unique:` with a `period:` that includes finished jobs ("at most once an hour") | A time bucket in the key, with `reuse: :never` on the workflow: `key: "report:2026-11-09T14"` |
+| `job.conflict?` | `return: :details` on start: `{:ok, %{id: id, created: false}}` |
 | Finish, check for new work, snooze to go again | `on_duplicate: :run_again` |
 | `max_attempts`, `backoff/1` | `retry: [max_attempts: 5, backoff: :exponential]` on a step |
 | `job.attempt` | `attempt/0`, `max_attempts/0`, `last_attempt?/0` in `Durable.Context` |
@@ -22,6 +24,7 @@ does the same thing here.
 | `{:cancel, reason}` | `{:cancel, reason}` |
 | `{:discard, reason}` | `{:fail, reason}` |
 | `tags` | `tags: ["account:7"]` on start |
+| `Oban.cancel_job/1` | `Durable.cancel/2`. A running step is killed at its next heartbeat; it can check `cancelled?/0` to stop cleanly first |
 | `Oban.cancel_all_jobs/1` | `Durable.cancel_all([tag: "account:7"], reason)` |
 | `assert_enqueued`, `refute_enqueued`, `all_enqueued` | `assert_started`, `refute_started`, `all_started` in `Durable.Testing` |
 | `Oban.drain_queue/1` | `Durable.Testing.drain/2` |

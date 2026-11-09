@@ -82,6 +82,25 @@ defmodule Durable.Queue.WorkerTest do
     end
   end
 
+  describe "the step's task dies" do
+    @tag :capture_log
+    test "TASK_CRASH uses the attempt and fails the run through the normal path" do
+      ref = "task-crash-#{System.unique_integer([:positive])}"
+      input = %{"action" => "TASK_CRASH", "ref" => ref, "bin_pid" => pid_to_bin()}
+
+      {:ok, wf_id} = Durable.start(SinkWorkflow, input)
+
+      with_backoff([total: 300, sleep: 10], fn ->
+        exec = Config.get(Durable).repo.get!(WorkflowExecution, wf_id)
+        assert exec.status == :failed
+        assert exec.error["type"] == "task_crash"
+        assert exec.locked_by == nil
+      end)
+
+      refute_received {:done, ^ref}
+    end
+  end
+
   describe "worker killed mid-step" do
     @tag :capture_log
     test "external kill leaves the lock, StaleJobRecovery rescues the row" do

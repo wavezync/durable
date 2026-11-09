@@ -505,6 +505,46 @@ defmodule Durable.ParallelTest do
       Executor.execute_workflow(child.id, config)
     end)
   end
+
+  describe "what a parallel block can hold" do
+    test "anything but a step is a compile error that names it" do
+      error =
+        assert_raise CompileError, fn ->
+          Code.compile_string("""
+          defmodule ParallelHoldingADecision do
+            use Durable
+
+            workflow "w" do
+              parallel do
+                decision :check, fn data -> {:ok, data} end
+                step :work, fn data -> {:ok, data} end
+              end
+            end
+          end
+          """)
+        end
+
+      assert error.description =~ "decision(:check"
+      assert error.description =~ "parallel"
+    end
+  end
+
+  describe "branches of a run with a priority" do
+    test "inherit it" do
+      config = Config.get(Durable)
+
+      {:ok, id} = Durable.start(SimpleParallelTestWorkflow, %{}, priority: 9)
+      Executor.execute_workflow(id, config)
+
+      priorities =
+        config.repo.all(
+          from(w in WorkflowExecution, where: w.parent_workflow_id == ^id, select: w.priority)
+        )
+
+      assert priorities != []
+      assert Enum.all?(priorities, &(&1 == 9))
+    end
+  end
 end
 
 # Test workflow modules

@@ -10,7 +10,9 @@ defmodule Durable.Queue.Worker do
 
   The worker spawns job execution in a separate Task, allowing the GenServer
   to send periodic heartbeats to update `locked_at` and prevent stale lock
-  recovery from incorrectly reclaiming long-running jobs.
+  recovery from incorrectly reclaiming long-running jobs. It traps exits, so a
+  Task that dies (a linked process crashed, or something killed it) is an
+  attempt it can record rather than a crash that takes it down too.
   """
 
   use GenServer, restart: :temporary
@@ -18,6 +20,7 @@ defmodule Durable.Queue.Worker do
   require Logger
 
   alias Durable.Config
+  alias Durable.Executor.StepRunner
   alias Durable.Queue.Adapter
 
   defstruct [:job, :config, :poller_pid, :started_at, :task_ref, :task_pid, :heartbeat_timer]
@@ -50,6 +53,8 @@ defmodule Durable.Queue.Worker do
 
   @impl true
   def init(opts) do
+    Process.flag(:trap_exit, true)
+
     job = Keyword.fetch!(opts, :job)
     config = Keyword.fetch!(opts, :config)
     poller_pid = Keyword.fetch!(opts, :poller_pid)
@@ -87,6 +92,9 @@ defmodule Durable.Queue.Worker do
       {:error, :fenced} ->
         self_fence(state)
 
+      {:error, :cancelled} ->
+        stop_cancelled(state)
+
       :ok ->
         emit_heartbeat_telemetry(state.job)
         timer = schedule_heartbeat(state.config.heartbeat_interval)
@@ -117,24 +125,31 @@ defmodule Durable.Queue.Worker do
     {:stop, :normal, state}
   end
 
-  # Task crashed
+  # The task died: a process linked to it crashed, or something killed it.
   @impl true
   def handle_info({:DOWN, ref, :process, _pid, reason}, %{task_ref: ref} = state) do
     cancel_heartbeat(state.heartbeat_timer)
 
-    Logger.error("Task crashed for job #{state.job.id}: #{inspect(reason)}")
+    message = Exception.format_exit(reason)
+    Logger.error("Task crashed for job #{state.job.id}: #{message}")
 
-    error = %{type: "task_crash", message: inspect(reason)}
+    error = %{type: "task_crash", message: message}
     duration_ms = System.monotonic_time(:millisecond) - state.started_at
 
-    # Emit telemetry
-    emit_telemetry(state.job, {:error, error}, duration_ms)
+    # If this can't reach the database either, the run stays locked and stale
+    # recovery takes it back.
+    result =
+      safely(:fenced, fn -> Durable.Executor.attempt_died(state.job, error, state.config) end)
 
-    # Notify poller of failure
-    send(state.poller_pid, {:job_complete, self(), state.job.id, {:error, error}, duration_ms})
+    emit_telemetry(state.job, result, duration_ms)
+    send(state.poller_pid, {:job_complete, self(), state.job.id, result, duration_ms})
 
     {:stop, :normal, state}
   end
+
+  # A dead task's exit signal. Its :DOWN does the work.
+  @impl true
+  def handle_info({:EXIT, _pid, _reason}, state), do: {:noreply, state}
 
   # Private functions
 
@@ -187,11 +202,7 @@ defmodule Durable.Queue.Worker do
         "worker after stale-lock recovery) — aborting to avoid a duplicate execution"
     )
 
-    cancel_heartbeat(state.heartbeat_timer)
-    if state.task_ref, do: Process.demonitor(state.task_ref, [:flush])
-    if state.task_pid && Process.alive?(state.task_pid), do: Process.exit(state.task_pid, :kill)
-
-    duration_ms = System.monotonic_time(:millisecond) - state.started_at
+    duration_ms = stop_task(state)
 
     :telemetry.execute(
       [:durable, :queue, :worker_fenced],
@@ -207,6 +218,46 @@ defmodule Durable.Queue.Worker do
     send(state.poller_pid, {:job_complete, self(), state.job.id, :fenced, duration_ms})
 
     {:stop, :normal, %{state | heartbeat_timer: nil}}
+  end
+
+  # Cancelled while its step ran. The cancel already settled the run, so this
+  # only stops the work and closes the attempt.
+  defp stop_cancelled(state) do
+    Logger.info("[Durable] stopping the step of job #{state.job.id}: the run was cancelled")
+
+    duration_ms = stop_task(state)
+
+    safely(:ok, fn ->
+      StepRunner.close_running(state.config, [state.job.id], :cancelled, %{
+        type: "cancelled",
+        message: "the run was cancelled while this step was running"
+      })
+    end)
+
+    emit_telemetry(state.job, :fenced, duration_ms)
+    send(state.poller_pid, {:job_complete, self(), state.job.id, :fenced, duration_ms})
+
+    {:stop, :normal, %{state | heartbeat_timer: nil}}
+  end
+
+  defp stop_task(state) do
+    cancel_heartbeat(state.heartbeat_timer)
+    if state.task_ref, do: Process.demonitor(state.task_ref, [:flush])
+    if state.task_pid && Process.alive?(state.task_pid), do: Process.exit(state.task_pid, :kill)
+
+    System.monotonic_time(:millisecond) - state.started_at
+  end
+
+  defp safely(fallback, fun) do
+    fun.()
+  rescue
+    error ->
+      Logger.error("[Durable] worker cleanup failed: #{Exception.message(error)}")
+      fallback
+  catch
+    :exit, reason ->
+      Logger.error("[Durable] worker cleanup failed: #{inspect(reason)}")
+      fallback
   end
 
   defp schedule_heartbeat(interval) do

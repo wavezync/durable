@@ -38,7 +38,7 @@ defmodule Durable.FuzzScripts do
       constant(:input),
       constant(:any),
       constant(:all),
-      tuple({member_of([:error, :raise, :throw, :exit, :bad]), integer(1..4)}),
+      tuple({member_of([:error, :raise, :throw, :exit, :bad, :linked, :killed]), integer(1..4)}),
       tuple({constant(:snooze), integer(1..3)}),
       tuple({constant(:put), one_of([integer(), string(:ascii, max_length: 4)])})
     ])
@@ -78,7 +78,9 @@ defmodule Durable.FuzzScripts do
   defp outcome({:bad, _times}), do: :failed
 
   defp outcome({how, times})
-       when how in [:error, :raise, :throw, :exit, :bad] and times >= @max_attempts, do: :failed
+       when how in [:error, :raise, :throw, :exit, :bad, :linked, :killed] and
+              times >= @max_attempts,
+       do: :failed
 
   defp outcome(_action), do: :done
 

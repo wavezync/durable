@@ -18,6 +18,41 @@ defmodule Durable.ContextTest do
   # Context Key Handling Tests
   # ============================================================================
 
+  describe "a key held in the other shape" do
+    alias Durable.Context
+
+    setup do
+      Process.put(:durable_context, %{"id" => 42, name: "ada"})
+      on_exit(fn -> Process.delete(:durable_context) end)
+    end
+
+    test "is found whichever way it's asked for" do
+      assert Context.get_context(:id) == 42
+      assert Context.get_context("id") == 42
+      assert Context.get_context(:name) == "ada"
+      assert Context.get_context("name") == "ada"
+      assert Context.has_context?(:id)
+      refute Context.has_context?(:nope)
+      assert Context.get_context(:nope, :default) == :default
+    end
+
+    test "is written and deleted where it is, not beside itself" do
+      Context.put_context(:id, 43)
+      assert Context.context() == %{"id" => 43, name: "ada"}
+
+      Context.delete_context(:id)
+      assert Context.context() == %{name: "ada"}
+    end
+
+    test "a new key takes the usual form" do
+      Context.put_context("name_of_a_key_the_code_knows", 1)
+      assert Context.context()["name_of_a_key_the_code_knows"] == 1
+
+      Context.put_context(:fresh_atom_key, 2)
+      assert Context.context()[:fresh_atom_key] == 2
+    end
+  end
+
   describe "context key handling" do
     test "input with both string and atom versions of same key" do
       # When input has both :key and "key", atomization should handle this

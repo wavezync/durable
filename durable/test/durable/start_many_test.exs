@@ -43,6 +43,52 @@ defmodule Durable.StartManyTest do
     assert Enum.map(runs(), & &1.tags) == [["import:9"], ["row:2"], ["import:9"], ["import:9"]]
   end
 
+  describe "return: :details" do
+    test "says whether a start created a run" do
+      assert {:ok, %{id: id, created: true}} =
+               Durable.start(ImportRow, %{}, key: "a", return: :details)
+
+      assert {:ok, %{id: ^id, created: false}} =
+               Durable.start(ImportRow, %{}, key: "a", return: :details)
+
+      assert {:ok, ^id} = Durable.start(ImportRow, %{}, key: "a")
+      assert {:ok, %{created: true}} = Durable.start(ImportRow, %{}, return: :details)
+    end
+
+    test "still refuses a taken key the same way" do
+      {:ok, holder} = Durable.start(Strict, %{}, key: "a")
+
+      assert {:error, {:key_taken, ^holder}} =
+               Durable.start(Strict, %{}, key: "a", return: :details)
+    end
+
+    test "works on start_many, for all items or one" do
+      assert [{:ok, %{created: true}}, {:ok, %{created: false}}, {:ok, %{created: true}}] =
+               Durable.start_many(
+                 [
+                   {ImportRow, %{}, key: "b"},
+                   {ImportRow, %{}, key: "b"},
+                   {ImportRow, %{}}
+                 ],
+                 return: :details
+               )
+
+      assert [{:ok, id}, {:ok, %{id: id2, created: true}}] =
+               Durable.start_many([
+                 {ImportRow, %{}},
+                 {ImportRow, %{}, return: :details}
+               ])
+
+      assert is_binary(id) and is_binary(id2)
+    end
+
+    test "anything else is a programmer error" do
+      assert_raise ArgumentError, ~r/return/, fn ->
+        Durable.start(ImportRow, %{}, return: :everything)
+      end
+    end
+  end
+
   test "joins the caller's transaction" do
     TestRepo.transaction(fn ->
       [{:ok, _}, {:ok, _}] = Durable.start_many([{ImportRow, %{}}, {ImportRow, %{}}])

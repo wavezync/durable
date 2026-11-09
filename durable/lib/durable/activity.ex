@@ -12,6 +12,7 @@ defmodule Durable.Activity do
   | `"queue_paused"`      | `Durable.pause_queue/2` (`details.by` when given)               |
   | `"queue_resumed"`     | `Durable.resume_queue/2`                                       |
   | `"schedule_disabled"` | a schedule was turned off after failing repeatedly            |
+  | `"schedule_removed"`  | schedules were turned off for no longer having an `@schedule`  |
   | `"pruned"`            | the retention pruner deleted finished runs                     |
   | `"key_duplicate"`     | a start found its key taken and returned the holder or an error |
   | `"key_handed_off"`    | a start took a key from a closed run that `reuse:` let go      |

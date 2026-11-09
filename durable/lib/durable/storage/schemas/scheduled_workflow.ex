@@ -20,6 +20,7 @@ defmodule Durable.Storage.Schemas.ScheduledWorkflow do
           input: map(),
           queue: String.t(),
           enabled: boolean(),
+          source: String.t(),
           last_run_at: DateTime.t() | nil,
           next_run_at: DateTime.t() | nil,
           last_error: String.t() | nil,
@@ -43,6 +44,9 @@ defmodule Durable.Storage.Schemas.ScheduledWorkflow do
     field(:queue, :string, default: "default")
     field(:key, :string)
     field(:enabled, :boolean, default: true)
+    # "api" (`Durable.schedule/3`), "code" (`@schedule`), or "removed" (its
+    # `@schedule` is gone, so it was turned off at boot).
+    field(:source, :string, default: "api")
     field(:last_run_at, :utc_datetime_usec)
     field(:next_run_at, :utc_datetime_usec)
     # Bug L-1 — scheduler resilience tracking
@@ -61,6 +65,7 @@ defmodule Durable.Storage.Schemas.ScheduledWorkflow do
     :queue,
     :key,
     :enabled,
+    :source,
     :last_run_at,
     :next_run_at,
     :last_error,
@@ -163,11 +168,11 @@ defmodule Durable.Storage.Schemas.ScheduledWorkflow do
   @doc """
   Creates a changeset for upserting during registration.
 
-  Updates cron, timezone, input, and queue, but preserves enabled status
-  and run times for existing records.
+  Updates cron, timezone, input, and queue. `API.register/2` includes
+  `:next_run_at` when the cron or time zone changed and `:enabled` when a
+  removed `@schedule` came back; anything else about the record is preserved.
   """
   def upsert_changeset(scheduled_workflow, attrs) do
-    # Only update these fields during registration - preserve enabled, last_run_at, next_run_at
     upsert_fields = [
       :workflow_module,
       :workflow_name,
@@ -175,7 +180,10 @@ defmodule Durable.Storage.Schemas.ScheduledWorkflow do
       :timezone,
       :input,
       :queue,
-      :key
+      :key,
+      :source,
+      :next_run_at,
+      :enabled
     ]
 
     scheduled_workflow
