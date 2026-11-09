@@ -19,7 +19,9 @@ defmodule Durable.Config do
     interval only delays runs that come due later: sleeps, retries, snoozes
     and delayed starts.
   * `:pubsub` - Phoenix.PubSub for lifecycle broadcasts and waking pollers:
-    a server name, `:start` for Durable's own, or `nil` (default)
+    a server name, `:start` for Durable's own, or `nil` (default). A start
+    inside your own transaction wakes them when it commits. Without a PubSub,
+    runs are claimed on the next poll
   * `:queue_enabled` - Enable/disable queue processing (default: `true`)
   * `:stale_lock_timeout` - Seconds before a lock is considered stale (default: `300`)
   * `:heartbeat_interval` - Milliseconds between worker heartbeats (default: `30_000`)

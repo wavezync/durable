@@ -27,6 +27,7 @@ does the same thing here.
 | `Oban.drain_queue/1` | `Durable.Testing.drain/2` |
 | A queue with a `limit` | A queue with a `concurrency` |
 | A queue per pipeline stage | `queue:` on each step of one workflow |
+| The notifier that wakes queues | `pubsub: :start`, or your own Phoenix.PubSub |
 
 ## Differences That Bite
 
@@ -48,6 +49,9 @@ does the same thing here.
 - **Queue concurrency is per node.** `concurrency: 20` on three nodes runs up
   to 60 at once, as Oban's `limit` does without Oban Pro's global limits. That
   goes for a step's `queue:` too.
+- **Nothing to change behind PgBouncer.** Durable uses no `LISTEN`/`NOTIFY` or
+  other session features, so transaction mode works as it is. Oban's Postgres
+  notifier needs replacing there.
 
 ## Production Settings
 

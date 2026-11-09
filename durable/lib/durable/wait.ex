@@ -231,7 +231,6 @@ defmodule Durable.Wait do
   @spec wait_for_event(String.t(), keyword()) :: term()
   def wait_for_event(event_name, opts \\ []) do
     # Check if we're resuming with event data already in context
-    # Context keys are atoms (converted from strings when restored from DB)
     case answer(Process.get(:durable_context, %{}), event_name) do
       {:ok, data} -> data
       :error -> throw({:wait_for_event, Keyword.put(opts, :event_name, event_name)})
@@ -261,7 +260,6 @@ defmodule Durable.Wait do
   @spec wait_for_any([String.t()], keyword()) :: {String.t(), term()}
   def wait_for_any(event_names, opts \\ []) when is_list(event_names) do
     # Check if we're resuming with event data already in context
-    # Context keys are atoms (converted from strings when restored from DB)
     context = Process.get(:durable_context, %{})
 
     # Find first matching event in context (convert string names to atoms)
@@ -299,7 +297,6 @@ defmodule Durable.Wait do
   @spec wait_for_all([String.t()], keyword()) :: map()
   def wait_for_all(event_names, opts \\ []) when is_list(event_names) do
     # Check if we're resuming with all events already in context
-    # Context keys are atoms (converted from strings when restored from DB)
     context = Process.get(:durable_context, %{})
     answers = Enum.map(event_names, &answer(context, &1))
 
@@ -352,7 +349,6 @@ defmodule Durable.Wait do
   @spec wait_for_input(String.t(), keyword()) :: term()
   def wait_for_input(input_name, opts \\ []) do
     # Check if we're resuming with input data already in context
-    # Context keys are atoms (converted from strings when restored from DB)
     case answer(Process.get(:durable_context, %{}), input_name) do
       {:ok, data} -> data
       :error -> throw({:wait_for_input, Keyword.put(opts, :input_name, input_name)})

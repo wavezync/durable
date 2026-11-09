@@ -1,11 +1,11 @@
 ---
 // Every workflow primitive, as a bento grid. The wide tiles carry a small diagram;
 // the last one spans the row, so the grid stays full at every width.
-import { RefreshCw, GitBranch, Split, Undo2, Hourglass, Webhook, UserCheck, CalendarClock, Network, Timer, KeyRound } from '@lucide/astro';
+import { RefreshCw, GitBranch, Split, Undo2, Hourglass, Webhook, UserCheck, CalendarClock, Network, Timer, KeyRound, Layers, AlarmClock, OctagonX, Tags } from '@lucide/astro';
 
 const tiles = [
   { icon: Split, wide: 'parallel', name: 'Parallel steps', text: 'Fan out, run at the same time, and collect each result as {:ok, _} or {:error, _}.', code: 'parallel do ... end', href: '/docs/parallel/' },
-  { icon: RefreshCw, name: 'Retries with backoff', text: 'Exponential, linear or constant, per step.', code: 'retry: [max_attempts: 3]', href: '/docs/#reference' },
+  { icon: RefreshCw, name: 'Retries with backoff', text: 'Exponential, linear or constant, per step. The wait holds no worker.', code: 'retry: [max_attempts: 3]', href: '/docs/#reference' },
   { icon: GitBranch, name: 'Branching', text: 'Pattern-match on the context to pick one path.', code: 'branch on: fn ctx -> ... end', href: '/docs/branching/' },
   { icon: Webhook, name: 'Events', text: 'Resume when your app calls Durable.send_event/3.', code: 'wait_for_event("paid")', href: '/docs/waiting/' },
   { icon: UserCheck, name: 'Human input', text: 'Approvals, choices, text and forms, with timeouts.', code: 'wait_for_approval("lead")', href: '/docs/waiting/' },
@@ -14,7 +14,11 @@ const tiles = [
   { icon: CalendarClock, name: 'Cron schedules', text: 'Recurring workflows, in any timezone.', code: '@schedule cron: "0 9 * * *"', href: '/docs/#scheduled-reports' },
   { icon: Network, name: 'Child workflows', text: 'Call one and wait for it, or start one and move on.', code: 'call_workflow(Child, input)', href: '/docs/orchestration/' },
   { icon: Timer, name: 'Deadlines', text: 'A run past its timeout fails and runs its compensations.', code: 'timeout: hours(2)', href: '/docs/#workflow-options' },
-  { icon: KeyRound, wide: 'keys', name: 'Unique executions', text: 'Start with a key and a repeat gets the run that already holds it. Or replace that run, send it the new input, or debounce a burst into one.', code: 'Durable.start(Article, input, key: "article:42")', href: '/docs/workflow-keys/' },
+  { icon: Layers, name: 'Step queues', text: 'Give a step its own queue and concurrency limit.', code: 'step :ocr, [queue: :ocr]', href: '/docs/#step-queues' },
+  { icon: AlarmClock, name: 'Snooze', text: 'Try again later without using an attempt.', code: '{:snooze, seconds(15)}', href: '/docs/#retries' },
+  { icon: OctagonX, name: 'Stop early', text: "Fail or cancel now when retrying won't help.", code: '{:fail, "the file is gone"}', href: '/docs/#retries' },
+  { icon: Tags, name: 'Bulk starts and tags', text: 'Start many runs at once, then find or cancel them by tag.', code: 'Durable.start_many(items)', href: '/docs/#api' },
+  { icon: KeyRound, wide: 'keys', name: 'Unique executions', text: 'Start with a key and a repeat gets the run that already holds it. Or replace that run, send it the new input, run once more after it, or debounce a burst into one.', code: 'Durable.start(Article, input, key: "article:42")', href: '/docs/workflow-keys/' },
 ];
 ---
 <ul class="bento">

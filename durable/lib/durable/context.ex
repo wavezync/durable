@@ -426,7 +426,7 @@ defmodule Durable.Context do
 
   @doc false
   def restore_context(context_map, input, workflow_id) do
-    # Convert string keys to atoms since JSON encoding converts atoms to strings
+    # JSON turned atom keys into strings; turn back the ones the code knows.
     atomized_context = atomize_keys(context_map || %{})
     Process.put(@context_key, atomized_context)
     Process.put(@input_key, input)
@@ -434,7 +434,7 @@ defmodule Durable.Context do
     :ok
   end
 
-  # Convert string keys to atoms (for context restored from database)
+  # Keys the code knows become atoms again (for context restored from database)
   # Only converts top-level keys, nested maps keep their original keys
   defp atomize_keys(map) when is_map(map) do
     Map.new(map, fn

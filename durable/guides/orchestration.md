@@ -336,6 +336,7 @@ A child called from a branch can wait like any workflow: sleep, wait for an even
 ## Limitations
 
 - Child workflows run on the queue, like any run
+- A child's input must be a map: anything else raises `ArgumentError` in the calling step
 - The `:timeout` option requires the timeout checker to be running (same as `wait_for_event`)
 
 ## Best Practices

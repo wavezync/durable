@@ -224,6 +224,10 @@ defmodule Durable do
   - `{:error, %Ecto.Changeset{}}` for an invalid key, and
     `{:error, :key_contended}` in the rare case the key changed hands three
     times while this start ran
+  - `{:error, :invalid_input}` for input that isn't a map
+
+  Raises `ArgumentError` for a `:key`, `:tags` or `:queue` that PostgreSQL can't
+  store, such as text with a NUL character.
 
   ## Examples
 

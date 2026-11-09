@@ -20,7 +20,10 @@ A durable, resumable workflow engine for Elixir. Similar to Temporal/Inngest.
 - **Parallel** - Run steps concurrently with result collection
 - **Compensations** - Saga pattern with automatic rollback
 - **Cron Scheduling** - Recurring workflows with cron expressions
-- **Reliability** - Automatic retries with exponential/linear/constant backoff
+- **Reliability** - Automatic retries with exponential/linear/constant backoff, waiting off the worker
+- **Run control** - Snooze, fail now or cancel from a step
+- **Step queues** - Give a step its own queue and concurrency limit
+- **Bulk starts and tags** - Start many runs in one transaction, then find or cancel them by tag
 - **Orchestration** - Parent/child workflow composition
 - **Workflow keys** - At most one run per key, so duplicate starts return the existing run
 - **Persistence** - PostgreSQL-backed execution state
@@ -32,6 +35,8 @@ def deps do
   [{:durable, "~> 1.0"}]
 end
 ```
+
+Durable needs PostgreSQL 13 or newer.
 
 ## Quick Start
 
@@ -613,8 +618,9 @@ When a step fails, its execution keeps what went wrong as `error`:
 - **Exited** (a `GenServer.call` timeout, a linked process going down) —
   `type: "exit"`, a readable `message` (`Exception.format_exit/1`) and the
   `stacktrace`. Throws are kept the same way.
-- **Returned** — `{:error, reason}` from the step: `reason` itself (a map is
-  stored as-is), with no stack, because nothing was raised.
+- **Returned** — `{:error, reason}` from the step: `reason` itself, with no
+  stack, because nothing was raised. A map is stored as it is, and anything
+  JSON can't hold is stored in a readable form.
 
 The same applies to compensations and to a branch's `on:` function. A
 failed run's `error` is its failing step's. The stack is as deep as the
@@ -644,9 +650,9 @@ Something like this keeps the tables small:
 config :durable, log_capture: [levels: [:warning, :error]]
 ```
 
-Durable uses no session features, so it runs behind PgBouncer in transaction
-mode. A PgBouncer older than 1.24 needs `prepare: :unnamed` on your repo.
-Durable needs PostgreSQL 13 or newer.
+Durable uses no session features, so it works on direct connections and
+behind PgBouncer in transaction mode. A PgBouncer older than 1.24 needs
+`prepare: :unnamed` on your repo.
 
 ### API
 
