@@ -233,7 +233,7 @@ defmodule Durable.Orchestration do
       workflow_name: workflow_def.name,
       status: :pending,
       queue: Keyword.get(opts, :queue, "default") |> to_string(),
-      priority: Keyword.get(opts, :priority, 0),
+      priority: Keyword.get(opts, :priority) || 0,
       input: safe_input,
       context: %{},
       parent_workflow_id: parent_id,

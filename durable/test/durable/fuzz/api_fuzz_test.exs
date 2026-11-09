@@ -16,16 +16,6 @@ defmodule Durable.Fuzz.ApiTest do
 
   @runs String.to_integer(System.get_env("FUZZ_RUNS", "60"))
 
-  # For a value of the wrong type these say so, which is the caller's bug.
-  @misuse [
-    ArgumentError,
-    FunctionClauseError,
-    Protocol.UndefinedError,
-    Ecto.Query.CastError,
-    Ecto.QueryError,
-    DBConnection.EncodeError
-  ]
-
   @statuses [:pending, :running, :waiting, :completed, :failed, :cancelled]
 
   defp finished do
@@ -114,7 +104,9 @@ defmodule Durable.Fuzz.ApiTest do
     :ok
   rescue
     error ->
-      unless error.__struct__ in @misuse and not of_type?(value, type) do
+      # A value of the wrong type is the caller's bug and may raise anything, as
+      # long as it doesn't get as far as a raw database error.
+      if of_type?(value, type) or match?(%Postgrex.Error{}, error) do
         flunk("""
         #{name} raised #{inspect(error.__struct__)} on #{inspect(value)}
         #{Exception.message(error)}

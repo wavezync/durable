@@ -173,7 +173,7 @@ defmodule Durable.HostileValuesTest do
     test "matches nothing when it's a filter or a name" do
       {:ok, id} = Durable.start(Returns, %{})
 
-      for bad <- ["a\0b", <<0xFF>>] do
+      for bad <- ["a\0b", <<0xFF>>, ["a\0b"], [["a\0b"]], [0]] do
         assert Durable.list_executions(queue: bad) == []
         assert Durable.list_executions(key: bad) == []
         assert Durable.list_executions(tag: bad) == []
@@ -184,10 +184,17 @@ defmodule Durable.HostileValuesTest do
         assert Durable.get_schedule(bad) == {:error, :not_found}
         assert Durable.delete_schedule(bad) == {:error, :not_found}
         assert Durable.pause_queue(bad) == {:error, :invalid_queue}
+        assert Durable.resume_queue(bad) == {:error, :invalid_queue}
       end
     end
 
-    for opts <- [[key: "a\0"], [queue: "a\0"], [tags: ["ok", <<0xFF>>]], [queue: :"a\0"]] do
+    for opts <- [
+          [key: "a\0"],
+          [queue: "a\0"],
+          [tags: ["ok", <<0xFF>>]],
+          [queue: :"a\0"],
+          [queue: [0]]
+        ] do
       test "is refused by name in #{inspect(opts)}" do
         assert_raise ArgumentError, ~r/can't be stored/, fn ->
           Durable.start(Returns, %{}, unquote(opts))
@@ -202,6 +209,11 @@ defmodule Durable.HostileValuesTest do
 
     assert Durable.start(Returns, ~D[2026-01-01]) == {:error, :invalid_input}
     assert Durable.start(Returns, "a string") == {:error, :invalid_input}
+  end
+
+  test "tags: nil and priority: nil mean the defaults" do
+    assert {:ok, id} = Durable.start(Returns, %{}, tags: nil, priority: nil)
+    assert %{tags: [], priority: 0} = TestRepo.get!(WorkflowExecution, id)
   end
 
   test "any cancel reason can be stored" do

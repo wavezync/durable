@@ -657,14 +657,14 @@ defmodule Durable.Executor do
       workflow_name: workflow_def.name,
       status: :pending,
       queue: (opts[:queue] || workflow_def.opts[:queue] || "default") |> to_string(),
-      priority: Keyword.get(opts, :priority, 0),
+      priority: Keyword.get(opts, :priority) || 0,
       input: input,
       context: %{},
       scheduled_at: scheduled_at,
       trigger: Keyword.get(opts, :trigger, :api),
       trigger_ref: Keyword.get(opts, :trigger_ref),
       deadline_at: deadline(workflow_def, scheduled_at),
-      tags: Keyword.get(opts, :tags, [])
+      tags: Keyword.get(opts, :tags) || []
     }
 
     case Keyword.fetch(opts, :key) do

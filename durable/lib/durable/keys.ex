@@ -47,10 +47,8 @@ defmodule Durable.Keys do
 
     with {:ok, value} <- Keyword.fetch(opts, :on_duplicate), do: validate_on_duplicate!(value)
 
-    for {opt, value} <- Keyword.take(opts, [:key, :queue, :tags]),
-        text <- List.wrap(value),
-        Repo.bad_text?(text) do
-      raise ArgumentError, "#{opt}: can't be stored: #{inspect(text)}"
+    for {opt, value} <- Keyword.take(opts, [:key, :queue, :tags]), Repo.bad_text?(value) do
+      raise ArgumentError, "#{opt}: can't be stored: #{inspect(value)}"
     end
 
     :ok

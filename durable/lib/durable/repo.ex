@@ -39,6 +39,11 @@ defmodule Durable.Repo do
   def bad_text?(value) when is_binary(value),
     do: not String.valid?(value) or String.contains?(value, <<0>>)
 
+  # A list can reach the database as text too, through to_string/1 or a filter.
+  def bad_text?(value) when is_list(value) do
+    not List.improper?(value) and Enum.any?(value, &(&1 == 0 or bad_text?(&1)))
+  end
+
   def bad_text?(_value), do: false
 
   @doc """
