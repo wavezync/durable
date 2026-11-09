@@ -13,6 +13,15 @@ defmodule Durable.PubSubTest do
   alias Durable.PubSub, as: DurablePubSub
   alias Durable.Wait
 
+  defmodule Snoozes do
+    @moduledoc false
+    use Durable
+
+    workflow "snoozes" do
+      step(:later, fn _data -> {:snooze, 60_000} end)
+    end
+  end
+
   setup do
     config = Config.get(Durable)
     {:ok, config: config}
@@ -50,6 +59,17 @@ defmodule Durable.PubSubTest do
       assert_receive {:durable_event, :workflow_resumed, %{id: ^wf_id, status: :running}}
 
       assert_receive {:durable_event, :workflow_completed, %{id: ^wf_id, status: :completed}}
+    end
+
+    test "broadcasts :workflow_parked when a step snoozes, so lists see it stop", %{
+      config: config
+    } do
+      :ok = DurablePubSub.subscribe(config, DurablePubSub.workflows_topic(config))
+
+      {:ok, wf_id} = Executor.start_workflow(__MODULE__.Snoozes, %{})
+      Executor.execute_workflow(wf_id, config)
+
+      assert_receive {:durable_event, :workflow_parked, %{id: ^wf_id, status: :pending}}
     end
 
     test "broadcasts :workflow_cancelled on cancel", %{config: config} do

@@ -2508,6 +2508,7 @@ defmodule Durable.Executor do
       )
       |> cas_update!(config)
 
+    DurablePubSub.broadcast_workflow(config, :workflow_parked, workflow_event(execution))
     {:waiting, execution}
   end
 

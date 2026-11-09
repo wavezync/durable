@@ -4,20 +4,11 @@ What's next for Durable, in order. For how it works today, see [ARCHITECTURE.md]
 
 ## Next
 
-### 1. Release what's on `feat/step-attempt-control`
+### 1. Release `durable`, then the dashboard
 
-Merge [PR #26](https://github.com/wavezync/durable/pull/26) and release `durable`. It has a new migration, so apps need to run it. The dashboard's telemetry catalog must match the engine's events exactly, so its next release has to require this `durable` release.
+Release `durable` first. It has a new migration, so apps need to run it. The dashboard's next release has to require that `durable` release: its telemetry catalog must match the engine's events exactly, and its pages read the new run fields.
 
-### 2. Bring the dashboard up to date
-
-The rest of [issue #25](https://github.com/wavezync/durable/issues/25):
-
-- Show parked and snoozed runs properly, and snoozed attempts in the trace
-- Tags on the Runs page, with a filter
-- Schedule keys, and which run a `run_again` run is waiting behind
-- A step's queue and home queue
-
-### 3. Workflow versioning
+### 2. Workflow versioning
 
 Pin each run to the version of the workflow it started on. Today a run resumes on whatever is deployed, and fails if its current step is gone.
 
@@ -27,7 +18,7 @@ Still to decide:
 - **Release:** it needs a new column, so a minor release with an upgrade note, or wait for 2.0?
 - **Missing version:** fail the run, or fall back to the latest version if the run's current step exists there?
 
-### 4. Global concurrency and broker adapters
+### 3. Global concurrency and broker adapters
 
 Queue limits are per node today, by decision. Cluster-wide limits come later through an adapter, along with adapters for Kafka, RabbitMQ, NATS and Redis to raise throughput.
 

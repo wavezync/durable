@@ -8,6 +8,7 @@ defmodule DurableDashboard.RunSearch do
       input.order_id:ORD-1042           exact value of an input field (dotted paths)
       schedule:nightly_report           runs that schedule started
       key:article:42                    runs started with this workflow key
+      tag:account:7                     runs started with this tag (repeat for all of several)
 
   Other words are searched for in the error. Filters combine with AND.
   `workflow:`, `status:` and `since:` are facets: `split_facets/1` lifts them
@@ -48,7 +49,7 @@ defmodule DurableDashboard.RunSearch do
   id when it looks like one, otherwise text in the error, as `parse/1` reads it.
   """
   @spec label(token()) :: {String.t(), String.t()}
-  def label(%{key: key, value: value}) when key in ~w(step id error schedule key),
+  def label(%{key: key, value: value}) when key in ~w(step id error schedule key tag),
     do: {key, value}
 
   def label(%{key: "input." <> path = key, value: value}) when path != "", do: {key, value}
@@ -56,6 +57,12 @@ defmodule DurableDashboard.RunSearch do
   def label(%{key: key, value: value}), do: {"error", "#{key}:#{value}"}
 
   defp word_kind(word), do: if(Regex.match?(@id_like, word), do: "id", else: "error")
+
+  @doc "A `key:value` term to search with, quoted when the value has a space."
+  @spec term(String.t(), String.t()) :: String.t()
+  def term(key, value) do
+    if String.match?(value, ~r/\s/), do: ~s(#{key}:"#{value}"), else: "#{key}:#{value}"
+  end
 
   @doc """
   Splits typed text into the facets it names — `workflow:`, `status:` (comma
@@ -84,6 +91,7 @@ defmodule DurableDashboard.RunSearch do
   defp add(%{key: "error", value: value}, acc), do: append_error(acc, value)
   defp add(%{key: "schedule", value: value}, acc), do: Map.put(acc, :schedule, value)
   defp add(%{key: "key", value: value}, acc), do: Map.put(acc, :key, value)
+  defp add(%{key: "tag", value: value}, acc), do: Map.update(acc, :tag, [value], &[value | &1])
 
   defp add(%{key: "input." <> path, value: value}, acc) when path != "",
     do: Map.update(acc, :input, %{path => value}, &Map.put(&1, path, value))
@@ -103,6 +111,7 @@ defmodule DurableDashboard.RunSearch do
 
   defp to_filter({:id_prefix, ""}), do: []
   defp to_filter({:schedule, name}), do: [trigger: :schedule, trigger_ref: name]
+  defp to_filter({:tag, tags}), do: Enum.map(Enum.reverse(tags), &{:tag, &1})
   defp to_filter({key, value}), do: [{key, value}]
 
   defp clean_id(value), do: value |> String.downcase() |> String.replace(~r/[^0-9a-f-]/, "")

@@ -310,6 +310,7 @@ defmodule Durable.StepQueueTest do
     # The start's queue only hands it on: nothing has run yet.
     run = advance(id, "documents")
     assert {run.status, run.queue, run.home_queue} == {:pending, "downloads", "documents"}
+    assert {:ok, %{home_queue: "documents"}} = Durable.Query.get_execution(id)
     assert ran(id) == []
     assert claim("documents") == []
 

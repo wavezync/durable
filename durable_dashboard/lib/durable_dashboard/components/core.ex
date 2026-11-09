@@ -579,19 +579,21 @@ defmodule DurableDashboard.Components.Core do
 
       <.run_status run={row} />
   """
-  attr :run, :map, required: true, doc: "a run with `:status`, `:current_step` and `:error`"
+  attr :run, :map,
+    required: true,
+    doc: "a run with `:status`, `:current_step` and `:error`; `:parked` when it has one"
+
+  attr :now, :any, default: nil, doc: "the page's clock, for a parked run's countdown"
 
   def run_status(assigns) do
     run = assigns.run
-    key = status_key(run.status)
+    parked = Map.get(run, :parked)
+    key = if parked, do: Atom.to_string(parked.status), else: status_key(run.status)
     {label, tone} = status_meta(key)
 
-    step =
-      if key not in ["completed", "pending"] && run.current_step,
-        do: Trace.display_name(run.current_step)
-
+    step = if key != "completed" && run.current_step, do: Trace.display_name(run.current_step)
     error = Trace.error_parts(run.error)
-    where = step && "#{if key == "compensated", do: "after", else: "at"} "
+    where = step && "#{where_word(key)} "
 
     assigns =
       assign(assigns,
@@ -600,7 +602,9 @@ defmodule DurableDashboard.Components.Core do
         tone: run_status_tone(tone),
         step: step,
         where: where,
-        error: error,
+        then: parked && parked_time(parked, assigns.now || DateTime.utc_now()),
+        note: (error && error.message) || run_note(run, parked),
+        error_type: error && error.type,
         tip_title: if(step, do: label <> " " <> where <> step, else: label)
       )
 
@@ -608,20 +612,51 @@ defmodule DurableDashboard.Components.Core do
     <div
       class="flex min-w-0 flex-col leading-tight"
       data-tip-title={@tip_title}
-      data-tip={(@error && @error.message) || status_help(@key)}
-      data-tip-meta={@error && @error.type}
+      data-tip={@note || status_help(@key)}
+      data-tip-meta={@error_type}
     >
       <span class="flex min-w-0 items-center gap-1.5 whitespace-nowrap">
         <.status_dot status={@key} />
         <span class={["font-medium", @tone]}>{@label}</span>
         <span :if={@step} class="min-w-0 truncate text-muted-foreground">
-          {@where}<span class={["font-mono text-xs", @tone]}>{@step}</span>
+          {@where}<span class={["font-mono text-xs", @tone]}>{@step}</span><span :if={@then}> {@then}</span>
         </span>
       </span>
-      <span :if={@error} class="truncate pl-3.5 text-xs text-muted-foreground">{@error.message}</span>
+      <span :if={@note} class="truncate pl-3.5 text-xs text-muted-foreground">{@note}</span>
     </div>
     """
   end
+
+  defp where_word("compensated"), do: "after"
+  defp where_word("pending"), do: "next"
+  defp where_word(_status), do: "at"
+
+  # "in 12s · 2 of 5", "for 48s", or "due now" once its time has passed.
+  defp parked_time(%{status: :retrying} = parked, now) do
+    left = Trace.time_left(parked.at, now)
+    "#{if left, do: "in #{left}", else: "due now"} · #{Trace.attempts_used(parked)}"
+  end
+
+  defp parked_time(%{status: :snoozed} = parked, now) do
+    if left = Trace.time_left(parked.at, now), do: "for #{left}", else: "· due now"
+  end
+
+  defp run_note(_run, %{reason: reason}), do: reason
+
+  defp run_note(%{status: :pending} = run, nil) do
+    cond do
+      after_id = Map.get(run, :runs_after_id) ->
+        "Waiting for run #{String.slice(after_id, 0, 8)} to finish"
+
+      Map.get(run, :home_queue) ->
+        "Waiting for a slot on #{run.queue}"
+
+      true ->
+        nil
+    end
+  end
+
+  defp run_note(_run, _parked), do: nil
 
   defp run_status_tone("primary"), do: "text-primary"
   defp run_status_tone("warning"), do: "text-warning"
@@ -652,6 +687,8 @@ defmodule DurableDashboard.Components.Core do
   def status_help(status) do
     case status_key(status) do
       "pending" -> "Queued · waiting for a worker to pick it up"
+      "retrying" -> "A step failed · it runs again when its backoff ends"
+      "snoozed" -> "A step asked to run again later · a snooze doesn't use an attempt"
       "running" -> "A worker is running its steps now"
       "waiting" -> "Paused on a sleep, an event or a person's input · resumes by itself"
       "completed" -> "Finished every step"
@@ -677,6 +714,8 @@ defmodule DurableDashboard.Components.Core do
   defp status_meta(s) when is_binary(s) do
     case s do
       "pending" -> {"Pending", "muted"}
+      "retrying" -> {"Retrying", "warning"}
+      "snoozed" -> {"Snoozed", "muted"}
       "running" -> {"Running", "primary"}
       "waiting" -> {"Waiting", "warning"}
       "completed" -> {"Completed", "success"}

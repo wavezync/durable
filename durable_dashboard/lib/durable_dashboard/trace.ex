@@ -5,14 +5,55 @@ defmodule DurableDashboard.Trace do
   One row per step — the run's own steps plus those of its direct child runs
   (parallel branches, called workflows), indented one level. Each attempt is a
   bar positioned on the run's wall-clock window. The time between attempts is
-  drawn as a gap: **backoff** after a failed attempt, **wait** after a
-  suspension (sleep, event, input). Compensations sort last, in their own
-  lane. See `DESIGN.md` §6 "Run page".
+  drawn as a gap: **backoff** after a failed attempt, **snoozed** after a
+  snooze, **wait** after a suspension (sleep, event, input). Compensations sort
+  last, in their own lane. See `DESIGN.md` §6 "Run page".
 
-  Pure: `build/4` is the whole API.
+  `build/4` draws a run; `parked/2` says why a pending run is due later.
   """
 
+  alias DurableDashboard.GraphBuilder
+
   @live_statuses [:pending, :running, :waiting, :compensating]
+
+  @doc """
+  Why a `:pending` run is due later, when a step's backoff or snooze is the
+  reason. `last` is the newest of its step executions; `nil` means there are
+  none. Returns `nil` for any other pending run.
+
+  `%{status: :retrying | :snoozed, step, at, exec_id, attempt, max, reason}`,
+  where `step` is the name to show, `attempt` the attempts used so far and
+  `max` the step's budget (`nil` when its workflow isn't loaded on this node).
+  """
+  def parked(
+        %{status: :pending, scheduled_at: %DateTime{} = at, current_step: step} = run,
+        %{step_name: step, status: status} = last
+      )
+      when status in [:failed, :snoozed] do
+    %{
+      status: if(status == :failed, do: :retrying, else: :snoozed),
+      step: display_name(step),
+      at: at,
+      exec_id: last.id,
+      attempt: last.attempt,
+      max: GraphBuilder.max_attempts(run, step),
+      reason: last.error && error_parts(last.error).message
+    }
+  end
+
+  def parked(_run, _last), do: nil
+
+  @doc "What's left until `at`, as `12s`; nil once it's due."
+  def time_left(at, now) do
+    case DateTime.diff(at, now, :millisecond) do
+      ms when ms > 0 -> short_ms(ms)
+      _due -> nil
+    end
+  end
+
+  @doc "`2 of 5`, or `2` when the step's budget isn't known."
+  def attempts_used(%{attempt: attempt, max: nil}), do: "#{attempt}"
+  def attempts_used(%{attempt: attempt, max: max}), do: "#{attempt} of #{max}"
 
   @doc """
   Returns `%{rows: [row], ticks: [%{pct, label}], span_ms: integer, live?: boolean}`.
@@ -37,7 +78,14 @@ defmodule DurableDashboard.Trace do
           else: steps |> Enum.map(&last_moment/1) |> Enum.reject(&is_nil/1) |> Enum.max(DateTime)
 
       span_ms = max(DateTime.diff(finish, start, :millisecond), 1)
-      window = %{start: start, span_ms: span_ms, now: now, live?: live?}
+
+      window = %{
+        start: start,
+        span_ms: span_ms,
+        now: now,
+        live?: live?,
+        pending?: run.status == :pending
+      }
 
       %{rows: rows(steps, run, window), ticks: ticks(span_ms), span_ms: span_ms, live?: live?}
     end
@@ -57,7 +105,8 @@ defmodule DurableDashboard.Trace do
 
   defp row(run, workflow_id, name, execs, window) do
     latest = List.last(execs)
-    attempts = Enum.reject(execs, &(&1.status == :waiting))
+    attempts = Enum.reject(execs, &(&1.status in [:waiting, :snoozed]))
+    parked = if workflow_id == run.id, do: parked(run, latest)
 
     %{
       key: hd(execs).id,
@@ -68,8 +117,9 @@ defmodule DurableDashboard.Trace do
       depth: if(workflow_id == run.id, do: 0, else: 1),
       compensation?: latest.is_compensation == true,
       step_type: latest.step_type,
-      status: latest.status,
+      status: if(parked, do: parked.status, else: latest.status),
       attempts: length(attempts),
+      snoozes: Enum.count(execs, &(&1.status == :snoozed)),
       duration_ms: attempts |> Enum.map(&(&1.duration_ms || 0)) |> Enum.sum(),
       child_workflow_id: Enum.find_value(execs, & &1.child_workflow_id),
       first_at: hd(execs).started_at || hd(execs).inserted_at,
@@ -107,17 +157,32 @@ defmodule DurableDashboard.Trace do
 
     [
       segment(kind, exec.started_at, end_at(exec, window), window, %{
-        title: "Attempt #{exec.attempt} · #{exec.status}",
+        title: bar_title(exec),
         meta: exec.error && error_parts(exec.error).message
       })
     ]
   end
 
-  @backoff %{title: "Backoff", note: "the pause before the next attempt"}
-  @wait %{title: "Waiting", note: "suspended until a sleep, event or input resumes it"}
+  defp bar_title(%{status: :snoozed}), do: "Snoozed · doesn't use an attempt"
+  defp bar_title(exec), do: "Attempt #{exec.attempt} · #{exec.status}"
+
+  # ponytail: a share of the row, not pixels, so a narrow waterfall can clip a
+  # label; measure the bar on the client if that shows up.
+  @label_min_pct 12
+
+  @backoff %{title: "Backoff", word: "backoff", note: "the pause before the next attempt"}
+  @snoozed %{title: "Snoozed", word: "snoozed", note: "the step asked to run again later"}
+  @wait %{
+    title: "Waiting",
+    word: "wait",
+    note: "suspended until a sleep, event or input resumes it"
+  }
 
   defp gap(%{status: :failed}, from, to, window),
     do: [segment(:backoff, from, to, window, @backoff)]
+
+  defp gap(%{status: :snoozed}, from, to, window),
+    do: [segment(:snoozed, from, to, window, @snoozed)]
 
   defp gap(%{status: :waiting}, from, to, window),
     do: [segment(:wait, from, to, window, @wait)]
@@ -125,7 +190,13 @@ defmodule DurableDashboard.Trace do
   defp gap(_exec, _from, _to, _window), do: []
 
   defp trailing_gap(%{status: :waiting} = exec, %{live?: true} = window),
-    do: [segment(:wait, end_at(exec, window), window.now, window, @wait)]
+    do: gap(exec, end_at(exec, window), window.now, window)
+
+  # A retry or snooze still to come. Only while the run is pending: a failed
+  # last attempt in a compensating run isn't going to run again.
+  defp trailing_gap(%{status: status} = exec, %{pending?: true} = window)
+       when status in [:failed, :snoozed],
+       do: gap(exec, end_at(exec, window), window.now, window)
 
   defp trailing_gap(_exec, _window), do: []
 
@@ -144,6 +215,11 @@ defmodule DurableDashboard.Trace do
       kind: kind,
       left: pct(offset, window.span_ms),
       width: pct(length, window.span_ms),
+      # A gap's name, when it has room to be read above the line.
+      label:
+        if(about[:word] && pct(length, window.span_ms) >= @label_min_pct,
+          do: "#{about.word} #{short_ms(length)}"
+        ),
       title: about.title,
       tip: Enum.join(List.wrap(about[:note]) ++ [span], "\n"),
       meta: about[:meta]
@@ -200,6 +276,10 @@ defmodule DurableDashboard.Trace do
 
   def format_ms(ms), do: "#{div(ms, 3_600_000)}h #{div(rem(ms, 3_600_000), 60_000)}m"
 
+  @doc "`format_ms/1` in whole seconds under a minute: `12s`, for countdowns and gap names."
+  def short_ms(ms) when ms >= 1_000 and ms < 60_000, do: "#{round(ms / 1_000)}s"
+  def short_ms(ms), do: format_ms(ms)
+
   @library_apps ~w(durable elixir stdlib kernel ecto ecto_sql postgrex db_connection phoenix
                    phoenix_live_view plug bandit cowboy jason telemetry)
 
@@ -212,6 +292,10 @@ defmodule DurableDashboard.Trace do
   Frames from the host app are `app?: true`; library frames are dimmed.
   """
   def error_parts(nil), do: nil
+
+  # A snooze isn't an error, but it's stored in the same column: its reason.
+  def error_parts(%{"type" => "snoozed"} = snooze),
+    do: %{type: nil, message: snooze["message"], details: nil, frames: []}
 
   def error_parts(error) when is_map(error) do
     error = Map.new(error, fn {k, v} -> {to_string(k), v} end)

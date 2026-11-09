@@ -29,6 +29,19 @@ defmodule DurableDashboard.RunSearchTest do
     assert RunSearch.parse(~s(key:"invoice:INV 7")) == [key: "invoice:INV 7"]
   end
 
+  test "tag: keeps its colons, and repeats mean all of them" do
+    [token] = RunSearch.tokens("tag:account:7")
+    assert RunSearch.label(token) == {"tag", "account:7"}
+    assert RunSearch.parse("tag:account:7") == [tag: "account:7"]
+    assert RunSearch.parse("tag:a tag:b") == [tag: "a", tag: "b"]
+  end
+
+  test "term/2 writes what parse/1 reads back" do
+    assert RunSearch.term("tag", "account:7") == "tag:account:7"
+    assert RunSearch.term("tag", "two words") == ~s(tag:"two words")
+    assert RunSearch.parse(RunSearch.term("tag", "two words")) == [tag: "two words"]
+  end
+
   test "an unknown key is searched as text rather than dropped" do
     assert RunSearch.parse("region:eu") == [error_contains: "region:eu"]
   end

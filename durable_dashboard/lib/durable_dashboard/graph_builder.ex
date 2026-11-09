@@ -59,6 +59,50 @@ defmodule DurableDashboard.GraphBuilder do
     end
   end
 
+  @doc "The definition a run was started from, `{:ok, workflow}` or `:error` if it isn't loaded here."
+  def definition_for(%{workflow_module: module_str, workflow_name: name}) do
+    module = Module.safe_concat([module_str])
+
+    # In dev mode modules are lazy-loaded; `function_exported?/3` returns
+    # false for an existing-but-not-yet-loaded module. Load it explicitly
+    # so the exports check is meaningful.
+    _ = Code.ensure_loaded(module)
+
+    cond do
+      function_exported?(module, :__workflow_definition__, 1) ->
+        case module.__workflow_definition__(name) do
+          {:ok, definition} -> {:ok, definition}
+          _ -> :error
+        end
+
+      function_exported?(module, :__default_workflow__, 0) ->
+        case module.__default_workflow__() do
+          {:ok, definition} -> {:ok, definition}
+          _ -> :error
+        end
+
+      true ->
+        :error
+    end
+  rescue
+    _ -> :error
+  end
+
+  def definition_for(_), do: :error
+
+  @doc "How many attempts a run's step gets; nil if its workflow isn't loaded here."
+  def max_attempts(run, step_name) do
+    with {:ok, %Workflow{steps: steps}} <- definition_for(run) do
+      case Enum.find(steps, &(to_string(&1.name) == step_name)) do
+        %Step{opts: %{retry: %{max_attempts: max}}} -> max
+        %Step{} -> 1
+        nil -> nil
+      end
+    else
+      :error -> nil
+    end
+  end
+
   @doc """
   Overlays runtime step execution status onto graph nodes.
 
