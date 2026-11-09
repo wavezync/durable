@@ -646,6 +646,7 @@ config :durable, log_capture: [levels: [:warning, :error]]
 
 Durable uses no session features, so it runs behind PgBouncer in transaction
 mode. A PgBouncer older than 1.24 needs `prepare: :unnamed` on your repo.
+Durable needs PostgreSQL 13 or newer.
 
 ### API
 
