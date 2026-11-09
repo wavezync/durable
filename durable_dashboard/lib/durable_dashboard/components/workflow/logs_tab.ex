@@ -17,7 +17,7 @@ defmodule DurableDashboard.Components.Workflow.LogsTab do
   alias DurableDashboard.Components.Core
   alias DurableDashboard.Components.Workflow.LogLine
 
-  @levels ["all", "debug", "info", "warning", "error"]
+  @levels ["all", "debug", "info", "notice", "warning", "error", "critical", "alert", "emergency"]
   @per_page 100
 
   @impl true

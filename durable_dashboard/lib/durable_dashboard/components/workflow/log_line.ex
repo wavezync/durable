@@ -102,14 +102,16 @@ defmodule DurableDashboard.Components.Workflow.LogLine do
   # Level styling
   # ============================================================================
 
-  def level_class("error"), do: "text-destructive"
+  def level_class(level) when level in ~w(error critical alert emergency), do: "text-destructive"
   def level_class("warning"), do: "text-warning"
-  def level_class("info"), do: "text-info"
+  def level_class(level) when level in ~w(info notice), do: "text-info"
   def level_class("debug"), do: "text-muted-foreground"
   def level_class(_), do: "text-muted-foreground"
 
   # Per-level left-bar accent + faint row tint so error/warning stand out.
-  defp row_tint("error"), do: "border-l-destructive bg-destructive/5"
+  defp row_tint(level) when level in ~w(error critical alert emergency),
+    do: "border-l-destructive bg-destructive/5"
+
   defp row_tint("warning"), do: "border-l-warning bg-warning/5"
   defp row_tint("info"), do: "border-l-info/50"
   defp row_tint("debug"), do: "border-l-border"
@@ -120,9 +122,10 @@ defmodule DurableDashboard.Components.Workflow.LogLine do
   # ============================================================================
 
   # Meaningful metadata as a compact inline `key=value` string. Framework /
-  # source-location internals are filtered so the lines stay clean.
+  # source-location internals, and the run details every line now carries, are
+  # filtered so the lines stay clean.
   @noise_meta ~w(line module function file pid mfa domain gl time application erl_level
-                 otel_span_id otel_trace_id ansi_color)
+                 otel_span_id otel_trace_id ansi_color workflow workflow_id step attempt)
   def meta_labels(entry) do
     case entry["metadata"] do
       m when is_map(m) and map_size(m) > 0 ->

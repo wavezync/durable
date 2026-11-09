@@ -24,7 +24,7 @@ defmodule DurableDashboard.Live.SettingsLive do
 
   @log_defaults [
     enabled: true,
-    levels: [:debug, :info, :warning, :error],
+    levels: [:debug, :info, :notice, :warning, :error, :critical, :alert, :emergency],
     io_capture: true,
     max_log_entries: 1_000,
     max_message_length: 10_000
