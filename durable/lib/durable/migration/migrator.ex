@@ -23,7 +23,8 @@ defmodule Durable.Migration.Migrator do
     Durable.Migration.Migrations.V20261106000000AddWorkflowKeys,
     Durable.Migration.Migrations.V20261107000000AddScheduleKeysAndTags,
     Durable.Migration.Migrations.V20261109000000AddClaimIndex,
-    Durable.Migration.Migrations.V20261110000000AddReadyOrderAndScheduleSource
+    Durable.Migration.Migrations.V20261110000000AddReadyOrderAndScheduleSource,
+    Durable.Migration.Migrations.V20261111000000AddRootWorkflowId
   ]
 
   @doc """

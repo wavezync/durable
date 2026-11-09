@@ -161,7 +161,7 @@ defmodule Durable.Wait do
     step = Process.get(:durable_current_step)
 
     cond do
-      Map.get(context, :__cancelled__) == true ->
+      cancelled(context) != :none ->
         true
 
       step != nil and Map.get(context, :__sleep_satisfied__) == Atom.to_string(step) ->
@@ -172,12 +172,68 @@ defmodule Durable.Wait do
     end
   end
 
-  # What a wait got, if it has been answered. The name is in the context as an
-  # atom or a string, depending on whether the atom existed when the run came
-  # back. A nil payload is still an answer.
-  defp answer(context, name) do
+  # What a wait got, if it has been answered. A nil payload is still an answer.
+  # The name can also just be a key in the run's own data, so it only counts
+  # once the wait has its row: before that, this is the wait's first pass.
+  defp answer(context, name, wait_table) do
+    with {:ok, _value} = found <- fetch_key(context, name),
+         true <- wait_row?(wait_table, name) do
+      found
+    else
+      _not_answered -> :error
+    end
+  end
+
+  # A key is in the context as an atom or a string, depending on whether the
+  # atom existed when the run came back.
+  defp fetch_key(context, name) do
     with :error <- Map.fetch(context, Context.known_key(name)), do: Map.fetch(context, name)
   end
+
+  defp cancelled(context) do
+    case fetch_key(context, "__cancelled__") do
+      {:ok, reason} -> {:cancelled, reason}
+      :error -> :none
+    end
+  end
+
+  defp wait_row?(PendingEvent, name) do
+    wait_row?(from(p in PendingEvent, where: p.event_name == ^name and p.status != :buffered))
+  end
+
+  defp wait_row?(PendingInput, name) do
+    wait_row?(from(p in PendingInput, where: p.input_name == ^name))
+  end
+
+  # Outside a run (a unit test, say) there's no row to look for.
+  defp wait_row?(query) do
+    case Context.workflow_id() do
+      nil ->
+        true
+
+      id ->
+        config = Config.get(Process.get(:durable_instance, Durable))
+
+        Repo.one(config, from(p in query, where: p.workflow_id == ^id, select: 1, limit: 1)) !=
+          nil
+    end
+  end
+
+  # A group wait that timed out has no answer to return, only the code's own
+  # `:timeout_value`, or which events did arrive.
+  defp group_wait_over(context, opts, wait) do
+    with :none <- cancelled(context),
+         :error <- fetch_key(context, "__wait_group_result__") do
+      throw(wait)
+    else
+      {:cancelled, _reason} = cancelled -> cancelled
+      {:ok, result} -> Keyword.get(opts, :timeout_value) || timed_out_group(result)
+    end
+  end
+
+  # A tuple comes back from the database as a list.
+  defp timed_out_group(["timeout", received]), do: {:timeout, received}
+  defp timed_out_group(result), do: result
 
   # ============================================================================
   # Event Waiting
@@ -231,9 +287,14 @@ defmodule Durable.Wait do
   @spec wait_for_event(String.t(), keyword()) :: term()
   def wait_for_event(event_name, opts \\ []) do
     # Check if we're resuming with event data already in context
-    case answer(Process.get(:durable_context, %{}), event_name) do
+    context = Process.get(:durable_context, %{})
+
+    with :none <- cancelled(context),
+         :error <- answer(context, event_name, PendingEvent) do
+      throw({:wait_for_event, Keyword.put(opts, :event_name, event_name)})
+    else
       {:ok, data} -> data
-      :error -> throw({:wait_for_event, Keyword.put(opts, :event_name, event_name)})
+      {:cancelled, _reason} = cancelled -> cancelled
     end
   end
 
@@ -263,12 +324,13 @@ defmodule Durable.Wait do
     context = Process.get(:durable_context, %{})
 
     # Find first matching event in context (convert string names to atoms)
-    case Enum.find(event_names, &(answer(context, &1) != :error)) do
+    case Enum.find(event_names, &(answer(context, &1, PendingEvent) != :error)) do
       nil ->
-        throw({:wait_for_any, Keyword.merge(opts, event_names: event_names, wait_type: :any)})
+        wait = {:wait_for_any, Keyword.merge(opts, event_names: event_names, wait_type: :any)}
+        group_wait_over(context, opts, wait)
 
       event_name ->
-        {:ok, data} = answer(context, event_name)
+        {:ok, data} = fetch_key(context, event_name)
         {event_name, data}
     end
   end
@@ -298,11 +360,12 @@ defmodule Durable.Wait do
   def wait_for_all(event_names, opts \\ []) when is_list(event_names) do
     # Check if we're resuming with all events already in context
     context = Process.get(:durable_context, %{})
-    answers = Enum.map(event_names, &answer(context, &1))
+    answers = Enum.map(event_names, &answer(context, &1, PendingEvent))
 
     # Check if all events are in context
     if :error in answers do
-      throw({:wait_for_all, Keyword.merge(opts, event_names: event_names, wait_type: :all)})
+      wait = {:wait_for_all, Keyword.merge(opts, event_names: event_names, wait_type: :all)}
+      group_wait_over(context, opts, wait)
     else
       event_names
       |> Enum.zip(answers)
@@ -349,9 +412,14 @@ defmodule Durable.Wait do
   @spec wait_for_input(String.t(), keyword()) :: term()
   def wait_for_input(input_name, opts \\ []) do
     # Check if we're resuming with input data already in context
-    case answer(Process.get(:durable_context, %{}), input_name) do
+    context = Process.get(:durable_context, %{})
+
+    with :none <- cancelled(context),
+         :error <- answer(context, input_name, PendingInput) do
+      throw({:wait_for_input, Keyword.put(opts, :input_name, input_name)})
+    else
       {:ok, data} -> data
-      :error -> throw({:wait_for_input, Keyword.put(opts, :input_name, input_name)})
+      {:cancelled, _reason} = cancelled -> cancelled
     end
   end
 
@@ -511,24 +579,39 @@ defmodule Durable.Wait do
   @spec next_business_day(keyword()) :: DateTime.t()
   def next_business_day(opts \\ []) do
     hour = Keyword.get(opts, :hour, 9)
-    now = DateTime.utc_now()
+    zone = zone(opts)
 
-    # Find next business day
-    find_next_business_day(now, hour)
+    zone |> today_in() |> find_next_business_day() |> at_time(Time.new!(hour, 0, 0, {0, 6}), zone)
   end
 
-  defp find_next_business_day(date, hour) do
-    next_day = DateTime.add(date, 1, :day)
-    day_of_week = Date.day_of_week(DateTime.to_date(next_day))
+  defp find_next_business_day(date) do
+    next_day = Date.add(date, 1)
 
     # Skip weekends (6 = Saturday, 7 = Sunday)
-    if day_of_week in [6, 7] do
-      find_next_business_day(next_day, hour)
-    else
-      next_day
-      |> DateTime.to_date()
-      |> DateTime.new!(Time.new!(hour, 0, 0, {0, 6}), "Etc/UTC")
+    if Date.day_of_week(next_day) in [6, 7], do: find_next_business_day(next_day), else: next_day
+  end
+
+  defp zone(opts) do
+    case Keyword.get(opts, :timezone, "UTC") do
+      "UTC" -> "Etc/UTC"
+      zone -> zone
     end
+  end
+
+  # Raises for a zone that can't be resolved, as `DateTime.now!/1` does.
+  defp today_in(zone), do: zone |> DateTime.now!() |> DateTime.to_date()
+
+  # A day's hour in the zone, as UTC. A time that a clock change repeats means
+  # its first occurrence, and one it skips means the moment after the change.
+  defp at_time(date, time, zone) do
+    local =
+      case DateTime.new(date, time, zone) do
+        {:ok, datetime} -> datetime
+        {:ambiguous, first, _second} -> first
+        {:gap, _before, just_after} -> just_after
+      end
+
+    DateTime.shift_zone!(local, "Etc/UTC")
   end
 
   @doc """
@@ -551,10 +634,11 @@ defmodule Durable.Wait do
   @spec next_weekday(atom(), keyword()) :: DateTime.t()
   def next_weekday(weekday, opts \\ []) do
     hour = Keyword.get(opts, :hour, 9)
-    now = DateTime.utc_now()
+    zone = zone(opts)
+    today = today_in(zone)
 
     target_day = weekday_number(weekday)
-    current_day = Date.day_of_week(DateTime.to_date(now))
+    current_day = Date.day_of_week(today)
 
     days_until =
       if target_day > current_day do
@@ -563,10 +647,7 @@ defmodule Durable.Wait do
         7 - current_day + target_day
       end
 
-    now
-    |> DateTime.add(days_until, :day)
-    |> DateTime.to_date()
-    |> DateTime.new!(Time.new!(hour, 0, 0, {0, 6}), "Etc/UTC")
+    today |> Date.add(days_until) |> at_time(Time.new!(hour, 0, 0, {0, 6}), zone)
   end
 
   defp weekday_number(:monday), do: 1
@@ -592,11 +673,9 @@ defmodule Durable.Wait do
   """
   @spec end_of_day(keyword()) :: DateTime.t()
   def end_of_day(opts \\ []) do
-    _timezone = Keyword.get(opts, :timezone, "UTC")
+    zone = zone(opts)
 
-    DateTime.utc_now()
-    |> DateTime.to_date()
-    |> DateTime.new!(Time.new!(23, 59, 59, {0, 6}), "Etc/UTC")
+    zone |> today_in() |> at_time(Time.new!(23, 59, 59, {0, 6}), zone)
   end
 
   # ============================================================================
@@ -626,13 +705,26 @@ defmodule Durable.Wait do
     safe_data = Durable.Executor.sanitize_for_json(data)
 
     with :ok <- answerable(workflow_id, input_name),
-         {:ok, pending} <- find_pending_input(config, workflow_id, input_name),
-         {:ok, completed} <- complete_pending_input(config, pending, safe_data),
-         {:ok, _} <-
-           Durable.Executor.resume_workflow(workflow_id, %{input_name => safe_data}, opts) do
+         {:ok, completed} <- answer_and_resume(config, workflow_id, input_name, safe_data, opts) do
       DurablePubSub.broadcast_input(config, :input_provided, pending_input_to_map(completed))
       :ok
     end
+  end
+
+  # One transaction: an answer used up without a resume would strand the run.
+  defp answer_and_resume(config, workflow_id, input_name, safe_data, opts) do
+    Repo.transaction(config, fn ->
+      lock_run(config, workflow_id)
+
+      with {:ok, pending} <- find_pending_input(config, workflow_id, input_name),
+           {:ok, completed} <- complete_pending_input(config, pending, safe_data),
+           {:ok, _} <-
+             Durable.Executor.resume_workflow(workflow_id, %{input_name => safe_data}, opts) do
+        completed
+      else
+        {:error, reason} -> config.repo.rollback(reason)
+      end
+    end)
   end
 
   # ============================================================================
@@ -903,20 +995,26 @@ defmodule Durable.Wait do
     config = get_config(opts)
     reason = Keyword.get(opts, :reason, "cancelled")
 
-    with {:ok, execution} <- get_waiting_execution(config, workflow_id),
-         :ok <- cancel_pending_waits(config, workflow_id),
+    with {:ok, _execution} <- get_waiting_execution(config, workflow_id),
          {:ok, _} <-
-           Durable.Executor.resume_workflow(
-             workflow_id,
-             %{__cancelled__: true, reason: reason},
-             opts
-           ) do
-      {:ok, execution}
+           Repo.transaction(config, fn -> cancel_and_resume(config, workflow_id, reason, opts) end) do
       :ok
     end
   end
 
-  defp cancel_pending_waits(config, workflow_id) do
+  defp cancel_and_resume(config, workflow_id, reason, opts) do
+    lock_run(config, workflow_id)
+    :ok = cancel_pending_waits(config, workflow_id)
+
+    case Durable.Executor.resume_workflow(workflow_id, %{__cancelled__: reason}, opts) do
+      {:ok, resumed} -> resumed
+      {:error, error} -> config.repo.rollback(error)
+    end
+  end
+
+  @doc false
+  @spec cancel_pending_waits(Config.t(), String.t()) :: :ok
+  def cancel_pending_waits(config, workflow_id) do
     # Cancel pending inputs
     query = from(p in PendingInput, where: p.workflow_id == ^workflow_id and p.status == :pending)
     Repo.update_all(config, query, set: [status: :cancelled, completed_at: DateTime.utc_now()])

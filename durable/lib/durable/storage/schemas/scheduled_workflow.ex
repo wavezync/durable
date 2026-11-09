@@ -88,9 +88,22 @@ defmodule Durable.Storage.Schemas.ScheduledWorkflow do
   @doc """
   Creates a changeset for enabling/disabling a scheduled workflow.
   """
-  def enable_changeset(scheduled_workflow, enabled) do
-    scheduled_workflow
-    |> cast(%{enabled: enabled}, [:enabled])
+  def enable_changeset(scheduled_workflow, true) do
+    cast(scheduled_workflow, Map.put(cleared_failures(), :enabled, true), [
+      :enabled | Map.keys(cleared_failures())
+    ])
+  end
+
+  def enable_changeset(scheduled_workflow, false) do
+    cast(scheduled_workflow, %{enabled: false}, [:enabled])
+  end
+
+  @doc """
+  The fields that say a schedule has been failing, reset. Turning it back on
+  starts it with a clean record.
+  """
+  def cleared_failures do
+    %{auto_disabled_at: nil, consecutive_failures: 0, last_error: nil, last_error_at: nil}
   end
 
   @doc """
@@ -164,7 +177,9 @@ defmodule Durable.Storage.Schemas.ScheduledWorkflow do
   Creates a changeset for updating a schedule's configuration.
   """
   def update_changeset(scheduled_workflow, attrs) do
-    update_fields = [:cron_expression, :timezone, :input, :queue, :key, :enabled, :next_run_at]
+    update_fields =
+      [:cron_expression, :timezone, :input, :queue, :key, :enabled, :next_run_at] ++
+        Map.keys(cleared_failures())
 
     scheduled_workflow
     |> cast(attrs, update_fields)

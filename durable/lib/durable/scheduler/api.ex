@@ -23,9 +23,11 @@ defmodule Durable.Scheduler.API do
 
   import Ecto.Query
 
+  alias Crontab.CronExpression
   alias Crontab.CronExpression.Parser, as: CronParser
   alias Crontab.Scheduler
   alias Durable.Config
+  alias Durable.Executor
   alias Durable.Repo
   alias Durable.Storage.Schemas.ScheduledWorkflow
 
@@ -89,6 +91,7 @@ defmodule Durable.Scheduler.API do
 
     with {:ok, workflow_name} <- resolve_workflow_name(module, opts),
          :ok <- validate_cron(cron_expression),
+         {:ok, input} <- Executor.storable_input(Keyword.get(opts, :input, %{})),
          {:ok, next_run} <- compute_next_run(cron_expression, Keyword.get(opts, :timezone, "UTC")) do
       schedule_name = Keyword.get(opts, :name, workflow_name)
 
@@ -98,7 +101,7 @@ defmodule Durable.Scheduler.API do
         workflow_name: workflow_name,
         cron_expression: cron_expression,
         timezone: Keyword.get(opts, :timezone, "UTC"),
-        input: Keyword.get(opts, :input, %{}),
+        input: input,
         queue: to_string(Keyword.get(opts, :queue, :default)),
         key: Keyword.get(opts, :key),
         enabled: Keyword.get(opts, :enabled, true),
@@ -175,7 +178,7 @@ defmodule Durable.Scheduler.API do
 
   ## Updatable Fields
 
-  - `:cron_expression` - New cron expression
+  - `:cron_expression` (or `:cron`) - New cron expression
   - `:timezone` - New timezone
   - `:input` - New input data
   - `:queue` - New queue
@@ -194,9 +197,14 @@ defmodule Durable.Scheduler.API do
     durable_name = Keyword.get(changes, :durable, Durable)
     config = Config.get(durable_name)
 
-    with {:ok, schedule} <- get_schedule(name, durable: durable_name) do
-      attrs = build_update_attrs(changes, schedule)
+    changes =
+      case Keyword.pop(changes, :cron) do
+        {nil, changes} -> changes
+        {cron, changes} -> Keyword.put(changes, :cron_expression, cron)
+      end
 
+    with {:ok, schedule} <- get_schedule(name, durable: durable_name),
+         {:ok, attrs} <- build_update_attrs(changes, schedule) do
       schedule
       |> ScheduledWorkflow.update_changeset(attrs)
       |> Repo.update(config)
@@ -353,13 +361,11 @@ defmodule Durable.Scheduler.API do
   """
   @spec register_all([module()], keyword()) :: :ok | {:error, term()}
   def register_all(modules, opts \\ []) when is_list(modules) do
-    Enum.reduce_while(modules, :ok, fn module, :ok ->
-      case register(module, opts) do
-        :ok -> {:cont, :ok}
-        error -> {:halt, error}
-      end
-    end)
+    modules |> Enum.map(&register(&1, opts)) |> first_error()
   end
+
+  # One bad schedule mustn't stop the ones declared after it.
+  defp first_error(results), do: Enum.find(results, :ok, &match?({:error, _}, &1))
 
   @doc """
   Turns off schedules that came from `@schedule` in `modules` and that those
@@ -448,6 +454,22 @@ defmodule Durable.Scheduler.API do
     count == 1
   end
 
+  @doc false
+  # Where a failed fire goes next: the next run in the schedule's own zone, or
+  # 5 minutes from now if that can't be worked out, so it can't fire every check.
+  @spec next_run_after_failure(ScheduledWorkflow.t()) :: DateTime.t()
+  def next_run_after_failure(%ScheduledWorkflow{} = schedule) do
+    case compute_next_run(schedule.cron_expression, schedule.timezone) do
+      {:ok, next_run} -> next_run
+      _unresolved -> retry_in_five_minutes()
+    end
+  rescue
+    # A cron with no next date raises from `get_next_run_date!/2`.
+    _error -> retry_in_five_minutes()
+  end
+
+  defp retry_in_five_minutes, do: DateTime.add(DateTime.utc_now(), 300, :second)
+
   # ============================================================================
   # Private Functions
   # ============================================================================
@@ -495,8 +517,59 @@ defmodule Durable.Scheduler.API do
   defp compute_next_run(cron_expression, timezone) do
     with {:ok, cron} <- CronParser.parse(cron_expression),
          {:ok, now} <- get_local_time(timezone) do
-      next_local = Scheduler.get_next_run_date!(cron, now)
-      local_to_utc(next_local, timezone)
+      next_fire(cron, now, timezone, DateTime.utc_now())
+    end
+  end
+
+  defp next_fire(cron, local_now, timezone, _utc_now) when timezone in ["UTC", "Etc/UTC"] do
+    with {:ok, next} <- next_date(cron, local_now), do: local_to_utc(next, timezone)
+  end
+
+  # A cron for every hour keeps firing through an hour the clocks repeat. The
+  # wall clock can't say when that is, so it runs on the offset in force now.
+  # ponytail: assumes whole-hour clock changes; a 30-minute one (Lord Howe)
+  # fires at the wrong minute once a year.
+  defp next_fire(%CronExpression{hour: [:*]} = cron, _local_now, timezone, utc_now) do
+    with {:ok, local} <- zoned(utc_now, timezone),
+         {:ok, next} <- next_date(cron, DateTime.to_naive(local)) do
+      offset = local.utc_offset + local.std_offset
+      {:ok, next |> DateTime.from_naive!("Etc/UTC") |> DateTime.add(-offset, :second) |> usec()}
+    end
+  end
+
+  # A cron at fixed hours fires once. In an hour the clocks repeat, that's the
+  # first occurrence still to come; if both have passed, it's the next match.
+  defp next_fire(cron, local_now, timezone, utc_now) do
+    with {:ok, next} <- next_date(cron, local_now) do
+      case DateTime.from_naive(next, timezone) do
+        {:ambiguous, first, second} ->
+          next_of_repeat(cron, next, timezone, utc_now, [first, second])
+
+        _unambiguous ->
+          local_to_utc(next, timezone)
+      end
+    end
+  end
+
+  defp next_of_repeat(cron, next, timezone, utc_now, occurrences) do
+    case Enum.find(occurrences, &DateTime.after?(&1, utc_now)) do
+      nil -> next_fire(cron, NaiveDateTime.add(next, 60), timezone, utc_now)
+      upcoming -> shift_to_utc(upcoming, timezone)
+    end
+  end
+
+  defp zoned(utc, timezone) do
+    case DateTime.shift_zone(utc, timezone) do
+      {:ok, _local} = ok -> ok
+      {:error, reason} -> {:error, {:timezone_error, timezone, reason}}
+    end
+  end
+
+  # A valid cron can still never match, like February 31st.
+  defp next_date(cron, naive) do
+    case Scheduler.get_next_run_date(cron, naive) do
+      {:ok, _next} = ok -> ok
+      {:error, _reason} -> {:error, {:invalid_cron, :no_next_date}}
     end
   end
 
@@ -581,75 +654,58 @@ defmodule Durable.Scheduler.API do
   end
 
   defp build_update_attrs(changes, schedule) do
-    attrs = %{}
-
-    attrs =
-      if Keyword.has_key?(changes, :cron_expression) or Keyword.has_key?(changes, :timezone) do
-        cron = Keyword.get(changes, :cron_expression, schedule.cron_expression)
-        timezone = Keyword.get(changes, :timezone, schedule.timezone)
-
-        case compute_next_run(cron, timezone) do
-          {:ok, next_run} ->
-            attrs
-            |> Map.put(:cron_expression, cron)
-            |> Map.put(:next_run_at, next_run)
-
-          _ ->
-            Map.put(attrs, :cron_expression, cron)
-        end
-      else
-        attrs
-      end
-
-    attrs =
-      if Keyword.has_key?(changes, :timezone) do
-        Map.put(attrs, :timezone, Keyword.get(changes, :timezone))
-      else
-        attrs
-      end
-
-    attrs =
-      if Keyword.has_key?(changes, :input) do
-        Map.put(attrs, :input, Keyword.get(changes, :input))
-      else
-        attrs
-      end
-
-    attrs =
-      if Keyword.has_key?(changes, :queue) do
-        Map.put(attrs, :queue, to_string(Keyword.get(changes, :queue)))
-      else
-        attrs
-      end
-
-    attrs =
-      if Keyword.has_key?(changes, :key) do
-        Map.put(attrs, :key, Keyword.get(changes, :key))
-      else
-        attrs
-      end
-
-    attrs =
-      if Keyword.has_key?(changes, :enabled) do
-        Map.put(attrs, :enabled, Keyword.get(changes, :enabled))
-      else
-        attrs
-      end
-
-    attrs
+    with {:ok, timing} <- updated_timing(changes, schedule),
+         {:ok, input} <- updated_input(changes) do
+      {:ok, Enum.reduce([timing, input, plain_updates(changes)], &Map.merge/2)}
+    end
   end
+
+  defp updated_timing(changes, schedule) do
+    if Keyword.has_key?(changes, :cron_expression) or Keyword.has_key?(changes, :timezone) do
+      cron = Keyword.get(changes, :cron_expression, schedule.cron_expression)
+      timezone = Keyword.get(changes, :timezone, schedule.timezone)
+
+      with {:ok, next_run} <- compute_next_run(cron, timezone) do
+        {:ok, %{cron_expression: cron, timezone: timezone, next_run_at: next_run}}
+      end
+    else
+      {:ok, %{}}
+    end
+  end
+
+  defp updated_input(changes) do
+    case Keyword.fetch(changes, :input) do
+      {:ok, input} ->
+        with {:ok, safe} <- Executor.storable_input(input), do: {:ok, %{input: safe}}
+
+      :error ->
+        {:ok, %{}}
+    end
+  end
+
+  defp plain_updates(changes) do
+    changes
+    |> Keyword.take([:queue, :key, :enabled])
+    |> Map.new(fn
+      {:queue, queue} -> {:queue, to_string(queue)}
+      other -> other
+    end)
+    |> clear_failures_if_enabled()
+  end
+
+  defp clear_failures_if_enabled(%{enabled: true} = attrs),
+    do: Map.merge(attrs, ScheduledWorkflow.cleared_failures())
+
+  defp clear_failures_if_enabled(attrs), do: attrs
 
   defp register_schedules(_module, [], _durable_name), do: :ok
 
   defp register_schedules(module, schedules, durable_name) do
     config = Config.get(durable_name)
 
-    Enum.reduce_while(schedules, :ok, fn schedule_def, :ok ->
-      case register_single_schedule(module, schedule_def, config) do
-        {:ok, _} -> {:cont, :ok}
-        {:error, _} = error -> {:halt, error}
-      end
-    end)
+    schedules
+    |> Enum.map(&register_single_schedule(module, &1, config))
+    |> first_error()
   end
 
   defp register_single_schedule(module, schedule_def, config) do
@@ -659,6 +715,7 @@ defmodule Durable.Scheduler.API do
     name = schedule_name(schedule_def)
 
     with :ok <- validate_cron(cron),
+         {:ok, input} <- Executor.storable_input(schedule_def[:input] || %{}),
          {:ok, next_run} <- compute_next_run(cron, timezone) do
       attrs = %{
         name: name,
@@ -666,7 +723,7 @@ defmodule Durable.Scheduler.API do
         workflow_name: workflow_name,
         cron_expression: cron,
         timezone: timezone,
-        input: schedule_def[:input] || %{},
+        input: input,
         queue: to_string(schedule_def[:queue] || :default),
         key: schedule_def[:key],
         source: "code",

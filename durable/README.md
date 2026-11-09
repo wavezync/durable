@@ -352,6 +352,8 @@ end
 {Durable, repo: MyApp.Repo, scheduled_modules: [MyApp.DailyReport]}
 ```
 
+A time zone other than UTC needs a time zone database, which Elixir doesn't ship with. Add [`tzdata`](https://hex.pm/packages/tzdata) and set `config :elixir, :time_zone_database, Tzdata.TimeZoneDatabase`.
+
 Add `key: "daily_sales_report"` to `@schedule` so a fire while the last run
 is still going doesn't start a second copy. See
 [Workflow keys](guides/workflow_keys.md#cron-schedules).

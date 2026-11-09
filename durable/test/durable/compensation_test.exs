@@ -336,14 +336,25 @@ defmodule Durable.CompensationTest do
       assert execution.status == :compensation_failed
     end
 
-    test "parallel steps trigger compensations when step after parallel fails" do
-      {:ok, execution} = create_and_execute_workflow(ParallelWithCompensationWorkflow, %{})
+    test "compensate: in a parallel block is a compile error, not a silent no-op" do
+      error =
+        assert_raise CompileError, fn ->
+          Code.eval_string("""
+          defmodule ParallelCompensationRejected do
+            use Durable
 
-      # With durable parallel, parallel steps run as child executions.
-      # The parent's step_executions don't include parallel step records,
-      # so compensations for parallel steps don't trigger on the parent.
-      # The workflow ends as :failed since no parent steps have compensations.
-      assert execution.status == :failed
+            workflow "parallel_compensation_rejected" do
+              parallel do
+                step(:task_a, [compensate: :undo_task_a], fn data -> {:ok, data} end)
+              end
+
+              compensate(:undo_task_a, fn data -> {:ok, data} end)
+            end
+          end
+          """)
+        end
+
+      assert Exception.message(error) =~ "parallel block"
     end
   end
 
@@ -562,35 +573,6 @@ defmodule ErrorMapCompensationWorkflow do
 
     compensate(:undo_work, fn _data ->
       {:error, %{reason: "Compensation returned error"}}
-    end)
-  end
-end
-
-defmodule ParallelWithCompensationWorkflow do
-  use Durable
-  use Durable.Helpers
-
-  workflow "parallel_with_compensation" do
-    parallel do
-      step(:task_a, [compensate: :undo_task_a], fn data ->
-        {:ok, assign(data, :a_done, true)}
-      end)
-
-      step(:task_b, [compensate: :undo_task_b], fn data ->
-        {:ok, assign(data, :b_done, true)}
-      end)
-    end
-
-    step(:after_parallel, fn _data ->
-      raise "Failure after parallel"
-    end)
-
-    compensate(:undo_task_a, fn data ->
-      {:ok, assign(data, :a_undone, true)}
-    end)
-
-    compensate(:undo_task_b, fn data ->
-      {:ok, assign(data, :b_undone, true)}
     end)
   end
 end

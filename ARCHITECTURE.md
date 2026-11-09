@@ -106,6 +106,7 @@ All tables live in the `durable` schema.
 | `running`, lock not refreshed for `stale_lock_timeout` (300 s) | `StaleJobRecovery` closes the attempt as failed (`worker_lost`) and sets the run back to `pending`, and the old worker is fenced out by its `lock_token` |
 | `waiting` with nothing left that could wake it | `StaleJobRecovery` marks it failed |
 | `compensating`, lock not refreshed for `stale_lock_timeout` | `StaleJobRecovery` marks it failed |
+| Parent waiting on a child that finished, its notice lost | `StaleJobRecovery` sends the notice again |
 | A wait past its timeout | `TimeoutWorker` |
 
 A step whose process dies uses one of its attempts. With attempts left the step runs again, so steps should be idempotent: delivery is at least once. With none left (one attempt is the default) the next claim fails the run the normal way.
@@ -122,7 +123,7 @@ Each of these was learned from a real bug. Breaking one brings it back.
 2. **Lock order.** Any transaction that changes a wait and its run locks the run first (`Executor.lock_run/2`).
 3. **Keys.** Any change to who holds a key takes the per-key advisory lock first (`Keys.lock_key/2`).
 4. **Commit a wait with its status.** Never write a wait's rows and `waiting` in separate statements (`enter_wait/3`).
-5. **Writes to a run, and how an attempt ended, go through the compare-and-set** (`cas_update/3`), so a cancel or a takeover wins over a worker that's still running.
+5. **Writes to a run, and how an attempt ended, go through the compare-and-set** (`cas_update/3`), on status and the claim's lock token, so a cancel or a takeover wins over a worker that's still running.
 6. **Everything stored is made storable first.** Use `sanitize_for_json/1`, `storable_error/1`, `storable_input/1` or `serialize_output/1`. A date or decimal in a `:map` column makes the row unreadable.
 7. **Don't make atoms from stored text.** Use `Context.known_key/1`. Atoms are never freed.
 8. **A wake is only a hint.** Losing one must cost no more than the next poll.
@@ -138,3 +139,5 @@ Each of these was learned from a real bug. Breaking one brings it back.
 | `mix test --only fuzz` | Hostile values, the public API, generated runs checked against a model, and operator actions racing live runs. `--seed` replays a failure and `FUZZ_RUNS=n` runs more cases |
 
 CI runs the last two both direct and through PgBouncer in transaction mode. Set `INTEGRATION_DB_PORT` to do the same locally.
+11. **Whoever closes an attempt's row sends its end event** (`StepRunner.report_closed/5`). A worker that finds its row closed (`Executor.finish_attempt!/2`) stays quiet, so each attempt gets exactly one, from any node.
+12. **The database's clock is read as UTC** (`(NOW() AT TIME ZONE 'UTC')`). Timestamp columns hold UTC in a type with no zone, so a bare `NOW()` is wrong on any server not set to UTC.

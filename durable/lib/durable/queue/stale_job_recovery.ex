@@ -90,6 +90,8 @@ defmodule Durable.Queue.StaleJobRecovery do
       log_recovery(:zombie, zombie_result, config)
     end
 
+    Durable.Executor.redeliver_lost_notices(config, config.stale_lock_timeout)
+
     # Preserve the return shape expected by `recover_now/1` callers.
     stale_result
   end

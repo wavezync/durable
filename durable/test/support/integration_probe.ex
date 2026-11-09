@@ -38,6 +38,7 @@ defmodule Durable.IntegrationProbe do
   @doc "Stores a term for a step to pick up, without a trip through JSON."
   def put(key, value), do: GenServer.call(@name, {:put, key, value})
   def fetch(key), do: GenServer.call(@name, {:fetch, key})
+  def fetch_or(key, default), do: GenServer.call(@name, {:fetch_or, key, default})
 
   @doc "Like `here/1`, without looking up the queue. Returns its count so far."
   def note(label), do: GenServer.call(@name, {:here, label, nil})
@@ -84,6 +85,9 @@ defmodule Durable.IntegrationProbe do
   end
 
   def handle_call({:fetch, key}, _from, state), do: {:reply, Map.fetch!(state.stored, key), state}
+
+  def handle_call({:fetch_or, key, default}, _from, state),
+    do: {:reply, Map.get(state.stored, key, default), state}
 
   def handle_call({:here, label, queue}, {pid, _}, state) do
     state = count(state, label)

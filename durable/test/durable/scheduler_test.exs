@@ -284,9 +284,9 @@ defmodule Durable.SchedulerTest do
     test "updates timezone" do
       {:ok, _} = Durable.schedule(SimpleWorkflow, "0 9 * * *", name: "update_tz_test")
 
-      {:ok, updated} = Durable.update_schedule("update_tz_test", timezone: "Europe/London")
+      {:ok, updated} = Durable.update_schedule("update_tz_test", timezone: "Etc/UTC")
 
-      assert updated.timezone == "Europe/London"
+      assert updated.timezone == "Etc/UTC"
     end
 
     test "updates enabled status" do

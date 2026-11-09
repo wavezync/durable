@@ -147,7 +147,46 @@ defmodule Durable.Fuzz.ChaosTest do
     end
   end
 
+  # Starts and ends come from different processes when an attempt dies or is
+  # cancelled, so only the row can say that each attempt got exactly one end.
+  defp assert_every_attempt_ended_once do
+    Process.sleep(100)
+    events = drain_attempt_events()
+    starts = for {:start, id} <- events, do: id
+    ends = for {:end, id} <- events, do: id
+
+    assert Enum.sort(starts) == Enum.sort(ends)
+    assert starts == Enum.uniq(starts)
+  end
+
+  defp drain_attempt_events do
+    receive do
+      {:attempt_event, event} -> [event | drain_attempt_events()]
+    after
+      0 -> []
+    end
+  end
+
+  defp capture_attempt_events do
+    test = self()
+    handler = "attempt-events-#{System.unique_integer([:positive])}"
+
+    :telemetry.attach_many(
+      handler,
+      [[:durable, :step, :start], [:durable, :step, :stop], [:durable, :step, :exception]],
+      fn [:durable, :step, phase], _, meta, _ ->
+        kind = if phase == :start, do: :start, else: :end
+        send(test, {:attempt_event, {kind, meta.step_execution_id}})
+      end,
+      nil
+    )
+
+    on_exit(fn -> :telemetry.detach(handler) end)
+  end
+
   property "operators and sweeps never hang a run, repeat a step or disturb the others" do
+    capture_attempt_events()
+
     check all(
             scripts <- list_of(script(), length: @batch),
             ops <- list_of(op(), min_length: 5, max_length: 25),
@@ -172,6 +211,7 @@ defmodule Durable.Fuzz.ChaosTest do
       for queue <- @queues, do: Durable.resume_queue(queue)
       drive(runs)
       quiesce()
+      assert_every_attempt_ended_once()
 
       cancelled_at = Agent.get(seen, & &1)
       Agent.stop(seen)

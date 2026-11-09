@@ -267,12 +267,16 @@ defmodule Durable.TelemetryTest do
       ends = [:stop, :exception]
 
       for {[:durable, kind, :start], _, %{telemetry_span_context: ref}} <- events do
+        starts =
+          for {[:durable, ^kind, :start], _, %{telemetry_span_context: ^ref}} <- events, do: ref
+
         closes =
           for {[:durable, ^kind, phase], _, %{telemetry_span_context: ^ref}} <- events,
               phase in ends,
               do: phase
 
-        assert length(closes) == 1
+        # A run's segments follow one another, so they share the run's id.
+        assert length(closes) == length(starts)
       end
 
       # The run's last reported status is the persisted one (a cancel shows up

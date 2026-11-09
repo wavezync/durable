@@ -85,7 +85,8 @@ defmodule Durable.Context do
           increment_context: 2,
           parallel_results: 0,
           parallel_result: 1,
-          parallel_ok?: 1
+          parallel_ok?: 1,
+          bind: 1
         ]
     end
   end
@@ -421,8 +422,18 @@ defmodule Durable.Context do
   """
   @spec parallel_results() :: map()
   def parallel_results do
-    get_context(:__results__, %{})
+    :__results__
+    |> get_context(%{})
+    |> Map.new(fn {name, result} -> {known_name(name), tagged_result(result)} end)
   end
+
+  # Stored as JSON, as `["ok", data]` under the branch's name as a string.
+  defp known_name(name) when is_binary(name), do: known_key(name)
+  defp known_name(name), do: name
+
+  defp tagged_result(["ok", value]), do: {:ok, value}
+  defp tagged_result(["error", value]), do: {:error, value}
+  defp tagged_result(result), do: result
 
   @doc """
   Returns a specific parallel step's result by name.
@@ -475,6 +486,72 @@ defmodule Durable.Context do
     String.to_existing_atom(key)
   rescue
     ArgumentError -> key
+  end
+
+  # Everything of a step's that another process needs, leaving out the process's
+  # own log buffer and IO capture.
+  @unbound_keys [
+    :durable_logs,
+    :durable_log_step_body,
+    :durable_io_capture_pid,
+    :durable_original_group_leader
+  ]
+
+  @doc """
+  Wraps a function so it runs as part of the current step in another process.
+
+  A `Task` starts with none of the step's state. Wrapped, its function can read
+  the context and has the step's Logger metadata and OpenTelemetry span, and
+  its log lines are saved on the step's row. Lines from a plain `Task` still
+  reach the console, but aren't saved.
+
+      Task.await(Task.async(bind(fn -> fetch(order_id) end)))
+      Task.async_stream(orders, bind(&fetch/1))
+
+  Changes it makes to the context stay in its own process. Lines it logs after
+  the step has ended aren't saved.
+  """
+  @spec bind((-> result)) :: (-> result) when result: term()
+  @spec bind((arg -> result)) :: (arg -> result) when arg: term(), result: term()
+  def bind(fun) when is_function(fun, 0) do
+    state = step_state()
+
+    fn ->
+      restore_step_state(state)
+      fun.()
+    end
+  end
+
+  def bind(fun) when is_function(fun, 1) do
+    state = step_state()
+
+    fn arg ->
+      restore_step_state(state)
+      fun.(arg)
+    end
+  end
+
+  @compile {:no_warn_undefined, :otel_ctx}
+
+  defp step_state do
+    %{
+      dict: for({key, _} = entry <- Process.get(), step_key?(key), do: entry),
+      logger: :logger.get_process_metadata(),
+      otel: if(Code.ensure_loaded?(:otel_ctx), do: :otel_ctx.get_current())
+    }
+  end
+
+  defp step_key?({Durable.Telemetry, _}), do: true
+
+  defp step_key?(key) when is_atom(key),
+    do: key not in @unbound_keys and String.starts_with?(Atom.to_string(key), "durable_")
+
+  defp step_key?(_key), do: false
+
+  defp restore_step_state(%{dict: dict, logger: logger, otel: otel}) do
+    Enum.each(dict, fn {key, value} -> Process.put(key, value) end)
+    if is_map(logger), do: :logger.set_process_metadata(logger)
+    if otel, do: :otel_ctx.attach(otel)
   end
 
   @doc false
@@ -541,7 +618,7 @@ defmodule Durable.Context do
     Process.delete(@step_key)
     Process.delete(@attempt_key)
     # Log capture keys (cleanup in case of crashes)
-    Process.delete(:durable_logs)
+    Durable.LogCapture.clear_logs()
     Process.delete(:durable_original_group_leader)
     Process.delete(:durable_io_capture_pid)
     Durable.Telemetry.clear_log_metadata()

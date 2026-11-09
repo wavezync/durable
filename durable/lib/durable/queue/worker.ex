@@ -171,6 +171,14 @@ defmodule Durable.Queue.Worker do
         {:error, error}
     end
   rescue
+    error in DBConnection.ConnectionError ->
+      # Says nothing about the step, so the run goes back rather than failing.
+      Logger.error(
+        "Lost the database connection running job #{job.id}: #{Exception.message(error)}"
+      )
+
+      safely(:fenced, fn -> Durable.Executor.connection_lost(job, error, config) end)
+
     error ->
       Logger.error(
         "Worker crashed executing job #{job.id}: #{Exception.message(error)}\n#{Exception.format_stacktrace(__STACKTRACE__)}"
@@ -227,12 +235,7 @@ defmodule Durable.Queue.Worker do
 
     duration_ms = stop_task(state)
 
-    safely(:ok, fn ->
-      StepRunner.close_running(state.config, [state.job.id], :cancelled, %{
-        type: "cancelled",
-        message: "the run was cancelled while this step was running"
-      })
-    end)
+    safely(:ok, fn -> StepRunner.close_cancelled(state.config, state.job.id) end)
 
     emit_telemetry(state.job, :fenced, duration_ms)
     send(state.poller_pid, {:job_complete, self(), state.job.id, :fenced, duration_ms})

@@ -27,19 +27,21 @@ defmodule Durable.Scheduler do
 
   require Logger
 
-  alias Crontab.CronExpression.Parser, as: CronParser
-  alias Crontab.Scheduler, as: CronScheduler
   alias Durable.Repo
   alias Durable.Scheduler.API
   alias Durable.Storage.Schemas.ScheduledWorkflow
 
   @default_interval 60_000
 
+  # How long a fire can stay due while this node lacks the schedule's module.
+  @code_grace_seconds 15 * 60
+
   defstruct [
     :config,
     :interval,
     :timer_ref,
-    :scheduled_modules
+    :scheduled_modules,
+    registered: false
   ]
 
   # ============================================================================
@@ -102,11 +104,12 @@ defmodule Durable.Scheduler do
       scheduled_modules: scheduled_modules
     }
 
-    # Register scheduled modules
-    register_modules(scheduled_modules, config.name)
-
     # Schedule first check
-    state = schedule_check(state, 1000)
+    state =
+      schedule_check(
+        %{state | registered: register_modules(scheduled_modules, config.name)},
+        1000
+      )
 
     Logger.info("Scheduler started with interval=#{interval}ms")
 
@@ -126,7 +129,7 @@ defmodule Durable.Scheduler do
 
   @impl true
   def handle_info(:check, state) do
-    state = %{state | timer_ref: nil}
+    state = retry_registration(%{state | timer_ref: nil})
     safely_process_due_schedules(state.config)
     state = schedule_check(state, state.interval)
     {:noreply, state}
@@ -151,17 +154,35 @@ defmodule Durable.Scheduler do
     %{state | timer_ref: timer_ref}
   end
 
-  defp register_modules([], _durable_name), do: :ok
+  defp retry_registration(%{registered: false} = state) do
+    %{state | registered: register_modules(state.scheduled_modules, state.config.name)}
+  end
+
+  defp retry_registration(state), do: state
+
+  # Whether it reached the database. The host application must start either
+  # way, so an unreachable one is left for a later check to try again.
+  defp register_modules([], _durable_name), do: true
 
   defp register_modules(modules, durable_name) do
     case API.register_all(modules, durable: durable_name) do
-      :ok ->
-        API.turn_off_removed(modules, durable: durable_name)
-        Logger.info("Registered #{length(modules)} scheduled module(s)")
-
-      {:error, reason} ->
-        Logger.error("Failed to register scheduled modules: #{inspect(reason)}")
+      :ok -> Logger.info("Registered #{length(modules)} scheduled module(s)")
+      {:error, reason} -> Logger.error("Failed to register a schedule: #{inspect(reason)}")
     end
+
+    API.turn_off_removed(modules, durable: durable_name)
+    true
+  rescue
+    error ->
+      Logger.warning(
+        "[Durable.Scheduler] couldn't register schedules yet: #{Exception.message(error)}"
+      )
+
+      false
+  catch
+    :exit, reason ->
+      Logger.warning("[Durable.Scheduler] couldn't register schedules yet: #{inspect(reason)}")
+      false
   end
 
   # A busy pool mustn't take the scheduler down. The next check tries again.
@@ -201,26 +222,33 @@ defmodule Durable.Scheduler do
         start_workflow(schedule, mod, config)
 
       {:error, reason} ->
-        # Bug L-1: instead of just logging and re-firing on every poll cycle,
-        # record the failure on the schedule row, advance next_run_at past
-        # the current trigger so we don't loop hot, and auto-disable after
-        # too many consecutive failures.
-        record_failure(
-          schedule,
-          config,
-          "Failed to load module #{schedule.workflow_module}: #{inspect(reason)}"
-        )
+        handle_missing_module(schedule, config, reason)
+    end
+  end
+
+  # In a rolling deploy this node may just not have the code yet, so the fire
+  # stays due for one that does. Once it's overdue by the grace period the code
+  # isn't coming: record the failure, which moves the fire on and in time
+  # disables a schedule whose module is gone.
+  defp handle_missing_module(schedule, config, reason) do
+    if DateTime.diff(DateTime.utc_now(), schedule.next_run_at) < @code_grace_seconds do
+      Logger.warning(
+        "[Durable.Scheduler] #{schedule.name}: #{schedule.workflow_module} isn't on this node, " <>
+          "leaving it for one that has it"
+      )
+    else
+      record_failure(
+        schedule,
+        config,
+        "Failed to load module #{schedule.workflow_module}: #{inspect(reason)}"
+      )
     end
   end
 
   defp record_failure(schedule, config, message) do
-    # Compute the next run time so we don't immediately re-fire on the next
-    # poll. If the cron parse itself fails, just defer 5 minutes.
-    next_run_at = compute_next_run(schedule)
-
     changeset =
       ScheduledWorkflow.failure_changeset(schedule, message,
-        next_run_at: next_run_at,
+        next_run_at: API.next_run_after_failure(schedule),
         auto_disable_after: 5
       )
 
@@ -255,24 +283,6 @@ defmodule Durable.Scheduler do
     end
   end
 
-  defp compute_next_run(schedule) do
-    case CronParser.parse(schedule.cron_expression) do
-      {:ok, cron} ->
-        case CronScheduler.get_next_run_date(cron, DateTime.utc_now() |> DateTime.to_naive()) do
-          {:ok, naive} ->
-            naive
-            |> DateTime.from_naive!("Etc/UTC")
-            |> then(&%{&1 | microsecond: {elem(&1.microsecond, 0), 6}})
-
-          _ ->
-            DateTime.add(DateTime.utc_now(), 300, :second)
-        end
-
-      _ ->
-        DateTime.add(DateTime.utc_now(), 300, :second)
-    end
-  end
-
   defp parse_module(module_string) do
     # Handle both "Elixir.MyModule" and "MyModule" formats
     module_name =
@@ -283,7 +293,8 @@ defmodule Durable.Scheduler do
       end
 
     try do
-      {:ok, String.to_existing_atom(module_name)}
+      module = String.to_existing_atom(module_name)
+      if Code.ensure_loaded?(module), do: {:ok, module}, else: {:error, :module_not_found}
     rescue
       ArgumentError ->
         {:error, :module_not_found}
@@ -328,12 +339,17 @@ defmodule Durable.Scheduler do
         key: schedule.key,
         durable: config.name,
         trigger: :schedule,
-        trigger_ref: schedule.name
+        trigger_ref: schedule.name,
+        return: :details
       )
 
     case result do
-      {:ok, workflow_id} ->
+      {:ok, %{id: workflow_id, created: true}} ->
         {:started, workflow_id}
+
+      # The key's holder came back instead of a new run: nothing started.
+      {:ok, %{id: holder_id, created: false}} ->
+        {:skipped, holder_id}
 
       # The workflow's on_duplicate: :error refused the start: the last run
       # still holds the key. That's this fire being skipped, not a failure,

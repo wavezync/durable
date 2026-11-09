@@ -662,9 +662,11 @@ defmodule Durable.DSL.Step do
   defp extract_parallel_step_call(
          {:step, _meta, [name, opts, {:fn, _, _} = body_fn]},
          parallel_id,
-         _env
+         env
        )
        when is_atom(name) and is_list(opts) do
+    if Keyword.has_key?(opts, :compensate), do: no_parallel_compensation!(name, env)
+
     qualified_name = :"parallel_#{parallel_id}__#{name}"
 
     # Extract returns option, default to original name
@@ -686,9 +688,11 @@ defmodule Durable.DSL.Step do
   defp extract_parallel_step_call(
          {:step, _meta, [name, opts, [do: {:fn, _, _} = body_fn]]},
          parallel_id,
-         _env
+         env
        )
        when is_atom(name) and is_list(opts) do
+    if Keyword.has_key?(opts, :compensate), do: no_parallel_compensation!(name, env)
+
     qualified_name = :"parallel_#{parallel_id}__#{name}"
 
     # Extract returns option, default to original name
@@ -709,10 +713,20 @@ defmodule Durable.DSL.Step do
   defp extract_parallel_step_call(other, _parallel_id, env),
     do: not_a_step!(other, "parallel block", env)
 
+  # A parent only undoes its own steps, so this would quietly never run.
+  defp no_parallel_compensation!(name, env) do
+    raise CompileError,
+      file: env.file,
+      line: env.line,
+      description:
+        "step #{inspect(name)} has compensate:, which isn't supported in a parallel block. " <>
+          "Put the undo on a step before the block, and have it check what actually happened."
+  end
+
   # Normalize parallel step options (includes :returns)
   defp normalize_parallel_step_opts(opts) do
     opts
-    |> Keyword.take([:retry, :timeout, :compensate, :queue, :returns])
+    |> Keyword.take([:retry, :timeout, :queue, :returns])
     |> Enum.into(%{})
     |> normalize_retry_opts()
   end

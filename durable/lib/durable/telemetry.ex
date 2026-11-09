@@ -17,13 +17,14 @@ defmodule Durable.Telemetry do
   a new segment, possibly on another node. Each segment is one span.
 
     * `[:durable, :workflow, :start]` — `%{system_time, monotonic_time}`;
-      metadata `:workflow_id`, `:workflow`, `:workflow_module`, `:queue`, `:key`,
-      `:tags`, `:trigger`, `:resumed` (false on a run's first segment)
+      metadata `:workflow_id`, `:root_workflow_id` (the run at the top of its
+      tree), `:workflow`, `:workflow_module`, `:queue`, `:key`, `:tags`,
+      `:trigger`, `:resumed` (false on a run's first segment)
     * `[:durable, :workflow, :stop]` — `%{duration, monotonic_time}`; adds
       `:status`: `:completed`, `:failed`, `:compensated`,
       `:compensation_failed`, `:waiting` (suspended: a wait, or a retry or
       snooze that parked the run) or `:superseded`
-      (cancelled or reclaimed by another node mid-segment)
+      (cancelled, reclaimed by another node, or its process died mid-segment)
     * `[:durable, :workflow, :exception]` — the executor itself crashed;
       adds `:kind`, `:reason`, `:stacktrace`
 
@@ -32,8 +33,9 @@ defmodule Durable.Telemetry do
   One span per attempt. A step that raises or returns an error is a normal
   `:stop` with `result: :error` — `:exception` means Durable itself failed.
 
-    * `[:durable, :step, :start]` — metadata `:workflow_id`, `:workflow`, `:key`,
-      `:tags`, `:step`, `:step_type`, `:attempt`, `:max_attempts`
+    * `[:durable, :step, :start]` — metadata `:workflow_id`,
+      `:root_workflow_id`, `:step_execution_id` (the attempt's row), `:workflow`,
+      `:key`, `:tags`, `:step`, `:step_type`, `:attempt`, `:max_attempts`
     * `[:durable, :step, :stop]` — adds `:result` (`:ok`, `:error`,
       `:suspended`, `:snoozed` or `:cancelled`) and, for errors, `:error`
       (`%{type, message}`)
@@ -46,8 +48,30 @@ defmodule Durable.Telemetry do
   ## Compensations
 
     * `[:durable, :compensation, :start | :stop | :exception]` — metadata
-      `:workflow_id`, `:workflow`, `:key`, `:tags`, `:compensation`, `:step`
-      (the step it undoes); `:stop` adds `:result` (`:ok` or `:error`)
+      `:workflow_id`, `:root_workflow_id`, `:workflow`, `:key`, `:tags`,
+      `:compensation`, `:step` (the step it undoes); `:stop` adds `:result`
+      (`:ok` or `:error`)
+
+  ## Attempts that die
+
+  An attempt's end event comes from whoever closes its row. That's one atomic
+  update, so each attempt gets exactly one. When its process dies, its node is
+  lost or its run is cancelled, that's the worker, a sweep or the cancel,
+  possibly on another node, which sends:
+
+    * `[:durable, :step, :stop]` with `result: :error` (and `:error`),
+      `:cancelled` or `:snoozed`, or `[:durable, :compensation, :stop]` with
+      `result: :error`. `duration` runs from the attempt's start
+    * `[:durable, :step, :retry]` if another attempt follows; `backoff_ms` is 0
+      after a lost worker, which uses no attempt
+    * `[:durable, :workflow, :stop]` with `status: :superseded`. Its `duration`
+      also runs from the attempt's start, not the segment's, and `:resumed` is
+      `nil`
+
+  So a handler can't assume the process that saw `:start` sees the end.
+  `:telemetry_span_context` matches them up: it's the row id for a step, the run
+  id for a segment. A node that dies between two steps has no attempt to close,
+  so that segment gets no end event.
 
   ## Queue, scheduler and waits
 
@@ -86,7 +110,10 @@ defmodule Durable.Telemetry do
   Before each attempt of a step or compensation, `Logger.metadata/1` gets
   `:workflow`, `:workflow_id`, `:step` and `:attempt`, plus whatever the
   workflow's `log_metadata:` function returns for the step's data. Add the
-  ones you want to your Logger formatter's `:metadata`.
+  ones you want to your Logger formatter's `:metadata`. `Durable.LogCapture`
+  describes what's saved on the step's row.
+
+  `Durable.OpenTelemetry` turns attempts into spans.
 
   ## Reporting
 
@@ -257,6 +284,56 @@ defmodule Durable.Telemetry do
   @meta_key {__MODULE__, :run}
   @log_fields_key {__MODULE__, :log_fields}
   @log_keys_key {__MODULE__, :log_keys}
+
+  @doc false
+  # A run's id as an OpenTelemetry trace id, and the low 8 bytes of a row's id
+  # as a span id. Both are the hex forms OpenTelemetry uses.
+  @spec log_ids(String.t(), String.t()) :: %{trace_id: String.t(), span_id: String.t()}
+  def log_ids(root_id, row_id) do
+    %{
+      trace_id: String.replace(root_id, "-", ""),
+      span_id: row_id |> String.replace("-", "") |> String.slice(16, 16)
+    }
+  end
+
+  @doc false
+  # :telemetry.span/3, except that the end event can belong to someone else: an
+  # attempt that was closed while it ran had its end event sent by the closer.
+  # `meta` carries a `:telemetry_span_context` the closer can work out too.
+  @spec span([atom()], map(), (-> {result, map()})) :: result when result: term()
+  def span(prefix, %{telemetry_span_context: _} = meta, fun) do
+    started = System.monotonic_time()
+
+    :telemetry.execute(
+      prefix ++ [:start],
+      %{monotonic_time: started, system_time: System.system_time()},
+      meta
+    )
+
+    try do
+      {result, stop_meta} = fun.()
+      :telemetry.execute(prefix ++ [:stop], elapsed(started), stop_meta)
+      result
+    catch
+      :throw, :durable_attempt_closed ->
+        throw(:durable_attempt_closed)
+
+      # The attempt is still open: whoever closes it sends the end event.
+      :error, %DBConnection.ConnectionError{} = error ->
+        reraise error, __STACKTRACE__
+
+      kind, reason ->
+        stacktrace = __STACKTRACE__
+        details = %{kind: kind, reason: reason, stacktrace: stacktrace}
+        :telemetry.execute(prefix ++ [:exception], elapsed(started), Map.merge(meta, details))
+        :erlang.raise(kind, reason, stacktrace)
+    end
+  end
+
+  defp elapsed(started) do
+    now = System.monotonic_time()
+    %{duration: now - started, monotonic_time: now}
+  end
 
   @doc false
   def put_run_meta(meta, log_fields \\ nil) do

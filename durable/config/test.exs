@@ -23,3 +23,9 @@ config :durable, Durable.IntegrationRepo,
 
 # Log level for tests - keep higher to reduce noise, but allow info for log capture tests
 config :logger, level: :info
+
+# Real spans for the OpenTelemetry tests, handed to the test that asks for them.
+config :opentelemetry,
+  id_generator: Durable.OpenTelemetry.IdGenerator,
+  span_processor: :simple,
+  traces_exporter: :none

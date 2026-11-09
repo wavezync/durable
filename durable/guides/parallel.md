@@ -36,7 +36,7 @@ defmodule MyApp.OnboardingWorkflow do
 
     # Access results from parallel steps
     step :complete, fn data ->
-      results = data[:__results__]
+      results = parallel_results()
 
       case {results[:send_welcome_email], results[:provision_workspace]} do
         {{:ok, _}, {:ok, _}} ->
@@ -52,17 +52,19 @@ end
 
 ## Results Model
 
-Parallel steps produce results stored in the `__results__` key with tagged tuples:
+Each branch's result is stored in the run's data under `__results__`, as JSON:
 
 ```elixir
 # After parallel block completes, context contains:
 %{
   ...original_context,
-  __results__: %{
-    step_name: {:ok, returned_data} | {:error, reason}
+  "__results__" => %{
+    "step_name" => ["ok", returned_data]  # or ["error", reason]
   }
 }
 ```
+
+The helpers below read that as `%{step_name: {:ok, returned_data} | {:error, reason}}`.
 
 ### Accessing Results
 
@@ -88,13 +90,13 @@ step :handle_results, fn ctx ->
 end
 ```
 
-Or access directly from the context:
+Or read the stored form directly from the context, with string names and lists:
 
 ```elixir
 step :handle_results, fn ctx ->
-  case ctx[:__results__][:payment] do
-    {:ok, payment} -> {:ok, Map.put(ctx, :payment_id, payment.id)}
-    {:error, _} -> {:goto, :handle_payment_failure, ctx}
+  case ctx[:__results__]["payment"] do
+    ["ok", payment] -> {:ok, Map.put(ctx, :payment_id, payment["id"])}
+    ["error", _] -> {:goto, :handle_payment_failure, ctx}
   end
 end
 ```
@@ -155,8 +157,8 @@ parallel do
   end
 end
 
-# Results:
-# %{__results__: %{order: {:ok, %{items: [...]}}, user: {:ok, %{name: "John"}}}}
+# parallel_results():
+# %{order: {:ok, %{items: [...]}}, user: {:ok, %{name: "John"}}}
 ```
 
 This is useful when the step name is verbose but you want a simpler key in results.
@@ -167,7 +169,7 @@ This is useful when the step name is verbose but you want a simpler key in resul
 
 | Strategy | Description |
 |----------|-------------|
-| `:fail_fast` | Stop on first error (default) |
+| `:fail_fast` | The first branch to fail cancels the others and fails the run (default) |
 | `:complete_all` | Wait for all steps, collect all results |
 
 ```elixir
@@ -196,7 +198,7 @@ parallel on_error: :complete_all do
 end
 
 step :check_notifications, fn ctx ->
-  results = ctx[:__results__]
+  results = parallel_results()
   sms_ok = match?({:ok, _}, results[:send_sms])
   email_ok = match?({:ok, _}, results[:send_email])
 
@@ -236,7 +238,7 @@ workflow "dashboard_data" do
   end
 
   step :build_dashboard, fn ctx ->
-    results = ctx[:__results__]
+    results = parallel_results()
 
     # Handle partial failures gracefully
     orders = case results[:fetch_orders] do
@@ -413,7 +415,7 @@ end
 
 ### Choose the Right Error Strategy
 
-- Use `:fail_fast` when all steps must succeed (transactions, critical paths)
+- Use `:fail_fast` when all steps must succeed. Other branches are cancelled when one fails, and a running branch stops at its next heartbeat, so what it had already done stays done
 - Use `:complete_all` when steps are independent and you want to handle partial success
 
 ### Return Focused Data from Steps
@@ -433,3 +435,7 @@ step :fetch_user, fn ctx ->
   {:ok, Map.put(ctx, :user, user)}  # Works but adds unnecessary data
 end
 ```
+
+## Undoing a Parallel Block
+
+`compensate:` isn't supported on a step in a parallel block, and it's a compile error to try: a branch that finished isn't undone when the run later fails. If branches have side effects to undo, put the compensation on a step before the block. It runs however far the block got, so have it check what actually happened, by an idempotency key from the run's input for example.
