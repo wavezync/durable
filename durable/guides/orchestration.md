@@ -324,7 +324,7 @@ workflow "enrich_order" do
   end
 
   step :process, fn data ->
-    results = data[:__results__]
+    results = parallel_results()
     # Handle results from parallel call_workflow steps...
     {:ok, data}
   end

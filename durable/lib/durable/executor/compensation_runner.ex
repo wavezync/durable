@@ -41,11 +41,13 @@ defmodule Durable.Executor.CompensationRunner do
       workflow: Map.get(run_meta, :workflow),
       key: Map.get(run_meta, :key),
       tags: Map.get(run_meta, :tags),
+      root_workflow_id: Map.get(run_meta, :root_workflow_id, workflow_id),
+      telemetry_span_context: StepRunner.compensation_span(workflow_id, compensation.name),
       compensation: compensation.name,
       step: compensating_step
     }
 
-    :telemetry.span([:durable, :compensation], meta, fn ->
+    Durable.Telemetry.span([:durable, :compensation], meta, fn ->
       result =
         execute_with_retry(compensation, workflow_id, compensating_step, 1, max_attempts, config)
 
@@ -77,7 +79,12 @@ defmodule Durable.Executor.CompensationRunner do
     {:ok, step_exec} = update_step_execution(config, step_exec, :running)
 
     # Start log capture for this compensation
-    Durable.LogCapture.start_capture()
+    Durable.LogCapture.start_capture(
+      Durable.Telemetry.log_ids(
+        Map.get(Durable.Telemetry.run_meta(), :root_workflow_id, workflow_id),
+        step_exec.id
+      )
+    )
 
     # Execute the compensation body
     start_time = System.monotonic_time(:millisecond)
@@ -183,12 +190,12 @@ defmodule Durable.Executor.CompensationRunner do
 
     step_exec
     |> StepExecution.complete_changeset(serializable_output, logs, duration_ms)
-    |> Repo.update(config)
+    |> Durable.Executor.finish_attempt!(config)
   end
 
   defp fail_step_execution(config, step_exec, error, logs, duration_ms) do
     step_exec
     |> StepExecution.fail_changeset(error, logs, duration_ms)
-    |> Repo.update(config)
+    |> Durable.Executor.finish_attempt!(config)
   end
 end

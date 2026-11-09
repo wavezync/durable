@@ -19,6 +19,11 @@ defmodule Durable.Queue.Adapters.Postgres do
 
   require Logger
 
+  # These columns hold UTC in a type with no zone, so the database's own clock
+  # has to be read as UTC too, whatever its TimeZone setting.
+  @utc_now "(NOW() AT TIME ZONE 'UTC')"
+  @utc_clock "(clock_timestamp() AT TIME ZONE 'UTC')"
+
   @impl true
   def fetch_jobs(%Config{} = config, queue, limit, node_id)
       when is_binary(queue) and limit > 0 do
@@ -58,8 +63,8 @@ defmodule Durable.Queue.Adapters.Postgres do
       SELECT w.id FROM #{prefix}.workflow_executions w
       WHERE w.status = 'pending'
         AND w.queue = $1
-        AND (w.scheduled_at IS NULL OR w.scheduled_at <= NOW())
-        AND (w.locked_by IS NULL OR w.locked_at < NOW() - INTERVAL '#{config.stale_lock_timeout} seconds')
+        AND (w.scheduled_at IS NULL OR w.scheduled_at <= #{@utc_now})
+        AND (w.locked_by IS NULL OR w.locked_at < #{@utc_now} - INTERVAL '#{config.stale_lock_timeout} seconds')
         AND NOT EXISTS (
           SELECT 1 FROM #{prefix}.queues q WHERE q.name = $1 AND q.paused_at IS NOT NULL
         )
@@ -74,7 +79,7 @@ defmodule Durable.Queue.Adapters.Postgres do
       FOR UPDATE SKIP LOCKED
     )
     UPDATE #{prefix}.workflow_executions
-    SET locked_by = $3, locked_at = NOW(), status = 'running', lock_token = gen_random_uuid()
+    SET locked_by = $3, locked_at = #{@utc_now}, status = 'running', lock_token = gen_random_uuid()
     WHERE id IN (SELECT id FROM claimable)
     RETURNING id, workflow_module, workflow_name, queue, priority, input, context, scheduled_at, COALESCE(scheduled_at, inserted_at) AS ready_at, current_step, lock_token;
     """
@@ -175,6 +180,9 @@ defmodule Durable.Queue.Adapters.Postgres do
   end
 
   defp fail_unrecorded(config, execution, error) do
+    # What raised has reported this attempt's end already, as an :exception.
+    StepRunner.close_attempts(config, [execution.id], :failed, error)
+
     with {:ok, failed} <-
            execution
            |> Ecto.Changeset.change(
@@ -252,10 +260,12 @@ defmodule Durable.Queue.Adapters.Postgres do
     # The step may be fine: an outage or a frozen VM takes every lock at once.
     # So this uses no attempt, but the row is closed and counted on its own
     # (StepRunner), or a step that takes its node down would run forever.
-    release_runs(config, query, :failed, %{
+    error = %{
       type: "worker_lost",
       message: "the worker running this attempt stopped responding"
-    })
+    }
+
+    release_runs(config, query, :failed, error, &StepRunner.retry_after_lost(config, &1))
   rescue
     e -> {:error, Exception.message(e)}
   end
@@ -280,16 +290,21 @@ defmodule Durable.Queue.Adapters.Postgres do
   # Back to :pending with the lock cleared, and the attempts those runs had
   # in flight closed with them. Clearing the fencing token means the next claim
   # stamps a fresh one, and the old worker's can never match again.
-  defp release_runs(config, query, step_status, error) do
-    Repo.transaction(config, fn ->
-      {count, ids} =
-        Repo.update_all(config, query,
-          set: [status: :pending, locked_by: nil, locked_at: nil, lock_token: nil]
-        )
+  defp release_runs(config, query, step_status, error, retry \\ fn _row -> nil end) do
+    result =
+      Repo.transaction(config, fn ->
+        {count, ids} =
+          Repo.update_all(config, query,
+            set: [status: :pending, locked_by: nil, locked_at: nil, lock_token: nil]
+          )
 
-      StepRunner.close_running(config, ids, step_status, error)
-      count
-    end)
+        {count, StepRunner.close_attempts(config, ids, step_status, error)}
+      end)
+
+    with {:ok, {count, closed}} <- result do
+      StepRunner.report_closed(config, closed, step_status, error, retry)
+      {:ok, count}
+    end
   end
 
   @impl true
@@ -425,7 +440,7 @@ defmodule Durable.Queue.Adapters.Postgres do
       SELECT id FROM #{prefix}.workflow_executions
       WHERE status = 'waiting'
         AND scheduled_at IS NOT NULL
-        AND scheduled_at <= clock_timestamp()
+        AND scheduled_at <= #{@utc_clock}
         AND current_step IS NOT NULL
       ORDER BY scheduled_at ASC
       LIMIT $1
@@ -442,7 +457,7 @@ defmodule Durable.Queue.Adapters.Postgres do
           to_jsonb(w.current_step),
           true
         ),
-        updated_at = clock_timestamp()
+        updated_at = #{@utc_clock}
     WHERE w.id IN (SELECT id FROM wakeable);
     """
 

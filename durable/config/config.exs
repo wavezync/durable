@@ -11,12 +11,10 @@ config :durable,
   # Captures Logger and IO output during workflow step execution
   log_capture: [
     enabled: true,
-    levels: [:debug, :info, :warning, :error],
     io_capture: true,
     io_passthrough: false,
     max_log_entries: 1000,
-    max_message_length: 10_000,
-    metadata_filter: [:request_id, :user_id, :module, :function, :line]
+    max_message_length: 10_000
   ]
 
 config :durable, Durable.TestRepo,

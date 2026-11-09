@@ -103,7 +103,10 @@ defmodule Durable.Orchestration do
 
       Map.has_key?(context, child_key) ->
         child_id = Map.get(context, child_key)
-        handle_existing_child(child_id, opts)
+
+        if timed_out?(context, child_id),
+          do: {:ok, Keyword.get(opts, :timeout_value, :child_timeout)},
+          else: handle_existing_child(child_id, opts)
 
       true ->
         create_and_wait(module, input, parent_id, child_key, opts)
@@ -187,6 +190,13 @@ defmodule Durable.Orchestration do
     )
   end
 
+  # The worker that timed out the wait cancels the child, so what the child
+  # did last says nothing about this call: the timeout has to be noticed first.
+  defp timed_out?(context, child_id) do
+    (Map.get(context, :__timeout__) || Map.get(context, "__timeout__")) == true and
+      Map.has_key?(context, child_event_name(child_id))
+  end
+
   defp handle_existing_child(child_id, opts) do
     durable_name = Keyword.get(opts, :durable, Durable)
     config = Config.get(durable_name)
@@ -237,6 +247,7 @@ defmodule Durable.Orchestration do
       input: safe_input,
       context: %{},
       parent_workflow_id: parent_id,
+      root_workflow_id: Map.get(Durable.Telemetry.run_meta(), :root_workflow_id, parent_id),
       trigger: :parent
     }
 

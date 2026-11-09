@@ -35,6 +35,11 @@ defmodule Durable.Executor.StepRunner do
     :call_workflow
   ]
 
+  # What a resume leaves for the step that waited, to read through the wait
+  # itself. They never appear in a step's data or outlast the step.
+  @wait_markers ~w(__sleep_satisfied__ __timeout__ __cancelled__ __wait_group_result__ __wait_group_status__)
+  @wait_marker_keys @wait_markers ++ Enum.map(@wait_markers, &String.to_atom/1)
+
   # A lost worker isn't the step's doing, so it uses no attempt, but a step
   # that takes its node down has to stop somewhere.
   # ponytail: fixed at 3, make it an option if anyone needs another number
@@ -70,7 +75,7 @@ defmodule Durable.Executor.StepRunner do
   @spec execute(Step.t(), map(), String.t(), Config.t(), DateTime.t() | nil) :: result()
   def execute(%Step{} = step, data, workflow_id, %Config{} = config, deadline \\ nil) do
     max_attempts = get_max_attempts(step)
-    %{failed: failed, lost: lost} = attempts_used(config, workflow_id, step)
+    %{failed: failed, lost: lost} = attempts_used(config, workflow_id, Atom.to_string(step.name))
     attempt = failed + 1
 
     # Spent before it started only when the last attempt died or lost its
@@ -86,28 +91,198 @@ defmodule Durable.Executor.StepRunner do
   # Closes the attempts these runs left :running. A process that dies can't
   # write its own result, so whoever finds out does it. Returns how many.
   @spec close_running(Config.t(), [String.t()], atom(), map()) :: non_neg_integer()
-  def close_running(_config, [], _status, _error), do: 0
-
   def close_running(%Config{} = config, workflow_ids, status, error) do
-    now = DateTime.utc_now()
-
-    {count, _} =
-      Repo.update_all(
-        config,
-        from(s in StepExecution, where: s.workflow_id in ^workflow_ids and s.status == :running),
-        set: [status: status, error: error, completed_at: now, updated_at: now]
-      )
-
-    count
+    closed = close_attempts(config, workflow_ids, status, error)
+    report_closed(config, closed, status, error)
+    length(closed)
   end
 
   @doc false
-  # How long to wait before retrying a step whose last attempt just died; 0
+  # close_running/4 without the events, for a caller whose write may still roll
+  # back. It sends them with report_closed/5 once that's committed.
+  @spec close_attempts(Config.t(), [String.t()], atom(), map()) :: [StepExecution.t()]
+  def close_attempts(_config, [], _status, _error), do: []
+
+  def close_attempts(%Config{} = config, workflow_ids, status, error) do
+    now = DateTime.utc_now()
+
+    {_count, closed} =
+      Repo.update_all(
+        config,
+        from(s in StepExecution,
+          where: s.workflow_id in ^workflow_ids and s.status == :running,
+          select: s
+        ),
+        set: [status: status, error: error, completed_at: now, updated_at: now]
+      )
+
+    closed
+  end
+
+  @doc false
+  # The end events for attempts closed by someone other than their own process.
+  # Closing a row is one atomic update, so exactly one party wins it and sends
+  # them; a worker still running finds its row closed and stays quiet.
+  #
+  # `retry` gives a row's backoff in ms when another attempt follows, else nil.
+  @spec report_closed(
+          Config.t(),
+          [StepExecution.t()],
+          atom(),
+          map(),
+          (StepExecution.t() -> non_neg_integer() | nil)
+        ) :: :ok
+  def report_closed(config, closed, status, error, retry \\ fn _row -> nil end)
+  def report_closed(_config, [], _status, _error, _retry), do: :ok
+
+  def report_closed(%Config{} = config, closed, status, error, retry) do
+    runs = closed_runs(config, closed)
+    summary = error_summary(error)
+
+    for row <- closed, run = runs[row.workflow_id] do
+      report_attempt(config, row, run, status, summary, retry)
+    end
+
+    for {id, run} <- runs do
+      report_segment(config, run, Enum.filter(closed, &(&1.workflow_id == id)))
+    end
+
+    :ok
+  end
+
+  defp closed_runs(config, closed) do
+    ids = closed |> Enum.map(& &1.workflow_id) |> Enum.uniq()
+
+    config
+    |> Repo.all(from(w in WorkflowExecution, where: w.id in ^ids))
+    |> Map.new(&{&1.id, &1})
+  end
+
+  defp report_attempt(config, %{is_compensation: true} = row, run, _status, _error, _retry) do
+    name = String.replace_prefix(row.step_name, "compensate_", "")
+
+    :telemetry.execute([:durable, :compensation, :stop], closed_time([row]), %{
+      durable: config.name,
+      workflow_id: run.id,
+      workflow: run.workflow_name,
+      key: run.key,
+      tags: run.tags,
+      root_workflow_id: run.root_workflow_id || run.id,
+      telemetry_span_context: compensation_span(run.id, name),
+      compensation: Context.known_key(name),
+      step: Context.known_key(row.compensation_for),
+      result: :error
+    })
+  end
+
+  defp report_attempt(config, row, run, status, error, retry) do
+    meta = %{
+      durable: config.name,
+      workflow_id: run.id,
+      workflow: run.workflow_name,
+      key: run.key,
+      tags: run.tags,
+      root_workflow_id: run.root_workflow_id || run.id,
+      telemetry_span_context: row.id,
+      step_execution_id: row.id,
+      step: Context.known_key(row.step_name),
+      step_type: Context.known_key(row.step_type),
+      attempt: row.attempt,
+      max_attempts: declared_max_attempts(run, row.step_name)
+    }
+
+    :telemetry.execute(
+      [:durable, :step, :stop],
+      closed_time([row]),
+      Map.merge(meta, closed_outcome(status, error))
+    )
+
+    with backoff_ms when is_integer(backoff_ms) <- retry.(row) do
+      :telemetry.execute(
+        [:durable, :step, :retry],
+        %{backoff_ms: backoff_ms},
+        Map.put(meta, :error, error)
+      )
+    end
+  end
+
+  defp report_segment(config, run, rows) do
+    :telemetry.execute([:durable, :workflow, :stop], closed_time(rows), %{
+      durable: config.name,
+      workflow_id: run.id,
+      workflow: run.workflow_name,
+      workflow_module: run.workflow_module,
+      queue: run.queue,
+      key: run.key,
+      tags: run.tags,
+      trigger: run.trigger,
+      root_workflow_id: run.root_workflow_id || run.id,
+      telemetry_span_context: run.id,
+      resumed: nil,
+      status: :superseded
+    })
+  end
+
+  @doc false
+  # A compensation's span covers all its attempts, so no one row can name it.
+  @spec compensation_span(String.t(), atom() | String.t()) :: String.t()
+  def compensation_span(workflow_id, name), do: "#{workflow_id}:#{name}"
+
+  defp closed_outcome(:failed, error), do: %{result: :error, error: error}
+  defp closed_outcome(:cancelled, _error), do: %{result: :cancelled}
+  defp closed_outcome(:snoozed, _error), do: %{result: :snoozed}
+
+  # From when the attempt started, the best a process that wasn't there can do.
+  defp closed_time(rows) do
+    now = DateTime.utc_now()
+    started = rows |> Enum.map(&(&1.started_at || now)) |> Enum.min(DateTime)
+
+    elapsed_us = max(DateTime.diff(now, started, :microsecond), 0)
+
+    %{
+      duration: System.convert_time_unit(elapsed_us, :microsecond, :native),
+      monotonic_time: System.monotonic_time()
+    }
+  end
+
+  defp declared_max_attempts(run, step_name) do
+    module = String.to_existing_atom(run.workflow_module)
+
+    with {:ok, workflow} <- module.__workflow_definition__(run.workflow_name),
+         %Step{} = step <- Enum.find(workflow.steps, &(to_string(&1.name) == step_name)) do
+      get_max_attempts(step)
+    else
+      _not_found -> nil
+    end
+  rescue
+    # This node may not have the workflow's code.
+    _error -> nil
+  end
+
+  @doc false
+  @spec close_cancelled(Config.t(), String.t()) :: non_neg_integer()
+  def close_cancelled(%Config{} = config, workflow_id) do
+    close_running(config, [workflow_id], :cancelled, %{
+      type: "cancelled",
+      message: "the run was cancelled while this step was running"
+    })
+  end
+
+  @doc false
+  # How long to wait before retrying a step whose last attempt just died; nil
   # if that was its last, so the next claim fails the run without delay.
-  @spec delay_after_death(Step.t(), String.t(), Config.t()) :: non_neg_integer()
+  @spec delay_after_death(Step.t(), String.t(), Config.t()) :: non_neg_integer() | nil
   def delay_after_death(%Step{} = step, workflow_id, %Config{} = config) do
-    %{failed: failed} = attempts_used(config, workflow_id, step)
-    if failed + 1 > get_max_attempts(step), do: 0, else: backoff_ms(step, failed)
+    %{failed: failed} = attempts_used(config, workflow_id, Atom.to_string(step.name))
+    if failed < get_max_attempts(step), do: backoff_ms(step, failed)
+  end
+
+  @doc false
+  # 0 if a step that lost its worker runs again; nil once it's lost too many.
+  @spec retry_after_lost(Config.t(), StepExecution.t()) :: 0 | nil
+  def retry_after_lost(%Config{} = config, %StepExecution{} = row) do
+    %{lost: lost} = attempts_used(config, row.workflow_id, row.step_name)
+    if lost < @max_lost_workers, do: 0
   end
 
   # Seed the retry counter from durable state instead of always starting at 1.
@@ -124,9 +299,7 @@ defmodule Durable.Executor.StepRunner do
   # writes exactly one `:failed` row, so `failed + 1` is the next attempt.
   #
   # A `worker_lost` row is counted apart (`lost`), against @max_lost_workers.
-  defp attempts_used(config, workflow_id, %Step{name: name}) do
-    step_name = Atom.to_string(name)
-
+  defp attempts_used(config, workflow_id, step_name) do
     # Only failures since the last Durable.retry/2 count: an operator retry
     # hands the step a fresh max_attempts budget.
     Repo.one(
@@ -184,37 +357,40 @@ defmodule Durable.Executor.StepRunner do
     {:ok, step_exec} = update_step_execution(config, step_exec, :running)
 
     # Start log capture for this step
-    Durable.LogCapture.start_capture()
+    Durable.LogCapture.start_capture(
+      Durable.Telemetry.log_ids(
+        Map.get(Durable.Telemetry.run_meta(), :root_workflow_id, workflow_id),
+        step_exec.id
+      )
+    )
 
     # Execute the step body
     start_time = System.monotonic_time(:millisecond)
-    span_meta = step_span_meta(config, workflow_id, step, attempt, max_attempts)
+    span_meta = step_span_meta(config, step_exec, step, attempt, max_attempts)
 
-    result =
-      :telemetry.span([:durable, :step], span_meta, fn ->
-        result = run_body(step, data, time_limit(step, deadline))
-        {result, Map.merge(span_meta, step_outcome(result))}
-      end)
+    # The row is written inside the span: its end event belongs to whoever
+    # closes the row, and that may turn out not to be this process.
+    Durable.Telemetry.span([:durable, :step], span_meta, fn ->
+      result = run_body(step, without_wait_markers(data), time_limit(step, deadline))
+      duration_ms = System.monotonic_time(:millisecond) - start_time
 
-    end_time = System.monotonic_time(:millisecond)
-    duration_ms = end_time - start_time
+      # Stop log capture and get captured logs
+      logs = Durable.LogCapture.stop_capture()
 
-    # Stop log capture and get captured logs
-    logs = Durable.LogCapture.stop_capture()
+      # Bundle context into a map to reduce arity
+      result_ctx = %{
+        step: step,
+        step_exec: step_exec,
+        logs: logs,
+        duration_ms: duration_ms,
+        attempt: attempt,
+        max_attempts: max_attempts,
+        deadline: deadline,
+        config: config
+      }
 
-    # Bundle context into a map to reduce arity
-    result_ctx = %{
-      step: step,
-      step_exec: step_exec,
-      logs: logs,
-      duration_ms: duration_ms,
-      attempt: attempt,
-      max_attempts: max_attempts,
-      deadline: deadline,
-      config: config
-    }
-
-    handle_result(result, result_ctx)
+      {handle_result(result, result_ctx), Map.merge(span_meta, step_outcome(result))}
+    end)
   end
 
   defp run_body(step, data) do
@@ -253,6 +429,7 @@ defmodule Durable.Executor.StepRunner do
     task =
       Task.async(fn ->
         put_dict(dict)
+        Durable.LogCapture.mark_step_body()
         {run_body(step, data), Process.get()}
       end)
 
@@ -288,12 +465,15 @@ defmodule Durable.Executor.StepRunner do
   defp timeout_error(step, :run),
     do: %{type: "timeout", message: "the run passed its timeout during #{step.name}"}
 
-  defp step_span_meta(config, workflow_id, step, attempt, max_attempts) do
+  defp step_span_meta(config, step_exec, step, attempt, max_attempts) do
     run_meta = Durable.Telemetry.run_meta()
 
     %{
       durable: config.name,
-      workflow_id: workflow_id,
+      workflow_id: step_exec.workflow_id,
+      root_workflow_id: Map.get(run_meta, :root_workflow_id, step_exec.workflow_id),
+      telemetry_span_context: step_exec.id,
+      step_execution_id: step_exec.id,
       workflow: Map.get(run_meta, :workflow),
       key: Map.get(run_meta, :key),
       tags: Map.get(run_meta, :tags),
@@ -324,12 +504,20 @@ defmodule Durable.Executor.StepRunner do
   defp step_outcome(_other),
     do: %{result: :error, error: %{type: "invalid_return", message: "unexpected step result"}}
 
-  defp error_summary(%{type: type, message: message}), do: %{type: type, message: message}
+  # A step can put anything in its error, and telemetry handlers interpolate these.
+  defp error_summary(%{type: type, message: message}), do: error_text(type, message)
+  defp error_summary(%{"type" => type, "message" => message}), do: error_text(type, message)
   defp error_summary(error), do: %{type: "error", message: inspect(error)}
+
+  defp error_text(type, message), do: %{type: text(type), message: text(message)}
+
+  defp text(value) when is_binary(value), do: value
+  defp text(value) when is_atom(value), do: Atom.to_string(value)
+  defp text(value), do: inspect(value)
 
   # Handle step result from pipeline model
   defp handle_result({:ok, new_data}, ctx) when is_run_data(new_data) do
-    new_data = without_sleep_marker(new_data)
+    new_data = without_wait_markers(new_data)
 
     %{step: step, step_exec: step_exec, logs: logs, duration_ms: duration_ms, config: config} =
       ctx
@@ -351,7 +539,7 @@ defmodule Durable.Executor.StepRunner do
   # Handle decision with goto
   defp handle_result({:goto, target, new_data}, ctx)
        when is_atom(target) and is_map(new_data) do
-    new_data = without_sleep_marker(new_data)
+    new_data = without_wait_markers(new_data)
 
     %{step_exec: step_exec, logs: logs, duration_ms: duration_ms, config: config} = ctx
 
@@ -407,7 +595,7 @@ defmodule Durable.Executor.StepRunner do
         [:durable, :step, :retry],
         %{backoff_ms: backoff_ms},
         config
-        |> step_span_meta(step_exec.workflow_id, step, attempt, max_attempts)
+        |> step_span_meta(step_exec, step, attempt, max_attempts)
         |> Map.put(:error, error_summary(error))
       )
 
@@ -451,11 +639,11 @@ defmodule Durable.Executor.StepRunner do
     {:error, error}
   end
 
-  # The marker is for the step that slept. Carried on in the data, it would
-  # reach a parallel branch's input and overwrite that branch's own marker, so
-  # the branch would sleep again every time it woke.
-  defp without_sleep_marker(data),
-    do: Map.drop(data, [:__sleep_satisfied__, "__sleep_satisfied__"])
+  @doc false
+  # Carried on in the data, a marker would reach a parallel branch's input and
+  # overwrite that branch's own, so the branch would sleep again on every wake.
+  @spec without_wait_markers(map()) :: map()
+  def without_wait_markers(data), do: Map.drop(data, @wait_marker_keys)
 
   defp give_up(error, ctx) do
     %{step_exec: step_exec, logs: logs, duration_ms: duration_ms, config: config} = ctx
@@ -488,7 +676,7 @@ defmodule Durable.Executor.StepRunner do
       [:durable, :step, :snooze],
       %{snooze_ms: ms},
       config
-      |> step_span_meta(step_exec.workflow_id, step, attempt, max_attempts)
+      |> step_span_meta(step_exec, step, attempt, max_attempts)
       |> Map.put(:reason, reason)
     )
 
@@ -566,7 +754,7 @@ defmodule Durable.Executor.StepRunner do
 
     case step_exec
          |> Ecto.Changeset.change(changes)
-         |> Durable.Executor.cas_update!(config) do
+         |> Durable.Executor.finish_attempt!(config) do
       {:ok, updated} = ok ->
         DurablePubSub.broadcast_step(config, :step_waiting, step_event(updated))
         ok
@@ -584,7 +772,7 @@ defmodule Durable.Executor.StepRunner do
 
     case step_exec
          |> StepExecution.complete_changeset(serializable_output, logs, duration_ms)
-         |> Durable.Executor.cas_update!(config) do
+         |> Durable.Executor.finish_attempt!(config) do
       {:ok, updated} = ok ->
         DurablePubSub.broadcast_step(config, :step_completed, step_event(updated))
         ok
@@ -603,7 +791,7 @@ defmodule Durable.Executor.StepRunner do
 
     case step_exec
          |> StepExecution.fail_changeset(safe_error, logs, duration_ms, status)
-         |> Durable.Executor.cas_update!(config) do
+         |> Durable.Executor.finish_attempt!(config) do
       {:ok, updated} = ok ->
         kind = :"step_#{status}"
         DurablePubSub.broadcast_step(config, kind, step_event(updated))

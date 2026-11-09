@@ -270,6 +270,10 @@ puts them back on the queue. You can shorten that with a smaller
 at boot if it's under 3). A worker whose lock was taken over is fenced out, so
 two copies can't both record a result.
 
+### Roll out new workflows
+
+A node that doesn't have a workflow's code yet leaves the run for one that does: it goes back on its queue and is tried again every 30 seconds. If no node ever has the code, the run waits until its own `timeout:` or an operator cancels it, and shows up as your oldest ready run. A due schedule gets 15 minutes for a node with the code to fire it. After that each fire counts as a failure, and five in a row disable it.
+
 ### Make steps safe to run twice
 
 A step whose process crashes uses one of its attempts and runs again if it has any left. A takeover like the one above uses none: the step runs again, and the run fails only after losing its worker three times. Use an
@@ -314,6 +318,26 @@ picked up. If you rename or remove the step a run stopped at, it fails with
 Every line a step logs has `:workflow`, `:workflow_id`, `:step` and `:attempt` in
 its Logger metadata, so add the ones you want to your formatter's `:metadata`.
 A workflow can add its own with `log_metadata: fn data -> [account_id: data["account_id"]] end`.
+
+When a step ends, Durable saves its lines on the step's row with all their
+metadata, plus `severity_number`, `trace_id` and `span_id` in OpenTelemetry's
+terms. Anything in Logger metadata stays in Postgres until the run is pruned, so
+if yours can hold secrets, narrow it:
+
+```elixir
+config :durable, log_capture: [metadata_filter: [:request_id, :account_id]]
+```
+
+A step that's killed or still running has no saved lines yet, so the console is
+its live copy. To keep the lines a step saves off the default Logger handler
+anyway, set `config :durable, log_capture: [console: false]`.
+
+A plain `Task` inside a step starts with none of this. Wrap its function in
+`Durable.Context.bind/1` to keep the Logger metadata and have its lines saved.
+
+To see runs as traces, add the OpenTelemetry SDK and follow `Durable.OpenTelemetry`.
+Each step attempt becomes a span, and a run and everything under it are one trace,
+across sleeps, retries and nodes.
 
 Add `Durable.Telemetry.metrics/0` to your reporter:
 

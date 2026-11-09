@@ -32,6 +32,7 @@ defmodule Durable.Storage.Schemas.WorkflowExecution do
           current_step: String.t() | nil,
           error: map() | nil,
           parent_workflow_id: Ecto.UUID.t() | nil,
+          root_workflow_id: Ecto.UUID.t() | nil,
           scheduled_at: DateTime.t() | nil,
           started_at: DateTime.t() | nil,
           completed_at: DateTime.t() | nil,
@@ -80,6 +81,8 @@ defmodule Durable.Storage.Schemas.WorkflowExecution do
     field(:current_step, :string)
     field(:error, :map)
     field(:parent_workflow_id, :binary_id)
+    # The run at the top of this run's tree; nil on a top run.
+    field(:root_workflow_id, :binary_id)
     field(:scheduled_at, :utc_datetime_usec)
     field(:started_at, :utc_datetime_usec)
     field(:completed_at, :utc_datetime_usec)
@@ -131,6 +134,7 @@ defmodule Durable.Storage.Schemas.WorkflowExecution do
     :current_step,
     :error,
     :parent_workflow_id,
+    :root_workflow_id,
     :scheduled_at,
     :started_at,
     :completed_at,

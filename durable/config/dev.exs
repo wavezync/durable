@@ -11,3 +11,6 @@ config :durable, Durable.TestRepo,
   pool_size: 10
 
 config :logger, :console, format: "[$level] $message\n"
+
+# The SDK is here for dialyzer and docs; nothing in dev has an exporter to send to.
+config :opentelemetry, traces_exporter: :none

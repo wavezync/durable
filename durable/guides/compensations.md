@@ -113,6 +113,8 @@ If a compensation fails, the others still run and the run ends `:compensation_fa
 4. **Recording**: Each compensation is recorded as a step execution
 5. **Continuation**: Compensation failures don't stop the chain - all compensations attempt to run
 
+A step in a `parallel` block can't have `compensate:`, which is a compile error. See [Undoing a Parallel Block](parallel.md#undoing-a-parallel-block).
+
 ## Best Practices
 
 ### Make Compensations Idempotent

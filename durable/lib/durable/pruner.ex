@@ -22,6 +22,7 @@ defmodule Durable.Pruner do
   alias Durable.Storage.Schemas.WorkflowExecution
 
   @interval :timer.hours(1)
+  @open [:pending, :running, :waiting, :compensating]
   @batch 5_000
   @groups [
     completed: [:completed],
@@ -57,8 +58,18 @@ defmodule Durable.Pruner do
     # finished.
     expired =
       from(w in WorkflowExecution,
+        as: :run,
         where: w.status in ^statuses,
         where: fragment("coalesce(?, ?)", w.completed_at, w.updated_at) < ^cutoff,
+        # A parallel block reads its branches' results from their rows when the
+        # last one ends, however long after the first that is.
+        where:
+          not exists(
+            from(p in WorkflowExecution,
+              where: p.id == parent_as(:run).parent_workflow_id and p.status in @open,
+              select: 1
+            )
+          ),
         select: w.id,
         limit: @batch,
         lock: "FOR UPDATE SKIP LOCKED"
