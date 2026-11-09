@@ -224,20 +224,46 @@ PgBouncer in transaction mode. A PgBouncer older than 1.24 needs `prepare:
 
 ### Give nodes time to stop
 
-When a node stops, Durable stops claiming on every queue and waits for running
-work to finish or park, for up to `shutdown_grace_period` (15 seconds by default).
+When a node gets `SIGTERM`, Durable stops claiming on every queue. Each run
+finishes the step it's on, then goes back on its queue, and another node carries
+on straight away. The node waits for that for up to `shutdown_grace_period`, 15
+seconds by default.
+
 Keep your platform's shutdown limit longer than that. In Kubernetes that's
-`terminationGracePeriodSeconds`, which is 30 seconds by default.
+`terminationGracePeriodSeconds`, which is 30 seconds by default. List `Durable`
+after whatever your steps depend on in your supervision tree, because children
+stop in reverse order.
 
-Anything still running when the time is up is killed, the same as a crash. The
-run stays `running` until its lock goes stale, 300 seconds by default, and a sweep
-that runs every 60 seconds puts it back on the queue. That's up to about six
-minutes, and the step runs again from the start.
+A step still running when the time is up is killed, and its run goes back on its
+queue at once. That step runs again from the start. If a step can run longer than
+the grace period, have it check `shutting_down?/0` and stop early. A snooze
+doesn't use an attempt:
 
-If your steps run long, raise `shutdown_grace_period` along with your platform's
-limit, or shorten the takeover with a smaller `stale_lock_timeout`, keeping it
-several times `heartbeat_interval`. A worker whose lock was taken over is fenced
-out, so two copies can't both record a result.
+```elixir
+use Durable.Context
+
+step :crawl, fn ctx ->
+  for page <- pages_left(ctx), not shutting_down?(), do: crawl(page)
+
+  if shutting_down?(),
+    do: {:snooze, 0, "node stopping"},
+    else: {:ok, ctx}
+end
+```
+
+Runs can change nodes between steps, so don't keep files on local disk from one
+step to the next. Compensations aren't handed over: they keep running during the
+wait, and one that's killed is marked failed.
+
+To start before the signal arrives, call `Durable.drain()`, for example from a
+Kubernetes `preStop` hook. For app-wide cleanup of your own, use OTP's
+`prep_stop/1`. Durable reports each drain as `[:durable, :node, :drain, :stop]`.
+
+A node that crashes or gets `kill -9` has no warning. Its runs stay locked until
+the lock goes stale, 300 seconds by default, and a sweep that runs every 60 seconds
+puts them back on the queue. You can shorten that with a smaller
+`stale_lock_timeout`, keeping it several times `heartbeat_interval`. A worker
+whose lock was taken over is fenced out, so two copies can't both record a result.
 
 ### Make steps safe to run twice
 
@@ -293,7 +319,7 @@ These are the ones worth an alert:
 | Oldest ready run | `oldest_ready_at` from `Durable.Stats.queues/1` | Work is waiting longer than it should: add capacity, or look for a stuck queue |
 | Ready backlog | `ready` from `Durable.Stats.queues/1` | You're not keeping up with what's being started |
 | Failed runs | `durable.workflow.stop.count`, `status: :failed` | The usual signal, per workflow |
-| Recovered runs | `durable.queue.stale_recovered.count` | A node crashed, or a deploy killed work that outlasted the grace period |
+| Recovered runs | `durable.queue.stale_recovered.count` | A node crashed or was killed without warning |
 | Fenced workers | `durable.queue.worker_fenced.count` | A run was taken over while its worker was still going, usually because heartbeats weren't getting through |
 | Failed acks | `[:durable, :queue, :ack_failed]` event | A finished job couldn't be released after retries |
 | Turned-off schedules | `schedule_disabled` in `Durable.Activity.list/1` | A cron schedule kept failing and stopped firing |

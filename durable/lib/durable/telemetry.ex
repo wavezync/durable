@@ -59,6 +59,9 @@ defmodule Durable.Telemetry do
     * `[:durable, :queue, :stale_recovered]`, `[:durable, :queue, :zombie_recovered]` — `%{count}`
     * `[:durable, :queue, :worker_fenced]` — `%{count, duration}`; `:job_id`, `:queue`
     * `[:durable, :queue, :ack_failed]` — `%{count, attempts}`; `:job_id`, `:reason`
+    * `[:durable, :node, :drain, :start | :stop | :exception]` — a span around a
+      node stopping work; metadata `:durable`, `:node_id`; `:stop` adds `:result`
+      (`:ok` or `{:error, :timeout}`)
     * `[:durable, :schedule, :trigger]` — `%{count}`; `:schedule`,
       `:workflow_id`, `:workflow_module`, `:workflow`, `:queue`
     * `[:durable, :wait, :sleep_woken]` — `%{count}`
@@ -108,6 +111,9 @@ defmodule Durable.Telemetry do
     [:durable, :queue, :zombie_recovered],
     [:durable, :queue, :worker_fenced],
     [:durable, :queue, :ack_failed],
+    [:durable, :node, :drain, :start],
+    [:durable, :node, :drain, :stop],
+    [:durable, :node, :drain, :exception],
     [:durable, :schedule, :trigger],
     [:durable, :wait, :sleep_woken],
     [:durable, :pruner, :pruned],

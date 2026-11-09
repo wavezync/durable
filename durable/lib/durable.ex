@@ -95,6 +95,7 @@ defmodule Durable do
 
   alias Durable.Config
   alias Durable.Queue.Control, as: QueueControl
+  alias Durable.Queue.Drainer
   alias Durable.Scheduler.API, as: SchedulerAPI
 
   defmacro __using__(_opts) do
@@ -477,6 +478,28 @@ defmodule Durable do
   @spec list_nodes(keyword()) :: [map()]
   def list_nodes(opts \\ []) do
     Durable.NodeRegistry.list(Config.get(Keyword.get(opts, :durable, Durable)))
+  end
+
+  @doc """
+  Stops this node taking new work and waits for what it's running.
+
+  A node does this by itself when it stops. Call it to start earlier, such as
+  from a Kubernetes `preStop` hook. Running runs finish their current step and
+  go back on their queues for another node. The node doesn't claim again until
+  it restarts, and other nodes aren't affected.
+
+  Returns `:ok`, or `{:error, :timeout}` if work was still running when the time
+  ran out. That work keeps going.
+
+  ## Options
+
+  - `:durable` - The Durable instance name (default: Durable)
+  - `:timeout` - Milliseconds to wait (default: the `:shutdown_grace_period`)
+  """
+  @spec drain(keyword()) :: :ok | {:error, :timeout}
+  def drain(opts \\ []) do
+    config = Config.get(Keyword.get(opts, :durable, Durable))
+    Drainer.drain(config, Keyword.get(opts, :timeout, config.shutdown_grace_period))
   end
 
   @doc """

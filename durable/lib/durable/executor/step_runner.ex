@@ -106,6 +106,7 @@ defmodule Durable.Executor.StepRunner do
     # Set current step for logging/observability
     Context.set_current_step(step.name)
     Context.set_attempt(attempt, max_attempts)
+    Context.set_instance(config.name)
 
     # Set current data in process dictionary for wait functions to access.
     # A retry runs after the run was parked, from a context that already holds

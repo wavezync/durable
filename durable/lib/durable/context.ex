@@ -43,11 +43,14 @@ defmodule Durable.Context do
 
   """
 
+  alias Durable.Queue.Drainer
+
   @context_key :durable_context
   @input_key :durable_input
   @workflow_id_key :durable_workflow_id
   @step_key :durable_current_step
   @attempt_key :durable_attempt
+  @instance_key :durable_instance
 
   @doc """
   Injects context management functions into the calling module.
@@ -71,6 +74,7 @@ defmodule Durable.Context do
           attempt: 0,
           max_attempts: 0,
           last_attempt?: 0,
+          shutting_down?: 0,
           append_context: 2,
           increment_context: 2,
           parallel_results: 0,
@@ -308,6 +312,30 @@ defmodule Durable.Context do
   end
 
   @doc """
+  Returns `true` once this node has started shutting down.
+
+  The node finishes the step it's on, then hands the rest of the run to another
+  node. A step that runs longer than the `:shutdown_grace_period` can check this
+  and stop early. Snoozing doesn't use an attempt, and another node carries on
+  straight away:
+
+  ## Examples
+
+      step :crawl, fn ctx ->
+        for page <- pages_left(ctx), not shutting_down?(), do: crawl(page)
+
+        if shutting_down?(),
+          do: {:snooze, 0, "node stopping"},
+          else: {:ok, ctx}
+      end
+
+  """
+  @spec shutting_down?() :: boolean()
+  def shutting_down? do
+    Drainer.stopping?(Process.get(@instance_key, Durable))
+  end
+
+  @doc """
   Appends a value to a list in the context.
 
   If the key doesn't exist, creates a new list with the value.
@@ -452,6 +480,12 @@ defmodule Durable.Context do
   @doc false
   def set_attempt(attempt, max_attempts) do
     Process.put(@attempt_key, {attempt, max_attempts})
+    :ok
+  end
+
+  @doc false
+  def set_instance(name) do
+    Process.put(@instance_key, name)
     :ok
   end
 

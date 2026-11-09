@@ -680,6 +680,7 @@ Durable.retry(id)                        # failed run: resume from the failed st
 Durable.rerun(id, input: new_input)      # finished run: start a fresh copy
 Durable.release_key(id, by: user)        # finished run: let its key start again
 Durable.pause_queue(:default, by: user)  # on every node, until resume_queue/2
+Durable.drain()                          # this node: stop claiming, finish running steps
 Durable.list_nodes()                     # heartbeating instances and what they run
 Durable.prune()                          # apply the :prune retention now
 

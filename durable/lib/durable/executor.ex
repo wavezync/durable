@@ -16,6 +16,7 @@ defmodule Durable.Executor do
   alias Durable.Executor.StepRunner
   alias Durable.Keys
   alias Durable.PubSub, as: DurablePubSub
+  alias Durable.Queue.Drainer
   alias Durable.Repo
   alias Durable.Storage.Schemas.PendingEvent
   alias Durable.Storage.Schemas.PendingInput
@@ -911,7 +912,7 @@ defmodule Durable.Executor do
       error = resume_failure(execution) ->
         fail_at(execution, step, error, workflow_def, config)
 
-      queue = queue_move(step, execution) ->
+      queue = queue_move(step, execution, config) ->
         move_to_queue(config, execution, step, queue, data)
 
       true ->
@@ -1257,7 +1258,7 @@ defmodule Durable.Executor do
          config,
          data
        ) do
-    case queue_move(step, execution) do
+    case queue_move(step, execution, config) do
       nil -> run_branch_step(steps, execution, step_index, workflow_def, config, data)
       queue -> move_to_queue(config, execution, step, queue, data)
     end
@@ -2465,11 +2466,12 @@ defmodule Durable.Executor do
   # Where this step has to run, when that isn't where the run is now: its own
   # `queue:`, or the queue the run started on. A branch only picks a clause, so
   # it runs where it is, and the clause's steps move for themselves.
-  defp queue_move(%{type: :branch}, _execution), do: nil
+  defp queue_move(%{type: :branch}, _execution, _config), do: nil
 
-  defp queue_move(step, execution) do
+  defp queue_move(step, execution, config) do
     queue = to_string(step.opts[:queue] || execution.home_queue || execution.queue)
-    if queue != execution.queue, do: queue
+    # A stopping node doesn't start another step: it goes back for another node.
+    if queue != execution.queue or Drainer.stopping?(config.name), do: queue
   end
 
   # Hands the run to another queue before `step`, so the step takes a slot

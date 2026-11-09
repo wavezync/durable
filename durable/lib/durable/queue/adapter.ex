@@ -95,6 +95,13 @@ defmodule Durable.Queue.Adapter do
               {:ok, non_neg_integer()} | {:error, term()}
 
   @doc """
+  Puts every run a node holds back on its queue, for a node that's stopping.
+  Returns the count released.
+  """
+  @callback release_node_jobs(config :: Config.t(), node_id :: String.t()) ::
+              {:ok, non_neg_integer()} | {:error, term()}
+
+  @doc """
   Returns statistics for a queue.
 
   Returns a map with counts by status and other metrics.
