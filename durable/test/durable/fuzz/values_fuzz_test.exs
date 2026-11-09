@@ -9,7 +9,7 @@ defmodule Durable.Fuzz.ValuesTest do
 
   alias Durable.Executor
   alias Durable.Executor.StepRunner
-  alias Durable.FuzzWorkflows.{Hostile, HostileUndo}
+  alias Durable.FuzzWorkflows.{Asks, Hostile, HostileUndo, Waits, WaitsAny}
   alias Durable.Wait.TimeoutWorker
 
   @moduletag :capture_log
@@ -106,6 +106,25 @@ defmodule Durable.Fuzz.ValuesTest do
       end
 
       assert pids() == before
+    end
+
+    for {name, workflow, answer} <- [
+          {"an event", Waits, quote(do: &Durable.send_event(&1, "go", &2))},
+          {"a buffered event", Waits, quote(do: &Durable.send_event(&1, "go", &2, buffer: true))},
+          {"an input", Asks, quote(do: &Durable.provide_input(&1, "approve", &2))},
+          {"wait_for_any's event", WaitsAny, quote(do: &Durable.send_event(&1, "yes", &2))}
+        ] do
+      property "whatever #{name} carries, the run takes it and finishes" do
+        answer = unquote(answer)
+
+        check all(payload <- nasty_term(), max_runs: @runs, max_shrinking_steps: 30) do
+          {:ok, id} = Durable.start(unquote(workflow), %{})
+          assert_eventually(fn -> get(id).status == :waiting end, 5_000, 5)
+
+          assert answer.(id, payload) == :ok
+          assert await_end(id, payload).status == :completed
+        end
+      end
     end
 
     property "whatever a compensation returns, its run ends" do

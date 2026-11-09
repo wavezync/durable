@@ -41,6 +41,7 @@ defmodule Durable.Wait do
   """
 
   alias Durable.Config
+  alias Durable.Context
   alias Durable.PubSub, as: DurablePubSub
   alias Durable.Repo
   alias Durable.Storage.Schemas.{PendingEvent, PendingInput, WaitGroup, WorkflowExecution}
@@ -171,6 +172,13 @@ defmodule Durable.Wait do
     end
   end
 
+  # What a wait got, if it has been answered. The name is in the context as an
+  # atom or a string, depending on whether the atom existed when the run came
+  # back. A nil payload is still an answer.
+  defp answer(context, name) do
+    with :error <- Map.fetch(context, Context.known_key(name)), do: Map.fetch(context, name)
+  end
+
   # ============================================================================
   # Event Waiting
   # ============================================================================
@@ -224,12 +232,9 @@ defmodule Durable.Wait do
   def wait_for_event(event_name, opts \\ []) do
     # Check if we're resuming with event data already in context
     # Context keys are atoms (converted from strings when restored from DB)
-    context = Process.get(:durable_context, %{})
-    key = String.to_atom(event_name)
-
-    case Map.get(context, key) do
-      nil -> throw({:wait_for_event, Keyword.put(opts, :event_name, event_name)})
-      data -> data
+    case answer(Process.get(:durable_context, %{}), event_name) do
+      {:ok, data} -> data
+      :error -> throw({:wait_for_event, Keyword.put(opts, :event_name, event_name)})
     end
   end
 
@@ -260,12 +265,13 @@ defmodule Durable.Wait do
     context = Process.get(:durable_context, %{})
 
     # Find first matching event in context (convert string names to atoms)
-    case Enum.find(event_names, fn name -> Map.has_key?(context, String.to_atom(name)) end) do
+    case Enum.find(event_names, &(answer(context, &1) != :error)) do
       nil ->
         throw({:wait_for_any, Keyword.merge(opts, event_names: event_names, wait_type: :any)})
 
       event_name ->
-        {event_name, Map.get(context, String.to_atom(event_name))}
+        {:ok, data} = answer(context, event_name)
+        {event_name, data}
     end
   end
 
@@ -295,13 +301,15 @@ defmodule Durable.Wait do
     # Check if we're resuming with all events already in context
     # Context keys are atoms (converted from strings when restored from DB)
     context = Process.get(:durable_context, %{})
-    atom_names = Enum.map(event_names, &String.to_atom/1)
+    answers = Enum.map(event_names, &answer(context, &1))
 
     # Check if all events are in context
-    if Enum.all?(atom_names, fn name -> Map.has_key?(context, name) end) do
-      Map.take(context, atom_names)
-    else
+    if :error in answers do
       throw({:wait_for_all, Keyword.merge(opts, event_names: event_names, wait_type: :all)})
+    else
+      event_names
+      |> Enum.zip(answers)
+      |> Map.new(fn {name, {:ok, data}} -> {Context.known_key(name), data} end)
     end
   end
 
@@ -345,12 +353,9 @@ defmodule Durable.Wait do
   def wait_for_input(input_name, opts \\ []) do
     # Check if we're resuming with input data already in context
     # Context keys are atoms (converted from strings when restored from DB)
-    context = Process.get(:durable_context, %{})
-    key = String.to_atom(input_name)
-
-    case Map.get(context, key) do
-      nil -> throw({:wait_for_input, Keyword.put(opts, :input_name, input_name)})
-      data -> data
+    case answer(Process.get(:durable_context, %{}), input_name) do
+      {:ok, data} -> data
+      :error -> throw({:wait_for_input, Keyword.put(opts, :input_name, input_name)})
     end
   end
 

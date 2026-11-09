@@ -58,6 +58,19 @@ defmodule Durable.FuzzWorkflows do
     end
   end
 
+  defmodule WaitsAny do
+    @moduledoc false
+    use Durable
+    use Durable.Wait
+
+    workflow "fuzz_waits_any" do
+      step(:a, fn data ->
+        wait_for_any(["yes", "no"])
+        {:ok, data}
+      end)
+    end
+  end
+
   defmodule Asks do
     @moduledoc false
     use Durable

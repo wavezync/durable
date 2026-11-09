@@ -556,7 +556,7 @@ defmodule Durable.Executor do
     context
     |> Map.delete(@atom_keys)
     |> Map.new(fn {key, value} ->
-      if key in atom_keys, do: {String.to_atom(key), value}, else: {key, value}
+      if key in atom_keys, do: {Context.known_key(key), value}, else: {key, value}
     end)
   end
 
@@ -565,7 +565,7 @@ defmodule Durable.Executor do
   # Atomize top-level keys in map (for context restored from DB)
   defp atomize_keys(map) when is_map(map) do
     Map.new(map, fn
-      {key, value} when is_binary(key) -> {String.to_atom(key), value}
+      {key, value} when is_binary(key) -> {Context.known_key(key), value}
       {key, value} -> {key, value}
     end)
   end

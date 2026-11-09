@@ -225,6 +225,53 @@ defmodule Durable.HostileValuesTest do
     assert {:ok, %{prefix: "durable"}} = Config.new(repo: TestRepo)
   end
 
+  defmodule WaitsByName do
+    use Durable
+    use Durable.Wait
+
+    workflow "hostile_waits_by_name" do
+      step(:a, fn data ->
+        wait_for_event(data[:name] || data["name"])
+        {:ok, data}
+      end)
+    end
+  end
+
+  defp resume_with_event(input, name, payload) do
+    {:ok, id} = Executor.start_workflow(WaitsByName, input, inline: true)
+    assert Durable.send_event(id, name, payload) == :ok
+    Executor.execute_workflow(id, Config.get(Durable))
+    TestRepo.get!(WorkflowExecution, id)
+  end
+
+  test "resuming a run creates no atoms for the keys in its data, or for event names" do
+    name = "ev_#{System.unique_integer([:positive])}"
+
+    keys =
+      for n <- 1..500, into: %{}, do: {"no_atom_#{System.unique_integer([:positive])}_#{n}", n}
+
+    before = :erlang.system_info(:atom_count)
+
+    run = resume_with_event(Map.put(keys, "name", name), name, %{})
+
+    assert run.status == :completed
+    assert :erlang.system_info(:atom_count) - before < 50
+    assert map_size(run.context) >= 500
+  end
+
+  test "a key the code mentions still comes back as an atom" do
+    assert Durable.Context.known_key("status") == :status
+
+    assert Durable.Context.known_key("no_atom_like_this_#{System.unique_integer()}")
+           |> is_binary()
+  end
+
+  for payload <- [nil, false, 0, ""] do
+    test "an event carrying #{inspect(payload)} resumes the run" do
+      assert resume_with_event(%{"name" => "go"}, "go", unquote(payload)).status == :completed
+    end
+  end
+
   test "sanitizing leaves nothing Postgres or JSON would reject" do
     for term <- ["a\0b", <<0xFF>>, :"a\0", %{"k\0" => 1}, %{<<0xFF>> => 1}, [1 | 2]] do
       safe = Executor.sanitize_for_json(term)

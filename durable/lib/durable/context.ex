@@ -406,6 +406,17 @@ defmodule Durable.Context do
   # Internal functions for executor use
 
   @doc false
+  # A key restored from JSON becomes an atom only if that atom already exists, as
+  # any key the code reads as `data.foo` does. One atom per distinct key is never
+  # freed, and enough of them crash the VM.
+  @spec known_key(String.t()) :: atom() | String.t()
+  def known_key(key) do
+    String.to_existing_atom(key)
+  rescue
+    ArgumentError -> key
+  end
+
+  @doc false
   def init_context(input, workflow_id) do
     Process.put(@context_key, %{})
     Process.put(@input_key, input)
@@ -427,7 +438,7 @@ defmodule Durable.Context do
   # Only converts top-level keys, nested maps keep their original keys
   defp atomize_keys(map) when is_map(map) do
     Map.new(map, fn
-      {key, value} when is_binary(key) -> {String.to_atom(key), value}
+      {key, value} when is_binary(key) -> {known_key(key), value}
       {key, value} -> {key, value}
     end)
   end
@@ -474,7 +485,7 @@ defmodule Durable.Context do
   # Normalize keys to atoms for consistency
   # (JSON encoding converts atoms to strings, so we normalize back)
   defp normalize_key(key) when is_atom(key), do: key
-  defp normalize_key(key) when is_binary(key), do: String.to_atom(key)
+  defp normalize_key(key) when is_binary(key), do: known_key(key)
 
   defp deep_merge(left, right) do
     Map.merge(left, right, fn
