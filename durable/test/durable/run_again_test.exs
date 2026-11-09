@@ -72,6 +72,8 @@ defmodule Durable.RunAgainTest do
     run = get(waiting)
     assert {run.status, run.runs_after_id, run.holds_key} == {:pending, holder.id, false}
     assert run.input == %{"v" => 3}
+    assert {:ok, %{runs_after_id: after_id}} = Durable.Query.get_execution(waiting)
+    assert after_id == holder.id
 
     # The claim query leaves it alone while the holder is open...
     assert claim() == []

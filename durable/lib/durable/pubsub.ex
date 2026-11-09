@@ -43,6 +43,7 @@ defmodule Durable.PubSub do
           :workflow_started
           | :workflow_resumed
           | :workflow_waiting
+          | :workflow_parked
           | :workflow_completed
           | :workflow_failed
           | :workflow_cancelled
