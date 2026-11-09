@@ -4,6 +4,12 @@ All notable changes to this package. Versions follow [Semantic
 Versioning](https://semver.org); entries come from [Conventional
 Commits](https://www.conventionalcommits.org).
 
+## [1.3.0](https://github.com/wavezync/durable/compare/durable_dashboard-v1.2.2...durable_dashboard-v1.3.0) - 2026-11-09
+
+### Features
+
+- List the node drain events in the telemetry catalog ([d9ce5ce](https://github.com/wavezync/durable/commit/d9ce5cee91576106a82eae4150ab6fbc1151caa3))
+
 ## [1.2.2](https://github.com/wavezync/durable/compare/durable_dashboard-v1.2.1...durable_dashboard-v1.2.2) - 2026-11-09
 
 ### Documentation
