@@ -58,7 +58,7 @@ commands work: `mix deps.get`, `mix compile`, `mix test`, `mix format`,
 
 ## Cross-package references
 
-`durable_dashboard` depends on `{:durable, "~> 1.0"}` from Hex, which is what
+`durable_dashboard` depends on `{:durable, "~> 1.3"}` from Hex, which is what
 it ships with. To build it against the local checkout, set `DURABLE_PATH`:
 
 ```bash

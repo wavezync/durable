@@ -94,6 +94,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      actions: write
     env:
       TAG: ${{ needs.tag.outputs.tag }}
       VERSION: ${{ needs.tag.outputs.version }}
@@ -167,3 +168,11 @@ jobs:
           flags=()
           if [[ $VERSION == *-* ]]; then flags+=(--prerelease); fi
           gh release create "$TAG" --verify-tag --title "$PACKAGE $VERSION" --notes-file "$RUNNER_TEMP/notes.md" "${flags[@]}"
+
+      # The version bump is pushed with GITHUB_TOKEN, which doesn't trigger the
+      # Site workflow, so the site would keep showing the last version.
+      - name: Deploy the site
+        working-directory: .
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run site.yml --ref main
