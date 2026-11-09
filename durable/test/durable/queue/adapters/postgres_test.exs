@@ -11,6 +11,25 @@ defmodule Durable.Queue.Adapters.PostgresTest do
   defp repo, do: config().repo
 
   describe "fetch_jobs/4" do
+    test "reads a deep backlog in order, instead of sorting it" do
+      repo().query!("""
+      INSERT INTO durable.workflow_executions
+        (id, workflow_module, workflow_name, status, queue, input, context, inserted_at, updated_at)
+      SELECT gen_random_uuid(), 'M', 'w', 'pending', 'default', '{}', '{}', now(), now()
+      FROM generate_series(1, 20000)
+      """)
+
+      repo().query!("ANALYZE durable.workflow_executions")
+
+      plan =
+        repo().query!("EXPLAIN " <> Postgres.claim_sql(config()), ["default", 10, "node_a"]).rows
+        |> List.flatten()
+        |> Enum.join("\n")
+
+      assert plan =~ "workflow_executions_claim_index"
+      refute plan =~ "Sort"
+    end
+
     test "claims pending jobs atomically" do
       # Create 5 pending jobs
       for i <- 1..5 do

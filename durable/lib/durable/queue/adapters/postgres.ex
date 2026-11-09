@@ -20,10 +20,27 @@ defmodule Durable.Queue.Adapters.Postgres do
   @impl true
   def fetch_jobs(%Config{} = config, queue, limit, node_id)
       when is_binary(queue) and limit > 0 do
+    case Repo.query(config, claim_sql(config), [queue, limit, node_id]) do
+      {:ok, %{rows: rows, columns: columns}} ->
+        rows
+        |> Enum.map(&parse_row(&1, columns))
+        # Re-sort in Elixir since UPDATE doesn't preserve order
+        |> Enum.sort_by(fn job -> {-job.priority, job.scheduled_at} end)
+
+      {:error, _reason} ->
+        []
+    end
+  end
+
+  # Its ORDER BY is the order of `workflow_executions_claim_index`, so a claim
+  # reads only the rows it takes, however deep the backlog is. Change them
+  # together.
+  @doc false
+  def claim_sql(%Config{} = config) do
     prefix = config.prefix
 
     # Use raw SQL for FOR UPDATE SKIP LOCKED which Ecto doesn't support directly
-    sql = """
+    """
     WITH claimable AS (
       SELECT w.id FROM #{prefix}.workflow_executions w
       WHERE w.status = 'pending'
@@ -48,17 +65,6 @@ defmodule Durable.Queue.Adapters.Postgres do
     WHERE id IN (SELECT id FROM claimable)
     RETURNING id, workflow_module, workflow_name, queue, priority, input, context, scheduled_at, current_step, lock_token;
     """
-
-    case Repo.query(config, sql, [queue, limit, node_id]) do
-      {:ok, %{rows: rows, columns: columns}} ->
-        rows
-        |> Enum.map(&parse_row(&1, columns))
-        # Re-sort in Elixir since UPDATE doesn't preserve order
-        |> Enum.sort_by(fn job -> {-job.priority, job.scheduled_at} end)
-
-      {:error, _reason} ->
-        []
-    end
   end
 
   @impl true

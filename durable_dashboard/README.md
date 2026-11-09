@@ -6,6 +6,7 @@
 [![License](https://img.shields.io/hexpm/l/durable_dashboard.svg)](https://github.com/wavezync/durable/blob/main/LICENSE)
 
 **Docs:** [durable.wavezync.com](https://durable.wavezync.com/docs/dashboard/) ·
+**Guide:** [Using the dashboard](guides/using_the_dashboard.md) ·
 **Engine:** [`durable`](https://hex.pm/packages/durable) ·
 **API:** [HexDocs](https://hexdocs.pm/durable_dashboard)
 
@@ -18,20 +19,25 @@ just one router macro.
 
 ## Features
 
-- **Overview** — live status counts and recent executions
-- **Workflows** — catalog of registered workflows (run counts, last status),
-  derived from execution history
-- **Executions** — every run, with a faceted filter bar: pick a workflow
-  (autocomplete), multi-select status, a relative/custom time range, or an
-  execution id (prefix filter + jump). Filters live in the URL, so views are
-  shareable
-- **Execution detail** — Summary, Flow graph, Timeline (absolute-time Gantt),
-  Logs, I/O, and History (trace spine), plus a Family tab for parent/child runs
-- **Pending inputs** — surface and resolve human-in-the-loop steps
-- **Schedules** — toggle, trigger, and inspect cron-driven workflows
-- **Settings** — inspect Durable's runtime configuration
-- **⌘K command palette** — jump to any page, workflow, or recent run
-- **Copy buttons** — one-click copy on JSON payloads, ids, and config values
+- **Overview** — health over a time range: what's failing and why, queue
+  pressure, the slowest steps and a live feed
+- **Runs** — every run, with saved views, a query bar (`step:`, `error:`,
+  `input.path:`, `key:`, `tag:` and more) and bulk retry, rerun and cancel.
+  Filters live in the URL, so views are shareable
+- **One run** — a trace of every attempt, the workflow graph, logs, context,
+  parent and child runs, and what happened to its workflow key
+- **Workflows** — runs, failure rate, duration and retries per workflow, its
+  structure with per-step numbers, and errors grouped by signature
+- **Inbox** — answer inputs, send events, see what's sleeping
+- **Keys** — every workflow key, who holds it, and what was re-added or dropped
+- **Queues & nodes** — load, backlog and wait per queue, pause and resume, node
+  health and a record of recoveries
+- **Schedules** — cron schedules, their recent runs, run now, on and off
+- **Telemetry** — which handlers are attached and which events are firing
+- **Settings** — schema status, this instance's configuration, retention
+- **⌘K command palette** — jump to any page, workflow, schedule, run or key
+
+New to it? Read [Using the dashboard](guides/using_the_dashboard.md).
 
 ## Installation
 
@@ -72,19 +78,23 @@ inline in your router. It must live at the **top level** — not inside a
   (default: `"/live"`)
 - `:on_mount` — list of `on_mount` hooks the host wants to inject for
   auth or other concerns (default: `[]`)
+- `:resolver` — a `DurableDashboard.Access` module that decides who can change
+  things. Without one the dashboard is read-only
 
 ### URL surface
 
 The macro emits these routes under your `:mount` prefix:
 
 - `GET /` — Overview
-- `GET /workflows` — workflow catalog
-- `GET /workflows/:name` — executions for one workflow
-- `GET /executions` — all executions (faceted filters)
-- `GET /executions/:id[/:tab]` — execution detail (Summary / Flow / Timeline /
-  Logs / I/O / History)
-- `GET /inputs`
-- `GET /schedules`
+- `GET /executions` — Runs
+- `GET /executions/:id[/:view]` — one run (`trace`, `graph`, `logs`, `context`,
+  `family`, `key`)
+- `GET /workflows`, `GET /workflows/:name`, `GET /workflows/:name/runs`
+- `GET /inputs` — Inbox
+- `GET /keys`
+- `GET /queues` — Queues & nodes
+- `GET /schedules`, `GET /schedules/:name`
+- `GET /telemetry`
 - `GET /settings`
 - `GET /__assets__/*` — CSS/JS/font assets
 
@@ -99,6 +109,10 @@ use DurableDashboard.Router,
   durable: MyApp.Durable,
   on_mount: [{MyAppWeb.UserAuth, :ensure_authenticated}]
 ```
+
+Without a `:resolver`, everyone who can open the dashboard is read-only. See
+[Using the dashboard](guides/using_the_dashboard.md#set-it-up) for the access
+levels.
 
 ## Design
 
