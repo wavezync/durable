@@ -103,6 +103,7 @@ defmodule Durable.MixProject do
         "guides/compensations.md",
         "guides/orchestration.md",
         "guides/parallel.md",
+        "guides/production.md",
         "guides/testing.md",
         "guides/waiting.md",
         "guides/workflow_keys.md"

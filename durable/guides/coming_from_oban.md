@@ -60,4 +60,4 @@ does the same thing here.
 ## Production Settings
 
 Pruning is off by default, and every log line a step writes is stored. See
-[Production Settings](../README.md#production-settings) before you go live.
+[Running in production](production.md) before you go live.

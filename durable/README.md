@@ -654,6 +654,9 @@ Durable uses no session features, so it works on direct connections and
 behind PgBouncer in transaction mode. A PgBouncer older than 1.24 needs
 `prepare: :unnamed` on your repo.
 
+See [Running in production](guides/production.md) for Postgres upkeep, deploys
+and what to monitor.
+
 ### API
 
 ```elixir
@@ -762,6 +765,8 @@ option list and design notes.
 - [Workflow keys](guides/workflow_keys.md) - One run per key, duplicate starts, reuse policies
 - [Testing](guides/testing.md) - Run and assert on workflows in ExUnit
 - [Coming from Oban](guides/coming_from_oban.md) - What maps to what, and what works differently
+- [Running in production](guides/production.md) - Settings, Postgres upkeep, deploys and what to monitor
+- [Using the dashboard](https://durable.wavezync.com/docs/using-the-dashboard/) - The web console: runs, queues, inbox and more
 
 ## License
 
