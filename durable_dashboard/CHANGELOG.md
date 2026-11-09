@@ -4,6 +4,17 @@ All notable changes to this package. Versions follow [Semantic
 Versioning](https://semver.org); entries come from [Conventional
 Commits](https://www.conventionalcommits.org).
 
+## [1.2.0](https://github.com/wavezync/durable/compare/durable_dashboard-v1.1.1...durable_dashboard-v1.2.0) - 2026-11-09
+
+### Features
+
+- List the step snooze event in the telemetry catalog ([13c14a0](https://github.com/wavezync/durable/commit/13c14a06dc7ad7de925089c9ec3dd8737f4973bc))
+- Show why a pending run is waiting ([2318458](https://github.com/wavezync/durable/commit/231845884b4544a9356d1058324f658b71537100))
+
+### Documentation
+
+- Install snippets ask for durable 1.3 and durable_dashboard 1.2 ([17c07ac](https://github.com/wavezync/durable/commit/17c07ac81e7351ac88fd7b4f89840332ffc6b171))
+
 ## [1.1.1](https://github.com/wavezync/durable/compare/durable_dashboard-v1.1.0...durable_dashboard-v1.1.1) - 2026-11-06
 
 ### Bug fixes
