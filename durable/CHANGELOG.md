@@ -4,6 +4,12 @@ All notable changes to this package. Versions follow [Semantic
 Versioning](https://semver.org); entries come from [Conventional
 Commits](https://www.conventionalcommits.org).
 
+## [1.5.0](https://github.com/wavezync/durable/compare/durable-v1.4.0...durable-v1.5.0) - 2026-11-09
+
+### Features
+
+- A stopping node hands runs over at the next step ([d34cc8a](https://github.com/wavezync/durable/commit/d34cc8aa52126f97a6fdfff7e925f1f96a3a9743))
+
 ## [1.4.0](https://github.com/wavezync/durable/compare/durable-v1.3.0...durable-v1.4.0) - 2026-11-09
 
 ### Features
