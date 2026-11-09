@@ -4,6 +4,23 @@ All notable changes to this package. Versions follow [Semantic
 Versioning](https://semver.org); entries come from [Conventional
 Commits](https://www.conventionalcommits.org).
 
+## [1.4.0](https://github.com/wavezync/durable/compare/durable-v1.3.0...durable-v1.4.0) - 2026-11-09
+
+### Features
+
+- A stopping node lets running work finish ([5296b76](https://github.com/wavezync/durable/commit/5296b7699dae7007146da58b2d779dbd823096cb))
+
+### Performance
+
+- Claim from a deep backlog without sorting it ([d681398](https://github.com/wavezync/durable/commit/d681398712b6ee11fd4cf7ce58f0fba0f9595b52))
+
+### Documentation
+
+- Install snippets ask for durable 1.3 and durable_dashboard 1.2 ([17c07ac](https://github.com/wavezync/durable/commit/17c07ac81e7351ac88fd7b4f89840332ffc6b171))
+- Say when to fail and when to cancel in the Oban guide ([cde9940](https://github.com/wavezync/durable/commit/cde99408c7ff11b33bfbe3cd8f7c5ab0fb568331))
+- Add a running in production guide ([9114190](https://github.com/wavezync/durable/commit/911419077b74b869f0a49cdf6afc7165eac233f5))
+- The production guide no longer needs its workarounds ([d316f81](https://github.com/wavezync/durable/commit/d316f81b7ac9948fb8458df4e06299b4eec8d750))
+
 ## [1.3.0](https://github.com/wavezync/durable/compare/durable-v1.2.0...durable-v1.3.0) - 2026-11-09
 
 ### Features
