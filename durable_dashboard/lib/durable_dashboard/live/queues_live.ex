@@ -17,7 +17,7 @@ defmodule DurableDashboard.Live.QueuesLive do
   # Operations shows what happened to queues and nodes. Key events
   # (`key_*`) belong to a run's Key view and its workflow's Keys section.
   @operation_kinds ~w(stale_recovered zombie_recovered worker_fenced ack_failed queue_paused
-                      queue_resumed schedule_disabled pruned)
+                      queue_resumed schedule_disabled schedule_removed pruned)
 
   alias DurableDashboard.Access
   alias DurableDashboard.Components.Charts
@@ -398,6 +398,13 @@ defmodule DurableDashboard.Live.QueuesLive do
     ~H"""
     Turned off schedule <span class="font-mono font-medium">{@event.details["schedule"]}</span>
     after {@event.details["failures"]} failures in a row: <span class="text-destructive">{@event.details["error"]}</span>
+    """
+  end
+
+  defp activity_line(%{event: %{kind: "schedule_removed"}} = assigns) do
+    ~H"""
+    Turned off <span class="font-mono font-medium">{Enum.join(@event.details["schedules"], ", ")}</span>:
+    no longer declared with @schedule.
     """
   end
 
