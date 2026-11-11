@@ -347,7 +347,7 @@ defmodule DurableDashboard.Trace do
   # The DSL compiles each step, decision, compensation, branch `on:` and
   # parallel `into:` to a generated function; name it the way it was written:
   # "MyApp.Orders.__step_body_charge__/1" → "Orders · step :charge".
-  @generated ~r/(?:([\w.]+)\.)?__(step_body|decision_body|compensate_body|branch_condition|parallel_into)_(\w+?)__\/\d+/
+  @generated ~r/(?:([\w.]+)\.)?__(step_body|decision_body|compensate_body|branch_condition|parallel_into)_(\w+?)(?:__in_\d+)?__\/\d+/
 
   defp readable(function) do
     Regex.replace(@generated, function, fn _all, module, kind, name ->

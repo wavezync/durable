@@ -239,6 +239,7 @@ defmodule DurableDashboard.TraceTest do
     (my_app 0.1.0) lib/my_app/orders.ex:12: MyApp.Orders.__step_body_parallel_7__charge__/1
     (my_app 0.1.0) lib/my_app/orders.ex:30: anonymous fn/1 in MyApp.Orders.__compensate_body_refund__/1
     (my_app 0.1.0) lib/my_app/orders.ex:40: MyApp.Orders.__branch_condition_3__/1
+    (my_app 0.1.0) lib/my_app/orders.ex:50: MyApp.Orders.__step_body_charge__in_91234__/1
     """
 
     %{frames: frames} = Trace.error_parts(%{"message" => "x", "stacktrace" => stack})
@@ -246,7 +247,8 @@ defmodule DurableDashboard.TraceTest do
     assert Enum.map(frames, & &1.function) == [
              "Orders · step :charge",
              "anonymous fn/1 in Orders · compensation :refund",
-             "Orders · branch on:"
+             "Orders · branch on:",
+             "Orders · step :charge"
            ]
   end
 
