@@ -56,6 +56,9 @@ defmodule Durable.DSL.Workflow do
   """
   defmacro workflow(name, opts \\ [], do: block) do
     validate_workflow_opts!(opts, name)
+    # Read by the step macros as they expand, to tell this workflow's steps
+    # from another's in the same module.
+    Module.put_attribute(__CALLER__.module, :__durable_workflow__, name)
 
     # Generate unique function names for this workflow
     definition_fn = :"__workflow_def_#{name}__"

@@ -8,7 +8,6 @@ defmodule Durable.Integration.TimesAndBootRegressionsTest do
   alias Durable.Scheduler
   alias Durable.Scheduler.API
   alias Durable.Storage.Schemas.ScheduledWorkflow
-  alias Durable.Wait.SleepWaker
 
   defmodule DownRepo do
     use Ecto.Repo, otp_app: :durable, adapter: Ecto.Adapters.Postgres
@@ -52,12 +51,6 @@ defmodule Durable.Integration.TimesAndBootRegressionsTest do
     workflow "r_declares" do
       step(:work, fn data -> {:ok, data} end)
     end
-  end
-
-  defp step_rows(id) do
-    IntegrationRepo.all(
-      from(s in StepExecution, where: s.workflow_id == ^id, order_by: s.inserted_at)
-    )
   end
 
   test "schedule_at with the guide's literal datetime sleeps until then" do
@@ -215,5 +208,6 @@ defmodule Durable.Integration.TimesAndBootRegressionsTest do
       )
 
     assert disabled == []
+    assert row.enabled
   end
 end

@@ -308,7 +308,7 @@ defmodule Durable.Scheduler.API do
 
       Durable.Executor.start_workflow(module, input,
         workflow: schedule.workflow_name,
-        queue: String.to_atom(schedule.queue),
+        queue: schedule.queue,
         key: schedule.key,
         durable: durable_name,
         trigger: :schedule,
@@ -526,28 +526,38 @@ defmodule Durable.Scheduler.API do
   end
 
   # A cron for every hour keeps firing through an hour the clocks repeat. The
-  # wall clock can't say when that is, so it runs on the offset in force now.
+  # wall clock can't say when that is, so a fire within the hour runs on the
+  # offset in force now. One further out (`0 * * * 1` on a Tuesday) may be past
+  # a clock change, so it's converted like a fixed hour.
   # ponytail: assumes whole-hour clock changes; a 30-minute one (Lord Howe)
   # fires at the wrong minute once a year.
   defp next_fire(%CronExpression{hour: [:*]} = cron, _local_now, timezone, utc_now) do
     with {:ok, local} <- zoned(utc_now, timezone),
-         {:ok, next} <- next_date(cron, DateTime.to_naive(local)) do
-      offset = local.utc_offset + local.std_offset
-      {:ok, next |> DateTime.from_naive!("Etc/UTC") |> DateTime.add(-offset, :second) |> usec()}
+         naive = DateTime.to_naive(local),
+         {:ok, next} <- next_date(cron, naive) do
+      if NaiveDateTime.diff(next, naive) <= 3_600 do
+        offset = local.utc_offset + local.std_offset
+        {:ok, next |> DateTime.from_naive!("Etc/UTC") |> DateTime.add(-offset, :second) |> usec()}
+      else
+        at_wall_time(cron, next, timezone, utc_now)
+      end
     end
   end
 
   # A cron at fixed hours fires once. In an hour the clocks repeat, that's the
   # first occurrence still to come; if both have passed, it's the next match.
   defp next_fire(cron, local_now, timezone, utc_now) do
-    with {:ok, next} <- next_date(cron, local_now) do
-      case DateTime.from_naive(next, timezone) do
-        {:ambiguous, first, second} ->
-          next_of_repeat(cron, next, timezone, utc_now, [first, second])
+    with {:ok, next} <- next_date(cron, local_now),
+         do: at_wall_time(cron, next, timezone, utc_now)
+  end
 
-        _unambiguous ->
-          local_to_utc(next, timezone)
-      end
+  defp at_wall_time(cron, next, timezone, utc_now) do
+    case DateTime.from_naive(next, timezone) do
+      {:ambiguous, first, second} ->
+        next_of_repeat(cron, next, timezone, utc_now, [first, second])
+
+      _unambiguous ->
+        local_to_utc(next, timezone)
     end
   end
 

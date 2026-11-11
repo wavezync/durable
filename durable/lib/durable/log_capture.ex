@@ -41,7 +41,9 @@ defmodule Durable.LogCapture do
       `:all` (the default) or a list of keys. Anything in Logger metadata is
       stored until the run is pruned, so narrow this if yours can hold secrets.
     * `:console` - set to `false` to keep the lines a step saves off the
-      console. Takes effect when Durable starts.
+      console. Takes effect when Durable starts. Lines are saved when a step
+      ends, so with `false` a step that's killed (a cancel, a dead node, a
+      lost lock) leaves its lines nowhere: keep the console if you need those.
 
   ## What's saved
 

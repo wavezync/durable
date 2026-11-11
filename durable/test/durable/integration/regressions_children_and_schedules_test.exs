@@ -197,6 +197,7 @@ defmodule Durable.Integration.ChildrenAndSchedulesRegressionsTest do
       )
 
     deleted = Durable.prune()
+    assert deleted.completed == 0
     :ok = Probe.set(:finish_slow)
     assert_eventually(fn -> get(id).status in [:completed, :failed] end, 5_000)
     run = get(id)
@@ -215,6 +216,9 @@ defmodule Durable.Integration.ChildrenAndSchedulesRegressionsTest do
     [after_answer] = IntegrationRepo.all(from(p in PendingInput, where: p.workflow_id == ^id))
 
     refute id in inbox
+    assert input.status == :cancelled
+    assert answer == {:error, :not_found}
+    assert after_answer.status == :cancelled
   end
 
   test "an event name equal to a data key still waits" do
@@ -254,6 +258,7 @@ defmodule Durable.Integration.ChildrenAndSchedulesRegressionsTest do
           e -> {:raised, e.__struct__}
         end
 
+      assert match?({:ok, _}, started)
       assert match?({:ok, _}, scheduled)
     end
   end
@@ -286,6 +291,8 @@ defmodule Durable.Integration.ChildrenAndSchedulesRegressionsTest do
 
     row = IntegrationRepo.get!(ScheduledWorkflow, s.id)
 
-    assert runs <= 1
+    # Not due for ten minutes, and then once: at the occurrence still to come.
+    assert runs == 0
+    assert DateTime.diff(row.next_run_at, now) in 1..600
   end
 end

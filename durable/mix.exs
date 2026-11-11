@@ -86,7 +86,12 @@ defmodule Durable.MixProject do
       "ecto.setup": ["ecto.create", "ecto.migrate"],
       "ecto.reset": ["ecto.drop", "ecto.setup"],
       test: ["ecto.create --quiet", "ecto.migrate --quiet", "test"],
-      precommit: ["format", "compile --warnings-as-errors", "credo --strict", "test"]
+      precommit: [
+        "format",
+        "compile --warnings-as-errors",
+        "credo --strict",
+        "test --warnings-as-errors"
+      ]
     ]
   end
 

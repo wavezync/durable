@@ -116,7 +116,18 @@ defmodule Durable.Testing do
       Repo.all(
         config,
         from(w in WorkflowExecution,
+          as: :run,
           where: w.id in ^ids and w.status == :pending,
+          # As a poller would: a run waiting behind its key's holder isn't due.
+          where:
+            not exists(
+              from(h in WorkflowExecution,
+                where:
+                  h.id == parent_as(:run).runs_after_id and
+                    h.status in [:pending, :running, :waiting, :compensating],
+                select: 1
+              )
+            ),
           order_by: w.inserted_at,
           select: w.id
         )

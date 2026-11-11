@@ -98,7 +98,7 @@ jobs:
         run: mix credo --strict
 
       - name: Run tests
-        run: mix test
+        run: mix test --warnings-as-errors
 
   # Live pollers, committed rows, the real clock and second BEAM nodes: what the
   # SQL Sandbox in the job above can't exercise. Fuzz generates its inputs from
@@ -179,7 +179,7 @@ jobs:
         run: mix deps.get
 
       - name: Run ${{ matrix.suite }} tests
-        run: mix test --only ${{ matrix.suite }}
+        run: mix test --only ${{ matrix.suite }} --warnings-as-errors
 
   dashboard:
     name: Dashboard

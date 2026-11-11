@@ -348,7 +348,9 @@ defmodule Durable do
   @doc """
   Cancels every pending, running or waiting run that matches `filters`, the
   filters of `list_executions/1`, one by one as `cancel/2` would (children
-  included). Returns `{:ok, count}`. At least one filter is required.
+  included). Returns `{:ok, count}`. At least one filter is required, and one
+  that wouldn't narrow the runs (a misspelt name, a `nil`) raises rather than
+  cancel everything else.
 
   ## Examples
 

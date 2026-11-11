@@ -161,8 +161,8 @@ defmodule Durable.Context do
   """
   @spec put_context(map()) :: :ok
   def put_context(map) when is_map(map) do
-    new_context = Map.merge(context(), map)
-    Process.put(@context_key, new_context)
+    context = context()
+    Process.put(@context_key, Map.merge(context, as_stored(context, map)))
     :ok
   end
 
@@ -192,8 +192,8 @@ defmodule Durable.Context do
   """
   @spec merge_context(map()) :: :ok
   def merge_context(map) when is_map(map) do
-    new_context = deep_merge(context(), map)
-    Process.put(@context_key, new_context)
+    context = context()
+    Process.put(@context_key, deep_merge(context, as_stored(context, map)))
     :ok
   end
 
@@ -643,6 +643,10 @@ defmodule Durable.Context do
       do: normalized,
       else: other
   end
+
+  # A map's keys as the context holds them, as put_context/2 would write each.
+  # Merged raw, `count:` lands beside a stored "count", and the old one wins.
+  defp as_stored(context, map), do: Map.new(map, fn {k, v} -> {stored_key(context, k), v} end)
 
   defp deep_merge(left, right) do
     Map.merge(left, right, fn

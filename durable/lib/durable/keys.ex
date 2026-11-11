@@ -238,10 +238,7 @@ defmodule Durable.Keys do
     cond do
       # A finished holder `reuse:` lets go hands its key over.
       holder.status in WorkflowExecution.reusable_statuses(ctx.reuse) ->
-        moved =
-          if release_closed(ctx.config, holder, ctx.reuse), do: {:released, holder}, else: moved
-
-        claim(ctx, rounds - 1, moved)
+        take_from_closed(ctx, holder, rounds, moved)
 
       # A debounced run that hasn't started takes the newer input and waits again.
       debouncing?(ctx, holder) ->
@@ -257,6 +254,22 @@ defmodule Durable.Keys do
 
       true ->
         {:taken, holder}
+    end
+  end
+
+  # Under run_again a run may already be waiting behind this holder, about to
+  # be claimed. It takes the newer input: a new holder beside it would run
+  # first, and leave the older input to run last.
+  defp take_from_closed(ctx, holder, rounds, moved) do
+    case ctx.mode == :run_again && refresh_waiting(ctx) do
+      id when is_binary(id) ->
+        {:waiting_refreshed, id, holder}
+
+      _no_waiter ->
+        moved =
+          if release_closed(ctx.config, holder, ctx.reuse), do: {:released, holder}, else: moved
+
+        claim(ctx, rounds - 1, moved)
     end
   end
 
@@ -355,7 +368,9 @@ defmodule Durable.Keys do
   # start. Matches no row once a worker claimed it.
   defp debounce_holder(%{debounce: %{period: period, timeout: timeout}} = ctx, holder) do
     now = DateTime.utc_now()
-    at = DateTime.add(now, period, :millisecond)
+    # The later of the caller's `scheduled_at:` and the quiet period, as for a
+    # first start, so a duplicate can't pull a run scheduled for later forward.
+    at = ctx.entry[:scheduled_at] || DateTime.add(now, period, :millisecond)
 
     at =
       if timeout,
@@ -612,6 +627,8 @@ defmodule Durable.Keys do
   def retake(_config, %WorkflowExecution{holds_key: true}, _workflow_def), do: {:ok, []}
 
   def retake(config, %WorkflowExecution{} = run, workflow_def) do
+    # Its callers are in a transaction, so this holds until the run is reopened.
+    lock_key(config, run)
     reuse = if workflow_def, do: reuse(workflow_def), else: :never
     do_retake(config, run, reuse, @rounds)
   end
