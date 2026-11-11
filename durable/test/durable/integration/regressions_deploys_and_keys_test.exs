@@ -72,6 +72,7 @@ defmodule Durable.Integration.DeploysAndKeysRegressionsTest do
         )
 
       assert row.enabled
+      assert runs == 0
     end
   end
 

@@ -337,7 +337,7 @@ defmodule Durable.Scheduler do
     result =
       Durable.Executor.start_workflow(module, schedule.input,
         workflow: schedule.workflow_name,
-        queue: String.to_atom(schedule.queue),
+        queue: schedule.queue,
         key: schedule.key,
         durable: config.name,
         trigger: :schedule,

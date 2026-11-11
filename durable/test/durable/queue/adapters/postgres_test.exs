@@ -524,7 +524,7 @@ defmodule Durable.Queue.Adapters.PostgresTest do
 
       # Non-existent jobs return :not_found without firing telemetry.
       assert {:error, :not_found} = Postgres.ack(config(), Ecto.UUID.generate())
-      refute_received {:ack_failed, ^ref, _, _}, 100
+      refute_receive {:ack_failed, ^ref, _, _}, 100
 
       :telemetry.detach("ack-failed-test-#{inspect(ref)}")
     end

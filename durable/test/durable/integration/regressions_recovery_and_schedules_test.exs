@@ -223,6 +223,7 @@ defmodule Durable.Integration.RecoveryAndSchedulesRegressionsTest do
       Process.sleep(500)
 
       peak = Probe.peak(:second_peak)
+      assert get(id).lock_token == token_of_new_owner
       :ok = Probe.set(:finish_second)
       await_status(id, :completed)
       assert peak == 1
@@ -274,6 +275,7 @@ defmodule Durable.Integration.RecoveryAndSchedulesRegressionsTest do
         end
 
       assert "durable-opentelemetry" in attached
+      assert got_span
     end
 
     test "the default logger survives it too" do
@@ -463,12 +465,13 @@ defmodule Durable.Integration.RecoveryAndSchedulesRegressionsTest do
       {:ok, _} = API.schedule(Tick, "0 9 * * *", name: "k")
       schedule_refused = API.schedule(Tick, "0 9 * * *", name: "k2", timezone: "Nowhere/Land")
       updated = API.update_schedule("k", timezone: "Nowhere/Land")
+      assert match?({:error, _}, schedule_refused)
       assert match?({:error, _}, updated)
     end
 
     test "the documented `cron:` update changes the cron" do
       idle_durable!()
-      {:ok, s} = API.schedule(Tick, "0 9 * * *", name: "k3")
+      {:ok, _} = API.schedule(Tick, "0 9 * * *", name: "k3")
       {:ok, updated} = API.update_schedule("k3", cron: "0 10 * * *")
       assert updated.cron_expression == "0 10 * * *"
     end
@@ -526,6 +529,8 @@ defmodule Durable.Integration.RecoveryAndSchedulesRegressionsTest do
         )
 
       {:ok, enabled} = API.enable_schedule("ad")
+      assert enabled.enabled
+      assert enabled.consecutive_failures == 0
 
       # A fire that works.
       make_due = DateTime.add(DateTime.utc_now(), -5, :second)

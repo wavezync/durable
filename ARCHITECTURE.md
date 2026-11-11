@@ -91,7 +91,7 @@ All tables live in the `durable` schema.
 
 **Step queues.** `queue` is where the run is claimed now. `home_queue` is where it goes back to, set only while it's away. A move releases the run and wakes the target queue.
 
-**Deadlines.** A run past its `timeout:` fails at its next step boundary, or when `TimeoutWorker` resumes it from a wait. If no live node polls its queue, the sweep hands it to the queue it came from, or to another that's polled, and a worker there fails it.
+**Deadlines.** A run past its `timeout:` fails at its next step boundary, or when `TimeoutWorker` resumes it from a wait. If no live node polls its queue, the sweep hands it to the queue it came from, or to another that's polled, and a worker there fails it. A run whose code is on no node waits, checked every 30 s, until it's 15 minutes past its deadline, and then fails without compensations.
 
 **Cancelling** clears the run's lock token. The worker's next heartbeat sees the run is cancelled and kills the step. Until then a step can check `cancelled?/0` to stop cleanly.
 
@@ -109,7 +109,7 @@ All tables live in the `durable` schema.
 | Parent waiting on a child that finished, its notice lost | `StaleJobRecovery` sends the notice again |
 | A wait past its timeout | `TimeoutWorker` |
 
-A step whose process dies uses one of its attempts. With attempts left the step runs again, so steps should be idempotent: delivery is at least once. With none left (one attempt is the default) the next claim fails the run the normal way.
+A step whose process dies uses one of its attempts. With attempts left the step runs again, so steps should be idempotent: delivery is at least once. With none left (one attempt is the default) the next claim fails the run the normal way. A process that dies outside a step (in a branch's `on:`, or between two steps) has no attempt to use: the run goes back marked to fail, and the next claim fails it, compensations included.
 
 A lost worker uses no attempt, because the step may be fine: one outage can take every lock at once. The step runs again, and after three `worker_lost` rows the next claim fails the run, so a step that takes its node down can't loop forever.
 

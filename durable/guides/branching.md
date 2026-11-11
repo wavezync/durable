@@ -53,9 +53,11 @@ The `on:` option takes a function that returns a value. That value is matched ag
 |---------|---------|
 | Atoms | `:invoice`, `:pending`, `:active` |
 | Strings | `"pdf"`, `"high"` |
-| Integers | `1`, `2`, `100` |
+| Integers | `1`, `-2`, `100` |
 | Booleans | `true`, `false` |
 | Default | `_` (matches anything) |
+
+A clause matches by equality, so any other pattern (a float, a tuple, a map, a guard) is a compile error. Compute the value to match on in `on:` instead.
 
 ```elixir
 # Matching atoms

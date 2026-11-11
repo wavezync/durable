@@ -251,16 +251,15 @@ defmodule Durable.Query do
   """
   @spec get_step_executions(String.t(), keyword()) :: [map()]
   def get_step_executions(workflow_id, opts \\ []) do
-    config = get_config(opts)
-
     query =
       from(s in StepExecution,
         where: s.workflow_id == ^workflow_id,
         order_by: [asc: s.inserted_at]
       )
 
-    Repo.all(config, query)
-    |> Enum.map(&step_to_map/1)
+    if Repo.id?(workflow_id),
+      do: opts |> get_config() |> Repo.all(query) |> Enum.map(&step_to_map/1),
+      else: []
   end
 
   @doc """
@@ -281,9 +280,9 @@ defmodule Durable.Query do
         limit: 1
       )
 
-    case Repo.one(config, query) do
-      nil -> {:error, :not_found}
-      step -> {:ok, step.logs || []}
+    case Repo.id?(workflow_id) && Repo.one(config, query) do
+      %StepExecution{} = step -> {:ok, step.logs || []}
+      _no_such_step -> {:error, :not_found}
     end
   end
 
@@ -335,6 +334,8 @@ defmodule Durable.Query do
 
   def child_counts(parent_ids, opts) when is_list(parent_ids) do
     config = get_config(opts)
+
+    parent_ids = Enum.filter(parent_ids, &Repo.id?/1)
 
     from(w in WorkflowExecution,
       where: w.parent_workflow_id in ^parent_ids,
@@ -510,10 +511,22 @@ defmodule Durable.Query do
 
   # A value Postgres can't hold can't match a run.
   defp apply_filters(query, filters) do
-    if bad_filter?(filters),
+    # A nil value is a filter that wasn't set.
+    filters = Enum.reject(filters, fn {_name, value} -> is_nil(value) end)
+
+    if bad_filter?(filters) or Enum.any?(filters, &unmatchable?/1),
       do: from(w in query, where: false),
       else: reduce_filters(query, filters)
   end
+
+  @statuses Ecto.Enum.values(WorkflowExecution, :status)
+
+  # Not an id or a status, so no run has it. Compared anyway, it's a cast error.
+  defp unmatchable?({name, id}) when name in [:id, :parent_workflow_id],
+    do: is_binary(id) and id != "" and not Repo.id?(id)
+
+  defp unmatchable?({:status, status}), do: is_atom(status) and status not in @statuses
+  defp unmatchable?(_filter), do: false
 
   defp bad_filter?(filters) do
     Enum.any?(filters, fn
@@ -553,15 +566,15 @@ defmodule Durable.Query do
       {:parent_workflow_id, parent_id}, q when is_binary(parent_id) ->
         from(w in q, where: w.parent_workflow_id == ^parent_id)
 
+      # Exact execution id.
+      {:id, id}, q when is_binary(id) and id != "" ->
+        from(w in q, where: w.id == ^id)
+
       {:status, status}, q when is_atom(status) ->
         from(w in q, where: w.status == ^status)
 
       {:status, statuses}, q when is_list(statuses) and statuses != [] ->
         from(w in q, where: w.status in ^statuses)
-
-      # Exact execution id.
-      {:id, id}, q when is_binary(id) and id != "" ->
-        from(w in q, where: w.id == ^id)
 
       # Id prefix — matches the short (8-char) id shown in lists or any leading
       # slice of the full UUID. Cast the uuid to text so LIKE works. Callers

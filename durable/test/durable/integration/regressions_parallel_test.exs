@@ -184,7 +184,8 @@ defmodule Durable.Integration.ParallelRegressionsTest do
       )
 
     :ok = Probe.set(:release_slow)
-    assert run.status != :waiting
+    assert run.status == :failed
+    assert Enum.all?(branches, fn {_step, status} -> status in [:failed, :cancelled] end)
   end
 
   test "parallel_results/0, parallel_result/1 and parallel_ok?/1 read what a branch returned" do

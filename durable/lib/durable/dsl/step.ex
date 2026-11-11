@@ -96,18 +96,17 @@ defmodule Durable.DSL.Step do
 
   defmacro step(name, {:fn, _, _} = body_fn, nil) do
     # step :name, fn data -> ... end
-    build_step(name, [], body_fn)
+    build_step(name, [], body_fn, __CALLER__)
   end
 
   defmacro step(name, opts, {:fn, _, _} = body_fn) when is_list(opts) do
     # step :name, [opts], fn data -> ... end
-    build_step(name, opts, body_fn)
+    build_step(name, opts, body_fn, __CALLER__)
   end
 
-  defp build_step(name, opts, body_fn) do
+  defp build_step(name, opts, body_fn, caller) do
     normalized_opts = normalize_step_opts(opts)
-    # Generate a unique function name for this step's body
-    func_name = :"__step_body_#{name}__"
+    func_name = body_name(caller, :step_body, claim_step_name!(caller, name))
 
     quote do
       # Define a named function for the step body
@@ -122,6 +121,47 @@ defmodule Durable.DSL.Step do
         opts: unquote(quote_opts(normalized_opts))
       }
     end
+  end
+
+  # A step is found by its name: on resume, for a goto, for its attempts. Two
+  # with one name would share all of that.
+  defp claim_step_name!(caller, name) do
+    workflow = Module.get_attribute(caller.module, :__durable_workflow__)
+    taken = Module.get_attribute(caller.module, :__durable_step_names__) || MapSet.new()
+
+    if MapSet.member?(taken, {workflow, name}) do
+      raise CompileError,
+        file: caller.file,
+        line: caller.line,
+        description:
+          "step #{inspect(name)} is defined twice in workflow #{inspect(workflow)}; " <>
+            "step names must be unique within a workflow"
+    end
+
+    Module.put_attribute(
+      caller.module,
+      :__durable_step_names__,
+      MapSet.put(taken, {workflow, name})
+    )
+
+    name
+  end
+
+  # A body is a function of the module, and two workflows in one module can
+  # each have a `step :work`. The first keeps the plain name, which is what
+  # shows in a stack trace; a later one gets its workflow added.
+  defp body_name(caller, kind, name) do
+    workflow = Module.get_attribute(caller.module, :__durable_workflow__)
+    taken = Module.get_attribute(caller.module, :__durable_bodies__) || MapSet.new()
+    plain = :"__#{kind}_#{name}__"
+
+    func_name =
+      if MapSet.member?(taken, plain),
+        do: :"__#{kind}_#{name}__in_#{:erlang.phash2(workflow)}__",
+        else: plain
+
+    Module.put_attribute(caller.module, :__durable_bodies__, MapSet.put(taken, func_name))
+    func_name
   end
 
   @doc false
@@ -172,14 +212,14 @@ defmodule Durable.DSL.Step do
   defmacro decision(name, opts_or_fn, maybe_fn \\ nil)
 
   defmacro decision(name, {:fn, _, _} = body_fn, nil) do
-    build_decision(name, [], body_fn)
+    build_decision(name, [], body_fn, __CALLER__)
   end
 
   defmacro decision(name, opts, {:fn, _, _} = body_fn) when is_list(opts) do
-    build_decision(name, opts, body_fn)
+    build_decision(name, opts, body_fn, __CALLER__)
   end
 
-  defp build_decision(name, opts, body_fn) do
+  defp build_decision(name, opts, body_fn, caller) do
     # Walk the body AST for `{:goto, atom, _}` patterns so the dashboard
     # can render the conditional branches in the workflow graph. Best-
     # effort: `:goto` calls with computed atoms (`{:goto, var, _}`) are
@@ -192,7 +232,7 @@ defmodule Durable.DSL.Step do
       |> normalize_step_opts()
       |> Map.put(:branches, branches)
 
-    func_name = :"__decision_body_#{name}__"
+    func_name = body_name(caller, :decision_body, claim_step_name!(caller, name))
 
     quote do
       @doc false
@@ -249,16 +289,16 @@ defmodule Durable.DSL.Step do
   defmacro compensate(name, opts_or_fn, maybe_fn \\ nil)
 
   defmacro compensate(name, {:fn, _, _} = body_fn, nil) do
-    build_compensate(name, [], body_fn)
+    build_compensate(name, [], body_fn, __CALLER__)
   end
 
   defmacro compensate(name, opts, {:fn, _, _} = body_fn) when is_list(opts) do
-    build_compensate(name, opts, body_fn)
+    build_compensate(name, opts, body_fn, __CALLER__)
   end
 
-  defp build_compensate(name, opts, body_fn) do
+  defp build_compensate(name, opts, body_fn, caller) do
     normalized_opts = normalize_compensate_opts(opts)
-    func_name = :"__compensate_body_#{name}__"
+    func_name = body_name(caller, :compensate_body, name)
 
     quote do
       @doc false
@@ -304,19 +344,20 @@ defmodule Durable.DSL.Step do
 
   """
   defmacro branch(opts, do: block) do
+    caller = __CALLER__
     condition_fn = Keyword.fetch!(opts, :on)
-    clauses = extract_clauses(block)
+    clauses = extract_clauses(block, caller)
 
-    {shape, _} = process_branch_clauses(clauses, 0, __CALLER__)
+    {shape, _} = process_branch_clauses(clauses, 0, caller)
 
     branch_id =
       block_id(
-        __CALLER__,
+        caller,
         :branch,
         for({pattern, _, names, _} <- shape, do: {pattern_to_key(pattern), names})
       )
 
-    {clause_data, all_step_defs} = process_branch_clauses(clauses, branch_id, __CALLER__)
+    {clause_data, all_step_defs} = process_branch_clauses(clauses, branch_id, caller)
 
     branch_clauses =
       Enum.map(clause_data, fn {pattern, idx, step_names, _step_defs} ->
@@ -329,7 +370,7 @@ defmodule Durable.DSL.Step do
     # Generate named functions for each nested step
     step_registrations =
       Enum.map(all_step_defs, fn {qualified_name, body_fn, step_opts} ->
-        func_name = :"__step_body_#{qualified_name}__"
+        func_name = body_name(caller, :step_body, claim_step_name!(caller, qualified_name))
 
         quote do
           @doc false
@@ -386,7 +427,7 @@ defmodule Durable.DSL.Step do
     id
   end
 
-  defp extract_clauses(block) do
+  defp extract_clauses(block, env) do
     clauses =
       case block do
         {:__block__, _, items} -> items
@@ -394,12 +435,25 @@ defmodule Durable.DSL.Step do
         clause -> [clause]
       end
 
-    Enum.map(clauses, &parse_clause/1)
+    Enum.map(clauses, &parse_clause(&1, env))
   end
 
-  defp parse_clause({:->, _meta, [[pattern], body]}) do
+  defp parse_clause({:->, meta, [[pattern], body]}, env) do
+    if not matchable?(pattern) do
+      raise CompileError,
+        file: env.file,
+        line: Keyword.get(meta, :line, env.line),
+        description:
+          "a branch clause matches the `on:` value by equality, against an atom, a string, " <>
+            "an integer or `_`, but found: #{Macro.to_string(pattern)}"
+    end
+
     {pattern, body}
   end
+
+  defp matchable?({:_, _, _}), do: true
+  defp matchable?({:-, _, [int]}), do: is_integer(int)
+  defp matchable?(literal), do: is_atom(literal) or is_binary(literal) or is_integer(literal)
 
   defp process_branch_clauses(clauses, branch_id, env) do
     {clause_data, all_steps} =
@@ -489,17 +543,19 @@ defmodule Durable.DSL.Step do
         "a #{block} can only hold `step :name, fn data -> ... end`, but found: #{found}"
   end
 
-  defp pattern_to_clause_name({:_, _, _}), do: :default
-  defp pattern_to_clause_name(atom) when is_atom(atom), do: atom
-  defp pattern_to_clause_name(string) when is_binary(string), do: String.to_atom(string)
-  defp pattern_to_clause_name(int) when is_integer(int), do: :"val_#{int}"
-  defp pattern_to_clause_name(_), do: :match
+  defp pattern_to_clause_name(pattern) do
+    case pattern_to_key(pattern) do
+      atom when is_atom(atom) -> atom
+      string when is_binary(string) -> String.to_atom(string)
+      int when is_integer(int) -> :"val_#{int}"
+    end
+  end
 
   defp pattern_to_key({:_, _, _}), do: :default
   defp pattern_to_key(atom) when is_atom(atom), do: atom
   defp pattern_to_key(string) when is_binary(string), do: string
   defp pattern_to_key(int) when is_integer(int), do: int
-  defp pattern_to_key(_), do: :match
+  defp pattern_to_key({:-, _, [int]}) when is_integer(int), do: -int
 
   # ============================================================================
   # Parallel Macro
@@ -560,12 +616,14 @@ defmodule Durable.DSL.Step do
 
   """
   defmacro parallel(opts \\ [], do: block) do
+    caller = __CALLER__
+
     shape =
-      for {_, _, %{original_name: name}} <- extract_parallel_steps(block, 0, __CALLER__), do: name
+      for {_, _, %{original_name: name}} <- extract_parallel_steps(block, 0, caller), do: name
 
-    parallel_id = block_id(__CALLER__, :parallel, shape)
+    parallel_id = block_id(caller, :parallel, shape)
 
-    step_defs = extract_parallel_steps(block, parallel_id, __CALLER__)
+    step_defs = extract_parallel_steps(block, parallel_id, caller)
     step_names = Enum.map(step_defs, fn {name, _, _} -> name end)
 
     error_strategy = Keyword.get(opts, :on_error, :fail_fast)
@@ -574,7 +632,7 @@ defmodule Durable.DSL.Step do
     # Generate named functions for each parallel step
     step_registrations =
       Enum.map(step_defs, fn {qualified_name, body_fn, step_opts} ->
-        func_name = :"__step_body_#{qualified_name}__"
+        func_name = body_name(caller, :step_body, claim_step_name!(caller, qualified_name))
 
         quote do
           @doc false
