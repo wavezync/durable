@@ -9,6 +9,7 @@ defmodule Durable.Executor do
   - Handling workflow suspension and resumption
   """
 
+  alias Durable.Activity
   alias Durable.Config
   alias Durable.Context
   alias Durable.Definition.Workflow
@@ -3131,11 +3132,14 @@ defmodule Durable.Executor do
   # its queue, where the next claim retries the step or, out of attempts, fails
   # the run the normal way, compensations and all (StepRunner.execute/5).
   #
-  # Anything that died outside a step (a branch's `on:`, a parallel `into:`, a
-  # process a finished step left linked) has no attempts to run out, and run
-  # again would crash the same way. The run goes back marked to fail, so the
-  # next claim fails it in the executor, compensations and all. A compensation
-  # that died comes back `{:error, error}` for the poller to fail the run.
+  # A process lost outside a step (between two, in a branch's `on:`, in a
+  # parallel `into:`) has no attempt to count, and nothing says the workflow's
+  # code is at fault: a deploy or an out-of-memory kill does this. The run goes
+  # back on its queue and carries on. Code that dies every time would go round
+  # for ever, so the third loss in a row at one step comes back
+  # `{:error, error}` for the poller to fail the run, without compensating:
+  # no step failed that its compensations answer for. A compensation that died
+  # comes back the same way.
   @spec attempt_died(map(), map(), Config.t()) :: :waiting | :fenced | {:error, map()}
   def attempt_died(job, error, %Config{} = config) do
     {:ok, run} = load_execution(config, job.id)
@@ -3155,6 +3159,8 @@ defmodule Durable.Executor do
     end
   end
 
+  @losses_allowed 3
+
   defp close_and_requeue(config, run, error) do
     closed = StepRunner.close_attempts(config, [run.id], :failed, error)
     delay = delay_after_death(config, run)
@@ -3163,7 +3169,8 @@ defmodule Durable.Executor do
       cond do
         run.status != :running -> {:error, error}
         closed != [] -> requeue(config, run, delay)
-        true -> requeue(config, run, nil, Map.put(run.context, "__fail__", storable_error(error)))
+        lost_in_a_row(config, run) >= @losses_allowed -> {:error, error}
+        true -> requeue(config, run, nil)
       end
 
     # The run itself may be out of attempts, and so has no retry to report.
@@ -3172,11 +3179,27 @@ defmodule Durable.Executor do
     outcome
   end
 
+  # Records this loss and counts the run's latest losses at the step it is at,
+  # since it was last retried. A loss at another step in between starts again.
+  defp lost_in_a_row(config, run) do
+    Activity.record(config, "worker_lost",
+      workflow_id: run.id,
+      queue: run.queue,
+      details: %{step: run.current_step}
+    )
+
+    since = run.retried_at || run.inserted_at
+
+    [workflow_id: run.id, kinds: ["worker_lost"], since: since, durable: config.name]
+    |> Activity.list()
+    |> Enum.take_while(&(&1.details["step"] == run.current_step))
+    |> length()
+  end
+
   # The context stays as it was last saved: the attempt that died changed nothing.
-  defp requeue(config, run, delay, context \\ nil) do
+  defp requeue(config, run, delay) do
     run
     |> Ecto.Changeset.change(
-      context: context || run.context,
       status: :pending,
       scheduled_at: requeue_at(run, delay),
       locked_by: nil,

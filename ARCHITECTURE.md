@@ -113,7 +113,7 @@ All tables live in the `durable` schema.
 | Parent waiting on a child that finished, its notice lost | `StaleJobRecovery` sends the notice again |
 | A wait past its timeout | `TimeoutWorker` |
 
-A step whose process dies uses one of its attempts. With attempts left the step runs again, so steps should be idempotent: delivery is at least once. With none left (one attempt is the default) the next claim fails the run the normal way. A process that dies outside a step (in a branch's `on:`, or between two steps) has no attempt to use: the run goes back marked to fail, and the next claim fails it, compensations included.
+A step whose process dies uses one of its attempts. With attempts left the step runs again, so steps should be idempotent: delivery is at least once. With none left (one attempt is the default) the next claim fails the run the normal way. A process that dies outside a step (in a branch's `on:`, a parallel `into:`, or between two steps) has no attempt to use, and nothing says the code is at fault: the run goes back on its queue and carries on from where it was. Each such loss is recorded as a `worker_lost` activity, and the third in a row at one step fails the run, so code that dies every time can't loop for ever. It fails without compensating, since no step failed, and can be retried.
 
 A lost worker uses no attempt, because the step may be fine: one outage can take every lock at once. The step runs again, and after three `worker_lost` rows the next claim fails the run, so a step that takes its node down can't loop forever.
 

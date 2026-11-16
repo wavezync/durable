@@ -827,23 +827,28 @@ defmodule Durable.Integration.FailurePathsTest do
       assert run.error["message"] =~ "boom"
     end
 
-    test "with no running step row fails the run instead of looping" do
+    test "with no running step row is run again, and fails after three in a row" do
       start_durable!(%{default: 1})
 
       {:ok, id} = Durable.start(Held, %{})
-      assert_eventually(fn -> Probe.hits(:body) == 1 end)
 
-      # As if it had died outside a step, in a branch condition or `into:`.
-      {1, _} =
-        IntegrationRepo.update_all(from(s in StepExecution, where: s.workflow_id == ^id),
+      for n <- 1..3 do
+        assert_eventually(fn -> Probe.hits(:body) == n end)
+        assert_eventually(fn -> worker_pid!(id) end)
+
+        # As if it had died outside a step, in a branch condition or `into:`.
+        IntegrationRepo.update_all(
+          from(s in StepExecution, where: s.workflow_id == ^id and s.status == :running),
           set: [status: :completed]
         )
 
-      Process.exit(:sys.get_state(worker_pid!(id)).task_pid, :kill)
+        Process.exit(:sys.get_state(worker_pid!(id)).task_pid, :kill)
+        if n < 3, do: assert_eventually(fn -> Probe.hits(:body) == n + 1 end)
+      end
 
       run = await_status(id, :failed)
       assert run.error["type"] == "task_crash"
-      assert Probe.hits(:body) == 1
+      assert Probe.hits(:body) == 3
     end
 
     test "a fenced worker records it" do

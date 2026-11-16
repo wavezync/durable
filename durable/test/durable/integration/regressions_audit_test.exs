@@ -93,6 +93,47 @@ defmodule Durable.Integration.AuditRegressionsTest do
     end
   end
 
+  # A trip: both bookings made, then the worker's process is lost before the
+  # card is charged, once on the way to each of two decisions.
+  defmodule LostBetweenSteps do
+    use Durable
+    alias Durable.IntegrationProbe, as: Probe
+
+    defp lost_until(label, deaths) do
+      Probe.note(label)
+      if Probe.hits(label) <= deaths, do: Process.exit(self(), :kill)
+      :go
+    end
+
+    workflow "a_lost_between_steps" do
+      step(:book_flight, [compensate: :cancel_flight], fn trip ->
+        Probe.note(:book_flight)
+        {:ok, trip}
+      end)
+
+      branch on: fn trip -> lost_until(:first, trip["deaths"]) end do
+        _ ->
+          step(:book_hotel, fn trip ->
+            Probe.note(:book_hotel)
+            {:ok, trip}
+          end)
+      end
+
+      branch on: fn trip -> lost_until(:second, trip["deaths"]) end do
+        _ ->
+          step(:charge_card, fn trip ->
+            Probe.note(:charge_card)
+            {:ok, trip}
+          end)
+      end
+
+      compensate(:cancel_flight, fn trip ->
+        Probe.note(:cancel_flight)
+        {:ok, trip}
+      end)
+    end
+  end
+
   defmodule WaitsTwiceForOne do
     use Durable
     use Durable.Wait
@@ -271,16 +312,52 @@ defmodule Durable.Integration.AuditRegressionsTest do
     assert Probe.hits(:undo_a) == 1
   end
 
-  test "a run whose process dies between steps fails through its compensations" do
+  test "a run whose process is lost between steps carries on from where it was" do
+    start_durable!(%{default: 1})
+    {:ok, id} = Durable.start(LostBetweenSteps, %{"deaths" => 1})
+
+    run = await_status(id, :completed)
+
+    assert run.error == nil
+    # Lost once before each decision; no step ran twice and nothing was undone.
+    assert {Probe.hits(:first), Probe.hits(:second)} == {2, 2}
+
+    assert {Probe.hits(:book_flight), Probe.hits(:book_hotel), Probe.hits(:charge_card)} ==
+             {1, 1, 1}
+
+    assert Probe.hits(:cancel_flight) == 0
+
+    lost = Durable.Activity.list(workflow_id: id, kinds: ["worker_lost"])
+    assert length(lost) == 2
+  end
+
+  test "deaths with a step between them don't add up" do
+    start_durable!(%{default: 1})
+    # Two before each decision: four in all, never three in a row.
+    {:ok, id} = Durable.start(LostBetweenSteps, %{"deaths" => 2})
+
+    run = await_status(id, :completed)
+
+    assert {Probe.hits(:first), Probe.hits(:second)} == {3, 3}
+    assert Probe.hits(:charge_card) == 1
+    assert run.status == :completed
+  end
+
+  test "a run lost three times in a row fails, and nothing is undone" do
     start_durable!(%{default: 1})
     {:ok, id} = Durable.start(DiesBetweenSteps, %{})
 
-    run = await_status(id, :compensated)
+    run = await_status(id, :failed)
 
     assert run.error["type"] == "task_crash"
-    assert Probe.hits(:on) == 1
-    assert Probe.hits(:undo_a) == 1
-    refute Map.has_key?(run.context, "__fail__")
+    assert Probe.hits(:on) == 3
+    assert Probe.hits(:undo_a) == 0
+
+    # It can be retried, and gets three more goes.
+    {:ok, _} = Durable.retry(id)
+    assert_eventually(fn -> Probe.hits(:on) == 6 end)
+    assert await_status(id, :failed).error["type"] == "task_crash"
+    assert Probe.hits(:undo_a) == 0
   end
 
   test "an event named twice in one wait_for_all can still be sent" do
