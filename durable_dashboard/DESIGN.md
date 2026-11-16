@@ -971,6 +971,20 @@ per clause, in the order they're written. Without them, a parallel block
 followed by a branch wired every child to every clause (N × M labelled
 edges).
 
+**Named blocks nest.** A named branch's gateway is its deciding step: it
+carries that step's status and execution, labels itself with the branch's
+name, and shows the arm the step recorded ("→ review"), so an arm with
+nothing in it can still read as taken. Each arm and each lane is a sequence
+that may hold further blocks. A named parallel block's join counts lanes,
+not steps: a lane is done when the step it ends on is, and where it ends on
+a branch, the last step of whichever arm ran. Steps inside named blocks are
+matched to their executions by exact name only, since two arms may hold a
+step of the same name.
+
+Known gap: a branch followed directly by a parallel block still wires every
+way out of the branch to every lane. A fork pill before the lanes would fix
+it.
+
 ### Cards
 
 Icon tile tinted by status, the step name, and a status line with the

@@ -34,11 +34,7 @@ defmodule DurableDashboard.GraphBuilder do
   Returns `%{nodes: [node], edges: [edge]}`.
   """
   def build(%Workflow{steps: steps}) do
-    {nodes, edges, _} =
-      steps
-      |> Enum.reduce({[], [], nil}, fn step, {nodes, edges, prev_ids} ->
-        process_step(step, nodes, edges, prev_ids)
-      end)
+    {nodes, edges, _} = sequence(steps, Map.new(steps, &{&1.name, &1}), {[], [], nil})
 
     by_name = Map.new(steps, &{to_string(&1.name), &1})
 
@@ -49,6 +45,107 @@ defmodule DurableDashboard.GraphBuilder do
   end
 
   def build(_), do: %{nodes: [], edges: []}
+
+  # Steps in order. A named block draws what it holds itself, so the steps
+  # inside it, which follow it in the definition, are passed over here.
+  defp sequence(steps, by_name, acc) do
+    {acc, _inside} =
+      Enum.reduce(steps, {acc, MapSet.new()}, fn step, {{nodes, edges, prev_ids} = acc, inside} ->
+        cond do
+          step.name in inside ->
+            {acc, inside}
+
+          named?(step) ->
+            {named_block(step, by_name, acc),
+             MapSet.union(inside, MapSet.new(step.opts[:all_steps]))}
+
+          true ->
+            {process_step(step, nodes, edges, prev_ids), inside}
+        end
+      end)
+
+    acc
+  end
+
+  defp named?(%Step{type: :branch, opts: %{decider: true}}), do: true
+  defp named?(%Step{type: :parallel, opts: %{lanes: _}}), do: true
+  defp named?(_step), do: false
+
+  defp held(names, by_name), do: Enum.map(names, &Map.fetch!(by_name, &1))
+
+  # A named branch: its gateway is the deciding step, with one labelled edge
+  # into each arm. An arm holds any sequence; an empty one leaves the gateway
+  # itself as a tail.
+  defp named_block(%Step{type: :branch} = step, by_name, {nodes, edges, prev_ids}) do
+    id = to_string(step.name)
+    label = to_string(step.opts[:original_name] || step.name)
+
+    gateway = %{
+      id: id,
+      type: "branch",
+      data: %{label: label, step_type: "branch", name: id, decider: true, paths: []}
+    }
+
+    start = {[gateway | nodes], add_edges(edges, prev_ids, id), [], []}
+
+    {nodes, edges, tails, paths} =
+      step.opts.clauses
+      |> Enum.sort_by(fn {{_arm, idx}, _names} -> idx end)
+      |> Enum.reduce(start, fn {{arm, _idx}, names}, {nodes, edges, tails, paths} ->
+        arm = format_clause_key(arm)
+
+        {arm_nodes, arm_edges, arm_tails} =
+          sequence(held(names, by_name), by_name, {[], [], [id]})
+
+        arm_edges = Enum.map(arm_edges, &into_arm(&1, id, arm))
+        first = Enum.find_value(Enum.reverse(arm_edges), &(&1.source == id && &1.target))
+        arm_nodes = Enum.map(arm_nodes, &put_in(&1, [:data, :clause], &1.data[:clause] || arm))
+
+        {arm_nodes ++ nodes, arm_edges ++ edges, tails ++ arm_tails,
+         paths ++ [%{clause: arm, first: first}]}
+      end)
+
+    nodes = Enum.map(nodes, &if(&1.id == id, do: put_in(&1, [:data, :paths], paths), else: &1))
+    {nodes, edges, Enum.uniq(tails)}
+  end
+
+  # A named parallel block: the step before it fans out to every lane, each
+  # lane is a sequence, and the lanes meet in a join.
+  defp named_block(%Step{type: :parallel} = step, by_name, {nodes, edges, prev_ids}) do
+    join_id = "#{step.name}__join"
+
+    {nodes, edges, lanes} =
+      Enum.reduce(step.opts.lanes, {nodes, edges, []}, fn {_id, lane, names},
+                                                          {nodes, edges, lanes} ->
+        {lane_nodes, lane_edges, tails} =
+          sequence(held(names, by_name), by_name, {[], [], prev_ids})
+
+        lane = %{name: to_string(lane), tails: tails || [], nodes: Enum.map(lane_nodes, & &1.id)}
+        {lane_nodes ++ nodes, lane_edges ++ edges, lanes ++ [lane]}
+      end)
+
+    join = %{
+      id: join_id,
+      type: "join",
+      data: %{
+        label: "join",
+        step_type: "join",
+        name: join_id,
+        members: Enum.map(lanes, & &1.name),
+        lanes: lanes
+      }
+    }
+
+    into_join =
+      lanes |> Enum.flat_map(& &1.tails) |> Enum.uniq() |> Enum.map(&build_edge(&1, join_id))
+
+    {[join | nodes], into_join ++ edges, [join_id]}
+  end
+
+  defp into_arm(%{source: id} = edge, id, arm),
+    do: Map.merge(edge, %{label: arm, className: "flow-edge-conditional"})
+
+  defp into_arm(edge, _id, _arm), do: edge
 
   # Retry budget from the step's definition, for "attempt 2 of 3".
   defp put_max_attempts(%{data: %{name: name}} = node, by_name) do
@@ -155,6 +252,42 @@ defmodule DurableDashboard.GraphBuilder do
 
   # A join is done when every member is; a branch has run once the first
   # step of one of its clauses has (that clause is `taken`).
+  # A lane is done when the step it ends on is: where it ends on a branch, the
+  # last step of whichever arm ran.
+  # ponytail: an arm with nothing in it ends on its gateway, so a lane ending
+  # on such a branch reads as done from the decision until its arm's step
+  # starts. Track the taken arm per lane if that flicker matters.
+  defp derive_block_status(%{type: "join", data: %{lanes: lanes}} = node, statuses) do
+    lane_statuses =
+      Enum.map(lanes, fn lane ->
+        inside = Enum.map(lane.nodes, &statuses[&1])
+
+        cond do
+          "failed" in inside -> "failed"
+          Enum.any?(inside, &(&1 in ["running", "waiting"])) -> "running"
+          Enum.any?(lane.tails, &(statuses[&1] == "completed")) -> "completed"
+          true -> "pending"
+        end
+      end)
+
+    status =
+      cond do
+        "failed" in lane_statuses -> "failed"
+        "running" in lane_statuses -> "running"
+        Enum.all?(lane_statuses, &(&1 == "completed")) -> "completed"
+        true -> "pending"
+      end
+
+    node
+    |> put_in([:data, :status], status)
+    |> put_in([:data, :done], Enum.count(lane_statuses, &(&1 == "completed")))
+  end
+
+  # A named branch's gateway is a step: its status is its own, and the arm it
+  # took is what its row recorded.
+  defp derive_block_status(%{type: "branch", data: %{decider: true}} = node, _statuses),
+    do: update_in(node, [:data], &Map.put_new(&1, :taken, nil))
+
   defp derive_block_status(%{type: "join", data: %{members: members}} = node, statuses) do
     member_statuses = Enum.map(members, &statuses[&1])
 
@@ -228,8 +361,12 @@ defmodule DurableDashboard.GraphBuilder do
   defp lookup_step(node, step_map, by_original) do
     case Map.get(step_map, node.id) do
       nil ->
+        # Only an unnamed block's steps can have drifted from their stored
+        # names. A named block's are stable, and two arms may hold steps with
+        # one name, so matching those by the short name would cross arms.
         original = get_in(node, [:data, :original_name])
-        if original, do: Map.get(by_original, to_string(original)), else: nil
+        drifts? = String.starts_with?(node.id, ["branch_", "parallel_"])
+        if original && drifts?, do: Map.get(by_original, to_string(original)), else: nil
 
       step_exec ->
         step_exec
@@ -251,7 +388,13 @@ defmodule DurableDashboard.GraphBuilder do
     |> put_in([:data, :error], error_line(Map.get(step_exec, :error)))
     |> maybe_link_child(step_exec)
     |> maybe_ran_in_child(step_exec, current_id)
+    |> put_taken(step_exec)
   end
+
+  defp put_taken(%{type: "branch"} = node, %{output: %{} = output}),
+    do: put_in(node, [:data, :taken], output["target_step"] || output[:target_step])
+
+  defp put_taken(node, _step_exec), do: node
 
   defp error_line(%{} = error) do
     type = error["type"] || error[:type]
@@ -266,6 +409,9 @@ defmodule DurableDashboard.GraphBuilder do
   defp maybe_ran_in_child(%{data: %{child_workflow_id: id}} = node, _step_exec, _current)
        when is_binary(id),
        do: node
+
+  # A gateway inside a lane stays a gateway.
+  defp maybe_ran_in_child(%{type: "branch"} = node, _step_exec, _current), do: node
 
   defp maybe_ran_in_child(node, %{workflow_id: run_id}, current_id)
        when is_binary(run_id) and is_binary(current_id) and run_id != current_id do
