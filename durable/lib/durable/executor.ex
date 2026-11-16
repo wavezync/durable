@@ -445,10 +445,18 @@ defmodule Durable.Executor do
         {:error, reason} -> config.repo.rollback(reason)
       end
 
-    reopen_children(config, parent.context, retry_attrs)
+    # Every child had finished and the block failed after them (its `into:`,
+    # say): nothing is left to wait for, so the run reads their results again.
+    status =
+      if stopped_block?(config, parent.context) do
+        reopen_children(config, parent.context, retry_attrs)
+        :waiting
+      else
+        :pending
+      end
 
     parent
-    |> Ecto.Changeset.change([status: :waiting] ++ retry_attrs ++ key_attrs)
+    |> Ecto.Changeset.change([status: status] ++ retry_attrs ++ key_attrs)
     |> still_holding(parent)
     |> Ecto.Changeset.unique_constraint(:key, name: :workflow_executions_key_holder_index)
     |> cas_update(config, mode: :savepoint)
@@ -803,12 +811,23 @@ defmodule Durable.Executor do
   # Stored, those names are strings; this gives the next step the atoms it was
   # first handed, however the run got back to it.
   defp restore_lane_keys(data, workflow_def) do
-    for %{type: :parallel, opts: %{result_key: key, lanes: lanes}} <- workflow_def.steps,
+    for %{type: :parallel, opts: %{result_key: key, lanes: lanes} = opts} <- workflow_def.steps,
         is_map(data[key]),
         reduce: data do
-      data -> Map.update!(data, key, &lane_keys(&1, lanes))
+      data -> Map.update!(data, key, &(&1 |> lane_keys(lanes) |> lane_pairs(opts)))
     end
   end
+
+  # A block that collects holds each lane as a pair, stored as a two-item list.
+  defp lane_pairs(results, %{error_strategy: :collect}) do
+    Map.new(results, fn
+      {lane, ["ok", data]} -> {lane, {:ok, data}}
+      {lane, ["error", reason]} -> {lane, {:error, reason}}
+      other -> other
+    end)
+  end
+
+  defp lane_pairs(results, _opts), do: results
 
   # Only the lanes' names: under the same key, a step may have put a map of its own.
   defp lane_keys(results, lanes) do
@@ -1137,13 +1156,23 @@ defmodule Durable.Executor do
 
     cond do
       Atom.to_string(name) != done -> [step | rest]
-      step.type != :branch -> Enum.reject(rest, &(&1.name in (step.opts[:all_steps] || [])))
-      arm -> only_clause(rest, step, arm)
-      true -> [step | rest]
+      step.type == :branch and arm -> only_clause(rest, step, arm)
+      step.type == :branch -> [step | rest]
+      record["arm"] -> jumped(step, rest, record["arm"])
+      true -> Enum.reject(rest, &(&1.name in (step.opts[:all_steps] || [])))
     end
   end
 
   defp after_done(steps, _not_done), do: steps
+
+  # A block whose `into:` jumped: on from the step it named, or the block again
+  # if the workflow no longer has that step.
+  defp jumped(step, rest, target) do
+    case Enum.drop_while(rest, &(Atom.to_string(&1.name) != target)) do
+      [] -> [step | rest]
+      from_target -> from_target
+    end
+  end
 
   defp arm_steps(branch, arm) do
     Enum.find_value(branch.opts[:clauses], fn {{name, _}, steps} ->
@@ -1898,11 +1927,13 @@ defmodule Durable.Executor do
         mark_failed(config, execution, error)
 
       true ->
-        run_parallel_step(execution, step_def, step_name_str, config)
+        run_parallel_step(execution, step_def, workflow_def, config)
     end
   end
 
-  defp run_parallel_step(execution, step_def, step_name_str, config) do
+  defp run_parallel_step(execution, step_def, workflow_def, config) do
+    step_name_str = Atom.to_string(step_def.name)
+
     # Merge the inherited parent context into the pipeline data so that
     # get_context/1 inside the step body resolves keys set by prior
     # put_context/2 calls in the parent's non-parallel steps.
@@ -1916,6 +1947,7 @@ defmodule Durable.Executor do
       |> Map.drop(["__parallel_step", :__parallel_step, @atom_keys])
       |> Map.merge(execution.input)
       |> restore_keys()
+      |> restore_lane_keys(workflow_def)
 
     case StepRunner.execute(step_def, data, execution.id, config, execution.deadline_at) do
       {:ok, output_data} ->
@@ -2060,9 +2092,9 @@ defmodule Durable.Executor do
       parallel_step_name: parallel_step_name
     } = opts
 
-    result_key = Enum.find(workflow_def.steps, &(&1.name == parallel_step_name)).opts[:result_key]
+    block = Enum.find(workflow_def.steps, &(&1.name == parallel_step_name))
 
-    case apply_parallel_into(into_fn, base_ctx, results, result_key) do
+    case apply_parallel_into(into_fn, base_ctx, results, block.opts) do
       {:ok, final_ctx} ->
         {:ok, exec} = save_data_as_context(config, exec, final_ctx, :drop, parallel_step_name)
         after_parallel = skip_parallel_steps(remaining_steps, all_parallel_steps)
@@ -2077,7 +2109,8 @@ defmodule Durable.Executor do
         )
 
       {:goto, target_step, goto_ctx} ->
-        {:ok, exec} = save_data_as_context(config, exec, goto_ctx)
+        {:ok, exec} =
+          save_data_as_context(config, exec, goto_ctx, :drop, {parallel_step_name, target_step})
 
         case find_jump_target(target_step, remaining_steps, parallel_step_name, step_index) do
           {:ok, target_steps} ->
@@ -2105,21 +2138,30 @@ defmodule Durable.Executor do
   end
 
   # Apply into function or default to __results__
-  defp apply_parallel_into(nil, base_ctx, results, nil) do
+  # A named block: each lane goes under the block's name. Every lane finished
+  # (one that didn't has failed the block), so that is its data; a block that
+  # collects says how each lane ended.
+  defp apply_parallel_into(nil, base_ctx, results, %{result_key: result_key} = opts) do
+    collect? = opts[:error_strategy] == :collect
+
+    lanes =
+      Map.new(results, fn
+        {lane, {:ok, data}} when collect? -> {lane, {:ok, Map.delete(data, @string_keys)}}
+        {lane, {:ok, data}} -> {lane, Map.delete(data, @string_keys)}
+        {lane, {:error, reason}} -> {lane, {:error, reason}}
+      end)
+
+    {:ok, base_ctx |> Map.delete(to_string(result_key)) |> Map.put(result_key, lanes)}
+  end
+
+  defp apply_parallel_into(nil, base_ctx, results, _unnamed) do
     # No into function - add results to __results__ key
     # Serialize tuples to lists for JSON storage
     serialized_results = serialize_parallel_results(results)
     {:ok, Map.put(base_ctx, :__results__, serialized_results)}
   end
 
-  # A named block: every lane finished (one that didn't has failed the block),
-  # and its data goes under the block's name.
-  defp apply_parallel_into(nil, base_ctx, results, result_key) do
-    lanes = Map.new(results, fn {lane, {:ok, data}} -> {lane, Map.delete(data, @string_keys)} end)
-    {:ok, base_ctx |> Map.delete(to_string(result_key)) |> Map.put(result_key, lanes)}
-  end
-
-  defp apply_parallel_into(into_fn, base_ctx, results, _result_key)
+  defp apply_parallel_into(into_fn, base_ctx, results, _opts)
        when is_function(into_fn, 2) do
     # User callbacks get raw {:ok, value} / {:error, reason} tuples so they
     # can pattern-match cleanly — this is the intended ergonomic API.
@@ -3153,9 +3195,12 @@ defmodule Durable.Executor do
   end
 
   # Where this step has to run, when that isn't where the run is now: its own
-  # `queue:`, or the queue the run started on. A branch only picks a clause, so
-  # it runs where it is, and the clause's steps move for themselves.
-  defp queue_move(%{type: :branch}, _execution, _config), do: nil
+  # `queue:`, or the queue the run started on. An unnamed branch only picks a
+  # clause, so it runs where it is, and the clause's steps move for
+  # themselves. A named one decides in a step, which moves like any step.
+  defp queue_move(%{type: :branch, opts: opts}, _execution, _config)
+       when not is_map_key(opts, :decider),
+       do: nil
 
   defp queue_move(step, execution, config) do
     queue = to_string(step.opts[:queue] || execution.home_queue || execution.queue)

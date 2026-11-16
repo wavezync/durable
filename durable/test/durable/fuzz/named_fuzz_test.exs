@@ -10,7 +10,7 @@ defmodule Durable.Fuzz.NamedTest do
   import Durable.FuzzScripts, only: [answer_waits: 1, describe: 1, terminal: 0]
 
   alias Durable.Config
-  alias Durable.FuzzWorkflows.{NamedTree, NamedTreePlain}
+  alias Durable.FuzzWorkflows.{NamedCollect, NamedTree, NamedTreePlain}
   alias Durable.Queue.Adapters.Postgres
   alias Durable.Queue.Manager
   alias Durable.Storage.Schemas.{PendingEvent, PendingInput}
@@ -58,7 +58,7 @@ defmodule Durable.Fuzz.NamedTest do
     {:step, :last}
   ]
 
-  @retried [:route, :a1, :z1, :p1, :pick, :q1, :d2]
+  @retried [:route, :a1, :z1, :p1, :pick, :q1, :d2, :i1, :c, :reduce]
   @arms %{route: [:a, :b, :c], inner: [:x, :y, :z], pick: [:m, :n]}
 
   setup do
@@ -375,6 +375,129 @@ defmodule Durable.Fuzz.NamedTest do
 
     assert ended.compensated > 0 and ended.cancelled > 0,
            "an ending never seen: #{inspect(ended)}"
+  end
+
+  # ===========================================================================
+  # Collecting
+  # ===========================================================================
+
+  @collect_lanes [
+    a: [{:step, :a1}, {:step, :a2}],
+    b: [
+      {:step, :b1},
+      {:parallel, :inner, i1: [{:step, :i1}], i2: [{:step, :i2}]},
+      {:step, :b2}
+    ],
+    c: [{:step, :c}]
+  ]
+  @collect_after [{:step, :reduce}, {:step, :last}]
+  @collect_steps [:first, :a1, :a2, :b1, :i1, :i2, :b2, :c, :reduce, :last]
+
+  defp collect_script do
+    gen all(actions <- fixed_list(Enum.map(@collect_steps, &action/1))) do
+      # A cancel ends the whole run; here a step that would cancel fails.
+      actions = Enum.map(actions, &if(&1 == :cancel, do: :fail, else: &1))
+      %{steps: @collect_steps |> Enum.zip(actions) |> Map.new(), arms: %{}}
+    end
+  end
+
+  # A lane that failed doesn't fail the block: only :first and what follows can.
+  defp collect_model(script) do
+    lanes = for {lane, seq} <- @collect_lanes, do: {lane, walk(seq, script)}
+    {after_how, after_done, after_never} = walk(@collect_after, script)
+
+    handed =
+      Map.new(lanes, fn {lane, {how, _, _}} -> {lane, if(how == :done, do: :ok, else: :error)} end)
+
+    if outcome(script.steps.first, :first) == :done do
+      %{
+        status: if(after_how == :done, do: :completed, else: :failed),
+        done: [:first | Enum.flat_map(lanes, fn {_, {_, done, _}} -> done end)] ++ after_done,
+        never: Enum.flat_map(lanes, fn {_, {_, _, never}} -> never end) ++ after_never,
+        handed: handed,
+        lane_runs:
+          handed
+          |> Map.values()
+          |> Enum.frequencies_by(&if(&1 == :ok, do: :completed, else: :failed))
+      }
+    else
+      %{
+        status: :failed,
+        done: [],
+        never: @collect_steps -- [:first],
+        handed: handed,
+        lane_runs: %{}
+      }
+    end
+  end
+
+  defp check_collected(%{id: id, case_id: case_id, script: script}) do
+    run = get(id)
+    label = label(run, script)
+    model = collect_model(script)
+
+    assert run.status == model.status, "status: #{label}"
+
+    for name <- model.done do
+      assert hits(case_id, name, :done) == 1, "#{name} completed other than once: #{label}"
+      entered = hits(case_id, name, :enter)
+      wanted = enters(script.steps[name])
+      assert entered == wanted, "#{name} entered #{entered}, wanted #{wanted}: #{label}"
+    end
+
+    for name <- model.never do
+      assert hits(case_id, name, :enter) == 0, "#{name} must never start: #{label}"
+    end
+
+    for member <- family(id), row = get(member) do
+      assert row.status in terminal(), "family left open: #{inspect(describe(row))} #{label}"
+      assert row.locked_by == nil, "family left locked: #{label}"
+    end
+
+    children =
+      IntegrationRepo.all(
+        from(w in WorkflowExecution, where: w.parent_workflow_id == ^id, select: w.status)
+      )
+
+    assert Enum.frequencies(children) == model.lane_runs,
+           "lane runs #{inspect(children)}: #{label}"
+
+    check_handed(case_id, model, label)
+    if run.status == :completed, do: check_stored_pairs(run, model.handed, label)
+  end
+
+  defp check_handed(case_id, model, label) do
+    if :reduce in model.done do
+      assert Probe.fetch({case_id, :handed}) == model.handed, "what :reduce was handed: #{label}"
+      Probe.note({:handed, model.handed |> Map.values() |> Enum.uniq() |> Enum.sort()})
+    end
+  end
+
+  defp check_stored_pairs(run, handed, label) do
+    for {lane, tag} <- handed do
+      assert [stored, %{} = lane_data] = run.context["lookups"]["#{lane}"]
+      assert stored == "#{tag}", "#{lane} stored as #{stored}: #{label}"
+      trail = if tag == :ok, do: lane_data["trail"], else: ["first", "a lane's own steps"]
+      assert List.last(trail) != "first", "#{lane}'s trail: #{label}"
+    end
+
+    assert run.context["trail"] == ["first", "reduce", "last"], "the run's trail: #{label}"
+  end
+
+  property "a block that collects hands the next step every lane, however each ended" do
+    check all(
+            scripts <- list_of(collect_script(), length: 6),
+            max_runs: @runs,
+            max_shrinking_steps: 15
+          ) do
+      runs = Enum.map(scripts, &start_run(&1, [], NamedCollect))
+      drive(Enum.map(runs, & &1.id))
+      Enum.each(runs, &check_collected/1)
+    end
+
+    # The mixed case is the point: some lanes through, some not.
+    assert Probe.hits({:handed, [:error, :ok]}) > 0, "never reduced a mix of ok and failed lanes"
+    assert Probe.hits({:handed, [:ok]}) > 0, "never reduced lanes that all finished"
   end
 
   # ===========================================================================

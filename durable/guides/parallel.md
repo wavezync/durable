@@ -4,36 +4,67 @@ Run multiple steps concurrently and collect results as tagged tuples.
 
 ## Lanes
 
-Give a parallel block a name and it holds lanes. A lane is a sequence that runs on its own, and the step after the block joins them:
+Give a parallel block a name and it holds lanes. It is map and reduce: each lane does one independent piece of work, and the step after the block reduces what they found. Use it for lookups, scoring, enrichment and other work that doesn't depend on its neighbours. Steps that depend on each other, or that can't be undone, belong in a sequence.
 
 ```elixir
-parallel :fulfil do
-  lane :shipment do
-    step :pick_and_pack, fn order -> ... end
-    step :book_courier, [retry: [max_attempts: 3]], fn order -> ... end
-    step :send_tracking, fn order -> ... end
+workflow "loan_application" do
+  step :load_application, fn application -> ... end
+
+  parallel :lookups do
+    step :credit, [retry: [max_attempts: 3]], fn application ->
+      {:ok, Map.put(application, :score, CreditBureau.score(application["applicant"]))}
+    end
+
+    step :fraud, fn application -> ... end
+
+    lane :sanctions do
+      step :query, [retry: [max_attempts: 3]], fn application -> ... end
+      step :screen, fn application -> ... end
+    end
   end
 
-  lane :paperwork do
-    step :issue_invoice, fn order -> ... end
-    step :email_invoice, fn order -> ... end
+  step :decide, fn %{lookups: %{credit: credit, fraud: fraud, sanctions: sanctions}} = application ->
+    {:ok, Map.put(application, :outcome, outcome(credit["score"], fraud["risk"], sanctions["listed"]))}
   end
-
-  step :add_points, fn order -> ... end
-end
-
-step :close_order, fn %{fulfil: %{shipment: shipment, paperwork: invoice}} = order ->
-  {:ok, Map.put(order, :tracking, shipment["tracking"])}
 end
 ```
 
 - **A lane is its own run.** It retries, sleeps, waits and moves queues like any run, and comes back to the step it stopped at. It holds steps, named branches and named parallel blocks. A `step` written straight in the block is a lane of one step, named after it.
 - **Every lane starts from the same data** and sees nothing another lane does.
-- **The next step gets each lane's final data under the block's name**, by lane name: `%{fulfil: %{shipment: ..., paperwork: ..., add_points: ...}}`. A lane's data has been stored, so the keys inside it are strings.
-- **A lane that fails fails the block** and stops the other lanes. To handle a failed lane yourself, pass `into:`, which gets every lane's `{:ok, data}` or `{:error, reason}` by lane name and returns the data to carry on with.
-- **`Durable.retry/1` on the failed run** puts the lanes that didn't finish back to work where they stopped, including a lane inside a lane. Lanes that finished aren't run again.
-- **Steps are stored under the block and the lane**, as `fulfil__shipment__book_courier`.
+- **The next step gets each lane's final data under the block's name**, by lane name: `%{lookups: %{credit: ..., fraud: ..., sanctions: ...}}`. A lane's data has been stored, so the keys inside it are strings.
+- **A lane that fails fails the block** and stops the other lanes. That is `on_error: :fail_fast`, the default.
+- **`Durable.retry/1` on the failed run** puts the lanes that didn't finish back to work where they stopped, including a lane inside a lane. Lanes that finished aren't run again. A lane stopped in the middle of a step is told at its worker's next heartbeat; retry before that and the step can run once more beside the one still finishing, so keep steps in a lane safe to repeat, as lookups are.
+- **Steps are stored under the block and the lane**, as `lookups__sanctions__query`.
 - **`compensate:` isn't allowed in a lane.** Put the undo on a step before the block.
+
+### Carrying on when a lane fails
+
+With `on_error: :collect` every lane runs to its end, and the next step is handed each one as `{:ok, data}` or `{:error, reason}`. A failed lane doesn't fail the run; the step decides what it means:
+
+```elixir
+parallel :lookups, on_error: :collect do
+  step :credit, fn application -> ... end
+  step :fraud, fn application -> ... end
+  step :sanctions, fn application -> ... end
+end
+
+step :decide, fn %{lookups: lookups} = application ->
+  case lookups do
+    %{credit: {:ok, credit}, fraud: {:ok, fraud}, sanctions: {:ok, %{"listed" => false}}} ->
+      {:ok, Map.put(application, :outcome, outcome(credit["score"], fraud["risk"]))}
+
+    %{sanctions: {:error, _down}} ->
+      {:ok, Map.put(application, :outcome, "manual_review")}
+
+    _ ->
+      {:fail, "lookups failed"}
+  end
+end
+```
+
+The step sees the same pairs however the run got back to it. In the stored run a pair is a two-item list, `["ok", data]` or `["error", reason]`.
+
+`into:` still works on a named block: a function that gets every lane's pair and returns the data to carry on with. Prefer `on_error: :collect` and a step, which is retried, logged and shown like any other.
 
 The rest of this guide covers the older form, a `parallel` block of single steps with no name, which keeps working.
 

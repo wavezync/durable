@@ -867,7 +867,7 @@ defmodule Durable.DSL.Step do
       )
     end
 
-    qualified = claim_step_name!(caller, qualify(scope.prefix, name))
+    qualified = qualify(scope.prefix, name)
     arms = block |> statements(:->) |> Enum.map(&parse_arm(&1, name, caller))
     arm_names = Enum.map(arms, &elem(&1, 0))
 
@@ -958,28 +958,35 @@ defmodule Durable.DSL.Step do
   end
 
   defp named_parallel(name, opts, block, scope, caller) do
-    qualified = claim_step_name!(caller, qualify(scope.prefix, name))
+    qualified = qualify(scope.prefix, name)
     into_fn = Keyword.get(opts, :into)
     error_strategy = Keyword.get(opts, :on_error, :fail_fast)
 
-    if error_strategy != :fail_fast and is_nil(into_fn) do
+    if error_strategy not in [:fail_fast, :collect] do
       block_error!(
         caller,
-        "parallel #{inspect(name)} has on_error: #{inspect(error_strategy)} and no into:. " <>
-          "A named block's result holds each lane's data, so a failed lane fails the block; " <>
-          "pass into: to handle failed lanes yourself"
+        "parallel #{inspect(name)} has on_error: #{inspect(error_strategy)}. A named block " <>
+          "takes :fail_fast (a failed lane fails the block) or :collect (every lane runs, " <>
+          "and the next step gets each one as {:ok, data} or {:error, reason})"
       )
     end
 
     lanes = block |> statements(:lane) |> Enum.map(&compile_lane(&1, name, qualified, caller))
     lane_names = Enum.map(lanes, &elem(&1, 0))
 
+    if lanes == [],
+      do:
+        block_error!(
+          caller,
+          "parallel #{inspect(name)} has no lanes: give it a `lane` or a `step`"
+        )
+
     if lane_names != Enum.uniq(lane_names),
       do: block_error!(caller, "parallel #{inspect(name)} has a lane written twice")
 
     lane_meta = for {lane, {names, _}} <- lanes, do: {qualify(qualified, lane), lane, names}
     inner = Enum.flat_map(lanes, fn {_, {names, _}} -> names end)
-    into_name = :"__parallel_into_#{qualified}__"
+    into_name = if into_fn, do: body_name(caller, :parallel_into, qualified)
 
     into_def =
       if into_fn do
@@ -1087,7 +1094,7 @@ defmodule Durable.DSL.Step do
     if scope.lane? and Keyword.has_key?(opts, :compensate),
       do: no_parallel_compensation!(name, caller)
 
-    qualified = claim_step_name!(caller, qualify(scope.prefix, name))
+    qualified = qualify(scope.prefix, name)
     func_name = body_name(caller, :step_body, qualified)
     step_opts = opts |> normalize_step_opts() |> Map.put(:original_name, name)
 

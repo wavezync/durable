@@ -335,6 +335,52 @@ defmodule Durable.FuzzWorkflows do
     end
   end
 
+  # A block that collects: lookups side by side, reduced by the step after it.
+  # One lane holds a block of its own that fails fast.
+  defmodule NamedCollect do
+    @moduledoc false
+    use Durable
+    alias Durable.FuzzWorkflows, as: F
+
+    workflow "fuzz_named_collect" do
+      step(:first, fn d -> F.named(:first, d) end)
+
+      parallel :lookups, on_error: :collect do
+        lane :a do
+          step(:a1, [retry: [max_attempts: 3, backoff: :constant, base: 1]], fn d ->
+            F.named(:a1, d)
+          end)
+
+          step(:a2, [queue: :q_a], fn d -> F.named(:a2, d) end)
+        end
+
+        lane :b do
+          step(:b1, fn d -> F.named(:b1, d) end)
+
+          parallel :inner do
+            step(:i1, [retry: [max_attempts: 3, backoff: :constant, base: 1]], fn d ->
+              F.named(:i1, d)
+            end)
+
+            step(:i2, [queue: :q_b], fn d -> F.named(:i2, d) end)
+          end
+
+          step(:b2, fn d -> F.named_join(:b2, :inner, [:i1, :i2], d) end)
+        end
+
+        step(:c, [retry: [max_attempts: 3, backoff: :constant, base: 1]], fn d ->
+          F.named(:c, d)
+        end)
+      end
+
+      step(:reduce, [retry: [max_attempts: 3, backoff: :constant, base: 1]], fn d ->
+        F.named_reduce(:reduce, :lookups, [:a, :b, :c], d)
+      end)
+
+      step(:last, fn d -> F.named(:last, d) end)
+    end
+  end
+
   # Does what the script says for `step`, and adds it to the data's trail: the
   # steps this run's data has been through, in order.
   def named(step, data) do
@@ -365,6 +411,28 @@ defmodule Durable.FuzzWorkflows do
          {:ok, data} <- tree(step, data),
          :ok <- lanes_handed(step, block, lanes, data),
          do: {:ok, trail(data, step)}
+  end
+
+  # The step after a block that collects: fails unless each lane came as
+  # {:ok, data} or {:error, reason}, and notes which it was.
+  def named_reduce(step, block, lanes, data) do
+    with :ok <- no_plumbing(step, data),
+         {:ok, data} <- tree(step, data),
+         {:ok, handed} <- pairs_handed(step, block, lanes, data) do
+      Probe.put({case_of(data), :handed}, handed)
+      {:ok, trail(data, step)}
+    end
+  end
+
+  defp pairs_handed(step, block, lanes, data) do
+    results = Map.get(data, block, %{})
+
+    handed =
+      for lane <- lanes, {tag, %{}} <- [results[lane]], tag in [:ok, :error], do: {lane, tag}
+
+    if is_map(results) and map_size(results) == length(lanes) and length(handed) == length(lanes),
+      do: {:ok, Map.new(handed)},
+      else: {:fail, "#{step} got #{inspect(results, limit: 6)} under #{block}"}
   end
 
   defp lanes_handed(step, block, lanes, data) do
