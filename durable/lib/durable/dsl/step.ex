@@ -31,6 +31,15 @@ defmodule Durable.DSL.Step do
         end
       end
 
+  ## A step can run more than once
+
+  A step that finished is not run again. A step whose worker is lost part-way
+  is: after a payment provider accepted a charge, say, and before the step was
+  recorded as done. Make any step with an effect outside your database safe to
+  repeat, by giving the provider an idempotency key that is the same on every
+  attempt, such as `"\#{Durable.Context.workflow_id()}:charge_card"`. See
+  "Make steps safe to run twice" in the Production guide.
+
   ## Options
 
   - `:retry` - Retry configuration

@@ -15,7 +15,8 @@ them as ratios, not as a forecast.
 - **Stop storing every log line.** By default each step's logs go in the
   database at every level.
 - **Give Durable a PubSub**, so new work starts at once and you can poll less.
-- **Make steps safe to run twice.** Delivery is at least once.
+- **Make steps safe to run twice.** Delivery is at least once. A step that
+  charges a card, books something or sends an email needs an idempotency key.
 - **Give a step retries if it should survive a crash.** A step whose process
   dies has used an attempt, so with no `retry:` (one attempt) the run fails.
   Losing its node or its lock doesn't use one, and nor does a deploy that hands
@@ -276,8 +277,23 @@ A node that doesn't have a workflow's code yet leaves the run for one that does:
 
 ### Make steps safe to run twice
 
-A step whose process crashes uses one of its attempts and runs again if it has any left. A takeover like the one above uses none: the step runs again, and the run fails only after losing its worker three times. Use an
-idempotency key when you call a payment API, and upserts rather than inserts.
+A step whose process crashes uses one of its attempts and runs again if it has any left. A takeover like the one above uses none: the step runs again, and the run fails only after losing its worker three times.
+
+A step that finished is never run again by any of this. The danger is a step that was in the middle: the worker dies after the payment provider accepted the charge and before Durable recorded the step as done, and the step runs again on another node. So every step with an effect outside your database must be safe to repeat:
+
+```elixir
+step :charge_card, [retry: [max_attempts: 3]], fn trip ->
+  # The same key on every attempt of this step in this run: the provider
+  # charges once and returns the first result to the rest.
+  key = "#{Durable.Context.workflow_id()}:charge_card"
+  {:ok, charge} = Payments.charge(trip["card"], trip["total"], idempotency_key: key)
+  {:ok, Map.put(trip, :charge_id, charge.id)}
+end
+```
+
+Use the provider's idempotency key for charges, bookings and emails, and upserts rather than inserts for your own tables.
+
+A worker lost between two steps, in a deploy that kills a node before it drains or an out-of-memory kill, costs nothing: the run goes back on its queue and carries on with the next step. Nothing is compensated, because nothing failed. If the same run is lost three times in a row at the same place, it fails so that it can't loop, and you can retry it.
 
 ### Upgrade Durable
 
