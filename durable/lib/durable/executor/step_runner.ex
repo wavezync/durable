@@ -74,6 +74,8 @@ defmodule Durable.Executor.StepRunner do
   """
   @spec execute(Step.t(), map(), String.t(), Config.t(), DateTime.t() | nil) :: result()
   def execute(%Step{} = step, data, workflow_id, %Config{} = config, deadline \\ nil) do
+    # Which lane a run is belongs to its stored context, not to a step's data.
+    data = Map.drop(data, ["__parallel_step", :__parallel_step])
     max_attempts = get_max_attempts(step)
     %{failed: failed, lost: lost} = attempts_used(config, workflow_id, Atom.to_string(step.name))
     attempt = failed + 1

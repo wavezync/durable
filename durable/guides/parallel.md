@@ -2,6 +2,41 @@
 
 Run multiple steps concurrently and collect results as tagged tuples.
 
+## Lanes
+
+Give a parallel block a name and it holds lanes. A lane is a sequence that runs on its own, and the step after the block joins them:
+
+```elixir
+parallel :fulfil do
+  lane :shipment do
+    step :pick_and_pack, fn order -> ... end
+    step :book_courier, [retry: [max_attempts: 3]], fn order -> ... end
+    step :send_tracking, fn order -> ... end
+  end
+
+  lane :paperwork do
+    step :issue_invoice, fn order -> ... end
+    step :email_invoice, fn order -> ... end
+  end
+
+  step :add_points, fn order -> ... end
+end
+
+step :close_order, fn %{fulfil: %{shipment: shipment, paperwork: invoice}} = order ->
+  {:ok, Map.put(order, :tracking, shipment["tracking"])}
+end
+```
+
+- **A lane is its own run.** It retries, sleeps, waits and moves queues like any run, and comes back to the step it stopped at. It holds steps, named branches and named parallel blocks. A `step` written straight in the block is a lane of one step, named after it.
+- **Every lane starts from the same data** and sees nothing another lane does.
+- **The next step gets each lane's final data under the block's name**, by lane name: `%{fulfil: %{shipment: ..., paperwork: ..., add_points: ...}}`. A lane's data has been stored, so the keys inside it are strings.
+- **A lane that fails fails the block** and stops the other lanes. To handle a failed lane yourself, pass `into:`, which gets every lane's `{:ok, data}` or `{:error, reason}` by lane name and returns the data to carry on with.
+- **`Durable.retry/1` on the failed run** puts the lanes that didn't finish back to work where they stopped, including a lane inside a lane. Lanes that finished aren't run again.
+- **Steps are stored under the block and the lane**, as `fulfil__shipment__book_courier`.
+- **`compensate:` isn't allowed in a lane.** Put the undo on a step before the block.
+
+The rest of this guide covers the older form, a `parallel` block of single steps with no name, which keeps working.
+
 ## Basic Usage
 
 ```elixir

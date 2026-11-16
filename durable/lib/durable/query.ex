@@ -638,7 +638,7 @@ defmodule Durable.Query do
       home_queue: execution.home_queue,
       priority: execution.priority,
       input: execution.input,
-      context: Map.delete(execution.context, "__string_keys__"),
+      context: Map.drop(execution.context, ["__string_keys__", "__done__"]),
       current_step: execution.current_step,
       error: execution.error,
       parent_workflow_id: execution.parent_workflow_id,

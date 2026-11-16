@@ -83,7 +83,11 @@ All tables live in the `durable` schema.
 
 **Sleep** is `waiting` with a `scheduled_at`. `SleepWaker` flips due runs to `pending` and stamps a marker so the step's `sleep` returns instead of sleeping again.
 
-**Parallel blocks.** Each branch is its own run, with a marker in its context saying which step it is. The parent waits on a wait group with one internal event per branch. Branches can retry, sleep, wait and call children.
+**Parallel blocks.** Each branch is its own run, with a marker in its context saying which step it is. The parent waits on a wait group with one internal event per branch. Branches can retry, sleep, wait and call children. In a named block the marker names a lane, and the run executes that lane's steps as a sequence. The marker stays in the stored context through every save and is never in a step's data or a lane's result.
+
+**Named branches.** The deciding function runs through the step runner as a step that jumps: the arm is what the step's row records. The executor then runs the arm's steps followed by what comes after the block.
+
+**What a save records.** A step's result is saved with the name of the step it came from, and for a branch the arm, and for a parallel block the fact that it finished. A run that comes back to that step, because it was stopped or lost its worker before moving on, continues from what follows. Without this the step would run again on its own result, a branch would decide again, and a parallel block would start its lanes a second time.
 
 **Child workflows.** The parent waits on an internal event named after the child. The child commits its final status and then looks for that event. The parent commits its event and then reads the child. Whichever goes second sees the other, so a child that finishes early can't be missed.
 

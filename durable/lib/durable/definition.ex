@@ -38,7 +38,10 @@ defmodule Durable.Definition do
               optional(:retry) => retry_opts(),
               optional(:timeout) => pos_integer(),
               optional(:compensate) => atom(),
-              optional(:queue) => atom()
+              optional(:queue) => atom(),
+              # What a block keeps about what it holds: its clauses or lanes,
+              # the steps inside it, and the name it was written with.
+              optional(atom()) => term()
             }
           }
 

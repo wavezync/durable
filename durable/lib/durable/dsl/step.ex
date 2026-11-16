@@ -615,7 +615,12 @@ defmodule Durable.DSL.Step do
       # Result: %{...ctx, __results__: %{order: {:ok, %{items: [...]}}}}
 
   """
-  defmacro parallel(opts \\ [], do: block) do
+  defmacro parallel(opts_or_name \\ [], do_block)
+
+  defmacro parallel(name, do: block) when is_atom(name),
+    do: emit(named_parallel(name, [], block, top_level(), __CALLER__))
+
+  defmacro parallel(opts, do: block) do
     caller = __CALLER__
 
     shape =
@@ -788,4 +793,347 @@ defmodule Durable.DSL.Step do
     |> Enum.into(%{})
     |> normalize_retry_opts()
   end
+
+  # ============================================================================
+  # Named blocks
+  # ============================================================================
+
+  @doc """
+  A branch with a name: a step decides, and its arms hold what runs next.
+
+  The function is run like a step body, with the same `:retry` and `:timeout`
+  options, its own row, logs and span. It returns `{arm, data}`, naming one of
+  the arms in the block; `data` goes to that arm's first step, and the arm's
+  last result goes to whatever follows the block. Naming an arm the block
+  doesn't have fails the run, without retries. Any other step return
+  (`{:error, reason}`, `{:fail, reason}`, `{:snooze, ms}`, `{:cancel, reason}`)
+  means what it means in a step.
+
+      branch :risk, [retry: [max_attempts: 3]], fn order ->
+        cond do
+          order.risk < 40 -> {:clear, order}
+          order.risk < 80 -> {:review, order}
+          true -> {:blocked, order}
+        end
+      end do
+        :clear ->
+          pass()
+
+        :review ->
+          step :ask_reviewer, fn order -> {:ok, order} end
+          step :record_review, fn order -> {:ok, order} end
+
+        :blocked ->
+          step :cancel_order, fn _order -> {:cancel, "blocked by risk check"} end
+      end
+
+  An arm holds steps, named branches and named parallel blocks, or `pass()`
+  for nothing. Steps inside are stored as `<branch>__<arm>__<step>`, so the
+  same step name can be used in two arms, and renaming one step renames only
+  that step.
+  """
+  defmacro branch(name, decider, do: block) when is_atom(name),
+    do: emit(named_branch(name, [], decider, block, top_level(), __CALLER__))
+
+  defmacro branch(name, opts, decider, do: block) when is_atom(name) and is_list(opts),
+    do: emit(named_branch(name, opts, decider, block, top_level(), __CALLER__))
+
+  @doc """
+  A parallel block with a name: each lane is a sequence that runs on its own.
+
+      parallel :fulfil do
+        lane :shipment do
+          step :pick_and_pack, fn order -> {:ok, order} end
+          step :send_tracking, fn order -> {:ok, order} end
+        end
+
+        lane :loyalty do
+          step :add_points, fn order -> {:ok, order} end
+        end
+      end
+
+      step :close_order, fn %{fulfil: %{shipment: shipment, loyalty: loyalty}} = order ->
+        {:ok, order}
+      end
+
+  Every lane starts from the data the block was given and sees none of what
+  another lane does. A lane holds steps, named branches and named parallel
+  blocks; a `step` written straight in the block is a lane of one step. The
+  step after the block gets the data from before it, with each lane's final
+  data under the block's name. A lane's data has been stored, so its own keys
+  are strings.
+
+  A lane that fails fails the block and stops the others. Pass `:into` to
+  decide for yourself, as in an unnamed block: the function gets every lane's
+  `{:ok, data}` or `{:error, reason}` by lane name.
+  """
+  defmacro parallel(name, opts, do: block) when is_atom(name) and is_list(opts),
+    do: emit(named_parallel(name, opts, block, top_level(), __CALLER__))
+
+  defp emit({_names, registrations}), do: {:__block__, [], registrations}
+
+  # `prefix` is what a step inside is named under; `lane?` is whether the
+  # steps run in a lane's own run, which a compensation can't reach.
+  defp top_level, do: %{prefix: nil, lane?: false}
+
+  defp qualify(nil, name), do: name
+  defp qualify(prefix, name), do: :"#{prefix}__#{name}"
+
+  @reserved_arms [:ok, :error, :fail, :snooze, :cancel, :goto]
+
+  defp named_branch(name, opts, decider, block, scope, caller) do
+    if is_list(decider) do
+      block_error!(
+        caller,
+        "branch #{inspect(name)} takes a function that returns {arm, data}, as in " <>
+          "`branch #{inspect(name)}, fn data -> {:ok_arm, data} end do`, " <>
+          "but found: #{first_line(decider)}"
+      )
+    end
+
+    qualified = claim_step_name!(caller, qualify(scope.prefix, name))
+    arms = block |> statements(:->) |> Enum.map(&parse_arm(&1, name, caller))
+    arm_names = Enum.map(arms, &elem(&1, 0))
+
+    if arm_names != Enum.uniq(arm_names),
+      do: block_error!(caller, "branch #{inspect(name)} has an arm written twice")
+
+    compiled =
+      for {arm, body} <- arms do
+        compile_body(body, %{scope | prefix: qualify(qualified, arm)}, caller, "branch arm")
+      end
+
+    clauses =
+      for {{names, _}, {arm, idx}} <- Enum.zip(compiled, Enum.with_index(arm_names)),
+          into: %{},
+          do: {{arm, idx}, names}
+
+    inner = Enum.flat_map(compiled, &elem(&1, 0))
+    func_name = body_name(caller, :branch_body, qualified)
+    step_opts = opts |> normalize_step_opts() |> Map.take([:retry, :timeout])
+
+    registration =
+      quote do
+        @doc false
+        def unquote(func_name)(data) do
+          Durable.DSL.Step.__arm__(unquote(decider).(data), unquote(name), unquote(arm_names))
+        end
+
+        @durable_current_steps %Durable.Definition.Step{
+          name: unquote(qualified),
+          type: :branch,
+          module: __MODULE__,
+          body_fn: &(__MODULE__.unquote(func_name) / 1),
+          opts:
+            Map.merge(unquote(quote_opts(step_opts)), %{
+              decider: true,
+              original_name: unquote(name),
+              clauses: unquote(Macro.escape(clauses)),
+              all_steps: unquote(inner)
+            })
+        }
+      end
+
+    {[qualified | inner], [registration | Enum.flat_map(compiled, &elem(&1, 1))]}
+  end
+
+  defp parse_arm({:->, _meta, [[arm], body]}, name, caller) when is_atom(arm) do
+    if arm in @reserved_arms do
+      block_error!(
+        caller,
+        "branch #{inspect(name)} can't have an arm called #{inspect(arm)}: " <>
+          "a decider returning {#{inspect(arm)}, ...} already means something"
+      )
+    end
+
+    {arm, body}
+  end
+
+  defp parse_arm({:->, _meta, [[other], _body]}, name, caller) do
+    block_error!(
+      caller,
+      "an arm of branch #{inspect(name)} is named by an atom, as in `:review ->`, " <>
+        "but found: #{Macro.to_string(other)}"
+    )
+  end
+
+  @doc false
+  # What a decider returned, as a step result: the arm becomes a jump the
+  # executor follows, and the step's row records it.
+  def __arm__({tag, _} = result, _name, _arms) when tag in [:error, :fail, :snooze, :cancel],
+    do: result
+
+  def __arm__({tag, _, _} = result, _name, _arms) when tag in [:snooze, :cancel], do: result
+
+  def __arm__({arm, data} = result, name, arms) when is_atom(arm) and is_map(data) do
+    if arm in arms, do: {:goto, arm, data}, else: no_such_arm(result, name, arms)
+  end
+
+  def __arm__(result, name, arms), do: no_such_arm(result, name, arms)
+
+  defp no_such_arm(result, name, arms) do
+    {:fail,
+     %{
+       type: "branch_error",
+       message:
+         "branch #{inspect(name)} must return {arm, data}, with data a map and arm one of " <>
+           "#{inspect(arms)}, got: #{inspect(result, limit: 5, printable_limit: 200)}"
+     }}
+  end
+
+  defp named_parallel(name, opts, block, scope, caller) do
+    qualified = claim_step_name!(caller, qualify(scope.prefix, name))
+    into_fn = Keyword.get(opts, :into)
+    error_strategy = Keyword.get(opts, :on_error, :fail_fast)
+
+    if error_strategy != :fail_fast and is_nil(into_fn) do
+      block_error!(
+        caller,
+        "parallel #{inspect(name)} has on_error: #{inspect(error_strategy)} and no into:. " <>
+          "A named block's result holds each lane's data, so a failed lane fails the block; " <>
+          "pass into: to handle failed lanes yourself"
+      )
+    end
+
+    lanes = block |> statements(:lane) |> Enum.map(&compile_lane(&1, name, qualified, caller))
+    lane_names = Enum.map(lanes, &elem(&1, 0))
+
+    if lane_names != Enum.uniq(lane_names),
+      do: block_error!(caller, "parallel #{inspect(name)} has a lane written twice")
+
+    lane_meta = for {lane, {names, _}} <- lanes, do: {qualify(qualified, lane), lane, names}
+    inner = Enum.flat_map(lanes, fn {_, {names, _}} -> names end)
+    into_name = :"__parallel_into_#{qualified}__"
+
+    into_def =
+      if into_fn do
+        quote do
+          @doc false
+          def unquote(into_name)(ctx, results), do: unquote(into_fn).(ctx, results)
+        end
+      end
+
+    into_ref = if into_fn, do: quote(do: &(__MODULE__.unquote(into_name) / 2))
+
+    registration =
+      quote do
+        unquote(into_def)
+
+        @durable_current_steps %Durable.Definition.Step{
+          name: unquote(qualified),
+          type: :parallel,
+          module: __MODULE__,
+          opts: %{
+            original_name: unquote(name),
+            result_key: unquote(name),
+            lanes: unquote(Macro.escape(lane_meta)),
+            steps: [],
+            all_steps: unquote(inner),
+            error_strategy: unquote(error_strategy),
+            into_fn: unquote(into_ref)
+          }
+        }
+      end
+
+    {[qualified | inner], [registration | Enum.flat_map(lanes, fn {_, {_, regs}} -> regs end)]}
+  end
+
+  defp compile_lane({:lane, _meta, [lane, [do: body]]}, _name, qualified, caller)
+       when is_atom(lane) do
+    {lane, compile_body(body, %{prefix: qualify(qualified, lane), lane?: true}, caller, "lane")}
+  end
+
+  # A step on its own is a lane of one step, named after it.
+  defp compile_lane({:step, _meta, [step_name | _]} = step, _name, qualified, caller)
+       when is_atom(step_name) do
+    {step_name, compile_body(step, %{prefix: qualified, lane?: true}, caller, "parallel block")}
+  end
+
+  defp compile_lane(other, name, _qualified, caller) do
+    block_error!(
+      caller,
+      "parallel #{inspect(name)} can hold `lane :name do ... end` and `step`, " <>
+        "but found: #{first_line(other)}"
+    )
+  end
+
+  # The statements of a do block. A block with one `->` clause or one call
+  # arrives as that alone.
+  defp statements({:__block__, _, items}, _kind), do: items
+  defp statements(clauses, :->) when is_list(clauses), do: clauses
+  defp statements(one, _kind), do: [one]
+
+  # What an arm or a lane holds, as the names of its steps and the code that
+  # registers them, in order.
+  defp compile_body(body, scope, caller, where) do
+    compiled = body |> statements(:body) |> Enum.map(&compile_statement(&1, scope, caller, where))
+    {Enum.flat_map(compiled, &elem(&1, 0)), Enum.flat_map(compiled, &elem(&1, 1))}
+  end
+
+  defp compile_statement(nil, _scope, _caller, _where), do: {[], []}
+
+  defp compile_statement({:pass, _, args}, _scope, _caller, _where) when args in [nil, []],
+    do: {[], []}
+
+  defp compile_statement({:step, _, [name, {:fn, _, _} = body_fn]}, scope, caller, _where)
+       when is_atom(name),
+       do: nested_step(name, [], body_fn, scope, caller)
+
+  defp compile_statement({:step, _, [name, opts, {:fn, _, _} = body_fn]}, scope, caller, _where)
+       when is_atom(name) and is_list(opts),
+       do: nested_step(name, opts, body_fn, scope, caller)
+
+  defp compile_statement({:branch, _, [name, decider, [do: block]]}, scope, caller, _where)
+       when is_atom(name),
+       do: named_branch(name, [], decider, block, scope, caller)
+
+  defp compile_statement({:branch, _, [name, opts, decider, [do: block]]}, scope, caller, _where)
+       when is_atom(name) and is_list(opts),
+       do: named_branch(name, opts, decider, block, scope, caller)
+
+  defp compile_statement({:parallel, _, [name, [do: block]]}, scope, caller, _where)
+       when is_atom(name),
+       do: named_parallel(name, [], block, scope, caller)
+
+  defp compile_statement({:parallel, _, [name, opts, [do: block]]}, scope, caller, _where)
+       when is_atom(name) and is_list(opts),
+       do: named_parallel(name, opts, block, scope, caller)
+
+  defp compile_statement(other, _scope, caller, where) do
+    block_error!(
+      caller,
+      "a #{where} can hold `step`, a named `branch`, a named `parallel` or `pass()`, " <>
+        "but found: #{first_line(other)}"
+    )
+  end
+
+  defp nested_step(name, opts, body_fn, scope, caller) do
+    if scope.lane? and Keyword.has_key?(opts, :compensate),
+      do: no_parallel_compensation!(name, caller)
+
+    qualified = claim_step_name!(caller, qualify(scope.prefix, name))
+    func_name = body_name(caller, :step_body, qualified)
+    step_opts = opts |> normalize_step_opts() |> Map.put(:original_name, name)
+
+    registration =
+      quote do
+        @doc false
+        def unquote(func_name)(data), do: unquote(body_fn).(data)
+
+        @durable_current_steps %Durable.Definition.Step{
+          name: unquote(qualified),
+          type: :step,
+          module: __MODULE__,
+          body_fn: &(__MODULE__.unquote(func_name) / 1),
+          opts: unquote(quote_opts(step_opts))
+        }
+      end
+
+    {[qualified], [registration]}
+  end
+
+  defp first_line(ast), do: ast |> Macro.to_string() |> String.split("\n") |> hd()
+
+  defp block_error!(caller, description),
+    do: raise(CompileError, file: caller.file, line: caller.line, description: description)
 end
