@@ -106,7 +106,7 @@ defmodule Durable.DSL.Step do
 
   defp build_step(name, opts, body_fn, caller) do
     normalized_opts = normalize_step_opts(opts)
-    func_name = body_name(caller, :step_body, claim_step_name!(caller, name))
+    func_name = body_name(caller, :step_body, name)
 
     quote do
       # Define a named function for the step body
@@ -121,30 +121,6 @@ defmodule Durable.DSL.Step do
         opts: unquote(quote_opts(normalized_opts))
       }
     end
-  end
-
-  # A step is found by its name: on resume, for a goto, for its attempts. Two
-  # with one name would share all of that.
-  defp claim_step_name!(caller, name) do
-    workflow = Module.get_attribute(caller.module, :__durable_workflow__)
-    taken = Module.get_attribute(caller.module, :__durable_step_names__) || MapSet.new()
-
-    if MapSet.member?(taken, {workflow, name}) do
-      raise CompileError,
-        file: caller.file,
-        line: caller.line,
-        description:
-          "step #{inspect(name)} is defined twice in workflow #{inspect(workflow)}; " <>
-            "step names must be unique within a workflow"
-    end
-
-    Module.put_attribute(
-      caller.module,
-      :__durable_step_names__,
-      MapSet.put(taken, {workflow, name})
-    )
-
-    name
   end
 
   # A body is a function of the module, and two workflows in one module can
@@ -232,7 +208,7 @@ defmodule Durable.DSL.Step do
       |> normalize_step_opts()
       |> Map.put(:branches, branches)
 
-    func_name = body_name(caller, :decision_body, claim_step_name!(caller, name))
+    func_name = body_name(caller, :decision_body, name)
 
     quote do
       @doc false
@@ -370,7 +346,7 @@ defmodule Durable.DSL.Step do
     # Generate named functions for each nested step
     step_registrations =
       Enum.map(all_step_defs, fn {qualified_name, body_fn, step_opts} ->
-        func_name = body_name(caller, :step_body, claim_step_name!(caller, qualified_name))
+        func_name = body_name(caller, :step_body, qualified_name)
 
         quote do
           @doc false
@@ -637,7 +613,7 @@ defmodule Durable.DSL.Step do
     # Generate named functions for each parallel step
     step_registrations =
       Enum.map(step_defs, fn {qualified_name, body_fn, step_opts} ->
-        func_name = body_name(caller, :step_body, claim_step_name!(caller, qualified_name))
+        func_name = body_name(caller, :step_body, qualified_name)
 
         quote do
           @doc false

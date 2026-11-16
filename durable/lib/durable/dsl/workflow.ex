@@ -82,6 +82,12 @@ defmodule Durable.DSL.Workflow do
       @durable_collected_steps_list Module.get_attribute(__MODULE__, :durable_current_steps)
                                     |> Enum.reverse()
 
+      Durable.DSL.Workflow.unique_step_names!(
+        @durable_collected_steps_list,
+        unquote(name),
+        __ENV__
+      )
+
       # Get collected compensations
       @durable_collected_comps_list Module.get_attribute(__MODULE__, :durable_compensations)
 
@@ -120,6 +126,28 @@ defmodule Durable.DSL.Workflow do
       if Code.ensure_loaded?(Durable.Scheduler.DSL) do
         SchedulerDSL.capture_schedule(__MODULE__, unquote(name))
       end
+    end
+  end
+
+  @doc false
+  # A step is found by its name: on resume, for a goto, for its attempts. Two
+  # with one name would share all of that. Checked on the steps the block
+  # produced, not as each `step` expands: only one arm of a compile-time `if`
+  # is ever a step.
+  def unique_step_names!(steps, workflow, env) do
+    names = Enum.map(steps, & &1.name)
+
+    case names -- Enum.uniq(names) do
+      [] ->
+        :ok
+
+      [name | _] ->
+        raise CompileError,
+          file: env.file,
+          line: env.line,
+          description:
+            "step #{inspect(name)} is defined twice in workflow #{inspect(workflow)}; " <>
+              "step names must be unique within a workflow"
     end
   end
 

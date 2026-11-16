@@ -196,6 +196,21 @@ defmodule Durable.Integration.FailurePathsTest do
     end
   end
 
+  defmodule KeyedParallel do
+    use Durable
+    alias Durable.IntegrationProbe, as: Probe
+
+    workflow "fp_keyed_parallel" do
+      parallel do
+        step(:left, fn data -> {:ok, data} end)
+
+        step(:right, fn data ->
+          if Probe.set?(:fixed), do: {:ok, data}, else: {:fail, "right is broken"}
+        end)
+      end
+    end
+  end
+
   # One zone, five hours behind UTC, so a test doesn't need a real tz database.
   defmodule FixedZone do
     @behaviour Calendar.TimeZoneDatabase
@@ -1100,6 +1115,67 @@ defmodule Durable.Integration.FailurePathsTest do
       assert_receive {:many, [{:error, %Postgrex.Error{}}, {:error, %Postgrex.Error{}}]}
 
       Task.await(holder)
+    end
+
+    test "a retry whose key lock fails is an error, not a MatchError" do
+      idle_durable!()
+      parent = self()
+      {:ok, lost} = Durable.start(Keyed, %{}, key: "lost")
+
+      # It failed, and its key went to a later run.
+      IntegrationRepo.update_all(from(w in WorkflowExecution, where: w.id == ^lost),
+        set: [status: :failed, holds_key: false]
+      )
+
+      holder =
+        Task.async(fn ->
+          IntegrationRepo.transaction(fn ->
+            {:ok, _} = Durable.start(Keyed, %{}, key: "lost")
+            send(parent, :holding)
+            Process.sleep(600)
+          end)
+        end)
+
+      assert_receive :holding, 2_000
+
+      {:error, :rollback} =
+        IntegrationRepo.transaction(fn ->
+          IntegrationRepo.query!("SET LOCAL lock_timeout = '50ms'")
+          send(parent, {:retried, Durable.retry(lost)})
+        end)
+
+      assert_receive {:retried, {:error, %Postgrex.Error{postgres: %{code: :lock_not_available}}}}
+      Task.await(holder)
+    end
+
+    test "a retry of a run failed in a parallel block and a start for its key don't both win" do
+      idle_durable!()
+      config = Durable.Config.get(Durable)
+
+      failed =
+        for n <- 1..30 do
+          key = "race:#{n}"
+          {:ok, id} = Durable.start(KeyedParallel, %{}, key: key)
+          Durable.Executor.execute_workflow(id, config)
+          Durable.DataCase.execute_children(IntegrationRepo, id, config)
+          Durable.Executor.execute_workflow(id, config)
+          assert %{status: :failed, holds_key: true} = get(id)
+          {key, id}
+        end
+
+      for {key, id} <- failed do
+        [fn -> Durable.retry(id) end, fn -> Durable.start(KeyedParallel, %{}, key: key) end]
+        |> Enum.map(&Task.async/1)
+        |> Task.await_many()
+
+        open =
+          from(w in WorkflowExecution,
+            where: w.key == ^key and w.status in [:pending, :running, :waiting],
+            select: {w.id, w.status, w.holds_key}
+          )
+
+        assert [{_, _, true}] = IntegrationRepo.all(open)
+      end
     end
   end
 
