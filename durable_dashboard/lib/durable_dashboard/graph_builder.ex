@@ -132,7 +132,8 @@ defmodule DurableDashboard.GraphBuilder do
         step_type: "join",
         name: join_id,
         members: Enum.map(lanes, & &1.name),
-        lanes: lanes
+        lanes: lanes,
+        collect: step.opts[:error_strategy] == :collect
       }
     }
 
@@ -226,12 +227,18 @@ defmodule DurableDashboard.GraphBuilder do
         attach_child_workflow_id(node, parallel_children)
       end)
 
-    statuses = Map.new(nodes, &{&1.id, &1.data.status})
+    # What a collecting block holds can't fail the lane the block sits in.
+    absorbed =
+      for %{type: "join", data: %{collect: true, lanes: lanes}} = join <- nodes, into: %{} do
+        {join.id, Enum.flat_map(lanes, & &1.nodes)}
+      end
+
+    statuses = settle(nodes, Map.new(nodes, &{&1.id, &1.data.status}), absorbed, length(nodes))
 
     nodes =
       Enum.map(nodes, fn node ->
         node
-        |> derive_block_status(statuses)
+        |> derive_block_status(statuses, absorbed)
         |> mark_not_run(finished?)
       end)
 
@@ -250,6 +257,19 @@ defmodule DurableDashboard.GraphBuilder do
     %{nodes: nodes, edges: edges}
   end
 
+  # A lane can end on a block, whose status is itself derived: work them out
+  # until nothing changes, which is once for each level of nesting.
+  defp settle(_nodes, statuses, _absorbed, 0), do: statuses
+
+  defp settle(nodes, statuses, absorbed, rounds) do
+    settled =
+      Map.new(nodes, &{&1.id, derive_block_status(&1, statuses, absorbed).data.status})
+
+    if settled == statuses,
+      do: statuses,
+      else: settle(nodes, settled, absorbed, rounds - 1)
+  end
+
   # A join is done when every member is; a branch has run once the first
   # step of one of its clauses has (that clause is `taken`).
   # A lane is done when the step it ends on is: where it ends on a branch, the
@@ -257,10 +277,12 @@ defmodule DurableDashboard.GraphBuilder do
   # ponytail: an arm with nothing in it ends on its gateway, so a lane ending
   # on such a branch reads as done from the decision until its arm's step
   # starts. Track the taken arm per lane if that flicker matters.
-  defp derive_block_status(%{type: "join", data: %{lanes: lanes}} = node, statuses) do
+  defp derive_block_status(%{type: "join", data: %{lanes: lanes}} = node, statuses, absorbed) do
     lane_statuses =
       Enum.map(lanes, fn lane ->
-        inside = Enum.map(lane.nodes, &statuses[&1])
+        inside =
+          (lane.nodes -- Enum.flat_map(lane.nodes, &Map.get(absorbed, &1, [])))
+          |> Enum.map(&statuses[&1])
 
         cond do
           "failed" in inside -> "failed"
@@ -270,25 +292,22 @@ defmodule DurableDashboard.GraphBuilder do
         end
       end)
 
-    status =
-      cond do
-        "failed" in lane_statuses -> "failed"
-        "running" in lane_statuses -> "running"
-        Enum.all?(lane_statuses, &(&1 == "completed")) -> "completed"
-        true -> "pending"
-      end
-
     node
-    |> put_in([:data, :status], status)
+    |> put_in([:data, :status], lanes_status(lane_statuses, node.data[:collect]))
     |> put_in([:data, :done], Enum.count(lane_statuses, &(&1 == "completed")))
+    |> put_in([:data, :failed], Enum.count(lane_statuses, &(&1 == "failed")))
   end
 
   # A named branch's gateway is a step: its status is its own, and the arm it
   # took is what its row recorded.
-  defp derive_block_status(%{type: "branch", data: %{decider: true}} = node, _statuses),
-    do: update_in(node, [:data], &Map.put_new(&1, :taken, nil))
+  defp derive_block_status(
+         %{type: "branch", data: %{decider: true}} = node,
+         _statuses,
+         _absorbed
+       ),
+       do: update_in(node, [:data], &Map.put_new(&1, :taken, nil))
 
-  defp derive_block_status(%{type: "join", data: %{members: members}} = node, statuses) do
+  defp derive_block_status(%{type: "join", data: %{members: members}} = node, statuses, _absorbed) do
     member_statuses = Enum.map(members, &statuses[&1])
 
     status =
@@ -304,7 +323,7 @@ defmodule DurableDashboard.GraphBuilder do
     |> put_in([:data, :done], Enum.count(member_statuses, &(&1 == "completed")))
   end
 
-  defp derive_block_status(%{type: "branch", data: %{paths: paths}} = node, statuses) do
+  defp derive_block_status(%{type: "branch", data: %{paths: paths}} = node, statuses, _absorbed) do
     taken = Enum.find(paths, &(&1.first && statuses[&1.first] not in [nil, "pending"]))
 
     node
@@ -312,7 +331,25 @@ defmodule DurableDashboard.GraphBuilder do
     |> put_in([:data, :taken], taken && taken.clause)
   end
 
-  defp derive_block_status(node, _statuses), do: node
+  defp derive_block_status(node, _statuses, _absorbed), do: node
+
+  # A block that collects goes on once every lane has ended, however it ended.
+  defp lanes_status(lanes, true) do
+    cond do
+      "running" in lanes -> "running"
+      Enum.all?(lanes, &(&1 in ["completed", "failed"])) -> "completed"
+      true -> "pending"
+    end
+  end
+
+  defp lanes_status(lanes, _fail_fast) do
+    cond do
+      "failed" in lanes -> "failed"
+      "running" in lanes -> "running"
+      Enum.all?(lanes, &(&1 == "completed")) -> "completed"
+      true -> "pending"
+    end
+  end
 
   # In a finished run, a step with no execution never ran — say so, rather
   # than "pending", which reads as "about to".

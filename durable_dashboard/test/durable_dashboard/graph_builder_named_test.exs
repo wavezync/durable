@@ -209,4 +209,66 @@ defmodule DurableDashboard.GraphBuilderNamedTest do
       assert status.([ran("fulfil__points"), ran("fulfil__ship__pack", :failed)]) == "failed"
     end
   end
+
+  describe "a lane that ends on a block, and a block that collects" do
+    setup do
+      {:ok, definition} = NamedBlocksWorkflow.__workflow_definition__("lookups")
+      {:ok, lookups: GraphBuilder.build(definition)}
+    end
+
+    @inner "lookups__sanctions__lists__join"
+
+    test "the lane is done when the block it ends on is", %{lookups: graph} do
+      rows =
+        Enum.map(
+          ~w(lookups__credit lookups__sanctions__query lookups__sanctions__lists__eu
+             lookups__sanctions__lists__un decide),
+          &ran/1
+        )
+
+      graph = GraphBuilder.overlay_status(graph, rows, run_status: :completed)
+
+      assert %{status: "completed", done: 2} = node(graph, @inner).data
+      assert %{status: "completed", done: 2} = node(graph, "lookups__join").data
+    end
+
+    test "and still open while that block is", %{lookups: graph} do
+      rows = [
+        ran("lookups__credit"),
+        ran("lookups__sanctions__query"),
+        ran("lookups__sanctions__lists__eu"),
+        ran("lookups__sanctions__lists__un", :running)
+      ]
+
+      graph = GraphBuilder.overlay_status(graph, rows, run_status: :running)
+
+      assert %{status: "running", done: 1} = node(graph, @inner).data
+      assert %{status: "running", done: 1} = node(graph, "lookups__join").data
+    end
+
+    test "a collecting join is done once every lane has ended, and says how many failed",
+         %{lookups: graph} do
+      assert node(graph, "lookups__join").data.collect
+      refute node(graph, @inner).data[:collect]
+
+      rows = [
+        ran("lookups__credit", :failed),
+        ran("lookups__sanctions__query"),
+        ran("lookups__sanctions__lists__eu"),
+        ran("lookups__sanctions__lists__un"),
+        ran("decide")
+      ]
+
+      graph = GraphBuilder.overlay_status(graph, rows, run_status: :completed)
+
+      assert %{status: "completed", done: 1, failed: 1} = node(graph, "lookups__join").data
+    end
+
+    test "a collecting join waits for a lane that is still going", %{lookups: graph} do
+      rows = [ran("lookups__credit", :failed), ran("lookups__sanctions__query", :running)]
+      graph = GraphBuilder.overlay_status(graph, rows, run_status: :running)
+
+      assert %{status: "running", done: 0, failed: 1} = node(graph, "lookups__join").data
+    end
+  end
 end

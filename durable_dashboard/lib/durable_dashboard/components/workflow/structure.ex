@@ -32,9 +32,16 @@ defmodule DurableDashboard.Components.Workflow.Structure do
     stats = Map.new(steps, &{&1.step, &1})
     by_name = Map.new(definition.steps, &{&1.name, &1})
 
+    # A named block's steps say nothing of the block they're in: it lists them.
+    held =
+      for %{opts: %{all_steps: names}} <- definition.steps,
+          name <- names,
+          into: MapSet.new(),
+          do: name
+
     nodes =
       definition.steps
-      |> Enum.reject(&nested?/1)
+      |> Enum.reject(&(nested?(&1) or &1.name in held))
       |> Enum.with_index(1)
       |> Enum.map(fn {step, index} -> step_node(step, index, stats, by_name) end)
 
@@ -59,6 +66,24 @@ defmodule DurableDashboard.Components.Workflow.Structure do
 
   defp nested?(%{opts: opts}),
     do: Map.has_key?(opts, :parallel_id) or Map.has_key?(opts, :branch_id)
+
+  # A named block: one row for each lane, with the lane's steps added up.
+  defp step_node(%{type: :parallel, opts: %{lanes: lanes}} = step, index, stats, _by_name) do
+    children = for {id, lane, names} <- lanes, do: lane_leaf(id, lane, names, stats)
+
+    %{
+      base(step, index)
+      | type: :parallel,
+        label: to_string(step.opts[:original_name] || step.name),
+        note: "#{length(children)} lanes · #{humanize(step.opts[:error_strategy] || :fail_fast)}",
+        runs: children |> Enum.map(& &1.runs) |> Enum.max(fn -> 0 end),
+        failed_runs: children |> Enum.map(& &1.failed_runs) |> Enum.sum(),
+        p95_ms:
+          children |> Enum.map(& &1.p95_ms) |> Enum.reject(&is_nil/1) |> Enum.max(fn -> nil end),
+        children: children
+    }
+    |> finish()
+  end
 
   defp step_node(%{type: :parallel} = step, index, stats, _by_name) do
     children =
@@ -97,13 +122,18 @@ defmodule DurableDashboard.Components.Workflow.Structure do
         }
       end)
 
+    # A named branch decides in a step of its own, which every run reaching it
+    # ran, whichever arm it took: an arm with nothing in it has no step to count.
+    decider = step.opts[:decider] && stats[Atom.to_string(step.name)]
+    in_arms = clauses |> Enum.map(& &1.failed_runs) |> Enum.sum()
+
     %{
       base(step, index)
       | type: :branch,
-        label: "branch",
+        label: if(step.opts[:decider], do: to_string(step.opts[:original_name]), else: "branch"),
         note: "#{length(clauses)} paths",
-        runs: clauses |> Enum.map(& &1.runs) |> Enum.sum(),
-        failed_runs: clauses |> Enum.map(& &1.failed_runs) |> Enum.sum(),
+        runs: if(decider, do: decider.runs, else: clauses |> Enum.map(& &1.runs) |> Enum.sum()),
+        failed_runs: in_arms + if(decider, do: decider.failed_runs, else: 0),
         clauses: clauses
     }
     |> finish()
@@ -124,6 +154,20 @@ defmodule DurableDashboard.Components.Workflow.Structure do
         compensation: compensation_for(step, stats, by_name)
     }
     |> finish()
+  end
+
+  # The lane's traffic is its first step's; its failures and its slowest step
+  # are from every step it holds.
+  defp lane_leaf(id, lane, names, stats) do
+    rows = names |> Enum.map(&stats[Atom.to_string(&1)]) |> Enum.reject(&is_nil/1)
+
+    %{
+      key: Atom.to_string(id),
+      label: Atom.to_string(lane),
+      runs: rows |> List.first(%{runs: 0}) |> Map.fetch!(:runs),
+      failed_runs: rows |> Enum.map(& &1.failed_runs) |> Enum.sum(),
+      p95_ms: rows |> Enum.map(& &1.p95_ms) |> Enum.reject(&is_nil/1) |> Enum.max(fn -> nil end)
+    }
   end
 
   defp base(step, index) do

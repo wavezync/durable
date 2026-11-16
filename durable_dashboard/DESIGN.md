@@ -979,7 +979,22 @@ that may hold further blocks. A named parallel block's join counts lanes,
 not steps: a lane is done when the step it ends on is, and where it ends on
 a branch, the last step of whichever arm ran. Steps inside named blocks are
 matched to their executions by exact name only, since two arms may hold a
-step of the same name.
+step of the same name. Block statuses settle from the inside out, so a lane
+that ends on a block is done when that block's join is.
+
+A block that collects (`on_error: :collect`) goes on whatever its lanes did:
+its join turns the success tone once every lane has ended and reads
+"2 done · 1 failed", and nothing a collecting block holds can fail the lane
+that block sits in. The failed lane's own cards stay in the failure tone.
+
+A named gateway's pill leads with the branch's name: "risk · 3 paths", then
+"risk → review". If the deciding step failed, the pill takes the failure tone
+and its tooltip carries the error.
+
+In the structure map a named branch is one card labelled with its name, its
+traffic the deciding step's; a named parallel block is one card listing its
+lanes, each lane's traffic its first step's and its failures and p95 from
+every step it holds.
 
 Known gap: a branch followed directly by a parallel block still wires every
 way out of the branch to every lane. A fork pill before the lanes would fix

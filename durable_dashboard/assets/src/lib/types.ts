@@ -69,6 +69,13 @@ export interface GraphNode {
     /** `join`: the parallel children it waits for, and how many are done. */
     members?: string[];
     done?: number;
+    /** `join` of a named block: its lanes, how many failed, and whether the
+     * block collects (a failed lane doesn't fail it). */
+    lanes?: { name: string }[];
+    failed?: number;
+    collect?: boolean;
+    /** `branch` of a named block: the gateway is the deciding step itself. */
+    decider?: boolean;
     /** `branch`: each clause and its first step; `taken` once one ran. */
     paths?: { clause: string; first: string | null }[];
     taken?: string | null;

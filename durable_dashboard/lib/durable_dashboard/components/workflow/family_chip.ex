@@ -20,6 +20,7 @@ defmodule DurableDashboard.Components.Workflow.FamilyChip do
 
   alias DurableDashboard.Components.Core
   alias DurableDashboard.Path, as: DPath
+  alias DurableDashboard.Trace
 
   @doc """
   Render the appropriate chip for the workflow's family position.
@@ -151,19 +152,8 @@ defmodule DurableDashboard.Components.Workflow.FamilyChip do
     end
   end
 
-  # Strip the qualified `parallel_<id>__` / `branch_<id>__<clause>__`
-  # prefix the DSL synthesizes — leaves the user-defined name that the
-  # popover label cares about. Mirrors the same logic used in graph_builder
-  # for status overlay fallback.
-  defp humanize_step_name(name) when is_binary(name) do
-    case String.split(name, "__") do
-      [_qualifier, _clause, original] -> original
-      [_qualifier, original] -> original
-      _ -> name
-    end
-  end
-
-  defp humanize_step_name(other), do: to_string(other)
+  # The name the step was written with, without the blocks it sits in.
+  defp humanize_step_name(name), do: Trace.display_name(name)
 
   defp short(nil), do: "—"
   defp short(id) when is_binary(id), do: String.slice(id, 0, 8)

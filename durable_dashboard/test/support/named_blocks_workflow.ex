@@ -49,4 +49,22 @@ defmodule DurableDashboard.NamedBlocksWorkflow do
 
     step(:close, fn d -> {:ok, d} end)
   end
+
+  # A block that collects, with a lane that ends on a block of its own.
+  workflow "lookups" do
+    parallel :lookups, on_error: :collect do
+      step(:credit, fn d -> {:ok, d} end)
+
+      lane :sanctions do
+        step(:query, fn d -> {:ok, d} end)
+
+        parallel :lists do
+          step(:eu, fn d -> {:ok, d} end)
+          step(:un, fn d -> {:ok, d} end)
+        end
+      end
+    end
+
+    step(:decide, fn d -> {:ok, d} end)
+  end
 end
