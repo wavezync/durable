@@ -5,6 +5,7 @@ defmodule Durable.Integration.NamedBlocksTest do
   @moduletag :capture_log
   @moduletag timeout: 120_000
 
+  alias Durable.Queue.Manager
   alias Durable.Storage.Schemas.{PendingEvent, PendingInput}
   alias Durable.Wait.TimeoutWorker
 
@@ -178,11 +179,13 @@ defmodule Durable.Integration.NamedBlocksTest do
     slow = lane(id, "both__slow")
     assert_eventually(fn -> get(slow.id).status == :cancelled end)
 
-    # Its worker is told at its next heartbeat and stops the step.
-    assert_eventually(fn ->
-      rows = IntegrationRepo.all(from(s in StepExecution, where: s.workflow_id == ^slow.id))
-      Enum.all?(rows, &(&1.status != :running))
-    end)
+    # Its worker is told at its next heartbeat and stops the step. Until then
+    # the step is still running, and a retry in that gap would run it beside
+    # the old one: wait for the worker to be gone.
+    assert_eventually(fn -> Manager.status(Durable, :default).active_jobs == 0 end)
+
+    rows = IntegrationRepo.all(from(s in StepExecution, where: s.workflow_id == ^slow.id))
+    assert Enum.all?(rows, &(&1.status != :running))
 
     assert Probe.hits(:s2) == 0
 
