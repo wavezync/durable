@@ -356,16 +356,20 @@ defmodule Durable.Executor do
 
     case cas_update(%{changeset | filters: %{holds_key: true}}, config) do
       {:error, :superseded} ->
-        case load_execution(config, execution.id) do
-          {:ok, %{status: :failed, holds_key: false} = lost} ->
-            retry_and_retake(config, lost, retry_attrs)
-
-          _retried_or_gone ->
-            {:error, :not_failed}
-        end
+        with {:ok, lost} <- lost_its_key(config, execution),
+             do: retry_and_retake(config, lost, retry_attrs)
 
       result ->
         result
+    end
+  end
+
+  # Why a reopen that asked for `holds_key` found nothing: the run as it is
+  # now if it's still failed and only its key went, or it was retried already.
+  defp lost_its_key(config, execution) do
+    case load_execution(config, execution.id) do
+      {:ok, %{status: :failed, holds_key: false} = lost} -> {:ok, lost}
+      _retried_or_gone -> {:error, :not_failed}
     end
   end
 
@@ -373,23 +377,21 @@ defmodule Durable.Executor do
   # (releasing a closed holder `reuse:` lets go) in the same transaction that
   # reopens it, or the retry is refused with {:key_taken, holder_id}.
   defp retry_and_retake(config, execution, retry_attrs) do
-    workflow_def = definition_or_nil(execution)
+    # The key's lock rolls the transaction back when it can't be taken.
+    with {:ok, result} <-
+           Repo.transaction(config, fn -> retake_and_reopen(config, execution, retry_attrs) end),
+         do: result
+  end
 
-    {:ok, result} =
-      Repo.transaction(config, fn ->
-        with {:ok, key_attrs} <- Keys.retake(config, execution, workflow_def) do
-          execution
-          |> Ecto.Changeset.change([status: :pending] ++ retry_attrs ++ key_attrs)
-          |> Ecto.Changeset.unique_constraint(:key,
-            name: :workflow_executions_key_holder_index
-          )
-          |> cas_update(config, mode: :savepoint)
-          |> not_failed_if_superseded()
-          |> key_taken_if_conflict(config, execution)
-        end
-      end)
-
-    result
+  defp retake_and_reopen(config, execution, retry_attrs) do
+    with {:ok, key_attrs} <- Keys.retake(config, execution, definition_or_nil(execution)) do
+      execution
+      |> Ecto.Changeset.change([status: :pending] ++ retry_attrs ++ key_attrs)
+      |> Ecto.Changeset.unique_constraint(:key, name: :workflow_executions_key_holder_index)
+      |> cas_update(config, mode: :savepoint)
+      |> not_failed_if_superseded()
+      |> key_taken_if_conflict(config, execution)
+    end
   end
 
   defp key_taken_if_conflict({:error, %Ecto.Changeset{} = changeset} = error, config, execution) do
@@ -414,8 +416,21 @@ defmodule Durable.Executor do
   # completion events and the group, and park the parent in :waiting again —
   # the last child to finish wakes it, exactly as on the first pass.
   defp retry_parallel_block(config, parent, retry_attrs) do
-    Repo.transaction(config, fn -> reopen_parallel_block(config, parent, retry_attrs) end)
+    case Repo.transaction(config, fn -> reopen_parallel_block(config, parent, retry_attrs) end) do
+      # As in retry_holder/3: a start took the key while this reopened the run.
+      {:error, :not_failed} when parent.holds_key ->
+        with {:ok, lost} <- lost_its_key(config, parent),
+             do: retry_parallel_block(config, lost, retry_attrs)
+
+      result ->
+        result
+    end
   end
+
+  defp still_holding(changeset, %{holds_key: true}),
+    do: %{changeset | filters: %{holds_key: true}}
+
+  defp still_holding(changeset, _parent), do: changeset
 
   defp reopen_parallel_block(config, parent, retry_attrs) do
     key_attrs =
@@ -470,6 +485,7 @@ defmodule Durable.Executor do
 
     parent
     |> Ecto.Changeset.change([status: :waiting] ++ retry_attrs ++ key_attrs)
+    |> still_holding(parent)
     |> Ecto.Changeset.unique_constraint(:key, name: :workflow_executions_key_holder_index)
     |> cas_update(config, mode: :savepoint)
     |> not_failed_if_superseded()
