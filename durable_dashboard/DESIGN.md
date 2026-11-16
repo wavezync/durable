@@ -986,6 +986,8 @@ A block that collects (`on_error: :collect`) goes on whatever its lanes did:
 its join turns the success tone once every lane has ended and reads
 "2 done · 1 failed", and nothing a collecting block holds can fail the lane
 that block sits in. The failed lane's own cards stay in the failure tone.
+A lane marked `optional: true` is treated the same way in a block that fails
+fast: its failure counts in "1 failed" and doesn't fail the join.
 
 A named gateway's pill leads with the branch's name: "risk · 3 paths", then
 "risk → review". If the deciding step failed, the pill takes the failure tone

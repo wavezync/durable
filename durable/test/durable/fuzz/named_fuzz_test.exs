@@ -10,7 +10,7 @@ defmodule Durable.Fuzz.NamedTest do
   import Durable.FuzzScripts, only: [answer_waits: 1, describe: 1, terminal: 0]
 
   alias Durable.Config
-  alias Durable.FuzzWorkflows.{NamedCollect, NamedTree, NamedTreePlain}
+  alias Durable.FuzzWorkflows.{NamedCollect, NamedOptional, NamedTree, NamedTreePlain}
   alias Durable.Queue.Adapters.Postgres
   alias Durable.Queue.Manager
   alias Durable.Storage.Schemas.{PendingEvent, PendingInput}
@@ -59,6 +59,7 @@ defmodule Durable.Fuzz.NamedTest do
   ]
 
   @retried [:route, :a1, :z1, :p1, :pick, :q1, :d2, :i1, :c, :reduce]
+  # The same names in the collecting and the optional tree are retried in both.
   @arms %{route: [:a, :b, :c], inner: [:x, :y, :z], pick: [:m, :n]}
 
   setup do
@@ -431,10 +432,19 @@ defmodule Durable.Fuzz.NamedTest do
     end
   end
 
-  defp check_collected(%{id: id, case_id: case_id, script: script}) do
+  defp check_collected(%{id: id, script: script} = started) do
+    model = collect_model(script)
+    check_modelled(started, model)
+    run = get(id)
+    if run.status == :completed, do: check_stored_pairs(run, model.handed, label(run, script))
+  end
+
+  # What a model of a block says of a run: how it ended, the steps that ran
+  # once, the steps that never started, how its lanes' runs ended and what the
+  # step after the block was handed.
+  defp check_modelled(%{id: id, case_id: case_id, script: script}, model) do
     run = get(id)
     label = label(run, script)
-    model = collect_model(script)
 
     assert run.status == model.status, "status: #{label}"
 
@@ -459,15 +469,16 @@ defmodule Durable.Fuzz.NamedTest do
         from(w in WorkflowExecution, where: w.parent_workflow_id == ^id, select: w.status)
       )
 
-    assert Enum.frequencies(children) == model.lane_runs,
-           "lane runs #{inspect(children)}: #{label}"
+    if model.lane_runs do
+      assert Enum.frequencies(children) == model.lane_runs,
+             "lane runs #{inspect(children)}: #{label}"
+    end
 
     check_handed(case_id, model, label)
-    if run.status == :completed, do: check_stored_pairs(run, model.handed, label)
   end
 
   defp check_handed(case_id, model, label) do
-    if :reduce in model.done do
+    if model.handed && :reduce in model.done do
       assert Probe.fetch({case_id, :handed}) == model.handed, "what :reduce was handed: #{label}"
       Probe.note({:handed, model.handed |> Map.values() |> Enum.uniq() |> Enum.sort()})
     end
@@ -498,6 +509,99 @@ defmodule Durable.Fuzz.NamedTest do
     # The mixed case is the point: some lanes through, some not.
     assert Probe.hits({:handed, [:error, :ok]}) > 0, "never reduced a mix of ok and failed lanes"
     assert Probe.hits({:handed, [:ok]}) > 0, "never reduced lanes that all finished"
+  end
+
+  # ===========================================================================
+  # Optional lanes
+  # ===========================================================================
+
+  @optional_lanes [a: [{:step, :a1}, {:step, :a2}], b1: [{:step, :b1}], c: [{:step, :c}]]
+  @optional_steps [:first, :a1, :a2, :b1, :c, :reduce, :last]
+
+  defp optional_script do
+    gen all(actions <- fixed_list(Enum.map(@optional_steps, &action/1))) do
+      actions = Enum.map(actions, &if(&1 == :cancel, do: :fail, else: &1))
+      %{steps: @optional_steps |> Enum.zip(actions) |> Map.new(), arms: %{}}
+    end
+  end
+
+  # Lane :a failing costs nothing; :b1 or :c failing fails the block, and then
+  # a lane is stopped wherever it has got to.
+  defp optional_model(script) do
+    lanes = for {lane, seq} <- @optional_lanes, do: {lane, walk(seq, script)}
+    {after_how, after_done, after_never} = walk(@collect_after, script)
+    required_done? = Enum.all?(lanes, fn {lane, {how, _, _}} -> lane == :a or how == :done end)
+    never = Enum.flat_map(lanes, fn {_, {_, _, never}} -> never end)
+
+    handed =
+      Map.new(lanes, fn {lane, {how, _, _}} ->
+        {lane, if(how == :done, do: :data, else: :nothing)}
+      end)
+
+    cond do
+      outcome(script.steps.first, :first) != :done ->
+        %{
+          status: :failed,
+          done: [],
+          never: @optional_steps -- [:first],
+          handed: nil,
+          lane_runs: %{}
+        }
+
+      required_done? ->
+        %{
+          status: if(after_how == :done, do: :completed, else: :failed),
+          done: [:first | Enum.flat_map(lanes, fn {_, {_, done, _}} -> done end)] ++ after_done,
+          never: never ++ after_never,
+          handed: handed,
+          lane_runs:
+            handed
+            |> Map.values()
+            |> Enum.frequencies_by(&if(&1 == :data, do: :completed, else: :failed))
+        }
+
+      true ->
+        %{
+          status: :failed,
+          done: [:first],
+          never: never ++ [:reduce, :last],
+          handed: nil,
+          lane_runs: nil
+        }
+    end
+  end
+
+  defp check_optional(%{id: id, case_id: case_id, script: script} = started) do
+    run = get(id)
+    label = label(run, script)
+    model = optional_model(script)
+    check_modelled(started, model)
+
+    if model.handed && run.status == :completed do
+      for {lane, came} <- model.handed do
+        stored = run.context["lookups"]["#{lane}"]
+        assert is_map(stored) == (came == :data), "#{lane} stored as #{inspect(stored)}: #{label}"
+      end
+    end
+
+    for name <- @optional_steps do
+      assert hits(case_id, name, :done) <= 1, "#{name} completed twice: #{label}"
+    end
+  end
+
+  property "a lane the block can do without never fails it, and a lane it needs still does" do
+    check all(
+            scripts <- list_of(optional_script(), length: 6),
+            max_runs: @runs,
+            max_shrinking_steps: 15
+          ) do
+      runs = Enum.map(scripts, &start_run(&1, [], NamedOptional))
+      drive(Enum.map(runs, & &1.id))
+      Enum.each(runs, &check_optional/1)
+    end
+
+    assert Probe.hits({:handed, [:data, :nothing]}) > 0, "never went on without the optional lane"
+    assert Probe.hits({:handed, [:data]}) > 0, "never reduced lanes that all finished"
   end
 
   # ===========================================================================

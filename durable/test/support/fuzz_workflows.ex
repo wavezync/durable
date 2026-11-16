@@ -381,6 +381,39 @@ defmodule Durable.FuzzWorkflows do
     end
   end
 
+  # A block that fails fast, with a lane it can do without.
+  defmodule NamedOptional do
+    @moduledoc false
+    use Durable
+    alias Durable.FuzzWorkflows, as: F
+
+    workflow "fuzz_named_optional" do
+      step(:first, fn d -> F.named(:first, d) end)
+
+      parallel :lookups do
+        lane :a, optional: true do
+          step(:a1, [retry: [max_attempts: 3, backoff: :constant, base: 1]], fn d ->
+            F.named(:a1, d)
+          end)
+
+          step(:a2, [queue: :q_a], fn d -> F.named(:a2, d) end)
+        end
+
+        step(:b1, [queue: :q_b], fn d -> F.named(:b1, d) end)
+
+        step(:c, [retry: [max_attempts: 3, backoff: :constant, base: 1]], fn d ->
+          F.named(:c, d)
+        end)
+      end
+
+      step(:reduce, [retry: [max_attempts: 3, backoff: :constant, base: 1]], fn d ->
+        F.named_reduce(:reduce, :lookups, [:a, :b1, :c], d)
+      end)
+
+      step(:last, fn d -> F.named(:last, d) end)
+    end
+  end
+
   # Does what the script says for `step`, and adds it to the data's trail: the
   # steps this run's data has been through, in order.
   def named(step, data) do
@@ -413,8 +446,8 @@ defmodule Durable.FuzzWorkflows do
          do: {:ok, trail(data, step)}
   end
 
-  # The step after a block that collects: fails unless each lane came as
-  # {:ok, data} or {:error, reason}, and notes which it was.
+  # The step after a block whose lanes may have failed: notes how each lane
+  # came, and fails if one came as nothing a lane can be.
   def named_reduce(step, block, lanes, data) do
     with :ok <- no_plumbing(step, data),
          {:ok, data} <- tree(step, data),
@@ -426,14 +459,19 @@ defmodule Durable.FuzzWorkflows do
 
   defp pairs_handed(step, block, lanes, data) do
     results = Map.get(data, block, %{})
+    handed = for lane <- lanes, Map.has_key?(results, lane), do: {lane, came_as(results[lane])}
 
-    handed =
-      for lane <- lanes, {tag, %{}} <- [results[lane]], tag in [:ok, :error], do: {lane, tag}
-
-    if is_map(results) and map_size(results) == length(lanes) and length(handed) == length(lanes),
-      do: {:ok, Map.new(handed)},
-      else: {:fail, "#{step} got #{inspect(results, limit: 6)} under #{block}"}
+    if map_size(results) == length(lanes) and length(handed) == length(lanes) and
+         :unknown not in Keyword.values(handed),
+       do: {:ok, Map.new(handed)},
+       else: {:fail, "#{step} got #{inspect(results, limit: 6)} under #{block}"}
   end
+
+  defp came_as({:ok, %{}}), do: :ok
+  defp came_as({:error, %{}}), do: :error
+  defp came_as(%{}), do: :data
+  defp came_as(nil), do: :nothing
+  defp came_as(_other), do: :unknown
 
   defp lanes_handed(step, block, lanes, data) do
     case data do

@@ -120,7 +120,13 @@ defmodule DurableDashboard.GraphBuilder do
         {lane_nodes, lane_edges, tails} =
           sequence(held(names, by_name), by_name, {[], [], prev_ids})
 
-        lane = %{name: to_string(lane), tails: tails || [], nodes: Enum.map(lane_nodes, & &1.id)}
+        lane = %{
+          name: to_string(lane),
+          tails: tails || [],
+          nodes: Enum.map(lane_nodes, & &1.id),
+          optional: lane in (step.opts[:optional] || [])
+        }
+
         {lane_nodes ++ nodes, lane_edges ++ edges, lanes ++ [lane]}
       end)
 
@@ -227,10 +233,11 @@ defmodule DurableDashboard.GraphBuilder do
         attach_child_workflow_id(node, parallel_children)
       end)
 
-    # What a collecting block holds can't fail the lane the block sits in.
+    # What a collecting block or an optional lane holds can't fail the lane
+    # the block sits in.
     absorbed =
-      for %{type: "join", data: %{collect: true, lanes: lanes}} = join <- nodes, into: %{} do
-        {join.id, Enum.flat_map(lanes, & &1.nodes)}
+      for %{type: "join", data: %{lanes: lanes} = data} = join <- nodes, into: %{} do
+        {join.id, for(lane <- lanes, data.collect or lane.optional, id <- lane.nodes, do: id)}
       end
 
     statuses = settle(nodes, Map.new(nodes, &{&1.id, &1.data.status}), absorbed, length(nodes))
@@ -292,8 +299,25 @@ defmodule DurableDashboard.GraphBuilder do
         end
       end)
 
+    # A failed lane fails the block unless the block collects or can do
+    # without that lane; then the lane has just ended.
+    fatal? =
+      lanes
+      |> Enum.zip(lane_statuses)
+      |> Enum.any?(fn {lane, status} ->
+        status == "failed" and not (node.data[:collect] || lane.optional)
+      end)
+
+    status =
+      cond do
+        fatal? -> "failed"
+        "running" in lane_statuses -> "running"
+        Enum.all?(lane_statuses, &(&1 in ["completed", "failed"])) -> "completed"
+        true -> "pending"
+      end
+
     node
-    |> put_in([:data, :status], lanes_status(lane_statuses, node.data[:collect]))
+    |> put_in([:data, :status], status)
     |> put_in([:data, :done], Enum.count(lane_statuses, &(&1 == "completed")))
     |> put_in([:data, :failed], Enum.count(lane_statuses, &(&1 == "failed")))
   end
@@ -332,24 +356,6 @@ defmodule DurableDashboard.GraphBuilder do
   end
 
   defp derive_block_status(node, _statuses, _absorbed), do: node
-
-  # A block that collects goes on once every lane has ended, however it ended.
-  defp lanes_status(lanes, true) do
-    cond do
-      "running" in lanes -> "running"
-      Enum.all?(lanes, &(&1 in ["completed", "failed"])) -> "completed"
-      true -> "pending"
-    end
-  end
-
-  defp lanes_status(lanes, _fail_fast) do
-    cond do
-      "failed" in lanes -> "failed"
-      "running" in lanes -> "running"
-      Enum.all?(lanes, &(&1 == "completed")) -> "completed"
-      true -> "pending"
-    end
-  end
 
   # In a finished run, a step with no execution never ran — say so, rather
   # than "pending", which reads as "about to".

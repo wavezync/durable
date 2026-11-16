@@ -67,4 +67,14 @@ defmodule DurableDashboard.NamedBlocksWorkflow do
 
     step(:decide, fn d -> {:ok, d} end)
   end
+
+  # A block that fails fast, with a lane it can do without.
+  workflow "enrich" do
+    parallel :lookups do
+      step(:credit, fn d -> {:ok, d} end)
+      step(:device, [optional: true], fn d -> {:ok, d} end)
+    end
+
+    step(:decide, fn d -> {:ok, d} end)
+  end
 end

@@ -971,7 +971,9 @@ defmodule Durable.DSL.Step do
       )
     end
 
-    lanes = block |> statements(:lane) |> Enum.map(&compile_lane(&1, name, qualified, caller))
+    written = statements(block, :lane)
+    lanes = Enum.map(written, &compile_lane(&1, name, qualified, caller))
+    optional = Enum.flat_map(written, &optional_lane/1)
     lane_names = Enum.map(lanes, &elem(&1, 0))
 
     if lanes == [],
@@ -1012,6 +1014,7 @@ defmodule Durable.DSL.Step do
             lanes: unquote(Macro.escape(lane_meta)),
             steps: [],
             all_steps: unquote(inner),
+            optional: unquote(optional),
             error_strategy: unquote(error_strategy),
             into_fn: unquote(into_ref)
           }
@@ -1024,6 +1027,19 @@ defmodule Durable.DSL.Step do
   defp compile_lane({:lane, _meta, [lane, [do: body]]}, _name, qualified, caller)
        when is_atom(lane) do
     {lane, compile_body(body, %{prefix: qualify(qualified, lane), lane?: true}, caller, "lane")}
+  end
+
+  defp compile_lane({:lane, meta, [lane, opts, [do: body]]}, name, qualified, caller)
+       when is_atom(lane) and is_list(opts) do
+    if Keyword.keys(opts) != [:optional] or not is_boolean(opts[:optional]) do
+      block_error!(
+        caller,
+        "lane #{inspect(lane)} of parallel #{inspect(name)} takes optional: true and " <>
+          "nothing else, got: #{Macro.to_string(opts)}"
+      )
+    end
+
+    compile_lane({:lane, meta, [lane, [do: body]]}, name, qualified, caller)
   end
 
   # A step on its own is a lane of one step, named after it.
@@ -1039,6 +1055,15 @@ defmodule Durable.DSL.Step do
         "but found: #{first_line(other)}"
     )
   end
+
+  # A lane the block can do without: `lane :x, optional: true do` or, for a
+  # lane of one step, `step :x, [optional: true], fn`.
+  defp optional_lane({kind, _meta, [lane, opts, _body]})
+       when kind in [:lane, :step] and is_atom(lane) and is_list(opts) do
+    if Keyword.keyword?(opts) and opts[:optional] == true, do: [lane], else: []
+  end
+
+  defp optional_lane(_statement), do: []
 
   # The statements of a do block. A block with one `->` clause or one call
   # arrives as that alone.

@@ -64,6 +64,30 @@ end
 
 The step sees the same pairs however the run got back to it. In the stored run a pair is a two-item list, `["ok", data]` or `["error", reason]`.
 
+### A lane the block can do without
+
+Mark a lane `optional: true` when the decision can be made without it. If it fails, the other lanes carry on, the block doesn't fail, and the next step gets `nil` for that lane:
+
+```elixir
+parallel :lookups do
+  step :credit, fn application -> ... end
+
+  step :device, [optional: true], fn application -> ... end
+
+  lane :social, optional: true do
+    step :find_profiles, fn application -> ... end
+    step :rate, fn application -> ... end
+  end
+end
+
+step :decide, fn %{lookups: %{credit: credit, device: device, social: social}} = application ->
+  # device and social are nil if their lookup failed
+  ...
+end
+```
+
+Why it failed stays on the lane's own run, which the dashboard shows. In a block that collects, an optional lane is `{:error, reason}` like any other failed lane. A lane that isn't optional still fails the block.
+
 `into:` still works on a named block: a function that gets every lane's pair and returns the data to carry on with. Prefer `on_error: :collect` and a step, which is retried, logged and shown like any other.
 
 The rest of this guide covers the older form, a `parallel` block of single steps with no name, which keeps working.

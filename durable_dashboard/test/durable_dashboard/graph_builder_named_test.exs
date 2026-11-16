@@ -271,4 +271,30 @@ defmodule DurableDashboard.GraphBuilderNamedTest do
       assert %{status: "running", done: 0, failed: 1} = node(graph, "lookups__join").data
     end
   end
+
+  describe "a lane the block can do without" do
+    setup do
+      {:ok, definition} = NamedBlocksWorkflow.__workflow_definition__("enrich")
+      {:ok, enrich: GraphBuilder.build(definition)}
+    end
+
+    test "is marked on the join", %{enrich: graph} do
+      assert [%{name: "credit", optional: false}, %{name: "device", optional: true}] =
+               node(graph, "lookups__join").data.lanes
+    end
+
+    test "doesn't fail the join when it fails", %{enrich: graph} do
+      rows = [ran("lookups__credit"), ran("lookups__device", :failed), ran("decide")]
+      graph = GraphBuilder.overlay_status(graph, rows, run_status: :completed)
+
+      assert %{status: "completed", done: 1, failed: 1} = node(graph, "lookups__join").data
+    end
+
+    test "and a lane the block needs still does", %{enrich: graph} do
+      rows = [ran("lookups__credit", :failed), ran("lookups__device")]
+      graph = GraphBuilder.overlay_status(graph, rows, run_status: :failed)
+
+      assert %{status: "failed", done: 1, failed: 1} = node(graph, "lookups__join").data
+    end
+  end
 end

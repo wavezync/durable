@@ -832,9 +832,10 @@ defmodule Durable.Executor do
   # Only the lanes' names: under the same key, a step may have put a map of its own.
   defp lane_keys(results, lanes) do
     Enum.reduce(lanes, results, fn {_id, lane, _steps}, results ->
-      case Map.pop(results, Atom.to_string(lane)) do
-        {nil, results} -> results
-        {data, results} -> Map.put(results, lane, data)
+      # An optional lane that failed is stored as nil, and is still the lane's.
+      case Map.fetch(results, Atom.to_string(lane)) do
+        {:ok, data} -> results |> Map.delete(Atom.to_string(lane)) |> Map.put(lane, data)
+        :error -> results
       end
     end)
   end
@@ -1735,18 +1736,11 @@ defmodule Durable.Executor do
 
     # Get parallel configuration
     opts = parallel_step.opts
-    parallel_step_names = opts[:steps] || []
     all_parallel_steps = opts[:all_steps] || []
     error_strategy = opts[:error_strategy] || :fail_fast
     into_fn = opts[:into_fn]
 
-    # What runs as a child: each lane of a named block, or each step of an
-    # unnamed one. A lane is started like a step, under its own id.
-    ordered_steps =
-      case opts[:lanes] do
-        nil -> find_ordered_steps(remaining_steps, parallel_step_names)
-        lanes -> for {id, lane, _names} <- lanes, do: %{name: id, opts: %{returns: lane}}
-      end
+    ordered_steps = block_children(opts, remaining_steps)
 
     # Save data before parallel execution
     {:ok, exec} = save_data_as_context(config, exec, data)
@@ -1774,6 +1768,16 @@ defmodule Durable.Executor do
       fan_out_parallel(exec, ordered_steps, data, config, strategy)
     end
   end
+
+  # What runs as a child: each lane of a named block, or each step of an
+  # unnamed one. A lane is started like a step, under its own id.
+  defp block_children(%{lanes: lanes} = opts, _remaining_steps) do
+    for {id, lane, _names} <- lanes,
+        do: %{name: id, opts: %{returns: lane, optional: lane in (opts[:optional] || [])}}
+  end
+
+  defp block_children(opts, remaining_steps),
+    do: find_ordered_steps(remaining_steps, opts[:steps] || [])
 
   # Fan-out: create child workflow executions for each parallel step and wait
   # In one transaction: a branch that a worker could claim while the parent was
@@ -1803,16 +1807,16 @@ defmodule Durable.Executor do
         child_queue = step.opts[:queue] || parent_queue
 
         {:ok, child} = create_parallel_child(exec, step, data, child_queue, config)
-        {child.id, Atom.to_string(step.name), returns_key}
+        {child.id, Atom.to_string(step.name), returns_key, step.opts[:optional] == true}
       end)
 
     # Build event names and children metadata map
-    event_names = Enum.map(children_meta, fn {id, _, _} -> "__parallel_done:#{id}" end)
+    event_names = Enum.map(children_meta, fn {id, _, _, _} -> "__parallel_done:#{id}" end)
 
     children_map =
-      Map.new(children_meta, fn {id, step_name, returns_key} ->
+      Map.new(children_meta, fn {id, step_name, returns_key, optional} ->
         returns_str = if is_atom(returns_key), do: Atom.to_string(returns_key), else: returns_key
-        {id, %{"step_name" => step_name, "returns_key" => returns_str}}
+        {id, %{"step_name" => step_name, "returns_key" => returns_str, "optional" => optional}}
       end)
 
     # Create WaitGroup + PendingEvents for all children
@@ -2023,8 +2027,13 @@ defmodule Durable.Executor do
         :__parallel_step
       ])
 
-    # Check for fail_fast
-    errors = Enum.filter(results, fn {_key, result} -> match?({:error, _}, result) end)
+    # Check for fail_fast. A lane the block can do without doesn't fail it.
+    optional = for {_id, %{"optional" => true, "returns_key" => key}} <- children_map, do: key
+
+    errors =
+      Enum.filter(results, fn {key, result} ->
+        match?({:error, _}, result) and to_string(key) not in optional
+      end)
 
     if effective_strategy == :fail_fast && errors != [] do
       # Branches the failure stopped report "cancelled", which isn't the reason.
@@ -2148,7 +2157,9 @@ defmodule Durable.Executor do
       Map.new(results, fn
         {lane, {:ok, data}} when collect? -> {lane, {:ok, Map.delete(data, @string_keys)}}
         {lane, {:ok, data}} -> {lane, Map.delete(data, @string_keys)}
-        {lane, {:error, reason}} -> {lane, {:error, reason}}
+        {lane, {:error, reason}} when collect? -> {lane, {:error, reason}}
+        # Only an optional lane gets here failed: the block did without it.
+        {lane, {:error, _reason}} -> {lane, nil}
       end)
 
     {:ok, base_ctx |> Map.delete(to_string(result_key)) |> Map.put(result_key, lanes)}
@@ -2636,7 +2647,10 @@ defmodule Durable.Executor do
        when group.status == :pending do
     parent = repo.get(WorkflowExecution, branch.parent_workflow_id)
 
-    if parent && parent.context["__parallel_error_strategy"] == "fail_fast" do
+    # A lane the block can do without doesn't end it.
+    optional? = parent && get_in(parent.context, ["__parallel_children", branch.id, "optional"])
+
+    if parent && parent.context["__parallel_error_strategy"] == "fail_fast" && !optional? do
       {:ok, _} =
         group
         |> Ecto.Changeset.change(status: :completed, completed_at: DateTime.utc_now())

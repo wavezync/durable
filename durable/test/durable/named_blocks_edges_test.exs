@@ -180,6 +180,58 @@ defmodule Durable.NamedBlocksEdgesTest do
     end
   end
 
+  # Lookups a decision can do without: a failed one doesn't fail the block.
+  defmodule Enrich do
+    use Durable
+    use Durable.Helpers
+
+    workflow "enrich" do
+      parallel :lookups do
+        step(:credit, fn application ->
+          if application["bureau_down"],
+            do: {:fail, "credit bureau is down"},
+            else: {:ok, assign(application, :score, 710)}
+        end)
+
+        step(:device, [optional: true], fn application ->
+          if application["device_down"],
+            do: {:fail, "device check is down"},
+            else: {:ok, assign(application, :device, "known")}
+        end)
+
+        lane :social, optional: true do
+          step(:find, fn application ->
+            if application["social_down"],
+              do: {:fail, "profile search is down"},
+              else: {:ok, assign(application, :profiles, 2)}
+          end)
+
+          step(:rate, fn application -> {:ok, assign(application, :rated, true)} end)
+        end
+      end
+
+      step(:decide, [retry: [max_attempts: 2, base: 1]], fn application ->
+        Seen.put({:enrich, Logger.metadata()[:attempt]}, application.lookups)
+
+        if application["decide_flaky"] && Logger.metadata()[:attempt] == 1,
+          do: {:error, "first attempt"},
+          else: {:ok, assign(application, :decided, true)}
+      end)
+    end
+
+    workflow "enrich_collect" do
+      parallel :lookups, on_error: :collect do
+        step(:credit, fn application -> {:ok, assign(application, :score, 710)} end)
+        step(:device, [optional: true], fn _application -> {:fail, "device check is down"} end)
+      end
+
+      step(:decide, fn application ->
+        Seen.put(:enrich_collect, application.lookups)
+        {:ok, application}
+      end)
+    end
+  end
+
   setup do
     on_exit(fn -> Seen.clear(:scorer_down) end)
   end
@@ -314,6 +366,76 @@ defmodule Durable.NamedBlocksEdgesTest do
 
       error = assert_raise CompileError, fn -> Code.compile_string(code) end
       assert error.description =~ ":collect"
+    end
+  end
+
+  describe "optional: true" do
+    test "an optional lane that fails is nil to the next step, and the run goes on" do
+      run =
+        run_workflow(Enrich, %{"device_down" => true, "social_down" => true}, workflow: "enrich")
+
+      assert run.status == :completed
+      assert %{credit: %{"score" => 710}, device: nil, social: nil} = Seen.get({:enrich, 1})
+
+      # Why it failed is on the lane's own run.
+      failed = Enum.filter(lanes(run), &(&1.status == :failed))
+
+      assert failed |> Enum.map(& &1.error["message"]) |> Enum.sort() ==
+               ["device check is down", "profile search is down"]
+    end
+
+    test "an optional lane that finishes is its data, like any lane" do
+      run = run_workflow(Enrich, %{}, workflow: "enrich")
+
+      assert run.status == :completed
+
+      assert %{device: %{"device" => "known"}, social: %{"rated" => true}} =
+               Seen.get({:enrich, 1})
+    end
+
+    test "a lane that isn't optional still fails the block" do
+      run =
+        run_workflow(Enrich, %{"bureau_down" => true, "device_down" => true}, workflow: "enrich")
+
+      assert run.status == :failed
+      assert run.error["message"] =~ "credit bureau is down"
+    end
+
+    test "the next step is handed the same when the run comes back to it" do
+      input = %{"device_down" => true, "decide_flaky" => true}
+      run = run_workflow(Enrich, input, workflow: "enrich")
+
+      assert run.status == :completed
+      assert %{device: nil, credit: %{}} = Seen.get({:enrich, 2})
+      assert Seen.get({:enrich, 2}) == Seen.get({:enrich, 1})
+    end
+
+    test "in a block that collects it is {:error, reason}, as every failed lane is" do
+      run = run_workflow(Enrich, %{}, workflow: "enrich_collect")
+
+      assert run.status == :completed
+
+      assert %{credit: {:ok, _}, device: {:error, %{"message" => "device check is down"}}} =
+               Seen.get(:enrich_collect)
+    end
+
+    test "is for a lane of a named block" do
+      code = """
+      defmodule Durable.NamedBlocksEdgesTest.OptionalLane do
+        use Durable
+
+        workflow "optional_lane" do
+          parallel :lookups do
+            lane :social, optional: :sometimes do
+              step(:find, fn loan -> {:ok, loan} end)
+            end
+          end
+        end
+      end
+      """
+
+      error = assert_raise CompileError, fn -> Code.compile_string(code) end
+      assert error.description =~ "optional: true"
     end
   end
 
