@@ -152,6 +152,12 @@ defmodule Durable.OnFailureTest do
       assert Durable.rollback(run.id) == {:error, :not_failed}
     end
 
+    test "rollback_plan names what it would run, and is empty with nothing to undo" do
+      assert Durable.rollback_plan(book("down").id) == [book_flight: :cancel_flight]
+      assert Durable.rollback_plan(book("down", "nothing_to_undo").id) == []
+      assert Durable.rollback_plan(Ecto.UUID.generate()) == []
+    end
+
     test "a run with nothing to undo stays failed, and can still be retried" do
       run = book("down", "nothing_to_undo")
       {:ok, _} = Durable.rollback(run.id)

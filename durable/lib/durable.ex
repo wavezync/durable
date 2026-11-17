@@ -421,6 +421,20 @@ defmodule Durable do
   end
 
   @doc """
+  What `rollback/2` would run for a run: the compensation of every step that
+  completed, newest first.
+
+      Durable.rollback_plan(workflow_id)
+      #=> [book_hotel: :cancel_hotel, book_flight: :cancel_flight]
+
+  Empty when there is nothing to undo. Takes `:durable` like `rollback/2`.
+  """
+  @spec rollback_plan(String.t(), keyword()) :: [{atom(), atom()}]
+  def rollback_plan(workflow_id, opts \\ []) do
+    Durable.Executor.rollback_plan(workflow_id, opts)
+  end
+
+  @doc """
   Starts a fresh run of a finished workflow, with its original input or a new
   one. The new run's `trigger` is `:rerun` and its `trigger_ref` is the
   original run's id.

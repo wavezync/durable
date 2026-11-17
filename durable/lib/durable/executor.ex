@@ -342,6 +342,24 @@ defmodule Durable.Executor do
     end
   end
 
+  @doc """
+  What `rollback_workflow/2` would run: the compensation of every step that
+  completed, newest first, as `{step, compensation}` names. Empty when there
+  is nothing to undo or the run's code isn't on this node.
+  """
+  @spec rollback_plan(String.t(), keyword()) :: [{atom(), atom()}]
+  def rollback_plan(workflow_id, opts \\ []) do
+    config = Config.get(Keyword.get(opts, :durable, Durable))
+
+    with {:ok, execution} <- load_execution(config, workflow_id),
+         {:ok, workflow_def} <- get_workflow_definition_from_execution(execution) do
+      for {step, compensation} <- build_compensation_stack(execution.id, workflow_def, config),
+          do: {step, compensation.name}
+    else
+      _ -> []
+    end
+  end
+
   defp queue_rollback(config, execution) do
     execution
     |> Ecto.Changeset.change(
