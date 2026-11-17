@@ -52,7 +52,10 @@ export const EXAMPLES: { slug: string; heading: string; file: string; guide?: st
     spec: {
       workflow: 'book_trip',
       module: 'MyApp.TripBooking',
-      toggles: [{ label: 'Decline the card', step: 'charge' }],
+      toggles: [
+        { label: 'Decline the card', step: 'charge' },
+        { label: 'Take payments down', step: 'charge', halt: true, error: 'payments timed out: the step returned `{:error, reason}`' },
+      ],
       nodes: [
         { step: 'book_flight', ms: 1000, compensate: 'cancel_flight' },
         { step: 'book_hotel', ms: 900, compensate: 'cancel_hotel' },

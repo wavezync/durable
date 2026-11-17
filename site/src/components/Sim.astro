@@ -19,7 +19,7 @@ const gid = `sim-${spec.workflow}`;
     <span class="pill st-pending" data-ui="status"><i class="st"></i>Pending</span>
     <div class="controls">
       {spec.toggles?.map((t) => (
-        <label class="toggle"><input type="checkbox" data-toggle={t.step} /> {t.label}</label>
+        <label class="toggle"><input type="checkbox" data-toggle={t.step} data-halt={t.halt ? (t.error ?? 'raised an error') : undefined} /> {t.label}</label>
       ))}
       <div class="actions" data-ui="actions"></div>
     </div>
@@ -94,7 +94,7 @@ const gid = `sim-${spec.workflow}`;
     const sim = new Sim(el, JSON.parse(el.dataset.spec!));
     Object.assign(el, { sim });
     for (const box of el.querySelectorAll<HTMLInputElement>('[data-toggle]')) {
-      box.onchange = () => sim.toggle(box.dataset.toggle!, box.checked);
+      box.onchange = () => sim.toggle(box.dataset.toggle!, box.checked, box.dataset.halt);
     }
     seen.observe(el);
   }

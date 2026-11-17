@@ -4,6 +4,8 @@
 // - a wait or sleep suspends the run; once answered, the run resumes and that
 //   step runs again from its top (the wait now returns the answer)
 // - a step that asks for a rollback runs completed steps' compensations
+// - a step that just fails leaves the run failed with nothing undone, to be
+//   retried or rolled back by hand
 // Drawn on the workflow graph from layout.ts: steps light up as they run.
 
 type Action = { label: string; value: string; call: string };
@@ -23,7 +25,9 @@ export type Spec = {
   workflow: string;
   module: string;
   nodes: Node[];
-  toggles?: { label: string; step: string }[];
+  // halt: the step fails with a plain error, so the run stops failed and
+  // nothing is undone. Without it the step asks for a rollback.
+  toggles?: { label: string; step: string; halt?: boolean; error?: string }[];
   intro?: string;
 };
 
@@ -32,7 +36,9 @@ type Row = { name: string; attempt: number; status: Status; t0: number; t1?: num
 
 const STOPPED = Symbol('stopped');
 const PARKED = Symbol('parked');
-class StepFailed extends Error {}
+class StepFailed extends Error {
+  constructor(public halt = false) { super(); }
+}
 
 const LABEL: Record<string, string> = {
   pending: 'Pending', running: 'Running', waiting: 'Waiting', completed: 'Completed', failed: 'Failed',
@@ -58,6 +64,8 @@ export class Sim {
   private steps = new Map<string, Step>();
   private lines = new Map<string, HTMLElement[]>();
   private failing = new Set<string>();
+  private halting = new Map<string, string>(); // step -> its error
+  private halted: string | null = null; // the step a failed run stopped at
   private ui: Record<string, HTMLElement>;
   private gnodes = new Map<string, SVGGElement>();
   private gedges: SVGGElement[] = [];
@@ -109,7 +117,7 @@ export class Sim {
     this.gen++;
     this.epoch++;
     Object.assign(this, {
-      t0: performance.now(), tEnd: 0, status: 'pending', rows: [], order: [], ctx: {}, parked: null, failed: false,
+      t0: performance.now(), tEnd: 0, status: 'pending', rows: [], order: [], ctx: {}, parked: null, failed: false, halted: null,
       runId: Math.random().toString(16).slice(2, 8),
     });
     this.done = new Set();
@@ -144,6 +152,7 @@ export class Sim {
     } catch (x) {
       if (x === STOPPED || x === PARKED) return;
       if (!(x instanceof StepFailed)) throw x;
+      if (x.halt) return this.finish('failed', 'Run failed and was left as it is. Nothing was undone, so it can be retried.');
       this.failed = true;
     }
     try {
@@ -188,7 +197,8 @@ export class Sim {
       if ((s.wait || s.sleep) && !this.answers.has(s.step)) this.park(s, row);
       if (s.as) this.ctx[s.as] = this.answers.get(s.step)!;
 
-      if (!this.failing.has(s.step) && attempt > (s.flaky ?? 0)) {
+      const halt = !this.failing.has(s.step) && this.halting.has(s.step);
+      if (!halt && !this.failing.has(s.step) && attempt > (s.flaky ?? 0)) {
         Object.assign(row, { status: 'completed', t1: this.now() });
         this.done.add(s.step);
         this.order.push(s.step);
@@ -197,10 +207,11 @@ export class Sim {
       }
 
       Object.assign(row, { status: 'failed', t1: this.now() });
-      const err = s.error ?? 'raised an error';
+      const err = halt ? this.halting.get(s.step)! : (s.error ?? 'raised an error');
       if (attempt >= (s.retry ?? 1)) {
         this.say(`\`${s.step}\` failed: ${err}.${s.retry ? ` Out of retries (${s.retry} attempts).` : ''}`);
-        throw new StepFailed();
+        if (halt) this.halted = s.step;
+        throw new StepFailed(halt);
       }
       const backoff = 1000 * 2 ** (attempt - 1);
       this.say(`\`${s.step}\` failed: ${err}. Retrying in ${backoff / 1000}s (attempt ${attempt + 1} of ${s.retry}).`);
@@ -264,10 +275,28 @@ export class Sim {
   }
 
   // Flipping a toggle starts a fresh run, so its effect shows right away.
-  toggle(step: string, on: boolean) {
-    if (on) this.failing.add(step);
-    else this.failing.delete(step);
+  toggle(step: string, on: boolean, halt?: string) {
+    if (halt === undefined) on ? this.failing.add(step) : this.failing.delete(step);
+    else on ? this.halting.set(step, halt) : this.halting.delete(step);
     this.start();
+  }
+
+  // Durable.retry/1: the cause is fixed, so the run carries on from the step it stopped at.
+  private retry() {
+    const step = this.halted!;
+    this.halting.delete(step);
+    const box = this.root.querySelector<HTMLInputElement>(`[data-toggle="${step}"][data-halt]`);
+    if (box) box.checked = false;
+    Object.assign(this, { halted: null, tEnd: 0 });
+    this.say(`\`Durable.retry(id)\`: the cause is fixed, so the run carries on from \`${step}\`.`);
+    this.later(300, () => this.resume(false));
+  }
+
+  // Durable.rollback/1: give up on the run and undo what it did.
+  private rollback() {
+    Object.assign(this, { halted: null, tEnd: 0, failed: true, status: 'compensating' });
+    this.say('`Durable.rollback(id)`: a worker undoes the steps that finished.');
+    this.exec(this.epoch);
   }
 
   private async tick(ms: number, e: number) {
@@ -348,8 +377,15 @@ export class Sim {
       b.onclick = () => this.answer(parked.step, 'woke', 'Skipped ahead to the wake-up time.');
       actions.push(b);
     }
+    if (this.status === 'failed' && this.halted) {
+      const retry = h('button', 'act primary', 'Retry');
+      retry.onclick = () => this.retry();
+      const undo = h('button', 'act', 'Roll back');
+      undo.onclick = () => this.rollback();
+      actions.push(retry, undo);
+    }
     if (['completed', 'failed', 'compensated'].includes(this.status)) {
-      const b = h('button', 'act primary', 'Run again');
+      const b = h('button', this.halted ? 'act' : 'act primary', 'Run again');
       b.onclick = () => this.start();
       actions.push(b);
     }
