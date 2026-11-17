@@ -62,6 +62,22 @@ defmodule DurableDashboard.Fixtures do
     end
   end
 
+  defmodule Holds do
+    @moduledoc false
+    use Durable
+
+    # No `on_failure:`, so a failed charge leaves the reservation in place.
+    workflow "hold_order" do
+      step(:reserve, [compensate: :release], fn data ->
+        {:ok, Map.put(data, "reservation", "RES-1")}
+      end)
+
+      step(:charge, fn _data -> {:error, %{reason: "payments_down"}} end)
+
+      compensate(:release, fn data -> {:ok, data} end)
+    end
+  end
+
   defmodule Approvals do
     @moduledoc false
     use Durable

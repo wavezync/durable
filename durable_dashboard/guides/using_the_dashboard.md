@@ -69,7 +69,7 @@ end
 | Level | Can |
 |---|---|
 | `:viewer` | See everything, change nothing |
-| `:operator` | Retry, rerun and cancel runs. Answer inputs and send events. Pause and resume queues. Run a schedule now. Release a workflow key |
+| `:operator` | Retry, roll back, rerun and cancel runs. Answer inputs and send events. Pause and resume queues. Run a schedule now. Release a workflow key |
 | `:admin` | All of that, plus turn schedules on and off and prune on demand |
 
 The server checks the level on every action, and each one emits
@@ -129,6 +129,9 @@ there:
 
 - **Retry from step** resumes at the failed step. Steps that finished don't run
   again.
+- **Roll back** undoes the steps that finished, newest first, when the run
+  has something to undo. It asks first and names the compensations it will
+  run. The run can't be retried afterwards.
 - **Rerun** starts a new run from the first step with the same input, linked
   back to this one.
 - **Rerun with edited input** does the same after you've fixed the input.
