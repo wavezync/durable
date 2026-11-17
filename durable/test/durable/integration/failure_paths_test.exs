@@ -66,7 +66,7 @@ defmodule Durable.Integration.FailurePathsTest do
     use Durable
     alias Durable.IntegrationProbe, as: Probe
 
-    workflow "fp_crash_compensated" do
+    workflow "fp_crash_compensated", on_failure: :rollback do
       step(:book, [compensate: :unbook], fn data -> {:ok, data} end)
 
       step(:work, fn data ->
@@ -162,7 +162,7 @@ defmodule Durable.Integration.FailurePathsTest do
     use Durable
     alias Durable.IntegrationProbe, as: Probe
 
-    workflow "fp_killed_compensation" do
+    workflow "fp_killed_compensation", on_failure: :rollback do
       step(:a, [compensate: :undo_a], fn data -> {:ok, data} end)
       step(:b, fn _data -> {:fail, "stop here"} end)
 
@@ -291,7 +291,7 @@ defmodule Durable.Integration.FailurePathsTest do
     use Durable
     alias Durable.IntegrationProbe, as: Probe
 
-    workflow "fp_slow_compensation" do
+    workflow "fp_slow_compensation", on_failure: :rollback do
       step(:book, [compensate: :unbook], fn d -> {:ok, d} end)
       step(:charge, fn _d -> {:fail, "declined"} end)
 
@@ -617,7 +617,7 @@ defmodule Durable.Integration.FailurePathsTest do
     use Durable
     alias Durable.IntegrationProbe, as: Probe
 
-    workflow "fp_reads_after_crash" do
+    workflow "fp_reads_after_crash", on_failure: :rollback do
       step(:first, fn d -> {:ok, Map.put(d, "x", 1)} end)
 
       step(:second, [retry: [max_attempts: 2, backoff: :constant, base: 1]], fn d ->

@@ -74,8 +74,10 @@ defmodule Durable.DSL.Step do
 
   - `{:ok, data}` - Done; `data` goes to the next step
   - `{:error, reason}` - Failed; retried while attempts are left
-  - `{:fail, reason}` - Failed, and not retried: the run fails now and its
-    compensations run
+  - `{:fail, reason}` - Failed, and not retried: the run fails now
+  - `{:rollback, reason}` - Failed, not retried, and undone: the run fails now
+    and the `compensate:` of every completed step runs, whatever the
+    workflow's `on_failure:` is
   - `{:snooze, ms}` or `{:snooze, ms, reason}` - Run the step again in `ms`
     milliseconds, without using an attempt. The run is parked meanwhile, like
     between retries. Snoozes have no limit; the workflow's `timeout:` is what
@@ -791,7 +793,8 @@ defmodule Durable.DSL.Step do
   the arms in the block; `data` goes to that arm's first step, and the arm's
   last result goes to whatever follows the block. Naming an arm the block
   doesn't have fails the run, without retries. Any other step return
-  (`{:error, reason}`, `{:fail, reason}`, `{:snooze, ms}`, `{:cancel, reason}`)
+  (`{:error, reason}`, `{:fail, reason}`, `{:rollback, reason}`, `{:snooze, ms}`,
+  `{:cancel, reason}`)
   means what it means in a step.
 
       branch :risk, [retry: [max_attempts: 3]], fn order ->
@@ -865,7 +868,7 @@ defmodule Durable.DSL.Step do
   defp qualify(nil, name), do: name
   defp qualify(prefix, name), do: :"#{prefix}__#{name}"
 
-  @reserved_arms [:ok, :error, :fail, :snooze, :cancel, :goto]
+  @reserved_arms [:ok, :error, :fail, :rollback, :snooze, :cancel, :goto]
 
   defp named_branch(name, opts, decider, block, scope, caller) do
     if is_list(decider) do
@@ -946,8 +949,9 @@ defmodule Durable.DSL.Step do
   @doc false
   # What a decider returned, as a step result: the arm becomes a jump the
   # executor follows, and the step's row records it.
-  def __arm__({tag, _} = result, _name, _arms) when tag in [:error, :fail, :snooze, :cancel],
-    do: result
+  def __arm__({tag, _} = result, _name, _arms)
+      when tag in [:error, :fail, :rollback, :snooze, :cancel],
+      do: result
 
   def __arm__({tag, _, _} = result, _name, _arms) when tag in [:snooze, :cancel], do: result
 

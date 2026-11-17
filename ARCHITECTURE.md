@@ -91,7 +91,7 @@ All tables live in the `durable` schema.
 
 **Child workflows.** The parent waits on an internal event named after the child. The child commits its final status and then looks for that event. The parent commits its event and then reads the child. Whichever goes second sees the other, so a child that finishes early can't be missed.
 
-**Compensations** run in reverse order, in the worker, after a step fails for good. Each attempt is a `step_executions` row. Their retries still wait in-process, capped at 30 s, and the worker keeps heartbeating. One compensation failing doesn't stop the others.
+**Compensations** run in reverse order, in the worker, when a failed run is rolled back. A failure rolls back only if the workflow says `on_failure: :rollback` or the error's type is `"rollback"`, which is what a step's `{:rollback, reason}` becomes and what a block passes up from a lane; otherwise the run is marked failed and nothing is undone. `Durable.rollback/2` puts a failed run back on its queue with the error it failed with under `__rollback__` in its context, and the worker that claims it compensates before anything else, so it never runs a step. Each attempt is a `step_executions` row. Their retries still wait in-process, capped at 30 s, and the worker keeps heartbeating. One compensation failing doesn't stop the others.
 
 **Step queues.** `queue` is where the run is claimed now. `home_queue` is where it goes back to, set only while it's away. A move releases the run and wakes the target queue.
 

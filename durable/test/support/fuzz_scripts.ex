@@ -84,7 +84,8 @@ defmodule Durable.FuzzScripts do
 
   defp outcome(_action), do: :done
 
-  defp model(script) do
+  # `:halt` is a workflow that leaves a failed run as it failed.
+  defp model(script, on_failure) do
     {done, reached, stop} =
       Enum.reduce_while(@steps, {[], [], nil}, fn step, {done, reached, nil} ->
         case outcome(script.steps[step]) do
@@ -93,7 +94,11 @@ defmodule Durable.FuzzScripts do
         end
       end)
 
-    undone = if stop == :failed, do: Enum.filter(done, &(&1 in @compensated)), else: []
+    undone =
+      if stop == :failed and on_failure == :rollback,
+        do: Enum.filter(done, &(&1 in @compensated)),
+        else: []
+
     failed_undo? = Enum.any?(undone, &(script.undo[&1] != :ok))
 
     status =
@@ -115,6 +120,7 @@ defmodule Durable.FuzzScripts do
   def start_run(script, opts \\ []) do
     case_id = System.unique_integer([:positive])
     :ok = Probe.put(case_id, script)
+    opts = Keyword.put_new(opts, :workflow, "fuzz_scripted")
     {:ok, id} = Durable.start(Scripted, %{"case" => case_id}, opts)
 
     # Sent before the run gets there. A run gets one per name.
@@ -169,8 +175,8 @@ defmodule Durable.FuzzScripts do
 
   defp hits(case_id, step, what), do: Probe.hits({case_id, step, what})
 
-  def check_run(%{id: id, case_id: case_id, script: script}) do
-    expected = model(script)
+  def check_run(%{id: id, case_id: case_id, script: script}, on_failure \\ :rollback) do
+    expected = model(script, on_failure)
     run = get(id)
     label = "#{inspect(script)}\n#{inspect(describe(run))}"
 

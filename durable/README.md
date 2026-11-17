@@ -18,7 +18,7 @@ A durable, resumable workflow engine for Elixir. Similar to Temporal/Inngest.
 - **Resumability** - Sleep, wait for events, wait for human input
 - **Branching** - Pattern-matched conditional flow control
 - **Parallel** - Run steps concurrently with result collection
-- **Compensations** - Saga pattern with automatic rollback
+- **Compensations** - Saga pattern: undo completed steps when a step or you ask
 - **Cron Scheduling** - Recurring workflows with cron expressions
 - **Reliability** - Automatic retries with exponential/linear/constant backoff, waiting off the worker
 - **Run control** - Snooze, fail now or cancel from a step
@@ -286,7 +286,7 @@ end
 
 ### Trip Booking (Saga)
 
-Book multiple services with automatic rollback on failure.
+Book multiple services, and undo the bookings if the card is declined.
 
 ```elixir
 defmodule MyApp.TripBooking do
@@ -306,8 +306,12 @@ defmodule MyApp.TripBooking do
 
     step :charge, fn ctx ->
       total = ctx.flight.price + ctx.hotel.price
-      Payments.charge(ctx["card"], total)
-      {:ok, assign(ctx, :charged, true)}
+
+      case Payments.charge(ctx["card"], total) do
+        {:ok, _receipt} -> {:ok, assign(ctx, :charged, true)}
+        {:error, :declined} -> {:rollback, "card declined"}
+        {:error, reason} -> {:error, reason}
+      end
     end
 
     compensate :cancel_flight, fn ctx ->
@@ -509,9 +513,12 @@ workflow "process_order", timeout: hours(2), queue: :orders do
 ```
 
 - `:timeout` — how long a run may take from when it's due to start, waits and
-  sleeps included. A run past it fails with a `"timeout"` error and runs its
-  compensations: a step still running is stopped, and a waiting run is woken
-  to fail (within the timeout worker's one-minute sweep).
+  sleeps included. A run past it fails with a `"timeout"` error: a step still
+  running is stopped, and a waiting run is woken to fail (within the timeout
+  worker's one-minute sweep).
+- `:on_failure` — `:halt` (default) leaves a failed run as it is, to retry or
+  to undo with `Durable.rollback/2`. `:rollback` runs its compensations on any
+  failure. See [Compensations](guides/compensations.md).
 - `:queue` — the queue runs start on unless `Durable.start/3` names one. A
   step's own `queue:` moves the run for that step (see
   [Step Queues](#step-queues)).
@@ -564,7 +571,7 @@ When retrying won't help, stop now:
 step :download, [retry: [max_attempts: 5]], fn ctx ->
   case Downloader.fetch(ctx.url) do
     {:ok, file} -> {:ok, assign(ctx, :file, file)}
-    {:error, :gone} -> {:fail, "the file is gone"}     # fails now, compensations run
+    {:error, :gone} -> {:fail, "the file is gone"}     # fails now, no more retries
     {:error, :deleted} -> {:cancel, "record deleted"}  # cancelled now, like Durable.cancel/2
     {:error, reason} -> {:error, reason}               # retried
   end
@@ -606,7 +613,7 @@ queue the run is on when it fails.
   the run starts on, even if its first step moves it. A run on a queue no live
   node polls waits there. Past its `timeout:`, the timeout worker's one-minute
   sweep hands it back to the queue it came from, or to another that's polled,
-  and it fails there, compensations included.
+  and it fails there.
 - Each move is one more claim. With `:pubsub` configured it happens as soon as
   a slot is free; without it, within that queue's `poll_interval`.
 - A finished run's `queue` is the last one it was on.

@@ -3,7 +3,7 @@
 //   top and skips what the journal already has
 // - a wait or sleep suspends the run; once answered, the run resumes and that
 //   step runs again from its top (the wait now returns the answer)
-// - a step that fails after its retries rolls back completed steps' compensations
+// - a step that asks for a rollback runs completed steps' compensations
 // Drawn on the workflow graph from layout.ts: steps light up as they run.
 
 type Action = { label: string; value: string; call: string };

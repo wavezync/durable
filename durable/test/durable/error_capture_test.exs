@@ -29,7 +29,7 @@ defmodule Durable.ErrorCaptureTest do
       end
     end
 
-    workflow "compensation_raises" do
+    workflow "compensation_raises", on_failure: :rollback do
       step(:reserve, [compensate: :release], fn data -> {:ok, data} end)
       step(:charge, fn _data -> raise "card declined" end)
       compensate(:release, fn _data -> raise RuntimeError, "release failed" end)

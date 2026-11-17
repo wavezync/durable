@@ -171,7 +171,7 @@ defmodule Durable.WorkflowKeysTest do
         defmodule Durable.WorkflowKeysTest.BadReuse do
           use Durable
 
-          workflow "bad", reuse: :sometimes do
+          workflow "bad", reuse: :sometimes, on_failure: :rollback do
             step :work, fn data -> {:ok, data} end
           end
         end

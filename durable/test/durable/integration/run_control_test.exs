@@ -62,7 +62,7 @@ defmodule Durable.Integration.RunControlTest do
   defmodule RunsOutOfRetries do
     use Durable
 
-    workflow "rc_runs_out_of_retries" do
+    workflow "rc_runs_out_of_retries", on_failure: :rollback do
       step(:book, [compensate: :unbook], fn data -> {:ok, data} end)
 
       step(:call, [retry: [max_attempts: 2, backoff: :constant, base: 50]], fn _data ->
@@ -101,7 +101,7 @@ defmodule Durable.Integration.RunControlTest do
   defmodule Fails do
     use Durable
 
-    workflow "rc_fails" do
+    workflow "rc_fails", on_failure: :rollback do
       step(:book, [compensate: :unbook], fn data -> {:ok, data} end)
 
       step(:call, [retry: [max_attempts: 5]], fn _data ->
@@ -119,7 +119,7 @@ defmodule Durable.Integration.RunControlTest do
   defmodule Cancels do
     use Durable
 
-    workflow "rc_cancels" do
+    workflow "rc_cancels", on_failure: :rollback do
       step(:book, [compensate: :unbook], fn data -> {:ok, data} end)
 
       step(:call, [retry: [max_attempts: 5]], fn _data ->
@@ -343,7 +343,7 @@ defmodule Durable.Integration.RunControlTest do
   defmodule UndoAfterBranchFails do
     use Durable
 
-    workflow "rc_undo_after_branch_fails" do
+    workflow "rc_undo_after_branch_fails", on_failure: :rollback do
       step(:book, [compensate: :unbook], fn data -> {:ok, Map.put(data, "booking", "B1")} end)
 
       parallel do
@@ -361,7 +361,7 @@ defmodule Durable.Integration.RunControlTest do
     use Durable
     use Durable.Wait
 
-    workflow "rc_undo_after_input_times_out" do
+    workflow "rc_undo_after_input_times_out", on_failure: :rollback do
       step(:book, [compensate: :unbook], fn data -> {:ok, Map.put(data, "booking", "B1")} end)
 
       step(:approve, fn data ->
@@ -379,7 +379,7 @@ defmodule Durable.Integration.RunControlTest do
   defmodule UndoAfterDeadline do
     use Durable
 
-    workflow "rc_undo_after_deadline", timeout: :timer.hours(1) do
+    workflow "rc_undo_after_deadline", timeout: :timer.hours(1), on_failure: :rollback do
       step(:book, [compensate: :unbook], fn data -> {:ok, Map.put(data, "booking", "B1")} end)
       step(:charge, [queue: :nobody], fn data -> {:ok, data} end)
 
@@ -494,7 +494,7 @@ defmodule Durable.Integration.RunControlTest do
   defmodule ChildCompensates do
     use Durable
 
-    workflow "rc_child_compensates" do
+    workflow "rc_child_compensates", on_failure: :rollback do
       step(:book, [compensate: :unbook], fn data -> {:ok, data} end)
       step(:charge, fn _data -> {:fail, "card declined"} end)
       compensate(:unbook, fn data -> {:ok, data} end)
@@ -504,7 +504,7 @@ defmodule Durable.Integration.RunControlTest do
   defmodule ChildCompensationFails do
     use Durable
 
-    workflow "rc_child_compensation_fails" do
+    workflow "rc_child_compensation_fails", on_failure: :rollback do
       step(:book, [compensate: :unbook], fn data -> {:ok, data} end)
       step(:charge, fn _data -> {:fail, "card declined"} end)
       compensate(:unbook, fn _data -> raise "still booked" end)
@@ -514,7 +514,7 @@ defmodule Durable.Integration.RunControlTest do
   defmodule ChildCompensationErrors do
     use Durable
 
-    workflow "rc_child_compensation_errors" do
+    workflow "rc_child_compensation_errors", on_failure: :rollback do
       step(:book, [compensate: :unbook], fn data -> {:ok, data} end)
       step(:charge, fn _data -> {:fail, "card declined"} end)
 
@@ -633,7 +633,7 @@ defmodule Durable.Integration.RunControlTest do
   defmodule Held do
     use Durable
 
-    workflow "rc_held" do
+    workflow "rc_held", on_failure: :rollback do
       step(:a, fn data ->
         Probe.here(:held)
         Probe.wait_for({:go, Probe.hits(:held)})

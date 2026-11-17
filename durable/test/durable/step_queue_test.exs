@@ -176,7 +176,7 @@ defmodule Durable.StepQueueTest do
     use Durable
     use Durable.Helpers
 
-    workflow "saga_across_queues" do
+    workflow "saga_across_queues", on_failure: :rollback do
       step(:charge, [queue: :ocr, compensate: :refund], fn data ->
         {:ok, assign(data, :charged, true)}
       end)
@@ -257,7 +257,7 @@ defmodule Durable.StepQueueTest do
     use Durable.Context
     use Durable.Helpers
 
-    workflow "context_unmoved" do
+    workflow "context_unmoved", on_failure: :rollback do
       step(:first, fn data ->
         put_context(:written, "by first")
         {:ok, assign(data, :returned, "by first")}

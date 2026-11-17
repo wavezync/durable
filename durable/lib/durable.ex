@@ -394,6 +394,33 @@ defmodule Durable do
   end
 
   @doc """
+  Undoes a failed run: runs the `compensate:` of every step that completed,
+  newest first, on a worker.
+
+  A failed run is left as it failed unless its workflow says
+  `on_failure: :rollback`, so it can be retried once the cause is fixed. Call
+  this when it shouldn't be: the customer gave up, the order was cancelled.
+  The run ends `:compensated` (or `:compensation_failed`) and can't be retried
+  after; a run with nothing to undo stays `:failed`.
+
+  Returns `{:error, :rolled_back}` for a run already rolled back and
+  `{:error, :not_failed}` for one that isn't failed.
+
+  ## Options
+
+  - `:durable` - The Durable instance name (default: Durable)
+
+  ## Examples
+
+      {:ok, ^workflow_id} = Durable.rollback(workflow_id)
+
+  """
+  @spec rollback(String.t(), keyword()) :: {:ok, String.t()} | {:error, term()}
+  def rollback(workflow_id, opts \\ []) do
+    Durable.Executor.rollback_workflow(workflow_id, opts)
+  end
+
+  @doc """
   Starts a fresh run of a finished workflow, with its original input or a new
   one. The new run's `trigger` is `:rerun` and its `trigger_ref` is the
   original run's id.

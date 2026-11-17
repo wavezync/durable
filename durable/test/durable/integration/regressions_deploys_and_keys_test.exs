@@ -179,7 +179,7 @@ defmodule Durable.Integration.DeploysAndKeysRegressionsTest do
       use Durable
       alias Durable.IntegrationProbe, as: Probe
 
-      workflow "r_two_comp" do
+      workflow "r_two_comp", on_failure: :rollback do
         step(:a, [compensate: :undo_a], fn d -> {:ok, d} end)
         step(:b, [compensate: :undo_b], fn d -> {:ok, d} end)
         step(:boom, fn _ -> {:fail, "no"} end)

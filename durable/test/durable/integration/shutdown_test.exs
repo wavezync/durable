@@ -99,7 +99,7 @@ defmodule Durable.Integration.ShutdownTest do
   defmodule SlowUndo do
     use Durable
 
-    workflow "shut_slow_undo" do
+    workflow "shut_slow_undo", on_failure: :rollback do
       step(:book, [compensate: :unbook], fn data -> {:ok, data} end)
       step(:charge, fn _data -> {:fail, "declined"} end)
 

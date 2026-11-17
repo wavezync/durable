@@ -45,7 +45,7 @@ defmodule DurableDashboard.Fixtures do
     @moduledoc false
     use Durable
 
-    workflow "fulfill_order" do
+    workflow "fulfill_order", on_failure: :rollback do
       step(:reserve, [compensate: :release], fn data ->
         {:ok, Map.put(data, "reservation", "RES-1")}
       end)

@@ -1,6 +1,6 @@
 # Compensations (Saga Pattern)
 
-Handle distributed transactions that need rollback when something fails.
+Undo what a run already did when it can't go on.
 
 ## What Are Compensations?
 
@@ -27,10 +27,14 @@ defmodule MyApp.BookTripWorkflow do
     end
 
     # Step 3: Charge payment (no compensation needed - it's the last step)
-    step :charge_payment, fn ctx ->
-      # If this fails, compensations run automatically!
-      PaymentService.charge(ctx.total)
-      {:ok, ctx}
+    step :charge_payment, [retry: [max_attempts: 3]], fn ctx ->
+      case PaymentService.charge(ctx.total) do
+        {:ok, receipt} -> {:ok, assign(ctx, :receipt, receipt)}
+        # The customer isn't paying: release the seat and the room now.
+        {:error, :declined} -> {:rollback, "card declined"}
+        # Payments are down: retried, and if still down the run is left failed.
+        {:error, :timeout} -> {:error, "payments timed out"}
+      end
     end
 
     # Compensation handlers
@@ -47,15 +51,33 @@ defmodule MyApp.BookTripWorkflow do
 end
 ```
 
-**What happens when payment fails:**
+**What happens when the card is declined:**
 
 1. `:book_flight` completes successfully
 2. `:book_hotel` completes successfully
-3. `:charge_payment` raises an error
-4. Durable automatically runs compensations in **reverse order**:
+3. `:charge_payment` returns `{:rollback, "card declined"}`
+4. Durable runs compensations in **reverse order**:
    - First: `:cancel_hotel` (undo hotel)
    - Then: `:cancel_flight` (undo flight)
 5. Workflow status becomes `:compensated`
+
+**What happens when payments are down:** `:charge_payment` uses its retries and the run ends `:failed`. Nothing is undone: the flight and hotel are still booked. When payments are back, `Durable.retry(id)` carries on from `:charge_payment`. If the customer gives up instead, `Durable.rollback(id)` undoes the bookings.
+
+## When Compensations Run
+
+A run that fails is left as it failed. Compensations run only when something asks:
+
+| Asked by | How |
+|----------|-----|
+| A step | It returns `{:rollback, reason}`. The run fails now, with no more retries, and is undone |
+| You | `Durable.rollback(id)` on a failed run. A worker runs the compensations |
+| The workflow | `workflow "book_trip", on_failure: :rollback do` undoes the run on any failure: a step out of retries, `{:fail, reason}`, a timeout |
+
+Use `on_failure: :rollback` when no failure is worth retrying by hand. Otherwise leave the default, `:halt`, and say which failures undo.
+
+A run that was rolled back can't be retried, because the work its later steps depend on is gone. `Durable.retry/2` returns `{:error, :rolled_back}`; `Durable.rerun/2` starts a fresh run.
+
+Until 1.6 every failure rolled back. To keep that, add `on_failure: :rollback` to each workflow that has `compensate:`.
 
 ## DSL Reference
 
@@ -108,7 +130,7 @@ If a compensation fails, the others still run and the run ends `:compensation_fa
 ## How It Works
 
 1. **Tracking**: Durable tracks which steps with compensations have completed
-2. **Failure**: When any step fails, compensation is triggered
+2. **Rollback**: A step, `Durable.rollback/2` or `on_failure: :rollback` asks for it
 3. **Reverse Order**: Compensations run in LIFO order (last completed first)
 4. **Recording**: Each compensation is recorded as a step execution
 5. **Continuation**: Compensation failures don't stop the chain - all compensations attempt to run
@@ -237,9 +259,13 @@ defmodule MyApp.ProcessOrderWorkflow do
     end
 
     step :create_shipment, fn ctx ->
-      # If shipping fails, inventory is released and payment refunded
-      {:ok, shipment} = Shipping.create(ctx["address"], ctx["items"])
-      {:ok, assign(ctx, :shipment_id, shipment.id)}
+      case Shipping.create(ctx["address"], ctx["items"]) do
+        {:ok, shipment} -> {:ok, assign(ctx, :shipment_id, shipment.id)}
+        # Can't be shipped there: release the inventory and refund the payment.
+        {:error, :undeliverable} -> {:rollback, "address can't be delivered to"}
+        # The carrier is down: the run is left failed, to retry.
+        {:error, reason} -> {:error, reason}
+      end
     end
 
     step :send_confirmation, fn ctx ->

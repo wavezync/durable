@@ -11,7 +11,7 @@ defmodule Durable.FuzzWorkflows do
     @moduledoc false
     use Durable
 
-    workflow "fuzz_hostile" do
+    workflow "fuzz_hostile", on_failure: :rollback do
       step(
         :act,
         [compensate: :undo, retry: [max_attempts: 2, backoff: :constant, base: 1]],
@@ -29,7 +29,7 @@ defmodule Durable.FuzzWorkflows do
     @moduledoc false
     use Durable
 
-    workflow "fuzz_hostile_undo" do
+    workflow "fuzz_hostile_undo", on_failure: :rollback do
       step(:book, [compensate: :undo], fn data -> {:ok, data} end)
       step(:charge, fn _data -> {:fail, "declined"} end)
       compensate(:undo, fn data -> Durable.FuzzWorkflows.undo(data) end)
@@ -86,45 +86,70 @@ defmodule Durable.FuzzWorkflows do
 
   # Each step does what the run's script says. Queues, retries and compensations
   # are fixed here; the model in the fuzz test knows them.
+  defmodule ScriptedBody do
+    @moduledoc false
+
+    # The same steps for a workflow that rolls back on failure and one that is
+    # left as it failed.
+    defmacro steps do
+      quote do
+        alias Durable.FuzzWorkflows, as: F
+
+        step(
+          :s1,
+          [compensate: :u1, retry: [max_attempts: 3, backoff: :constant, base: 1]],
+          fn d ->
+            F.scripted(:s1, nil, d)
+          end
+        )
+
+        step(
+          :s2,
+          [queue: :q_a, compensate: :u2, retry: [max_attempts: 3, backoff: :constant, base: 1]],
+          fn d -> F.scripted(:s2, :q_a, d) end
+        )
+
+        step(:s3, [retry: [max_attempts: 3, backoff: :constant, base: 1]], fn d ->
+          F.scripted(:s3, nil, d)
+        end)
+
+        step(
+          :s4,
+          [queue: :q_b, compensate: :u4, retry: [max_attempts: 3, backoff: :constant, base: 1]],
+          fn d -> F.scripted(:s4, :q_b, d) end
+        )
+
+        step(:s5, [queue: :q_a, retry: [max_attempts: 3, backoff: :constant, base: 1]], fn d ->
+          F.scripted(:s5, :q_a, d)
+        end)
+
+        step(
+          :s6,
+          [compensate: :u6, retry: [max_attempts: 3, backoff: :constant, base: 1]],
+          fn d ->
+            F.scripted(:s6, nil, d)
+          end
+        )
+
+        compensate(:u1, fn d -> F.scripted_undo(:s1, d) end)
+        compensate(:u2, fn d -> F.scripted_undo(:s2, d) end)
+        compensate(:u4, fn d -> F.scripted_undo(:s4, d) end)
+        compensate(:u6, fn d -> F.scripted_undo(:s6, d) end)
+      end
+    end
+  end
+
   defmodule Scripted do
     @moduledoc false
     use Durable
+    require Durable.FuzzWorkflows.ScriptedBody, as: Body
 
-    alias Durable.FuzzWorkflows, as: F
+    workflow "fuzz_scripted", on_failure: :rollback do
+      Body.steps()
+    end
 
-    workflow "fuzz_scripted" do
-      step(:s1, [compensate: :u1, retry: [max_attempts: 3, backoff: :constant, base: 1]], fn d ->
-        F.scripted(:s1, nil, d)
-      end)
-
-      step(
-        :s2,
-        [queue: :q_a, compensate: :u2, retry: [max_attempts: 3, backoff: :constant, base: 1]],
-        fn d -> F.scripted(:s2, :q_a, d) end
-      )
-
-      step(:s3, [retry: [max_attempts: 3, backoff: :constant, base: 1]], fn d ->
-        F.scripted(:s3, nil, d)
-      end)
-
-      step(
-        :s4,
-        [queue: :q_b, compensate: :u4, retry: [max_attempts: 3, backoff: :constant, base: 1]],
-        fn d -> F.scripted(:s4, :q_b, d) end
-      )
-
-      step(:s5, [queue: :q_a, retry: [max_attempts: 3, backoff: :constant, base: 1]], fn d ->
-        F.scripted(:s5, :q_a, d)
-      end)
-
-      step(:s6, [compensate: :u6, retry: [max_attempts: 3, backoff: :constant, base: 1]], fn d ->
-        F.scripted(:s6, nil, d)
-      end)
-
-      compensate(:u1, fn d -> F.scripted_undo(:s1, d) end)
-      compensate(:u2, fn d -> F.scripted_undo(:s2, d) end)
-      compensate(:u4, fn d -> F.scripted_undo(:s4, d) end)
-      compensate(:u6, fn d -> F.scripted_undo(:s6, d) end)
+    workflow "fuzz_scripted_halt" do
+      Body.steps()
     end
   end
 
@@ -135,7 +160,7 @@ defmodule Durable.FuzzWorkflows do
 
     alias Durable.FuzzWorkflows, as: F
 
-    workflow "fuzz_tree_child" do
+    workflow "fuzz_tree_child", on_failure: :rollback do
       step(:book, [compensate: :unbook], fn d -> {:ok, d} end)
       step(:work, fn d -> F.tree_child(d) end)
       compensate(:unbook, fn d -> {:ok, d} end)
@@ -149,7 +174,7 @@ defmodule Durable.FuzzWorkflows do
 
     alias Durable.FuzzWorkflows, as: F
 
-    workflow "fuzz_tree" do
+    workflow "fuzz_tree", on_failure: :rollback do
       step(:first, [compensate: :undo_first], fn d -> F.tree(:first, d) end)
 
       branch on: fn d -> F.tree_path(d) end do
@@ -314,7 +339,7 @@ defmodule Durable.FuzzWorkflows do
 
     require Durable.FuzzWorkflows.NamedTreeBody, as: Body
 
-    workflow "fuzz_named_tree" do
+    workflow "fuzz_named_tree", on_failure: :rollback do
       Body.steps(compensate: :undo_first)
 
       compensate(:undo_first, fn d ->

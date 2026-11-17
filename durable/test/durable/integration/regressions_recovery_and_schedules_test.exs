@@ -20,7 +20,7 @@ defmodule Durable.Integration.RecoveryAndSchedulesRegressionsTest do
     use Durable
     alias Durable.IntegrationProbe, as: Probe
 
-    workflow "r_booked" do
+    workflow "r_booked", on_failure: :rollback do
       step(:book, [compensate: :unbook], fn data ->
         Probe.note(:booked)
         {:ok, data}

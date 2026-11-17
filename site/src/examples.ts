@@ -56,7 +56,7 @@ export const EXAMPLES: { slug: string; heading: string; file: string; guide?: st
       nodes: [
         { step: 'book_flight', ms: 1000, compensate: 'cancel_flight' },
         { step: 'book_hotel', ms: 900, compensate: 'cancel_hotel' },
-        { step: 'charge', ms: 800, error: '`Payments.charge/2` raised: card declined' },
+        { step: 'charge', ms: 800, error: 'card declined: the step returned `{:rollback, reason}`' },
       ],
     },
   },

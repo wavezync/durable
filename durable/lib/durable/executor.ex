@@ -38,6 +38,9 @@ defmodule Durable.Executor do
   # not through it again on its own result: a parallel block isn't started a
   # second time, and a branch doesn't decide again.
   @done "__done__"
+  # Put on a failed run by `rollback_workflow/2`, holding the error it failed
+  # with: the worker that claims it runs its compensations and nothing else.
+  @rollback "__rollback__"
   # What 1.5.0 recorded on a park instead. Kept for runs parked over an upgrade.
   @atom_keys "__atom_keys__"
 
@@ -316,6 +319,42 @@ defmodule Durable.Executor do
       DurablePubSub.wake(config, retried)
       {:ok, workflow_id}
     end
+  end
+
+  @doc """
+  Undoes a failed run: runs the `compensate:` of every step that completed,
+  newest first, on a worker.
+
+  For a run that failed and was left as it was (`on_failure: :halt`, the
+  default) once it's clear it shouldn't be retried. The run ends
+  `:compensated`, or `:compensation_failed` if an undo failed, and can't be
+  retried after. A run with nothing to undo stays `:failed`.
+  """
+  @spec rollback_workflow(String.t(), keyword()) :: {:ok, String.t()} | {:error, term()}
+  def rollback_workflow(workflow_id, opts \\ []) do
+    config = Config.get(Keyword.get(opts, :durable, Durable))
+
+    with {:ok, execution} <- load_execution(config, workflow_id),
+         :ok <- ensure_retryable(execution.status),
+         {:ok, queued} <- queue_rollback(config, execution) do
+      DurablePubSub.wake(config, queued)
+      {:ok, workflow_id}
+    end
+  end
+
+  defp queue_rollback(config, execution) do
+    execution
+    |> Ecto.Changeset.change(
+      status: :pending,
+      context: Map.put(execution.context || %{}, @rollback, execution.error || %{}),
+      completed_at: nil,
+      scheduled_at: nil,
+      locked_by: nil,
+      locked_at: nil,
+      lock_token: nil
+    )
+    |> cas_update(config)
+    |> not_failed_if_superseded()
   end
 
   defp ensure_retryable(:failed), do: :ok
@@ -758,6 +797,9 @@ defmodule Durable.Executor do
 
     result =
       cond do
+        is_map_key(context, @rollback) ->
+          roll_back(execution, workflow_def, config)
+
         lane_steps ->
           run_lane(execution, lane_steps, {parallel_step_flag, done}, workflow_def, config)
 
@@ -2964,23 +3006,37 @@ defmodule Durable.Executor do
   # Compensation/Saga Support
   # ============================================================================
 
-  # Handles step failure by running compensations if needed
+  # A run that fails is left failed, to be retried or rolled back by hand,
+  # unless the workflow rolls back on failure or the step asked for it.
   defp handle_step_failure(execution, error, workflow_def, config) do
     # `error` is a map column: a step's `{:error, "declined"}` must become a
     # map here, or the failed/compensated write is rejected and the run stays
     # :running.
     error = storable_error(error)
 
-    # Get the compensation stack from completed steps
-    compensation_stack = build_compensation_stack(execution.id, workflow_def, config)
+    if workflow_def.opts[:on_failure] == :rollback or asks_rollback?(error),
+      do: compensate_or_fail(execution, error, workflow_def, config),
+      else: mark_failed(config, execution, error)
+  end
 
-    if compensation_stack == [] do
-      # No compensations to run - just mark as failed
-      mark_failed(config, execution, error)
-    else
-      # Run compensations
-      run_compensations(execution, error, compensation_stack, workflow_def, config)
+  # `{:rollback, reason}` from a step, or from a lane's step by way of its block.
+  defp asks_rollback?(error), do: "rollback" in [error[:type], error["type"]]
+
+  defp compensate_or_fail(execution, error, workflow_def, config) do
+    case build_compensation_stack(execution.id, workflow_def, config) do
+      [] -> mark_failed(config, execution, error)
+      stack -> run_compensations(execution, error, stack, workflow_def, config)
     end
+  end
+
+  # `rollback_workflow/2` asked: undo the run, keeping the error it failed with.
+  defp roll_back(execution, workflow_def, config) do
+    {error, context} = Map.pop(execution.context, @rollback)
+
+    {:ok, execution} =
+      execution |> Ecto.Changeset.change(context: context) |> cas_update!(config)
+
+    compensate_or_fail(execution, error, workflow_def, config)
   end
 
   # Builds the compensation stack from completed steps in reverse order

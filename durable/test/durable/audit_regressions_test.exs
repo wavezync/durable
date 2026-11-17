@@ -104,7 +104,7 @@ defmodule Durable.AuditRegressionsTest do
     use Durable
     use Durable.Context
 
-    workflow "probe_half_broken" do
+    workflow "probe_half_broken", on_failure: :rollback do
       parallel do
         step(:left, fn data -> {:ok, Map.put(data, "left", 1)} end)
 

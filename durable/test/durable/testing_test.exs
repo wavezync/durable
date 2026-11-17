@@ -55,7 +55,7 @@ defmodule Durable.TestingTest do
     use Durable.Helpers
     use Durable.Orchestration
 
-    workflow "trip" do
+    workflow "trip", on_failure: :rollback do
       step(:pay, [compensate: :refund], fn data ->
         {:ok, child} = call_workflow(Payment, %{})
         {:ok, assign(data, :payment_id, child["payment_id"])}
@@ -70,7 +70,7 @@ defmodule Durable.TestingTest do
   defmodule Declined do
     use Durable
 
-    workflow "declined" do
+    workflow "declined", on_failure: :rollback do
       step(:charge, fn _data -> {:error, "card declined"} end)
     end
   end

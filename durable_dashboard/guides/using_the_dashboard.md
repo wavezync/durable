@@ -112,7 +112,7 @@ a run, or one step's error into a chat.
 | **Waiting** | Paused on a sleep, an event or a person | The banner, and the Inbox |
 | **Completed** | Finished every step | |
 | **Failed** | A step ran out of attempts or returned `{:fail, reason}`, or the run passed its `timeout:` | The error and its stack. Retry picks up from that step |
-| **Compensated** | A step failed and the steps before it were undone | Rerun starts fresh. Retry is off, because earlier results were undone |
+| **Compensated** | The run failed and its completed steps were undone: a step returned `{:rollback, reason}`, someone called `Durable.rollback/2`, or the workflow has `on_failure: :rollback` | Rerun starts fresh. Retry is off, because earlier results were undone |
 | **Compensation failed** | Undoing the earlier steps failed too | The compensation steps. Some effects may still be in place |
 | **Cancelled** | Stopped on purpose: by a person, a step, its parent, or a newer start with the same key | The reason. Cancelled runs don't count as failures |
 

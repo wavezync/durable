@@ -76,7 +76,7 @@ defmodule Durable.OperatorControlsTest do
     @moduledoc false
     use Durable
 
-    workflow "compensated" do
+    workflow "compensated", on_failure: :rollback do
       step(:book, [compensate: :unbook], fn data -> {:ok, data} end)
       step(:fail, fn _data -> raise "nope" end)
       compensate(:unbook, fn data -> {:ok, data} end)

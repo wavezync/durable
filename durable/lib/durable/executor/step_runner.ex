@@ -493,6 +493,10 @@ defmodule Durable.Executor.StepRunner do
   defp step_outcome({:throw, {kind, _opts}}) when kind in @suspending, do: %{result: :suspended}
   defp step_outcome({:error, error}), do: %{result: :error, error: error_summary(error)}
   defp step_outcome({:fail, error}), do: %{result: :error, error: error_summary(error)}
+
+  defp step_outcome({:rollback, reason}),
+    do: %{result: :error, error: error_summary(rollback_error(reason))}
+
   defp step_outcome({:snooze, ms}) when is_integer(ms) and ms >= 0, do: %{result: :snoozed}
 
   defp step_outcome({:snooze, ms, _reason}) when is_integer(ms) and ms >= 0,
@@ -617,6 +621,10 @@ defmodule Durable.Executor.StepRunner do
   # The step says retrying won't help: fail now, whatever attempts are left.
   defp handle_result({:fail, error}, ctx), do: give_up(error, ctx)
 
+  # The step says the run can't go on and what it did should be undone: fail
+  # now, and the executor compensates whatever the workflow's on_failure: is.
+  defp handle_result({:rollback, reason}, ctx), do: give_up(rollback_error(reason), ctx)
+
   # The step says the run should stop: the executor cancels the scope's run
   # (nil = the default for where the step runs).
   defp handle_result({:cancel, reason}, ctx), do: cancel(reason, nil, ctx)
@@ -632,7 +640,8 @@ defmodule Durable.Executor.StepRunner do
       type: "invalid_step_return",
       message:
         "Step must return {:ok, map}, {:goto, :step, map}, {:error, reason}, " <>
-          "{:fail, reason}, {:snooze, ms}, {:snooze, ms, reason}, {:cancel, reason} or " <>
+          "{:fail, reason}, {:rollback, reason}, {:snooze, ms}, {:snooze, ms, reason}, " <>
+          "{:cancel, reason} or " <>
           "{:cancel, reason, scope: :run | :workflow | :root}, " <>
           "got: #{inspect(other)}"
     }
@@ -684,6 +693,8 @@ defmodule Durable.Executor.StepRunner do
 
     {:park, ms}
   end
+
+  defp rollback_error(reason), do: %{type: "rollback", message: reason_text(reason)}
 
   defp reason_text(reason) when is_binary(reason), do: reason
   defp reason_text(reason) when is_atom(reason), do: Atom.to_string(reason)
