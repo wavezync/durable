@@ -77,7 +77,7 @@ Use `on_failure: :rollback` when no failure is worth retrying by hand. Otherwise
 
 A run that was rolled back can't be retried, because the work its later steps depend on is gone. `Durable.retry/2` returns `{:error, :rolled_back}`; `Durable.rerun/2` starts a fresh run.
 
-Until 1.6 every failure rolled back. To keep that, add `on_failure: :rollback` to each workflow that has `compensate:`.
+Earlier versions rolled back on every failure. To keep that, add `on_failure: :rollback` to each workflow that has `compensate:`.
 
 ## DSL Reference
 
