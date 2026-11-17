@@ -2104,6 +2104,11 @@ defmodule Durable.Executor do
 
     block = Enum.find(workflow_def.steps, &(&1.name == parallel_step_name))
 
+    results =
+      if is_map_key(block.opts, :result_key),
+        do: lane_outputs(results, base_ctx),
+        else: results
+
     case apply_parallel_into(into_fn, base_ctx, results, block.opts) do
       {:ok, final_ctx} ->
         {:ok, exec} = save_data_as_context(config, exec, final_ctx, :drop, parallel_step_name)
@@ -2146,6 +2151,24 @@ defmodule Durable.Executor do
         handle_step_failure(exec, error, workflow_def, config)
     end
   end
+
+  # A lane hands back what it produced, not what it was started with: its data
+  # less every key it left as the block found it. A lane's data is as stored,
+  # so the block's is put the same way to compare. A lane can't hand back that
+  # it removed a key.
+  defp lane_outputs(results, started_with) do
+    started_with = started_with |> sanitize_for_json() |> Jason.encode!() |> Jason.decode!()
+
+    Map.new(results, fn
+      {lane, {:ok, data}} ->
+        {lane, {:ok, Map.reject(data, &left_alone?(&1, started_with))}}
+
+      failed ->
+        failed
+    end)
+  end
+
+  defp left_alone?({key, value}, started_with), do: Map.fetch(started_with, key) == {:ok, value}
 
   # Apply into function or default to __results__
   # A named block: each lane goes under the block's name. Every lane finished

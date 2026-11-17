@@ -844,9 +844,10 @@ defmodule Durable.DSL.Step do
   Every lane starts from the data the block was given and sees none of what
   another lane does. A lane holds steps, named branches and named parallel
   blocks; a `step` written straight in the block is a lane of one step. The
-  step after the block gets the data from before it, with each lane's final
-  data under the block's name. A lane's data has been stored, so its own keys
-  are strings.
+  step after the block gets the data from before it, with what each lane
+  produced under the block's name: the keys its steps added or changed, not
+  the data it was started with. That has been stored, so its own keys are
+  strings.
 
   A lane that fails fails the block and stops the others. Pass `:into` to
   decide for yourself, as in an unnamed block: the function gets every lane's

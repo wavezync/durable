@@ -94,6 +94,44 @@ defmodule Durable.NamedBlocksEdgesTest do
     end
   end
 
+  defmodule Outputs do
+    use Durable
+    use Durable.Helpers
+
+    workflow "loan" do
+      parallel :lookups do
+        step(:credit, fn loan -> {:ok, assign(loan, :score, 710)} end)
+        step(:fraud, fn _loan -> {:ok, %{risk: 0.02}} end)
+        step(:address, fn loan -> {:ok, loan} end)
+
+        lane :sanctions do
+          step(:query, fn loan -> {:ok, assign(loan, :hits, [])} end)
+          step(:screen, fn loan -> {:ok, assign(loan, :listed, loan.hits != [])} end)
+        end
+      end
+
+      parallel :quotes, on_error: :collect do
+        step(:north, fn loan -> {:ok, assign(loan, :rate, 6.1)} end)
+        step(:south, fn _loan -> {:error, "no answer"} end)
+      end
+
+      step(:decide, fn loan ->
+        Seen.put(:loan, loan)
+        {:ok, loan}
+      end)
+    end
+
+    workflow "loan_into" do
+      parallel :lookups,
+        into: fn loan, results ->
+          Seen.put(:loan_into, results)
+          {:ok, loan}
+        end do
+        step(:credit, fn loan -> {:ok, assign(loan, :score, 710)} end)
+      end
+    end
+  end
+
   defmodule Queues do
     use Durable
 
@@ -436,6 +474,39 @@ defmodule Durable.NamedBlocksEdgesTest do
 
       error = assert_raise CompileError, fn -> Code.compile_string(code) end
       assert error.description =~ "optional: true"
+    end
+  end
+
+  describe "what a lane hands to the next step" do
+    test "is what it produced, not the data it was started with" do
+      run =
+        run_workflow(Outputs, %{"statements" => String.duplicate("x", 1_000)}, workflow: "loan")
+
+      assert run.status == :completed
+
+      assert %{
+               credit: %{"score" => 710},
+               fraud: %{"risk" => 0.02},
+               address: %{},
+               sanctions: %{"hits" => [], "listed" => false}
+             } == Seen.get(:loan).lookups
+
+      # One copy of the statements in the stored run, not one per lane.
+      assert byte_size(Jason.encode!(run.context)) < 2_000
+    end
+
+    test "leaves out an earlier block's lanes, so blocks don't pile up copies" do
+      run_workflow(Outputs, %{"statements" => "many"}, workflow: "loan")
+
+      assert %{north: {:ok, %{"rate" => 6.1}}, south: {:error, %{"message" => "no answer"}}} =
+               Seen.get(:loan).quotes
+
+      assert {:ok, %{"rate" => 6.1}} == Seen.get(:loan).quotes.north
+    end
+
+    test "is what into: is handed too" do
+      run_workflow(Outputs, %{"statements" => "many"}, workflow: "loan_into")
+      assert Seen.get(:loan_into) == %{credit: {:ok, %{"score" => 710}}}
     end
   end
 

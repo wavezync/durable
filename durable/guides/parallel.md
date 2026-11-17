@@ -12,7 +12,7 @@ workflow "loan_application" do
 
   parallel :lookups do
     step :credit, [retry: [max_attempts: 3]], fn application ->
-      {:ok, Map.put(application, :score, CreditBureau.score(application["applicant"]))}
+      {:ok, %{score: CreditBureau.score(application["applicant"])}}
     end
 
     step :fraud, fn application -> ... end
@@ -31,7 +31,7 @@ end
 
 - **A lane is its own run.** It retries, sleeps, waits and moves queues like any run, and comes back to the step it stopped at. It holds steps, named branches and named parallel blocks. A `step` written straight in the block is a lane of one step, named after it.
 - **Every lane starts from the same data** and sees nothing another lane does.
-- **The next step gets each lane's final data under the block's name**, by lane name: `%{lookups: %{credit: ..., fraud: ..., sanctions: ...}}`. A lane's data has been stored, so the keys inside it are strings.
+- **The next step gets what each lane produced under the block's name**, by lane name: `%{lookups: %{credit: %{"score" => 712}, fraud: ..., sanctions: ...}}`. That is the block's collect step; you don't write one. What a lane produced is every key its steps added or changed. The data it was started with is left out, so a large application isn't copied once per lane. A lane's output has been stored, so the keys inside it are strings. A lane can't hand back that it removed a key.
 - **A lane that fails fails the block** and stops the other lanes. That is `on_error: :fail_fast`, the default.
 - **`Durable.retry/1` on the failed run** puts the lanes that didn't finish back to work where they stopped, including a lane inside a lane. Lanes that finished aren't run again. A lane stopped in the middle of a step is told at its worker's next heartbeat; retry before that and the step can run once more beside the one still finishing, so keep steps in a lane safe to repeat, as lookups are.
 - **Steps are stored under the block and the lane**, as `lookups__sanctions__query`.
@@ -39,7 +39,7 @@ end
 
 ### Carrying on when a lane fails
 
-With `on_error: :collect` every lane runs to its end, and the next step is handed each one as `{:ok, data}` or `{:error, reason}`. A failed lane doesn't fail the run; the step decides what it means:
+With `on_error: :collect` every lane runs to its end, and the next step is handed each one as `{:ok, output}` or `{:error, reason}`. A failed lane doesn't fail the run; the step decides what it means:
 
 ```elixir
 parallel :lookups, on_error: :collect do

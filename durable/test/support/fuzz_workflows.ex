@@ -467,16 +467,20 @@ defmodule Durable.FuzzWorkflows do
        else: {:fail, "#{step} got #{inspect(results, limit: 6)} under #{block}"}
   end
 
-  defp came_as({:ok, %{}}), do: :ok
+  defp came_as({:ok, %{} = output}), do: if(produced?(output), do: :ok, else: :unknown)
   defp came_as({:error, %{}}), do: :error
-  defp came_as(%{}), do: :data
+  defp came_as(%{} = output), do: if(produced?(output), do: :data, else: :unknown)
   defp came_as(nil), do: :nothing
   defp came_as(_other), do: :unknown
+
+  # A lane hands back what it produced. Every lane is started with the case and
+  # leaves it alone, so it isn't a lane's to hand back; its trail is.
+  defp produced?(output), do: is_map(output) and case_of(output) == nil and output["trail"] != nil
 
   defp lanes_handed(step, block, lanes, data) do
     case data do
       %{^block => %{} = results} when map_size(results) == length(lanes) ->
-        if Enum.all?(lanes, &is_map(results[&1])),
+        if Enum.all?(lanes, &produced?(results[&1])),
           do: :ok,
           else: {:fail, "#{step} got #{inspect(Map.keys(results))} under #{block}"}
 
