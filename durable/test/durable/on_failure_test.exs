@@ -351,6 +351,27 @@ defmodule Durable.OnFailureTest do
       assert reload(run).status == :compensated
     end
 
+    test "isn't pruned before it has been rolled back" do
+      run = book("down", "book_trip_waits_five_days")
+
+      # Four days on, with failed runs kept for three.
+      four_days_ago = DateTime.add(DateTime.utc_now(), -4, :day)
+
+      run
+      |> days_pass(4)
+      |> Ecto.Changeset.change(completed_at: four_days_ago, updated_at: four_days_ago)
+      |> Durable.TestRepo.update!()
+
+      config = %{Durable.Config.get(Durable) | prune: [failed: :timer.hours(24 * 3)]}
+      assert Durable.Pruner.prune(config) == %{failed: 0}
+
+      # The fifth day: the seat it held is released.
+      days_pass(run, 1)
+      sweep()
+      assert drain(run).status == :compensated
+      assert :cancel_flight in Seen.all()
+    end
+
     test "a retry takes the run out of it, and a second failure starts the wait again" do
       run = book("down", "book_trip_waits_five_days")
       days_pass(run, 4)

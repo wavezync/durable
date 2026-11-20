@@ -76,6 +76,8 @@ way. Deleting 100,000 runs and their 300,000 step rows took 4 seconds.
 - Steps, inputs and events go with their run. Child runs are pruned on their own
   age.
 - Pending, running and waiting runs are never pruned.
+- A failed run waiting out its workflow's `rollback_after:` isn't pruned until
+  it has been rolled back.
 - **A pruned run's workflow key is free again.** Keep runs for longer than you
   rely on a key to catch duplicates.
 
