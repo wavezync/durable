@@ -796,20 +796,7 @@ defmodule Durable.DSL.Step do
 
     written = statements(block, :lane)
     lanes = Enum.map(written, &compile_lane(&1, name, qualified, caller))
-    set = Enum.flat_map(written, &lane_opts/1)
-    optional = for {_kind, lane, opts} <- set, opts[:optional] == true, do: lane
-    defaults = for {_kind, lane, opts} <- set, Keyword.has_key?(opts, :default), do: lane
-    timeouts = for {:lane, lane, opts} <- set, opts[:timeout], do: {lane, opts[:timeout]}
-
-    if lane = Enum.find(defaults, &(&1 not in optional)) do
-      block_error!(
-        caller,
-        "#{inspect(lane)} of parallel #{inspect(name)} has default:, which is what the " <>
-          "next step gets when an optional lane fails: give it optional: true as well"
-      )
-    end
-
-    defaults = for {_kind, lane, opts} <- set, lane in defaults, do: {lane, opts[:default]}
+    {optional, defaults, timeouts} = lane_settings(written, name, caller)
     lane_names = Enum.map(lanes, &elem(&1, 0))
 
     if lanes == [],
@@ -893,6 +880,26 @@ defmodule Durable.DSL.Step do
       "parallel #{inspect(name)} can hold `lane :name do ... end` and `step`, " <>
         "but found: #{first_line(other)}"
     )
+  end
+
+  # Which lanes are optional, and the `default:` and `timeout:` written on them.
+  defp lane_settings(written, name, caller) do
+    set = Enum.flat_map(written, &lane_opts/1)
+    optional = for {_kind, lane, opts} <- set, opts[:optional] == true, do: lane
+
+    defaults =
+      for {_kind, lane, opts} <- set, Keyword.has_key?(opts, :default), do: {lane, opts[:default]}
+
+    if lane = Enum.find(Keyword.keys(defaults), &(&1 not in optional)) do
+      block_error!(
+        caller,
+        "#{inspect(lane)} of parallel #{inspect(name)} has default:, which is what the " <>
+          "next step gets when an optional lane fails: give it optional: true as well"
+      )
+    end
+
+    timeouts = for {:lane, lane, opts} <- set, opts[:timeout], do: {lane, opts[:timeout]}
+    {optional, defaults, timeouts}
   end
 
   # The options written on a lane: `lane :x, optional: true do` or, for a lane

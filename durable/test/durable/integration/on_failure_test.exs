@@ -5,6 +5,7 @@ defmodule Durable.Integration.OnFailureTest do
   @moduletag :capture_log
 
   alias Durable.IntegrationProbe, as: Probe
+  alias Durable.Wait.TimeoutWorker
 
   defmodule Booking do
     use Durable
@@ -138,8 +139,8 @@ defmodule Durable.Integration.OnFailureTest do
     )
 
     sweep = fn ->
-      Durable.Wait.TimeoutWorker.check_timeouts(Durable)
-      :sys.get_state(Durable.Wait.TimeoutWorker.worker_name(Durable))
+      TimeoutWorker.check_timeouts(Durable)
+      :sys.get_state(TimeoutWorker.worker_name(Durable))
     end
 
     retries =
@@ -173,7 +174,7 @@ defmodule Durable.Integration.OnFailureTest do
     {:ok, id} = Durable.start(Slow, %{}, workflow: "of_referee")
     await_status(id, :waiting)
     Process.sleep(350)
-    Durable.Wait.TimeoutWorker.check_timeouts(Durable)
+    TimeoutWorker.check_timeouts(Durable)
 
     await_status(id, :completed)
     assert %{"credit" => %{"score" => 700}, "referee" => nil} = get(id).context["checks"]

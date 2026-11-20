@@ -226,15 +226,7 @@ defmodule Durable.Executor do
         select: w
       )
 
-    # A rollback has to know whether a worker had the run, so the cancel only
-    # lands on the status it saw.
-    seen =
-      opts[:rollback] &&
-        Repo.one(
-          config,
-          from(w in WorkflowExecution, where: w.id == ^workflow_id, select: w.status)
-        )
-
+    seen = opts[:rollback] && status_now(config, workflow_id)
     cancellable = if seen, do: where(cancellable, [w], w.status == ^seen), else: cancellable
 
     case Repo.update_all(config, cancellable,
@@ -254,19 +246,24 @@ defmodule Durable.Executor do
         :ok
 
       {0, _} ->
-        case Repo.get(config, WorkflowExecution, workflow_id) do
-          nil ->
-            {:error, :not_found}
-
-          # It moved between the read and the cancel: go by what it is now.
-          %{status: status} when seen != nil and status in [:pending, :running, :waiting] ->
-            cancel_run(workflow_id, reason, opts)
-
-          _ended ->
-            {:error, :already_completed}
-        end
+        not_cancelled(status_now(config, workflow_id), seen, {workflow_id, reason, opts})
     end
   end
+
+  # A rollback has to know whether a worker had the run, so its cancel only
+  # lands on the status it saw.
+  defp status_now(config, workflow_id) do
+    Repo.one(config, from(w in WorkflowExecution, where: w.id == ^workflow_id, select: w.status))
+  end
+
+  defp not_cancelled(nil, _seen, _cancel), do: {:error, :not_found}
+
+  # It moved between the read and the cancel: go by what it is now.
+  defp not_cancelled(status, seen, {workflow_id, reason, opts})
+       when seen != nil and status in [:pending, :running, :waiting],
+       do: cancel_run(workflow_id, reason, opts)
+
+  defp not_cancelled(_ended, _seen, _cancel), do: {:error, :already_completed}
 
   # `rollback: true`: the cancelled run goes back on its queue to be undone.
   # A worker that had it is told at its next heartbeat, and until then a step

@@ -3,6 +3,7 @@ defmodule Durable.OnFailureTest do
   use Durable.DataCase, async: false
 
   import Durable.Testing
+  alias Durable.Wait.TimeoutWorker
 
   @moduletag :capture_log
 
@@ -275,16 +276,14 @@ defmodule Durable.OnFailureTest do
 
   describe "on_failure: [rollback_after: ms]" do
     setup do
-      start_supervised!(
-        {Durable.Wait.TimeoutWorker, config: Durable.Config.get(Durable), interval: 3_600_000}
-      )
+      start_supervised!({TimeoutWorker, config: Durable.Config.get(Durable), interval: 3_600_000})
 
       :ok
     end
 
     defp sweep do
-      Durable.Wait.TimeoutWorker.check_timeouts(Durable)
-      :sys.get_state(Durable.Wait.TimeoutWorker.worker_name(Durable))
+      TimeoutWorker.check_timeouts(Durable)
+      :sys.get_state(TimeoutWorker.worker_name(Durable))
     end
 
     defp days_pass(run, days) do
