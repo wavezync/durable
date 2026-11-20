@@ -22,10 +22,18 @@ defmodule Durable.DSL.Workflow do
 
   - `:timeout` - How long a run may take, in milliseconds, from when it is due
     to start — waits and sleeps included. A run past it fails with a
-    `"timeout"` error, running compensations like any failure: a step still
+    `"timeout"` error, like any failure (see `:on_failure`): a step still
     running is stopped (and not retried), and a waiting run is woken to fail.
     Steps in a run with a timeout run in their own process; see the step
     `:timeout` option.
+  - `:on_failure` - What a run does when it fails for good. `:halt` (default)
+    leaves it failed with nothing undone, so `Durable.retry/2` can carry it on
+    once the cause is fixed, or `Durable.rollback/2` can undo it. `:rollback`
+    runs the `compensate:` of every completed step at once; a run rolled back
+    can't be retried. `[rollback_after: ms]` halts, and rolls the run back if
+    nobody has retried it or rolled it back by then: for a run holding
+    something that lapses, such as a card authorization. Whichever is set, a
+    step that returns `{:rollback, reason}` rolls the run back
   - `:queue` - The queue runs start on unless `Durable.start/3` names one. A
     step's own `:queue` moves the run for that step
   - `:reuse` - When a start with a `key:` may run again after the run holding
@@ -119,6 +127,8 @@ defmodule Durable.DSL.Workflow do
         }
       end
 
+      Durable.DSL.Workflow.__on_failure__(Keyword.get(unquote(opts), :on_failure), unquote(name))
+
       # Register just the workflow name and function reference
       @durable_workflows {unquote(name), unquote(definition_fn)}
 
@@ -151,13 +161,26 @@ defmodule Durable.DSL.Workflow do
     end
   end
 
-  @workflow_opts [:timeout, :queue, :reuse, :on_duplicate, :debounce, :log_metadata]
+  @workflow_opts [:timeout, :on_failure, :queue, :reuse, :on_duplicate, :debounce, :log_metadata]
 
   # Literal values are checked here; anything computed is checked when a run starts.
   @allowed_values %{
+    on_failure: [:halt, :rollback],
     reuse: [:after_close, :after_failure, :never],
     on_duplicate: [:use_existing, :error, :cancel_existing, :run_again]
   }
+
+  @doc false
+  # Checked in the workflow module, where `rollback_after: days(5)` is a number.
+  def __on_failure__(on_failure, _name) when on_failure in [nil, :halt, :rollback], do: :ok
+
+  def __on_failure__([rollback_after: ms], _name) when is_integer(ms) and ms > 0, do: :ok
+
+  def __on_failure__(on_failure, name) do
+    raise ArgumentError,
+          "invalid on_failure: #{inspect(on_failure)} for workflow #{inspect(name)}; expected " <>
+            ":halt, :rollback or [rollback_after: ms], as in [rollback_after: days(5)]"
+  end
 
   defp validate_workflow_opts!(opts, name) when is_list(opts) do
     case Keyword.keys(opts) -- @workflow_opts do

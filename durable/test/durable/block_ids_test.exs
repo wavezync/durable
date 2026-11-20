@@ -1,7 +1,7 @@
 defmodule Durable.BlockIdsTest do
   @moduledoc """
-  Steps inside `parallel` and `branch` blocks are named after their block's
-  id, and those names are stored on runs. The ids must come out the same on
+  Steps inside an unnamed `branch` block are named after the block's id, and
+  those names are stored on runs. The ids must come out the same on
   every compile, or a run suspended inside a block can't resume after a deploy.
   """
   use ExUnit.Case, async: true
@@ -14,21 +14,21 @@ defmodule Durable.BlockIdsTest do
     workflow "fan_out" do
       step :start, fn data -> {:ok, data} end
 
-      parallel do
+      parallel :pair do
         step :a, fn data -> {:ok, data} end
         step :b, fn data -> {:ok, BODY} end
       end
 
       branch on: fn data -> data[:kind] end do
-        :x -> step :on_x, fn data -> {:ok, data} end
+        :x -> step :on_x, fn data -> {:ok, BODY} end
         _ -> step :otherwise, fn data -> {:ok, data} end
       end
     end
 
     workflow "twin" do
-      parallel do
-        step :a, fn data -> {:ok, data} end
-        step :b, fn data -> {:ok, data} end
+      branch on: fn data -> data[:kind] end do
+        :x -> step :on_x, fn data -> {:ok, data} end
+        _ -> step :otherwise, fn data -> {:ok, data} end
       end
     end
   end
@@ -56,18 +56,18 @@ defmodule Durable.BlockIdsTest do
   test "identical blocks in one module get different ids" do
     names = compile(Durable.BlockIdsTest.Third, "data")
 
-    [fan_out_parallel] =
+    [fan_out_branch] =
       for n <- names["fan_out"],
-          String.starts_with?(to_string(n), "parallel_") and
+          String.starts_with?(to_string(n), "branch_") and
             not String.contains?(to_string(n), "__"),
           do: n
 
-    [twin_parallel] =
+    [twin_branch] =
       for n <- names["twin"],
-          String.starts_with?(to_string(n), "parallel_") and
+          String.starts_with?(to_string(n), "branch_") and
             not String.contains?(to_string(n), "__"),
           do: n
 
-    assert fan_out_parallel != twin_parallel
+    assert fan_out_branch != twin_branch
   end
 end

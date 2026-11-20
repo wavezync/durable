@@ -14,7 +14,7 @@ defmodule Durable.WorkflowTimeoutTest do
     use Durable
     use Durable.Helpers
 
-    workflow "slow_saga", timeout: 50, queue: :sagas do
+    workflow "slow_saga", timeout: 50, queue: :sagas, on_failure: :rollback do
       step(:reserve, [compensate: :release], fn data -> {:ok, assign(data, :reserved, true)} end)
 
       step(:charge, fn data ->
@@ -78,7 +78,7 @@ defmodule Durable.WorkflowTimeoutTest do
     use Durable
     use Durable.Helpers
 
-    workflow "stuck_saga", timeout: hours(1) do
+    workflow "stuck_saga", timeout: hours(1), on_failure: :rollback do
       step(:reserve, [compensate: :release], fn data -> {:ok, assign(data, :reserved, true)} end)
       step(:charge, [queue: :nobody], fn data -> {:ok, assign(data, :charged, true)} end)
       compensate(:release, fn data -> {:ok, assign(data, :released, true)} end)
@@ -88,7 +88,7 @@ defmodule Durable.WorkflowTimeoutTest do
   defmodule StuckRaisingSaga do
     use Durable
 
-    workflow "stuck_raising_saga", timeout: hours(1) do
+    workflow "stuck_raising_saga", timeout: hours(1), on_failure: :rollback do
       step(:reserve, [compensate: :release], fn data -> {:ok, data} end)
       step(:charge, [queue: :nobody], fn data -> {:ok, data} end)
       compensate(:release, fn _data -> raise "boom" end)
@@ -100,7 +100,7 @@ defmodule Durable.WorkflowTimeoutTest do
     use Durable.Helpers
 
     workflow "stuck_branch", timeout: hours(1) do
-      parallel do
+      parallel :work do
         step(:stuck, [queue: :nobody], fn data -> {:ok, assign(data, :stuck, true)} end)
       end
     end
@@ -131,7 +131,7 @@ defmodule Durable.WorkflowTimeoutTest do
     defmodule Opts do
       use Durable
 
-      workflow "opts" do
+      workflow "opts", on_failure: :rollback do
         step(:a, [timeout: seconds(1), retry: [base: seconds(2)]], fn data -> {:ok, data} end)
       end
     end
@@ -408,6 +408,10 @@ defmodule Durable.WorkflowTimeoutTest do
       [child] =
         repo().all(from(w in WorkflowExecution, where: w.parent_workflow_id == ^parent))
 
+      # The lane starts on the parent's queue, which hands it on to its step's.
+      Executor.execute_workflow(child.id, Config.get(Durable))
+      assert %{status: :pending, queue: "nobody"} = run(child.id)
+
       repo().insert!(polling_node(["default"]))
       expire(child.id)
       sweep()
@@ -422,6 +426,10 @@ defmodule Durable.WorkflowTimeoutTest do
 
       [child] =
         repo().all(from(w in WorkflowExecution, where: w.parent_workflow_id == ^parent))
+
+      # The lane starts on the parent's queue, which hands it on to its step's.
+      Executor.execute_workflow(child.id, Config.get(Durable))
+      assert %{status: :pending, queue: "nobody"} = run(child.id)
 
       repo().insert!(polling_node(["default"]))
       expire(parent)

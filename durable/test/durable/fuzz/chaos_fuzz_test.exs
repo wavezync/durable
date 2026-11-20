@@ -66,12 +66,14 @@ defmodule Durable.Fuzz.ChaosTest do
   end
 
   defp apply_op(:cancel_tag, runs, seen) do
-    # Only the first three carry this tag.
+    Durable.cancel_all([tag: "chaos"], "chaos")
+
+    # Only the first three carry this tag. Counted after the cancel returns,
+    # as for one run: until then, starting more steps is allowed.
     for {run, i} <- runs |> Enum.take(3) |> Enum.with_index() do
       Agent.update(seen, &Map.put_new(&1, i, entered(run.case_id)))
     end
 
-    Durable.cancel_all([tag: "chaos"], "chaos")
     [0, 1, 2]
   end
 

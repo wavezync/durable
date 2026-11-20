@@ -18,7 +18,7 @@ A durable, resumable workflow engine for Elixir. Similar to Temporal/Inngest.
 - **Resumability** - Sleep, wait for events, wait for human input
 - **Branching** - Pattern-matched conditional flow control
 - **Parallel** - Run steps concurrently with result collection
-- **Compensations** - Saga pattern with automatic rollback
+- **Compensations** - Saga pattern: undo completed steps when a step or you ask
 - **Cron Scheduling** - Recurring workflows with cron expressions
 - **Reliability** - Automatic retries with exponential/linear/constant backoff, waiting off the worker
 - **Run control** - Snooze, fail now or cancel from a step
@@ -165,78 +165,25 @@ defmodule MyApp.DashboardBuilder do
       {:ok, %{user_id: input["user_id"]}}
     end
 
-    # Parallel steps produce results in __results__ map
-    parallel do
+    # Each lookup is a lane of its own; none depends on another
+    parallel :lookups do
       step :user, fn ctx ->
-        {:ok, %{user: Users.get(ctx.user_id)}}
+        {:ok, %{profile: Users.get(ctx.user_id)}}
       end
 
       step :orders, fn ctx ->
-        {:ok, %{orders: Orders.recent(ctx.user_id)}}
+        {:ok, %{recent: Orders.recent(ctx.user_id)}}
       end
 
-      step :notifications, fn ctx ->
-        {:ok, %{notifs: Notifications.unread(ctx.user_id)}}
+      # The page can be built without these
+      step :notifications, [optional: true, default: %{unread: []}], fn ctx ->
+        {:ok, %{unread: Notifications.unread(ctx.user_id)}}
       end
     end
 
-    # Access results from __results__ map
-    step :render, fn ctx ->
-      results = ctx[:__results__]
-
-      # Results are tagged tuples: ["ok", data] or ["error", reason]
-      user = case results["user"] do
-        ["ok", data] -> data.user
-        _ -> nil
-      end
-
-      orders = case results["orders"] do
-        ["ok", data] -> data.orders
-        _ -> []
-      end
-
-      notifs = case results["notifications"] do
-        ["ok", data] -> data.notifs
-        _ -> []
-      end
-
-      dashboard = Dashboard.build(user, orders, notifs)
-      {:ok, assign(ctx, :dashboard, dashboard)}
-    end
-  end
-end
-
-# Or use into: to transform results directly
-defmodule MyApp.DashboardBuilderWithInto do
-  use Durable
-  use Durable.Helpers
-
-  workflow "build_dashboard_v2" do
-    step :init, fn input ->
-      {:ok, %{user_id: input["user_id"]}}
-    end
-
-    parallel into: fn ctx, results ->
-      # results contains tuples: %{user: {:ok, data}, orders: {:ok, data}, ...}
-      case {results[:user], results[:orders], results[:notifications]} do
-        {{:ok, user_data}, {:ok, orders_data}, {:ok, notifs_data}} ->
-          {:ok, Map.merge(ctx, %{
-            user: user_data.user,
-            orders: orders_data.orders,
-            notifs: notifs_data.notifs
-          })}
-
-        _ ->
-          {:error, "Failed to fetch dashboard data"}
-      end
-    end do
-      step :user, fn ctx -> {:ok, %{user: Users.get(ctx.user_id)}} end
-      step :orders, fn ctx -> {:ok, %{orders: Orders.recent(ctx.user_id)}} end
-      step :notifications, fn ctx -> {:ok, %{notifs: Notifications.unread(ctx.user_id)}} end
-    end
-
-    step :render, fn ctx ->
-      dashboard = Dashboard.build(ctx.user, ctx.orders, ctx.notifs)
+    # What each lane produced is under the block's name, by lane
+    step :render, fn %{lookups: %{user: user, orders: orders, notifications: notifs}} = ctx ->
+      dashboard = Dashboard.build(user["profile"], orders["recent"], notifs["unread"])
       {:ok, assign(ctx, :dashboard, dashboard)}
     end
   end
@@ -286,7 +233,7 @@ end
 
 ### Trip Booking (Saga)
 
-Book multiple services with automatic rollback on failure.
+Book multiple services, and undo the bookings if the card is declined.
 
 ```elixir
 defmodule MyApp.TripBooking do
@@ -306,8 +253,12 @@ defmodule MyApp.TripBooking do
 
     step :charge, fn ctx ->
       total = ctx.flight.price + ctx.hotel.price
-      Payments.charge(ctx["card"], total)
-      {:ok, assign(ctx, :charged, true)}
+
+      case Payments.charge(ctx["card"], total) do
+        {:ok, _receipt} -> {:ok, assign(ctx, :charged, true)}
+        {:error, :declined} -> {:rollback, "card declined"}
+        {:error, reason} -> {:error, reason}
+      end
     end
 
     compensate :cancel_flight, fn ctx ->
@@ -484,8 +435,8 @@ end
 # Fire-and-forget: start child and continue
 {:ok, child_id} = start_workflow(MyApp.EmailWorkflow, %{"to" => email}, ref: :welcome)
 
-# call_workflow also works inside parallel blocks: each branch waits for its child
-parallel do
+# call_workflow also works inside parallel blocks: each lane waits for its child
+parallel :fulfil do
   step :payment, fn data ->
     case call_workflow(MyApp.PaymentWorkflow, %{"amount" => data.total}, ref: :pay) do
       {:ok, result} -> {:ok, assign(data, :payment, result)}
@@ -509,9 +460,13 @@ workflow "process_order", timeout: hours(2), queue: :orders do
 ```
 
 - `:timeout` — how long a run may take from when it's due to start, waits and
-  sleeps included. A run past it fails with a `"timeout"` error and runs its
-  compensations: a step still running is stopped, and a waiting run is woken
-  to fail (within the timeout worker's one-minute sweep).
+  sleeps included. A run past it fails with a `"timeout"` error: a step still
+  running is stopped, and a waiting run is woken to fail (within the timeout
+  worker's one-minute sweep).
+- `:on_failure` — `:halt` (default) leaves a failed run as it is, to retry or
+  to undo with `Durable.rollback/2`. `:rollback` runs its compensations on any
+  failure. `[rollback_after: days(5)]` halts, then rolls back a run nobody
+  retried or rolled back in that time. See [Compensations](guides/compensations.md).
 - `:queue` — the queue runs start on unless `Durable.start/3` names one. A
   step's own `queue:` moves the run for that step (see
   [Step Queues](#step-queues)).
@@ -564,7 +519,7 @@ When retrying won't help, stop now:
 step :download, [retry: [max_attempts: 5]], fn ctx ->
   case Downloader.fetch(ctx.url) do
     {:ok, file} -> {:ok, assign(ctx, :file, file)}
-    {:error, :gone} -> {:fail, "the file is gone"}     # fails now, compensations run
+    {:error, :gone} -> {:fail, "the file is gone"}     # fails now, no more retries
     {:error, :deleted} -> {:cancel, "record deleted"}  # cancelled now, like Durable.cancel/2
     {:error, reason} -> {:error, reason}               # retried
   end
@@ -606,7 +561,7 @@ queue the run is on when it fails.
   the run starts on, even if its first step moves it. A run on a queue no live
   node polls waits there. Past its `timeout:`, the timeout worker's one-minute
   sweep hands it back to the queue it came from, or to another that's polled,
-  and it fails there, compensations included.
+  and it fails there.
 - Each move is one more claim. With `:pubsub` configured it happens as soon as
   a slot is free; without it, within that queue's `poll_interval`.
 - A finished run's `queue` is the last one it was on.

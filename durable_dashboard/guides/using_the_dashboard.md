@@ -69,7 +69,7 @@ end
 | Level | Can |
 |---|---|
 | `:viewer` | See everything, change nothing |
-| `:operator` | Retry, rerun and cancel runs. Answer inputs and send events. Pause and resume queues. Run a schedule now. Release a workflow key |
+| `:operator` | Retry, roll back, rerun and cancel runs. Answer inputs and send events. Pause and resume queues. Run a schedule now. Release a workflow key |
 | `:admin` | All of that, plus turn schedules on and off and prune on demand |
 
 The server checks the level on every action, and each one emits
@@ -112,7 +112,7 @@ a run, or one step's error into a chat.
 | **Waiting** | Paused on a sleep, an event or a person | The banner, and the Inbox |
 | **Completed** | Finished every step | |
 | **Failed** | A step ran out of attempts or returned `{:fail, reason}`, or the run passed its `timeout:` | The error and its stack. Retry picks up from that step |
-| **Compensated** | A step failed and the steps before it were undone | Rerun starts fresh. Retry is off, because earlier results were undone |
+| **Compensated** | The run failed and its completed steps were undone: a step returned `{:rollback, reason}`, someone called `Durable.rollback/2`, or the workflow has `on_failure: :rollback` | Rerun starts fresh. Retry is off, because earlier results were undone |
 | **Compensation failed** | Undoing the earlier steps failed too | The compensation steps. Some effects may still be in place |
 | **Cancelled** | Stopped on purpose: by a person, a step, its parent, or a newer start with the same key | The reason. Cancelled runs don't count as failures |
 
@@ -129,6 +129,14 @@ there:
 
 - **Retry from step** resumes at the failed step. Steps that finished don't run
   again.
+- **Roll back** undoes the steps that finished, newest first, when the run
+  has something to undo. It asks first and names the compensations it will
+  run. The run can't be retried afterwards.
+- **Cancel and roll back**, on a run that is still live and has something to
+  undo, cancels it and then undoes what it did. Plain **Cancel** leaves what
+  the run did.
+- A failed run of a workflow with `on_failure: [rollback_after: …]` says in
+  its banner when it will roll back by itself.
 - **Rerun** starts a new run from the first step with the same input, linked
   back to this one.
 - **Rerun with edited input** does the same after you've fixed the input.

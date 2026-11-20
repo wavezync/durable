@@ -25,7 +25,7 @@ defmodule PhoenixDemo.Workflows.OrderFulfillmentWorkflow do
 
   require Logger
 
-  workflow "fulfill_order", timeout: minutes(10) do
+  workflow "fulfill_order", timeout: minutes(10), on_failure: :rollback do
     step(:reserve_inventory, [compensate: :release_inventory], fn data ->
       order_id = data["order_id"] || "ORD-#{:rand.uniform(99_999)}"
       reservation_id = "RES-#{:rand.uniform(99_999)}"

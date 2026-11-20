@@ -8,11 +8,13 @@ What's next for Durable, in order. For how it works today, see [ARCHITECTURE.md]
 
 Pin each run to the version of the workflow it started on. Today a run resumes on whatever is deployed, and fails if its current step is gone.
 
-Still to decide:
+Decided:
 
-- **API:** several `workflow "order", version: N` blocks in one module, or one module per version?
-- **Release:** it needs a new column, so a minor release with an upgrade note, or wait for 2.0?
-- **Missing version:** fail the run, or fall back to the latest version if the run's current step exists there?
+- **API:** `workflow "order", version: 2 do`. A run is pinned to the name and the version. Two versions can sit in one module or in two; the pair has to be unique.
+- **Release:** a minor release with an upgrade note. It needs a new column, so apps migrate to upgrade.
+- **Missing version:** the run fails with an error that names the version. Deploy it again and `Durable.retry/1` carries the run on. Nothing runs on code it wasn't started on.
+
+Still to decide: how an app that upgraded without migrating finds out, at boot or on its first run.
 
 ### 2. Global concurrency and broker adapters
 

@@ -63,7 +63,7 @@ defmodule Durable.OperatorControlsTest do
     workflow "flaky_parallel" do
       step(:setup, fn data -> Flaky.act(1, data) end)
 
-      parallel do
+      parallel :sides do
         step(:left, fn data -> Flaky.act(2, data) end)
         step(:right, fn data -> Flaky.act(3, data) end)
       end
@@ -76,7 +76,7 @@ defmodule Durable.OperatorControlsTest do
     @moduledoc false
     use Durable
 
-    workflow "compensated" do
+    workflow "compensated", on_failure: :rollback do
       step(:book, [compensate: :unbook], fn data -> {:ok, data} end)
       step(:fail, fn _data -> raise "nope" end)
       compensate(:unbook, fn data -> {:ok, data} end)

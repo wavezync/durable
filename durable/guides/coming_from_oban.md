@@ -46,9 +46,10 @@ does the same thing here.
 - **A snooze doesn't use an attempt**, and there's no limit on snoozes. The
   workflow's `timeout:` is what stops a step that snoozes forever.
 - **Stopping for good is a choice between two returns.** Use `{:fail, reason}`
-  when giving up is a failure: the run shows as failed and its compensations
-  run. Use `{:cancel, reason}` when there's nothing left to do: the run shows
-  as cancelled, not failed, and compensations don't run.
+  when giving up is a failure: the run shows as failed and can be retried.
+  Use `{:rollback, reason}` to fail and undo the steps before it. Use
+  `{:cancel, reason}` when there's nothing left to do: the run shows as
+  cancelled, not failed, and compensations don't run.
 - **`{:cancel, reason}` in a parallel step cancels the whole workflow**,
   without compensations. Pass `scope: :run` to cancel only that branch.
 - **Keys are checked on every start**, `start_many/2` included. Oban's

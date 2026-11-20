@@ -62,7 +62,7 @@ defmodule Durable.Integration.RunControlTest do
   defmodule RunsOutOfRetries do
     use Durable
 
-    workflow "rc_runs_out_of_retries" do
+    workflow "rc_runs_out_of_retries", on_failure: :rollback do
       step(:book, [compensate: :unbook], fn data -> {:ok, data} end)
 
       step(:call, [retry: [max_attempts: 2, backoff: :constant, base: 50]], fn _data ->
@@ -101,7 +101,7 @@ defmodule Durable.Integration.RunControlTest do
   defmodule Fails do
     use Durable
 
-    workflow "rc_fails" do
+    workflow "rc_fails", on_failure: :rollback do
       step(:book, [compensate: :unbook], fn data -> {:ok, data} end)
 
       step(:call, [retry: [max_attempts: 5]], fn _data ->
@@ -119,7 +119,7 @@ defmodule Durable.Integration.RunControlTest do
   defmodule Cancels do
     use Durable
 
-    workflow "rc_cancels" do
+    workflow "rc_cancels", on_failure: :rollback do
       step(:book, [compensate: :unbook], fn data -> {:ok, data} end)
 
       step(:call, [retry: [max_attempts: 5]], fn _data ->
@@ -144,7 +144,7 @@ defmodule Durable.Integration.RunControlTest do
     use Durable.Wait
 
     workflow "rc_cancels_workflow_from_branch" do
-      parallel do
+      parallel :fan do
         step(:stops, fn _data -> {:cancel, "order withdrawn"} end)
 
         step(:waits, fn data ->
@@ -160,7 +160,7 @@ defmodule Durable.Integration.RunControlTest do
     use Durable.Helpers
 
     workflow "rc_cancels_one_branch" do
-      parallel on_error: :complete_all do
+      parallel :sends, on_error: :collect do
         step(:skipped, fn _data -> {:cancel, "nothing to send", scope: :run} end)
         step(:sent, fn data -> {:ok, assign(data, :sent, true)} end)
       end
@@ -243,7 +243,7 @@ defmodule Durable.Integration.RunControlTest do
     use Durable.Wait
 
     workflow "rc_sleeping_branch" do
-      parallel do
+      parallel :fan do
         step(:sleeper, fn data ->
           sleep(1)
           Probe.here(:branch_done)
@@ -273,7 +273,7 @@ defmodule Durable.Integration.RunControlTest do
         {:ok, data}
       end)
 
-      parallel do
+      parallel :fan do
         step(:sleeper, fn data ->
           sleep(1)
           Probe.here(:branch_done)
@@ -293,7 +293,7 @@ defmodule Durable.Integration.RunControlTest do
     use Durable.Wait
 
     workflow "rc_waiting_branch" do
-      parallel do
+      parallel :fan do
         step(:waiter, fn data ->
           wait_for_event("go")
           Probe.here(:branch_done)
@@ -325,7 +325,7 @@ defmodule Durable.Integration.RunControlTest do
     use Durable.Orchestration
 
     workflow "rc_branch_calls_sleeper" do
-      parallel do
+      parallel :fan do
         step(:caller, fn data ->
           {:ok, _result} = call_workflow(ChildSleeps, %{}, ref: :nap)
           Probe.here(:branch_done)
@@ -343,10 +343,10 @@ defmodule Durable.Integration.RunControlTest do
   defmodule UndoAfterBranchFails do
     use Durable
 
-    workflow "rc_undo_after_branch_fails" do
+    workflow "rc_undo_after_branch_fails", on_failure: :rollback do
       step(:book, [compensate: :unbook], fn data -> {:ok, Map.put(data, "booking", "B1")} end)
 
-      parallel do
+      parallel :fan do
         step(:charge, fn _data -> {:fail, "declined"} end)
       end
 
@@ -361,7 +361,7 @@ defmodule Durable.Integration.RunControlTest do
     use Durable
     use Durable.Wait
 
-    workflow "rc_undo_after_input_times_out" do
+    workflow "rc_undo_after_input_times_out", on_failure: :rollback do
       step(:book, [compensate: :unbook], fn data -> {:ok, Map.put(data, "booking", "B1")} end)
 
       step(:approve, fn data ->
@@ -379,7 +379,7 @@ defmodule Durable.Integration.RunControlTest do
   defmodule UndoAfterDeadline do
     use Durable
 
-    workflow "rc_undo_after_deadline", timeout: :timer.hours(1) do
+    workflow "rc_undo_after_deadline", timeout: :timer.hours(1), on_failure: :rollback do
       step(:book, [compensate: :unbook], fn data -> {:ok, Map.put(data, "booking", "B1")} end)
       step(:charge, [queue: :nobody], fn data -> {:ok, data} end)
 
@@ -442,7 +442,7 @@ defmodule Durable.Integration.RunControlTest do
     use Durable
 
     workflow "rc_fans_out" do
-      parallel do
+      parallel :fan do
         step(:one, fn data -> {:ok, data} end)
         step(:two, fn data -> {:ok, data} end)
       end
@@ -453,7 +453,7 @@ defmodule Durable.Integration.RunControlTest do
     use Durable
 
     workflow "rc_wide_fan_out" do
-      parallel do
+      parallel :fan do
         step(:b01, fn data -> {:ok, data} end)
         step(:b02, fn data -> {:ok, data} end)
         step(:b03, fn data -> {:ok, data} end)
@@ -494,7 +494,7 @@ defmodule Durable.Integration.RunControlTest do
   defmodule ChildCompensates do
     use Durable
 
-    workflow "rc_child_compensates" do
+    workflow "rc_child_compensates", on_failure: :rollback do
       step(:book, [compensate: :unbook], fn data -> {:ok, data} end)
       step(:charge, fn _data -> {:fail, "card declined"} end)
       compensate(:unbook, fn data -> {:ok, data} end)
@@ -504,7 +504,7 @@ defmodule Durable.Integration.RunControlTest do
   defmodule ChildCompensationFails do
     use Durable
 
-    workflow "rc_child_compensation_fails" do
+    workflow "rc_child_compensation_fails", on_failure: :rollback do
       step(:book, [compensate: :unbook], fn data -> {:ok, data} end)
       step(:charge, fn _data -> {:fail, "card declined"} end)
       compensate(:unbook, fn _data -> raise "still booked" end)
@@ -514,7 +514,7 @@ defmodule Durable.Integration.RunControlTest do
   defmodule ChildCompensationErrors do
     use Durable
 
-    workflow "rc_child_compensation_errors" do
+    workflow "rc_child_compensation_errors", on_failure: :rollback do
       step(:book, [compensate: :unbook], fn data -> {:ok, data} end)
       step(:charge, fn _data -> {:fail, "card declined"} end)
 
@@ -604,7 +604,7 @@ defmodule Durable.Integration.RunControlTest do
     use Durable.Helpers
 
     workflow "rc_parked_in_branch" do
-      parallel do
+      parallel :fan do
         step(:flaky, [retry: [max_attempts: 2, backoff: :constant, base: 100]], fn data ->
           if Probe.here(:branch_flaky) == 1, do: {:error, :down}, else: {:ok, data}
         end)
@@ -633,7 +633,7 @@ defmodule Durable.Integration.RunControlTest do
   defmodule Held do
     use Durable
 
-    workflow "rc_held" do
+    workflow "rc_held", on_failure: :rollback do
       step(:a, fn data ->
         Probe.here(:held)
         Probe.wait_for({:go, Probe.hits(:held)})
@@ -810,7 +810,7 @@ defmodule Durable.Integration.RunControlTest do
       id = start!(CancelsOneBranch)
 
       run = await_status(id, :completed)
-      assert %{"skipped" => ["error", _], "sent" => ["ok", _]} = run.context["__results__"]
+      assert %{"skipped" => ["error", _], "sent" => ["ok", _]} = run.context["sends"]
     end
 
     test "scope: :root cancels the top of the tree from a child" do

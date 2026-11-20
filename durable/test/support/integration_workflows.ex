@@ -183,7 +183,7 @@ defmodule Durable.IntegrationWorkflows do
     @moduledoc false
     use Durable
 
-    workflow "it_saga" do
+    workflow "it_saga", on_failure: :rollback do
       step(:charge, [queue: :ocr, compensate: :refund], fn data ->
         Probe.here(:charge)
         {:ok, data}
@@ -234,7 +234,7 @@ defmodule Durable.IntegrationWorkflows do
     @moduledoc false
     use Durable
 
-    workflow "it_stuck_saga", timeout: :timer.hours(1) do
+    workflow "it_stuck_saga", timeout: :timer.hours(1), on_failure: :rollback do
       step(:reserve, [compensate: :release], fn data ->
         Probe.here(:reserve)
         {:ok, data}
@@ -256,7 +256,7 @@ defmodule Durable.IntegrationWorkflows do
     @moduledoc false
     use Durable
 
-    workflow "it_stuck_slow_saga", timeout: :timer.hours(1) do
+    workflow "it_stuck_slow_saga", timeout: :timer.hours(1), on_failure: :rollback do
       step(:reserve, [compensate: :release], fn data -> {:ok, data} end)
       step(:charge, [queue: :nobody], fn data -> {:ok, data} end)
 
@@ -349,7 +349,7 @@ defmodule Durable.IntegrationWorkflows do
         {:ok, assign(data, :prepared, true)}
       end)
 
-      parallel do
+      parallel :fan_out do
         step(:on_llm, [queue: :llm], fn data ->
           Probe.here(:on_llm)
           {:ok, assign(data, :on_llm, true)}

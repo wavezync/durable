@@ -83,9 +83,6 @@ defmodule Durable.Context do
           cancelled?: 0,
           append_context: 2,
           increment_context: 2,
-          parallel_results: 0,
-          parallel_result: 1,
-          parallel_ok?: 1,
           bind: 1
         ]
     end
@@ -400,79 +397,6 @@ defmodule Durable.Context do
   def increment_context(key, amount \\ 1) do
     current = get_context(key, 0)
     put_context(key, current + amount)
-  end
-
-  @doc """
-  Returns the full parallel results map from context.
-
-  The results map contains tagged tuples: `%{step_name => {:ok, data} | {:error, reason}}`
-
-  ## Examples
-
-      parallel do
-        step :payment, fn ctx -> {:ok, %{id: 123}} end
-        step :delivery, fn ctx -> {:error, :not_found} end
-      end
-
-      step :handle, fn ctx ->
-        results = parallel_results()
-        # => %{payment: {:ok, %{id: 123}}, delivery: {:error, :not_found}}
-      end
-
-  """
-  @spec parallel_results() :: map()
-  def parallel_results do
-    :__results__
-    |> get_context(%{})
-    |> Map.new(fn {name, result} -> {known_name(name), tagged_result(result)} end)
-  end
-
-  # Stored as JSON, as `["ok", data]` under the branch's name as a string.
-  defp known_name(name) when is_binary(name), do: known_key(name)
-  defp known_name(name), do: name
-
-  defp tagged_result(["ok", value]), do: {:ok, value}
-  defp tagged_result(["error", value]), do: {:error, value}
-  defp tagged_result(result), do: result
-
-  @doc """
-  Returns a specific parallel step's result by name.
-
-  ## Examples
-
-      step :handle, fn ctx ->
-        case parallel_result(:payment) do
-          {:ok, payment} -> # handle success
-          {:error, reason} -> # handle error
-        end
-      end
-
-  """
-  @spec parallel_result(atom()) :: {:ok, any()} | {:error, any()} | nil
-  def parallel_result(step_name) when is_atom(step_name) do
-    parallel_results() |> Map.get(step_name)
-  end
-
-  @doc """
-  Checks if a parallel step succeeded.
-
-  ## Examples
-
-      step :handle, fn ctx ->
-        if parallel_ok?(:payment) do
-          # payment succeeded
-        else
-          # payment failed
-        end
-      end
-
-  """
-  @spec parallel_ok?(atom()) :: boolean()
-  def parallel_ok?(step_name) when is_atom(step_name) do
-    case parallel_result(step_name) do
-      {:ok, _} -> true
-      _ -> false
-    end
   end
 
   # Internal functions for executor use

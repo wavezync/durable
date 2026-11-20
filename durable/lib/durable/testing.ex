@@ -257,7 +257,7 @@ defmodule Durable.Testing do
   end
 
   # Steps inside parallel and branch blocks are stored qualified, such as
-  # "parallel_123__email" or "branch_456__digital__ship".
+  # "lookups__credit" or "branch_456__digital__ship".
   defp short_name(%StepExecution{step_name: name}),
     do: name |> String.split("__") |> List.last()
 

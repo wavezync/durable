@@ -450,18 +450,19 @@ defmodule OrderProcessingWorkflow do
     end)
 
     # Parallel notification tasks
-    # Use into: to merge results back into context for backward compatibility
-    parallel into: fn ctx, results ->
-               merged =
-                 Enum.reduce(results, ctx, fn {_key, result}, acc ->
-                   case result do
-                     {:ok, data} -> Map.merge(acc, data)
-                     _ -> acc
-                   end
-                 end)
+    # Use into: to merge what each lane added back into the data
+    parallel :notify,
+      into: fn ctx, results ->
+        merged =
+          Enum.reduce(results, ctx, fn {_key, result}, acc ->
+            case result do
+              {:ok, data} -> Map.merge(acc, data)
+              _ -> acc
+            end
+          end)
 
-               {:ok, merged}
-             end do
+        {:ok, merged}
+      end do
       step(:send_confirmation, fn data ->
         {:ok, assign(data, :email_sent, true)}
       end)
@@ -509,17 +510,18 @@ defmodule DocumentApprovalWorkflow do
 
     # Parallel notification (only runs for high-value)
     # Use into: to merge results back into context
-    parallel into: fn ctx, results ->
-               merged =
-                 Enum.reduce(results, ctx, fn {_key, result}, acc ->
-                   case result do
-                     {:ok, data} -> Map.merge(acc, data)
-                     _ -> acc
-                   end
-                 end)
+    parallel :notify,
+      into: fn ctx, results ->
+        merged =
+          Enum.reduce(results, ctx, fn {_key, result}, acc ->
+            case result do
+              {:ok, data} -> Map.merge(acc, data)
+              _ -> acc
+            end
+          end)
 
-               {:ok, merged}
-             end do
+        {:ok, merged}
+      end do
       step(:notify_approvers, fn data ->
         {:ok, assign(data, :notified, true)}
       end)
@@ -609,17 +611,18 @@ defmodule BatchMigrationWorkflow do
 
     # Parallel reporting (only runs if we have batches)
     # Use into: to merge results back into context
-    parallel into: fn ctx, results ->
-               merged =
-                 Enum.reduce(results, ctx, fn {_key, result}, acc ->
-                   case result do
-                     {:ok, data} -> Map.merge(acc, data)
-                     _ -> acc
-                   end
-                 end)
+    parallel :reporting,
+      into: fn ctx, results ->
+        merged =
+          Enum.reduce(results, ctx, fn {_key, result}, acc ->
+            case result do
+              {:ok, data} -> Map.merge(acc, data)
+              _ -> acc
+            end
+          end)
 
-               {:ok, merged}
-             end do
+        {:ok, merged}
+      end do
       step(:generate_report, fn data ->
         {:ok, assign(data, :report_generated, true)}
       end)

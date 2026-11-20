@@ -1,10 +1,10 @@
 # Parallel Execution
 
-Run multiple steps concurrently and collect results as tagged tuples.
+Run independent pieces of work at the same time and hand what each produced to the next step.
 
 ## Lanes
 
-Give a parallel block a name and it holds lanes. It is map and reduce: each lane does one independent piece of work, and the step after the block reduces what they found. Use it for lookups, scoring, enrichment and other work that doesn't depend on its neighbours. Steps that depend on each other, or that can't be undone, belong in a sequence.
+A parallel block has a name and holds lanes. It is map and reduce: each lane does one independent piece of work, and the step after the block reduces what they found. Use it for lookups, scoring, enrichment and other work that doesn't depend on its neighbours. Steps that depend on each other, or that can't be undone, belong in a sequence.
 
 ```elixir
 workflow "loan_application" do
@@ -88,444 +88,104 @@ end
 
 Why it failed stays on the lane's own run, which the dashboard shows. In a block that collects, an optional lane is `{:error, reason}` like any other failed lane. A lane that isn't optional still fails the block.
 
-`into:` still works on a named block: a function that gets every lane's pair and returns the data to carry on with. Prefer `on_error: :collect` and a step, which is retried, logged and shown like any other.
-
-The rest of this guide covers the older form, a `parallel` block of single steps with no name, which keeps working.
-
-## Basic Usage
+Give the lane a `default:` and the next step gets that in place of `nil`:
 
 ```elixir
-defmodule MyApp.OnboardingWorkflow do
-  use Durable
-  use Durable.Helpers
-  use Durable.Context
+step :device, [optional: true, default: %{trust: "unknown"}], fn application -> ... end
+```
 
-  workflow "onboard_user" do
-    step :create_user, fn data ->
-      user = Users.create(data)
-      {:ok, %{user_id: user.id}}
-    end
+Like a lane's own output the default has been stored, so the step reads `device["trust"]`. The step can no longer tell a device rated unknown from a lookup that failed; only the lane's run shows that.
 
-    # These three steps run concurrently
-    parallel do
-      step :send_welcome_email, fn data ->
-        Mailer.send_welcome(data.user_id)
-        {:ok, %{email_sent: true}}
-      end
+### A time limit on a lane
 
-      step :provision_workspace, fn data ->
-        workspace = Workspaces.create(data.user_id)
-        {:ok, %{workspace_id: workspace.id}}
-      end
+`timeout:` on a `lane` is how long the whole lane may take: every step in it, with their retries, sleeps and waits. A step's own `timeout:` only limits one attempt.
 
-      step :setup_billing, fn data ->
-        Billing.setup(data.user_id)
-        {:ok, %{billing_ready: true}}
-      end
-    end
+```elixir
+parallel :lookups do
+  step :credit, fn application -> ... end
 
-    # Access results from parallel steps
-    step :complete, fn data ->
-      results = parallel_results()
-
-      case {results[:send_welcome_email], results[:provision_workspace]} do
-        {{:ok, _}, {:ok, _}} ->
-          {:ok, Map.put(data, :onboarded, true)}
-
-        _ ->
-          {:error, "Onboarding incomplete"}
-      end
-    end
+  lane :social, optional: true, timeout: seconds(20) do
+    step :find_profiles, [retry: [max_attempts: 5]], fn application -> ... end
+    step :rate, fn application -> ... end
   end
 end
 ```
 
-## Results Model
+Past its limit the lane fails with a `"timeout"` error, like any failed lane: here the block goes on without it. A step that is running is stopped; a lane that is sleeping or waiting is ended by a check that runs once a minute, so it can be up to a minute late. The run's own `timeout:` still applies if it comes first. `Durable.retry/1` gives a lane that timed out its full limit again.
 
-Each branch's result is stored in the run's data under `__results__`, as JSON:
+## `into:`
 
-```elixir
-# After parallel block completes, context contains:
-%{
-  ...original_context,
-  "__results__" => %{
-    "step_name" => ["ok", returned_data]  # or ["error", reason]
-  }
-}
-```
-
-The helpers below read that as `%{step_name: {:ok, returned_data} | {:error, reason}}`.
-
-### Accessing Results
-
-Use `parallel_results/0`, `parallel_result/1`, and `parallel_ok?/1` helpers:
+`into:` takes a function that gets the data from before the block and every lane's `{:ok, output}` or `{:error, reason}`, and returns what the run carries on with: `{:ok, data}`, `{:error, reason}` or `{:goto, step, data}`. Every lane runs to its end, and nothing is put under the block's name.
 
 ```elixir
-step :handle_results, fn ctx ->
-  # Get all results
-  results = parallel_results()  # => %{payment: {:ok, ...}, delivery: {:error, ...}}
-
-  # Get specific result
-  case parallel_result(:payment) do
-    {:ok, payment} -> # handle success
-    {:error, reason} -> # handle error
-  end
-
-  # Check if step succeeded
-  if parallel_ok?(:payment) do
-    # payment was successful
-  end
-
-  {:ok, ctx}
-end
-```
-
-Or read the stored form directly from the context, with string names and lists:
-
-```elixir
-step :handle_results, fn ctx ->
-  case ctx[:__results__]["payment"] do
-    ["ok", payment] -> {:ok, Map.put(ctx, :payment_id, payment["id"])}
-    ["error", _] -> {:goto, :handle_payment_failure, ctx}
-  end
-end
-```
-
-## The `into:` Callback
-
-Use `into:` to transform results before passing to the next step:
-
-```elixir
-parallel into: fn ctx, results ->
-  # ctx = original context (unchanged by parallel steps)
-  # results = %{step_name => {:ok, data} | {:error, reason}}
-
-  case {results[:payment], results[:delivery]} do
-    {{:ok, payment}, {:ok, delivery}} ->
-      # Return transformed context
-      {:ok, Map.merge(ctx, %{
-        payment_id: payment.id,
-        delivery_status: delivery.status
-      })}
-
-    {{:ok, _}, {:error, :not_found}} ->
-      # Jump to another step
-      {:goto, :handle_backorder, ctx}
+parallel :lookups, into: fn application, lanes ->
+  case lanes do
+    %{credit: {:ok, credit}, fraud: {:ok, fraud}} ->
+      {:ok, Map.put(application, :outcome, outcome(credit["score"], fraud["risk"]))}
 
     _ ->
-      # Fail the workflow
-      {:error, "Critical failure"}
+      {:goto, :manual_review, application}
   end
 end do
-  step :payment, fn ctx -> {:ok, %{id: 123}} end
-  step :delivery, fn ctx -> {:error, :not_found} end
+  step :credit, fn application -> ... end
+  step :fraud, fn application -> ... end
 end
 ```
 
-### `into:` Return Values
+Prefer `on_error: :collect` and a step. A step is retried, logged and shown like any other; the function is none of those.
 
-| Return | Effect |
-|--------|--------|
-| `{:ok, ctx}` | Continue to next step with new context |
-| `{:error, reason}` | Fail the workflow |
-| `{:goto, :step_name, ctx}` | Jump to the named step |
+## Child workflows and waits in a lane
 
-When `into:` is provided, the `__results__` key is NOT added to the context - the `into:` callback controls what the next step receives.
-
-## The `returns:` Option
-
-Customize the key name for a step's result:
+A lane is its own run, so it can do anything a run can: retry, snooze, `sleep`, `wait_for_event`, `wait_for_input` or `call_workflow`. The block waits for it without holding a worker.
 
 ```elixir
-parallel do
-  step :fetch_order, returns: :order do
-    fn ctx -> {:ok, %{items: [...]}} end
-  end
-
-  step :fetch_user, returns: :user do
-    fn ctx -> {:ok, %{name: "John"}} end
-  end
-end
-
-# parallel_results():
-# %{order: {:ok, %{items: [...]}}, user: {:ok, %{name: "John"}}}
-```
-
-This is useful when the step name is verbose but you want a simpler key in results.
-
-## Error Handling
-
-### `:on_error` Option
-
-| Strategy | Description |
-|----------|-------------|
-| `:fail_fast` | The first branch to fail cancels the others and fails the run (default) |
-| `:complete_all` | Wait for all steps, collect all results |
-
-```elixir
-# Fail fast (default) - workflow fails on first error
-parallel on_error: :fail_fast do
-  step :critical_task, fn ctx ->
-    {:ok, ctx}
-  end
-end
-
-# Complete all - continue despite errors, let next step handle
-parallel on_error: :complete_all do
-  step :send_sms, fn ctx ->
-    case SMS.send(ctx.user_id) do
-      :ok -> {:ok, %{sms_sent: true}}
-      {:error, e} -> {:error, e}  # Preserved in results
-    end
-  end
-
-  step :send_email, fn ctx ->
-    case Mailer.send(ctx.user_id) do
-      :ok -> {:ok, %{email_sent: true}}
-      {:error, e} -> {:error, e}  # Preserved in results
-    end
-  end
-end
-
-step :check_notifications, fn ctx ->
-  results = parallel_results()
-  sms_ok = match?({:ok, _}, results[:send_sms])
-  email_ok = match?({:ok, _}, results[:send_email])
-
-  cond do
-    sms_ok and email_ok -> {:ok, Map.put(ctx, :all_sent, true)}
-    sms_ok or email_ok -> {:ok, Map.put(ctx, :partial_sent, true)}
-    true -> {:error, "All notifications failed"}
-  end
-end
-```
-
-## Examples
-
-### Fetching Data from Multiple Sources
-
-```elixir
-workflow "dashboard_data" do
-  step :init, fn input ->
-    {:ok, %{user_id: input["user_id"]}}
-  end
-
-  parallel on_error: :complete_all do
-    step :fetch_orders, fn ctx ->
-      case Orders.recent(limit: 10) do
-        {:ok, orders} -> {:ok, %{orders: orders}}
-        {:error, e} -> {:error, e}
-      end
-    end
-
-    step :fetch_metrics, fn ctx ->
-      {:ok, %{metrics: Analytics.daily_metrics()}}
-    end
-
-    step :fetch_notifications, fn ctx ->
-      {:ok, %{notifications: Notifications.unread()}}
-    end
-  end
-
-  step :build_dashboard, fn ctx ->
-    results = parallel_results()
-
-    # Handle partial failures gracefully
-    orders = case results[:fetch_orders] do
-      {:ok, data} -> data.orders
-      {:error, _} -> []
-    end
-
-    metrics = case results[:fetch_metrics] do
-      {:ok, data} -> data.metrics
-      {:error, _} -> %{}
-    end
-
-    {:ok, %{
-      dashboard: %{orders: orders, metrics: metrics},
-      has_errors: Enum.any?(results, fn {_, r} -> match?({:error, _}, r) end)
-    }}
-  end
-end
-```
-
-### Conditional Branching Based on Results
-
-```elixir
-workflow "order_processing" do
-  step :validate, fn input ->
-    {:ok, %{order_id: input["order_id"]}}
-  end
-
-  parallel into: fn ctx, results ->
-    case {results[:check_inventory], results[:check_payment]} do
-      {{:ok, inv}, {:ok, pay}} when inv.available and pay.authorized ->
-        {:ok, Map.merge(ctx, %{inventory: inv, payment: pay, ready: true})}
-
-      {{:ok, _}, {:error, :card_declined}} ->
-        {:goto, :handle_payment_issue, ctx}
-
-      {{:error, :out_of_stock}, _} ->
-        {:goto, :handle_backorder, ctx}
-
-      _ ->
-        {:error, "Order validation failed"}
-    end
-  end do
-    step :check_inventory, fn ctx ->
-      case Inventory.check(ctx.order_id) do
-        {:ok, inv} -> {:ok, %{available: inv.quantity > 0, quantity: inv.quantity}}
-        {:error, e} -> {:error, e}
-      end
-    end
-
-    step :check_payment, fn ctx ->
-      case Payment.authorize(ctx.order_id) do
-        {:ok, auth} -> {:ok, %{authorized: true, auth_code: auth.code}}
-        {:error, e} -> {:error, e}
-      end
-    end
-  end
-
-  step :fulfill_order, fn ctx ->
-    # Only reached if both checks passed
-    {:ok, Map.put(ctx, :fulfilled, true)}
-  end
-
-  step :handle_payment_issue, fn ctx ->
-    {:ok, Map.put(ctx, :needs_payment_retry, true)}
-  end
-
-  step :handle_backorder, fn ctx ->
-    {:ok, Map.put(ctx, :backordered, true)}
-  end
-end
-```
-
-### With Retry on Individual Steps
-
-```elixir
-parallel do
-  step :external_api_call, [retry: [max_attempts: 5, backoff: :exponential]], fn ctx ->
-    result = ExternalAPI.fetch_data()
-    {:ok, %{external: result}}
-  end
-
-  step :quick_local_task, fn ctx ->
-    {:ok, %{local: LocalDB.query()}}
-  end
-end
-```
-
-## Calling Child Workflows in Parallel
-
-You can use `call_workflow` inside parallel steps. Each branch is its own run, so it waits for its child the way any run does, and the child can sleep or wait too.
-
-```elixir
-parallel on_error: :complete_all do
-  step :payment, fn data ->
-    case call_workflow(MyApp.PaymentWorkflow, %{"amount" => data.total}, ref: :payment) do
-      {:ok, result} -> {:ok, assign(data, :payment, result)}
+parallel :checks do
+  step :identity, fn application ->
+    case call_workflow(MyApp.VerifyIdentity, %{"applicant" => application["applicant"]}, ref: :identity) do
+      {:ok, result} -> {:ok, %{verified: result["verified"]}}
       {:error, reason} -> {:error, reason}
     end
   end
 
-  step :shipping, fn data ->
-    case call_workflow(MyApp.ShippingWorkflow, %{"order" => data.order_id}, ref: :shipping) do
-      {:ok, result} -> {:ok, assign(data, :shipping, result)}
-      {:error, reason} -> {:error, reason}
-    end
+  step :employer, fn application ->
+    answer = wait_for_event("employer_confirmed")
+    {:ok, %{employed: answer["employed"]}}
   end
 end
 ```
 
-See the [Orchestration Guide](orchestration.md) for more details on `call_workflow`.
-
-## Waiting in a Branch
-
-Each branch is its own run, so it can do anything a run can: retry, snooze, `sleep`, `wait_for_event`, `wait_for_input` or `call_workflow`. The parent waits for it without holding a worker. To send a branch an event, use the branch's own id:
+To send a lane an event or an input, use the lane's own id:
 
 ```elixir
-[branch | _] = Durable.list_children(parent_id)
-Durable.send_event(branch.id, "go", %{})
+employer = Enum.find(Durable.list_children(run_id), &(&1.current_step == "checks__employer"))
+Durable.send_event(employer.id, "employer_confirmed", %{"employed" => true})
 ```
 
-## How It Works
+See the [Orchestration Guide](orchestration.md) for more on `call_workflow`.
 
-1. Each step in the block becomes its own run on the queue: the step's `queue:`, or the parent's
-2. Each step receives a copy of the current context (steps are isolated)
-3. The parent waits without holding a worker, and collects the results into the `__results__` map when the block is done
-4. If `into:` is provided, it transforms the results
-5. Execution continues to the next step
+## How it works
 
-## Best Practices
+1. Each lane becomes a run of its own, on the block's queue. A step with a `queue:` moves the lane there when it is reached, as in any run.
+2. Each lane starts from the data the block was given.
+3. The block's run waits without holding a worker.
+4. When the lanes are done, what each produced goes under the block's name, or to `into:`.
+5. The run carries on at the next step.
 
-### Keep Parallel Steps Independent
+## Undoing a parallel block
 
-Parallel steps shouldn't depend on each other's data:
+`compensate:` isn't allowed on a step in a lane, and it's a compile error to try: a lane that finished isn't undone when the run later fails. If lanes have effects to undo, put the compensation on a step before the block. It runs however far the block got, so have it check what actually happened, by an idempotency key from the run's input for example.
 
-```elixir
-# Good - independent operations
-parallel do
-  step :a, fn ctx -> {:ok, %{result_a: compute_a()}} end
-  step :b, fn ctx -> {:ok, %{result_b: compute_b()}} end
-end
+## Upgrading from 1.5
 
-# Bad - step b depends on step a's data
-parallel do
-  step :a, fn ctx -> {:ok, Map.put(ctx, :value, 42)} end
-  step :b, fn ctx ->
-    # ctx doesn't have :value - steps are isolated!
-    x = ctx[:value]  # Returns nil
-    {:ok, ctx}
-  end
-end
-```
+Before 1.6 a block could be written with no name, `parallel do`. That form is gone, and is a compile error that says to name the block.
 
-### Use `into:` for Complex Result Handling
+| Before | Now |
+|---|---|
+| `parallel do` | `parallel :lookups do` |
+| `parallel_results()`, `parallel_result(:credit)`, the `__results__` key | the next step's data: `%{lookups: %{credit: ...}}` |
+| `on_error: :complete_all` | `on_error: :collect` |
+| `step :credit, returns: :score` | name the step for what it returns |
+| a step returned its whole data | a lane hands back the keys it added or changed, with string keys |
+| steps stored as `parallel_<id>__credit` | `lookups__credit` |
 
-When you need to:
-- Transform multiple results into a single value
-- Make branching decisions based on results
-- Fail early on certain combinations
-
-```elixir
-parallel into: fn ctx, results ->
-  # Clear logic for handling result combinations
-  case {results[:a], results[:b]} do
-    {{:ok, a}, {:ok, b}} -> {:ok, combine(ctx, a, b)}
-    {{:error, _}, _} -> {:goto, :handle_a_failure, ctx}
-    {_, {:error, _}} -> {:goto, :handle_b_failure, ctx}
-  end
-end do
-  step :a, fn ctx -> ... end
-  step :b, fn ctx -> ... end
-end
-```
-
-### Choose the Right Error Strategy
-
-- Use `:fail_fast` when all steps must succeed. Other branches are cancelled when one fails, and a running branch stops at its next heartbeat, so what it had already done stays done
-- Use `:complete_all` when steps are independent and you want to handle partial success
-
-### Return Focused Data from Steps
-
-Return only the data the step produces, not the entire context:
-
-```elixir
-# Good - return just the new data
-step :fetch_user, fn ctx ->
-  user = Users.get(ctx.user_id)
-  {:ok, %{name: user.name, email: user.email}}
-end
-
-# Less ideal - returning modified context
-step :fetch_user, fn ctx ->
-  user = Users.get(ctx.user_id)
-  {:ok, Map.put(ctx, :user, user)}  # Works but adds unnecessary data
-end
-```
-
-## Undoing a Parallel Block
-
-`compensate:` isn't supported on a step in a parallel block, and it's a compile error to try: a branch that finished isn't undone when the run later fails. If branches have side effects to undo, put the compensation on a step before the block. It runs however far the block got, so have it check what actually happened, by an idempotency key from the run's input for example.
+A run that was in the middle of an unnamed block when the app was upgraded can't carry on: finish or cancel those first.

@@ -23,7 +23,7 @@ defmodule Durable.Integration.AuditRegressionsTest do
     alias Durable.IntegrationProbe, as: Probe
 
     workflow "a_asks_in_parallel" do
-      parallel do
+      parallel :asks do
         step(:ask, fn data ->
           Probe.note(:ask)
           wait_for_input("ok", timeout: 1, on_timeout: :fail)
@@ -39,7 +39,7 @@ defmodule Durable.Integration.AuditRegressionsTest do
     use Durable
     alias Durable.IntegrationProbe, as: Probe
 
-    workflow "a_undoes_once" do
+    workflow "a_undoes_once", on_failure: :rollback do
       step(:a, [compensate: :undo_a], fn data ->
         Probe.note(:a)
         {:ok, data}
@@ -58,10 +58,10 @@ defmodule Durable.Integration.AuditRegressionsTest do
     use Durable
     alias Durable.IntegrationProbe, as: Probe
 
-    workflow "a_into_throws" do
+    workflow "a_into_throws", on_failure: :rollback do
       step(:a, [compensate: :undo_a], fn data -> {:ok, data} end)
 
-      parallel into: fn _ctx, _results -> throw(:nope) end do
+      parallel :work, into: fn _ctx, _results -> throw(:nope) end do
         step(:x, fn data -> {:ok, data} end)
       end
 
@@ -76,7 +76,7 @@ defmodule Durable.Integration.AuditRegressionsTest do
     use Durable
     alias Durable.IntegrationProbe, as: Probe
 
-    workflow "a_dies_between_steps" do
+    workflow "a_dies_between_steps", on_failure: :rollback do
       step(:a, [compensate: :undo_a], fn data -> {:ok, data} end)
 
       branch on: fn _data ->
@@ -105,7 +105,7 @@ defmodule Durable.Integration.AuditRegressionsTest do
       :go
     end
 
-    workflow "a_lost_between_steps" do
+    workflow "a_lost_between_steps", on_failure: :rollback do
       step(:book_flight, [compensate: :cancel_flight], fn trip ->
         Probe.note(:book_flight)
         {:ok, trip}
@@ -374,14 +374,14 @@ defmodule Durable.Integration.AuditRegressionsTest do
     defmodule SharedNames do
       use Durable
 
-      workflow "a_first" do
+      workflow "a_first", on_failure: :rollback do
         step(:work, fn data -> {:ok, Map.put(data, "ran", "first")} end)
         decision(:pick, fn data -> {:ok, Map.put(data, "picked", "first")} end)
         step(:fail, [compensate: :undo], fn _data -> {:error, "first"} end)
         compensate(:undo, fn data -> {:ok, data} end)
       end
 
-      workflow "a_second" do
+      workflow "a_second", on_failure: :rollback do
         step(:work, [compensate: :undo], fn data -> {:ok, Map.put(data, "ran", "second")} end)
         decision(:pick, fn data -> {:ok, Map.put(data, "picked", "second")} end)
 
@@ -391,7 +391,7 @@ defmodule Durable.Integration.AuditRegressionsTest do
         end)
       end
 
-      workflow "a_second_fails" do
+      workflow "a_second_fails", on_failure: :rollback do
         step(:work, [compensate: :undo], fn data -> {:ok, data} end)
         step(:fail, fn _data -> {:error, "second"} end)
 

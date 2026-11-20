@@ -412,7 +412,7 @@ defmodule Durable.NamedBlocksTest do
     use Durable
     use Durable.Helpers
 
-    workflow "undo_in_arm" do
+    workflow "undo_in_arm", on_failure: :rollback do
       branch :kind, fn data -> {:book, data} end do
         :book ->
           step(:reserve, [compensate: :release], fn data -> {:ok, assign(data, :held, true)} end)
@@ -699,7 +699,7 @@ defmodule Durable.NamedBlocksTest do
         defmodule Durable.NamedBlocksTest.Bad#{System.unique_integer([:positive])} do
           use Durable
 
-          workflow "w" do
+          workflow "w", on_failure: :rollback do
             #{body}
           end
         end
@@ -796,7 +796,7 @@ defmodule Durable.NamedBlocksTest do
       assert error.description =~ "compensate:"
     end
 
-    test "a way to take a failure that only unnamed blocks have" do
+    test "on_error: :complete_all, which is now :collect" do
       error =
         compile_error("""
         parallel :p, on_error: :complete_all do

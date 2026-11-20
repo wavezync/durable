@@ -38,7 +38,7 @@ defmodule Durable.TelemetryTest do
     @moduledoc false
     use Durable
 
-    workflow "rolls_back" do
+    workflow "rolls_back", on_failure: :rollback do
       step(:book, [compensate: :unbook], fn data -> {:ok, data} end)
       step(:fail, fn _data -> raise "nope" end)
       compensate(:unbook, fn data -> {:ok, data} end)
@@ -139,6 +139,7 @@ defmodule Durable.TelemetryTest do
       end
 
       workflow "logged",
+        on_failure: :rollback,
         log_metadata: fn data ->
           if data["bad_metadata"], do: raise("no metadata for you")
           [account_id: data["account_id"]]

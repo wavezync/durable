@@ -299,7 +299,7 @@ end
 
 ## `call_workflow` Inside `parallel` Blocks
 
-`call_workflow` works inside `parallel` blocks. Each branch is its own run, so it waits for its child the way any step does: the branch suspends, the child runs on the queue, and the branch resumes with the result. The block finishes once every branch has.
+`call_workflow` works inside `parallel` blocks. Each lane is its own run, so it waits for its child the way any step does: the lane suspends, the child runs on the queue, and the lane resumes with the result. The block finishes once every lane has.
 
 ```elixir
 workflow "enrich_order" do
@@ -307,15 +307,15 @@ workflow "enrich_order" do
     {:ok, %{order_id: input["order_id"]}}
   end
 
-  parallel on_error: :complete_all do
-    step :enrich_customer, fn data ->
+  parallel :enrich, on_error: :collect do
+    step :customer, fn data ->
       case call_workflow(MyApp.CustomerLookup, %{"id" => data.order_id}, ref: :customer) do
         {:ok, result} -> {:ok, assign(data, :customer, result)}
         {:error, reason} -> {:error, reason}
       end
     end
 
-    step :enrich_inventory, fn data ->
+    step :inventory, fn data ->
       case call_workflow(MyApp.InventoryCheck, %{"id" => data.order_id}, ref: :inventory) do
         {:ok, result} -> {:ok, assign(data, :inventory, result)}
         {:error, reason} -> {:error, reason}
@@ -323,15 +323,14 @@ workflow "enrich_order" do
     end
   end
 
-  step :process, fn data ->
-    results = parallel_results()
-    # Handle results from parallel call_workflow steps...
-    {:ok, data}
+  # Each lane is {:ok, what it added} or {:error, reason}
+  step :process, fn %{enrich: %{customer: customer, inventory: inventory}} = data ->
+    {:ok, assign(data, :ready, match?({{:ok, _}, {:ok, _}}, {customer, inventory}))}
   end
 end
 ```
 
-A child called from a branch can wait like any workflow: sleep, wait for an event or input, or call workflows of its own.
+A child called from a lane can wait like any workflow: sleep, wait for an event or input, or call workflows of its own.
 
 ## Limitations
 

@@ -60,7 +60,7 @@ defmodule Durable.WorkflowKeysTest do
     workflow "keyed_parallel", reuse: :after_close do
       step :setup, fn data -> {:ok, data} end
 
-      parallel do
+      parallel :sides do
         step :left, fn data -> {:ok, data} end
 
         step :right, fn data ->
@@ -171,7 +171,7 @@ defmodule Durable.WorkflowKeysTest do
         defmodule Durable.WorkflowKeysTest.BadReuse do
           use Durable
 
-          workflow "bad", reuse: :sometimes do
+          workflow "bad", reuse: :sometimes, on_failure: :rollback do
             step :work, fn data -> {:ok, data} end
           end
         end

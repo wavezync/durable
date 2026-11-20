@@ -564,7 +564,8 @@ One run, one page — header, banner, facts, then a view switch.
 
 - **Header**: workflow name + status pill, short id, the `<.key_chip>` when
   the run has a key, and the actions that fit the run's state: Cancel (live
-  runs), Retry from step (failed), Rerun and Rerun with edited input
+  runs), Retry from step (failed), Roll back (a failed run with something to
+  undo), Rerun and Rerun with edited input
   (finished), Release key (a closed run that holds its key, when the
   workflow's `reuse:` would otherwise keep it — releasing a key `reuse:`
   already lets go would change nothing, so the button isn't offered). Actions need
@@ -579,6 +580,17 @@ One run, one page — header, banner, facts, then a view switch.
   (§10), that says what happens next: "Release `invoice:INV-2208`? This run
   keeps its history. The next start for this key sends the invoice again."
   Release (destructive) and Keep it (ghost).
+- **Roll back confirms inline** the same way, and names what will run, newest
+  first: "Roll back this run? This runs `cancel_hotel`, then `cancel_flight`.
+  It can't be retried afterwards." Roll back (destructive) and Keep it
+  (ghost). The button is offered only when `Durable.rollback_plan/2` has
+  something in it: a failed run with nothing to undo gets Retry alone.
+  A live run with something to undo gets **Cancel and roll back** beside
+  Cancel, confirmed in the same strip ("Cancel this run and roll it back?
+  This runs …"); plain Cancel still leaves what the run did.
+- **A failed run that will roll back by itself says when**, as a muted line
+  in its banner: "Rolls back by itself 26 Nov, 14:02 unless it is retried or
+  rolled back first (`on_failure: [rollback_after: …]`)." (`local_time`).
 - **Banner** says what happened in a sentence — "`charge_card` failed after
   3 attempts — <error line>", "Cancelled — <reason>. Steps that finished stay
   finished." — with "Show error" linking straight to the inspector pane, and

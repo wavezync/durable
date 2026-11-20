@@ -38,6 +38,9 @@ defmodule Durable.Executor do
   # not through it again on its own result: a parallel block isn't started a
   # second time, and a branch doesn't decide again.
   @done "__done__"
+  # Put on a failed run by `rollback_workflow/2`, holding the error it failed
+  # with: the worker that claims it runs its compensations and nothing else.
+  @rollback "__rollback__"
   # What 1.5.0 recorded on a park instead. Kept for runs parked over an upgrade.
   @atom_keys "__atom_keys__"
 
@@ -223,6 +226,9 @@ defmodule Durable.Executor do
         select: w
       )
 
+    seen = opts[:rollback] && status_now(config, workflow_id)
+    cancellable = if seen, do: where(cancellable, [w], w.status == ^seen), else: cancellable
+
     case Repo.update_all(config, cancellable,
            set: [
              status: :cancelled,
@@ -236,13 +242,39 @@ defmodule Durable.Executor do
          ) do
       {1, [cancelled]} ->
         after_cancel(config, cancelled)
+        if opts[:rollback], do: roll_back_cancelled(config, cancelled, seen)
         :ok
 
       {0, _} ->
-        if Repo.get(config, WorkflowExecution, workflow_id),
-          do: {:error, :already_completed},
-          else: {:error, :not_found}
+        not_cancelled(status_now(config, workflow_id), seen, {workflow_id, reason, opts})
     end
+  end
+
+  # A rollback has to know whether a worker had the run, so its cancel only
+  # lands on the status it saw.
+  defp status_now(config, workflow_id) do
+    Repo.one(config, from(w in WorkflowExecution, where: w.id == ^workflow_id, select: w.status))
+  end
+
+  defp not_cancelled(nil, _seen, _cancel), do: {:error, :not_found}
+
+  # It moved between the read and the cancel: go by what it is now.
+  defp not_cancelled(status, seen, {workflow_id, reason, opts})
+       when seen != nil and status in [:pending, :running, :waiting],
+       do: cancel_run(workflow_id, reason, opts)
+
+  defp not_cancelled(_ended, _seen, _cancel), do: {:error, :already_completed}
+
+  # `rollback: true`: the cancelled run goes back on its queue to be undone.
+  # A worker that had it is told at its next heartbeat, and until then a step
+  # of its can still finish. The undo waits that long, so it sees that step.
+  defp roll_back_cancelled(config, cancelled, seen) do
+    at =
+      if seen == :running,
+        do: DateTime.add(DateTime.utc_now(), config.heartbeat_interval, :millisecond)
+
+    with {:ok, queued} <- queue_rollback(config, cancelled, at),
+         do: DurablePubSub.wake(config, queued)
   end
 
   @doc """
@@ -316,6 +348,64 @@ defmodule Durable.Executor do
       DurablePubSub.wake(config, retried)
       {:ok, workflow_id}
     end
+  end
+
+  @doc """
+  Undoes a failed run: runs the `compensate:` of every step that completed,
+  newest first, on a worker.
+
+  For a run that failed and was left as it was (`on_failure: :halt`, the
+  default) once it's clear it shouldn't be retried. The run ends
+  `:compensated`, or `:compensation_failed` if an undo failed, and can't be
+  retried after. A run with nothing to undo stays `:failed`.
+  """
+  @spec rollback_workflow(String.t(), keyword()) :: {:ok, String.t()} | {:error, term()}
+  def rollback_workflow(workflow_id, opts \\ []) do
+    config = Config.get(Keyword.get(opts, :durable, Durable))
+
+    with {:ok, execution} <- load_execution(config, workflow_id),
+         :ok <- ensure_retryable(execution.status),
+         {:ok, queued} <- queue_rollback(config, execution) do
+      DurablePubSub.wake(config, queued)
+      {:ok, workflow_id}
+    end
+  end
+
+  @doc """
+  What `rollback_workflow/2` would run: the compensation of every step that
+  completed, newest first, as `{step, compensation}` names. Empty when there
+  is nothing to undo or the run's code isn't on this node.
+  """
+  @spec rollback_plan(String.t(), keyword()) :: [{atom(), atom()}]
+  def rollback_plan(workflow_id, opts \\ []) do
+    config = Config.get(Keyword.get(opts, :durable, Durable))
+
+    with {:ok, execution} <- load_execution(config, workflow_id),
+         {:ok, workflow_def} <- get_workflow_definition_from_execution(execution) do
+      for {step, compensation} <- build_compensation_stack(execution.id, workflow_def, config),
+          do: {step, compensation.name}
+    else
+      _ -> []
+    end
+  end
+
+  defp queue_rollback(config, execution, at \\ nil) do
+    execution
+    |> Ecto.Changeset.change(
+      status: :pending,
+      context:
+        Map.put(execution.context || %{}, @rollback, %{
+          "error" => execution.error || %{},
+          "status" => Atom.to_string(execution.status)
+        }),
+      completed_at: nil,
+      scheduled_at: at,
+      locked_by: nil,
+      locked_at: nil,
+      lock_token: nil
+    )
+    |> cas_update(config)
+    |> not_failed_if_superseded()
   end
 
   defp ensure_retryable(:failed), do: :ok
@@ -503,6 +593,13 @@ defmodule Durable.Executor do
         config,
         from(c in WorkflowExecution, where: c.id in ^Enum.map(runs, &elem(&1, 0))),
         set: [status: status, updated_at: now] ++ retry_attrs
+      )
+    end
+
+    # A lane with a `timeout:` gets all of it again.
+    for {id, _ctx} <- stopped, ms = parallel_children(context)[id]["timeout"] do
+      Repo.update_all(config, from(c in WorkflowExecution, where: c.id == ^id),
+        set: [deadline_at: lane_deadline(retry_attrs[:deadline_at], ms)]
       )
     end
 
@@ -753,16 +850,26 @@ defmodule Durable.Executor do
         Map.get(execution.context, :__parallel_step)
 
     lane_steps = parallel_step_flag && lane_steps(workflow_def, parallel_step_flag)
+    # Whose deadline a timeout names: the lane's own, if it has one.
+    Process.put(:durable_lane_timeout, lane_timeout(execution, workflow_def))
     {done, context} = Map.pop(execution.context, @done)
     execution = %{execution | context: context}
 
     result =
       cond do
+        is_map_key(context, @rollback) ->
+          roll_back(execution, workflow_def, config)
+
         lane_steps ->
           run_lane(execution, lane_steps, {parallel_step_flag, done}, workflow_def, config)
 
+        # A lane the deployed code no longer has. Run as a whole workflow, it
+        # would repeat every step after the block.
         parallel_step_flag ->
-          execute_parallel_step(execution, workflow_def, config)
+          mark_failed(config, execution, %{
+            type: "parallel_step_not_found",
+            message: "Lane #{parallel_step_flag} not found in workflow"
+          })
 
         true ->
           # Pipeline model: start with workflow input or restored context
@@ -778,13 +885,27 @@ defmodule Durable.Executor do
     result
   end
 
-  # The steps of the lane a run was started for, if its marker names a lane
-  # (and not one step of an unnamed parallel block).
+  # The steps of the lane a run was started for, if the workflow still has it.
   defp lane_steps(workflow_def, lane_id) do
     Enum.find_value(workflow_def.steps, fn
       %{type: :parallel, opts: %{lanes: lanes}} ->
         with {_id, _lane, names} <- Enum.find(lanes, &(to_string(elem(&1, 0)) == lane_id)),
              do: Enum.filter(workflow_def.steps, &(&1.name in names))
+
+      _step ->
+        nil
+    end)
+  end
+
+  # The lane a run was started for and its `timeout:`, if it has one.
+  defp lane_timeout(execution, workflow_def) do
+    lane_id = execution.context["__parallel_step"]
+
+    Enum.find_value(workflow_def.steps, fn
+      %{type: :parallel, opts: %{lanes: lanes} = opts} ->
+        with {_id, lane, _names} <- Enum.find(lanes, &(to_string(elem(&1, 0)) == lane_id)),
+             ms when is_integer(ms) <- Map.get(opts[:timeouts] || %{}, lane),
+             do: {lane, ms}
 
       _step ->
         nil
@@ -1079,12 +1200,13 @@ defmodule Durable.Executor do
 
   # The deadline passed before `step` began.
   defp time_out(execution, step, workflow_def, config) do
-    error = %{
-      type: "timeout",
-      message:
-        "the run passed its #{format_timeout(workflow_def.opts[:timeout])} timeout " <>
-          "before #{step.name}"
-    }
+    passed =
+      case Process.get(:durable_lane_timeout) do
+        {lane, ms} -> "lane #{lane} passed its #{format_timeout(ms)} timeout"
+        nil -> "the run passed its #{format_timeout(workflow_def.opts[:timeout])} timeout"
+      end
+
+    error = %{type: "timeout", message: "#{passed} before #{step.name}"}
 
     fail_at(execution, step, error, workflow_def, config)
   end
@@ -1741,7 +1863,7 @@ defmodule Durable.Executor do
     error_strategy = opts[:error_strategy] || :fail_fast
     into_fn = opts[:into_fn]
 
-    ordered_steps = block_children(opts, remaining_steps)
+    ordered_steps = block_children(opts)
 
     # Save data before parallel execution
     {:ok, exec} = save_data_as_context(config, exec, data)
@@ -1770,15 +1892,18 @@ defmodule Durable.Executor do
     end
   end
 
-  # What runs as a child: each lane of a named block, or each step of an
-  # unnamed one. A lane is started like a step, under its own id.
-  defp block_children(%{lanes: lanes} = opts, _remaining_steps) do
+  # What runs as a child: each lane, started like a step, under its own id.
+  defp block_children(%{lanes: lanes} = opts) do
     for {id, lane, _names} <- lanes,
-        do: %{name: id, opts: %{returns: lane, optional: lane in (opts[:optional] || [])}}
+        do: %{
+          name: id,
+          opts: %{
+            returns: lane,
+            optional: lane in (opts[:optional] || []),
+            timeout: Map.get(opts[:timeouts] || %{}, lane)
+          }
+        }
   end
-
-  defp block_children(opts, remaining_steps),
-    do: find_ordered_steps(remaining_steps, opts[:steps] || [])
 
   # Fan-out: create child workflow executions for each parallel step and wait
   # In one transaction: a branch that a worker could claim while the parent was
@@ -1808,16 +1933,18 @@ defmodule Durable.Executor do
         child_queue = step.opts[:queue] || parent_queue
 
         {:ok, child} = create_parallel_child(exec, step, data, child_queue, config)
-        {child.id, Atom.to_string(step.name), returns_key, step.opts[:optional] == true}
+
+        {child.id, Atom.to_string(step.name), returns_key,
+         %{"optional" => step.opts[:optional] == true, "timeout" => step.opts[:timeout]}}
       end)
 
     # Build event names and children metadata map
     event_names = Enum.map(children_meta, fn {id, _, _, _} -> "__parallel_done:#{id}" end)
 
     children_map =
-      Map.new(children_meta, fn {id, step_name, returns_key, optional} ->
+      Map.new(children_meta, fn {id, step_name, returns_key, lane_opts} ->
         returns_str = if is_atom(returns_key), do: Atom.to_string(returns_key), else: returns_key
-        {id, %{"step_name" => step_name, "returns_key" => returns_str, "optional" => optional}}
+        {id, Map.merge(lane_opts, %{"step_name" => step_name, "returns_key" => returns_str})}
       end)
 
     # Create WaitGroup + PendingEvents for all children
@@ -1866,6 +1993,14 @@ defmodule Durable.Executor do
     exec
   end
 
+  # A lane with a `timeout:` has until then, or until the run's own deadline.
+  defp lane_deadline(run_deadline, nil), do: run_deadline
+
+  defp lane_deadline(run_deadline, ms) do
+    at = DateTime.add(DateTime.utc_now(), ms, :millisecond)
+    if run_deadline && DateTime.before?(run_deadline, at), do: run_deadline, else: at
+  end
+
   # Create a child workflow execution for a single parallel step
   defp create_parallel_child(parent_exec, step, data, queue, config) do
     # Inherit the parent's accumulated context so prior put_context/2 calls
@@ -1890,98 +2025,12 @@ defmodule Durable.Executor do
       trigger: :parent,
       current_step: Atom.to_string(step.name),
       # A branch is part of the run, so the run's deadline stops it too.
-      deadline_at: parent_exec.deadline_at
+      deadline_at: lane_deadline(parent_exec.deadline_at, step.opts[:timeout])
     }
 
     %WorkflowExecution{}
     |> WorkflowExecution.changeset(attrs)
     |> Repo.insert(config)
-  end
-
-  # Execute a single parallel step (called when a child execution is picked up)
-  # The marker stays in the saved context: without it, a branch that wakes up
-  # would run as a whole workflow and repeat every step after the block.
-  defp save_branch_context(config, execution, data, step_name) do
-    save_data_as_context(config, execution, Map.put(data, "__parallel_step", step_name))
-  end
-
-  defp execute_parallel_step(execution, workflow_def, config) do
-    step_name_str =
-      Map.get(execution.context, "__parallel_step") ||
-        Map.get(execution.context, :__parallel_step)
-
-    step_name = String.to_existing_atom(step_name_str)
-
-    step_def = Enum.find(workflow_def.steps, &(&1.name == step_name))
-
-    cond do
-      is_nil(step_def) ->
-        mark_failed(config, execution, %{
-          type: "parallel_step_not_found",
-          message: "Step #{step_name} not found in workflow"
-        })
-
-      # An `on_timeout: :fail` wait timed out. Run again, the step would only
-      # ask again, for ever.
-      error = resume_failure(execution) ->
-        {:ok, execution} =
-          execution
-          |> Ecto.Changeset.change(context: Map.delete(execution.context, "__fail__"))
-          |> cas_update!(config)
-
-        mark_failed(config, execution, error)
-
-      true ->
-        run_parallel_step(execution, step_def, workflow_def, config)
-    end
-  end
-
-  defp run_parallel_step(execution, step_def, workflow_def, config) do
-    step_name_str = Atom.to_string(step_def.name)
-
-    # Merge the inherited parent context into the pipeline data so that
-    # get_context/1 inside the step body resolves keys set by prior
-    # put_context/2 calls in the parent's non-parallel steps.
-    #
-    # StepRunner will Process.put(:durable_context, data) before running
-    # the body, which is why we need these keys to live inside `data`.
-    # The __parallel_step marker is internal plumbing — strip it from
-    # what the user sees.
-    data =
-      execution.context
-      |> Map.drop(["__parallel_step", :__parallel_step, @atom_keys])
-      |> Map.merge(execution.input)
-      |> restore_keys()
-      |> restore_lane_keys(workflow_def)
-
-    case StepRunner.execute(step_def, data, execution.id, config, execution.deadline_at) do
-      {:ok, output_data} ->
-        mark_completed(config, execution, output_data)
-
-      {:error, error} ->
-        mark_failed(config, execution, error)
-
-      {:cancel, reason, scope} ->
-        cancel_from_step(config, execution, reason, scope)
-
-      {:park, delay_ms} ->
-        park(config, execution, delay_ms)
-
-      {wait_type, wait_opts}
-      when wait_type in [:sleep, :wait_for_event, :wait_for_input, :wait_for_any, :wait_for_all] ->
-        {:ok, exec} = save_branch_context(config, execution, data, step_name_str)
-        handle_wait_result(config, exec, wait_type, wait_opts)
-
-      {:call_workflow, call_opts} ->
-        {:ok, exec} = save_branch_context(config, execution, data, step_name_str)
-        handle_call_workflow(config, exec, call_opts)
-
-      {:decision, _target, _data} ->
-        mark_failed(config, execution, %{
-          type: "parallel_decision_not_supported",
-          message: "decisions not supported in parallel blocks"
-        })
-    end
   end
 
   # Collect results from completed child executions (called when parent resumes)
@@ -2079,16 +2128,6 @@ defmodule Durable.Executor do
     end)
   end
 
-  defp find_ordered_steps(remaining_steps, step_names) do
-    steps_to_execute =
-      Enum.filter(remaining_steps, fn step -> step.name in step_names end)
-
-    Enum.map(step_names, fn name ->
-      Enum.find(steps_to_execute, fn s -> s.name == name end)
-    end)
-    |> Enum.reject(&is_nil/1)
-  end
-
   # Handle completion of parallel block - apply into_fn or add __results__
   # Uses opts map to reduce arity below credo's limit of 8
   defp handle_parallel_completion(results, base_ctx, into_fn, opts) do
@@ -2104,10 +2143,7 @@ defmodule Durable.Executor do
 
     block = Enum.find(workflow_def.steps, &(&1.name == parallel_step_name))
 
-    results =
-      if is_map_key(block.opts, :result_key),
-        do: lane_outputs(results, base_ctx),
-        else: results
+    results = lane_outputs(results, base_ctx)
 
     case apply_parallel_into(into_fn, base_ctx, results, block.opts) do
       {:ok, final_ctx} ->
@@ -2157,7 +2193,7 @@ defmodule Durable.Executor do
   # so the block's is put the same way to compare. A lane can't hand back that
   # it removed a key.
   defp lane_outputs(results, started_with) do
-    started_with = started_with |> sanitize_for_json() |> Jason.encode!() |> Jason.decode!()
+    started_with = stored(started_with)
 
     Map.new(results, fn
       {lane, {:ok, data}} ->
@@ -2168,9 +2204,11 @@ defmodule Durable.Executor do
     end)
   end
 
+  defp stored(data), do: data |> sanitize_for_json() |> Jason.encode!() |> Jason.decode!()
+
   defp left_alone?({key, value}, started_with), do: Map.fetch(started_with, key) == {:ok, value}
 
-  # Apply into function or default to __results__
+  # Apply the into function, or put each lane under the block's name.
   # A named block: each lane goes under the block's name. Every lane finished
   # (one that didn't has failed the block), so that is its data; a block that
   # collects says how each lane ended.
@@ -2182,18 +2220,12 @@ defmodule Durable.Executor do
         {lane, {:ok, data}} when collect? -> {lane, {:ok, Map.delete(data, @string_keys)}}
         {lane, {:ok, data}} -> {lane, Map.delete(data, @string_keys)}
         {lane, {:error, reason}} when collect? -> {lane, {:error, reason}}
-        # Only an optional lane gets here failed: the block did without it.
-        {lane, {:error, _reason}} -> {lane, nil}
+        # Only an optional lane gets here failed: the block did without it,
+        # and hands on its `default:`, put as a lane's stored data would be.
+        {lane, {:error, _reason}} -> {lane, stored(Map.get(opts[:defaults] || %{}, lane))}
       end)
 
     {:ok, base_ctx |> Map.delete(to_string(result_key)) |> Map.put(result_key, lanes)}
-  end
-
-  defp apply_parallel_into(nil, base_ctx, results, _unnamed) do
-    # No into function - add results to __results__ key
-    # Serialize tuples to lists for JSON storage
-    serialized_results = serialize_parallel_results(results)
-    {:ok, Map.put(base_ctx, :__results__, serialized_results)}
   end
 
   defp apply_parallel_into(into_fn, base_ctx, results, _opts)
@@ -2209,29 +2241,6 @@ defmodule Durable.Executor do
     # past its compensations.
     kind, reason -> {:error, caught_error(kind, reason, __STACKTRACE__)}
   end
-
-  # Serialize tagged tuples to lists for JSON storage
-  # {:ok, data} -> ["ok", data], {:error, reason} -> ["error", reason]
-  defp serialize_parallel_results(results) do
-    Map.new(results, fn {key, value} ->
-      serialized_key = if is_atom(key), do: Atom.to_string(key), else: key
-
-      serialized_value =
-        case value do
-          {:ok, data} -> ["ok", data]
-          {:error, reason} -> ["error", serialize_error_reason(reason)]
-          other -> other
-        end
-
-      {serialized_key, serialized_value}
-    end)
-  end
-
-  # Serialize error reasons that might contain atoms
-  defp serialize_error_reason(reason) when is_atom(reason), do: Atom.to_string(reason)
-  defp serialize_error_reason(reason) when is_map(reason), do: reason
-  defp serialize_error_reason(reason) when is_binary(reason), do: reason
-  defp serialize_error_reason(reason), do: inspect(reason)
 
   # Normalize error to map format
   defp normalize_error(error) when is_map(error), do: error
@@ -2434,7 +2443,10 @@ defmodule Durable.Executor do
     {:ok, execution}
   end
 
-  defp mark_failed(config, execution, error) do
+  # `rollback_at` is when a halted run is to be undone if nobody has acted by
+  # then (`on_failure: [rollback_after: ms]`). It's kept in `scheduled_at`,
+  # which means nothing else on a failed run; the timeout sweep reads it.
+  defp mark_failed(config, execution, error, rollback_at \\ nil) do
     # Sanitize the error before persisting — a step crash may hand us a map
     # containing tuples, PIDs, or functions (via stacktrace, raw values, etc).
     # Postgres JSONB can't store those, so we recursively replace unencodable
@@ -2449,7 +2461,7 @@ defmodule Durable.Executor do
           error: safe_error,
           completed_at: DateTime.utc_now()
         })
-        |> Ecto.Changeset.change(locked_by: nil, locked_at: nil, scheduled_at: nil)
+        |> Ecto.Changeset.change(locked_by: nil, locked_at: nil, scheduled_at: rollback_at)
         |> cas_update!(config)
       rescue
         e ->
@@ -2964,23 +2976,62 @@ defmodule Durable.Executor do
   # Compensation/Saga Support
   # ============================================================================
 
-  # Handles step failure by running compensations if needed
+  # A run that fails is left failed, to be retried or rolled back by hand,
+  # unless the workflow rolls back on failure or the step asked for it.
   defp handle_step_failure(execution, error, workflow_def, config) do
     # `error` is a map column: a step's `{:error, "declined"}` must become a
     # map here, or the failed/compensated write is rejected and the run stays
     # :running.
     error = storable_error(error)
 
-    # Get the compensation stack from completed steps
-    compensation_stack = build_compensation_stack(execution.id, workflow_def, config)
+    if workflow_def.opts[:on_failure] == :rollback or asks_rollback?(error),
+      do: compensate_or_fail(execution, error, workflow_def, config),
+      else: mark_failed(config, execution, error, rollback_at(execution, workflow_def))
+  end
 
-    if compensation_stack == [] do
-      # No compensations to run - just mark as failed
-      mark_failed(config, execution, error)
-    else
-      # Run compensations
-      run_compensations(execution, error, compensation_stack, workflow_def, config)
+  # A lane has nothing of its own to undo: its block's run is the one that waits.
+  defp rollback_at(execution, %{opts: %{on_failure: [rollback_after: ms]}}) do
+    unless parallel_branch?(execution), do: DateTime.add(DateTime.utc_now(), ms, :millisecond)
+  end
+
+  defp rollback_at(_execution, _workflow_def), do: nil
+
+  # `{:rollback, reason}` from a step, or from a lane's step by way of its block.
+  defp asks_rollback?(error), do: "rollback" in [error[:type], error["type"]]
+
+  defp compensate_or_fail(execution, error, workflow_def, config) do
+    case build_compensation_stack(execution.id, workflow_def, config) do
+      [] -> mark_failed(config, execution, error)
+      stack -> run_compensations(execution, error, stack, workflow_def, config)
     end
+  end
+
+  # `rollback_workflow/2` asked: undo the run, keeping the error it failed with.
+  defp roll_back(execution, workflow_def, config) do
+    {%{"error" => error, "status" => was}, context} = Map.pop(execution.context, @rollback)
+
+    {:ok, execution} =
+      execution |> Ecto.Changeset.change(context: context) |> cas_update!(config)
+
+    case build_compensation_stack(execution.id, workflow_def, config) do
+      [] when was == "cancelled" -> back_to_cancelled(config, execution, error)
+      [] -> mark_failed(config, execution, error)
+      stack -> run_compensations(execution, error, stack, workflow_def, config)
+    end
+  end
+
+  # A cancelled run that turned out to have nothing to undo.
+  defp back_to_cancelled(config, execution, error) do
+    {:ok, _} =
+      execution
+      |> WorkflowExecution.status_changeset(:cancelled, %{
+        error: error,
+        completed_at: DateTime.utc_now()
+      })
+      |> Ecto.Changeset.change(locked_by: nil, locked_at: nil, scheduled_at: nil)
+      |> cas_update!(config)
+
+    {:error, error}
   end
 
   # Builds the compensation stack from completed steps in reverse order

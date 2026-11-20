@@ -525,7 +525,7 @@ defmodule Durable.Fuzz.NamedTest do
     end
   end
 
-  # Lane :a failing costs nothing; :b1 or :c failing fails the block, and then
+  # Lane :a failing costs nothing, and its default is handed on; :b1 or :c failing fails the block, and then
   # a lane is stopped wherever it has got to.
   defp optional_model(script) do
     lanes = for {lane, seq} <- @optional_lanes, do: {lane, walk(seq, script)}
@@ -535,7 +535,7 @@ defmodule Durable.Fuzz.NamedTest do
 
     handed =
       Map.new(lanes, fn {lane, {how, _, _}} ->
-        {lane, if(how == :done, do: :data, else: :nothing)}
+        {lane, if(how == :done, do: :data, else: :default)}
       end)
 
     cond do
@@ -580,7 +580,11 @@ defmodule Durable.Fuzz.NamedTest do
     if model.handed && run.status == :completed do
       for {lane, came} <- model.handed do
         stored = run.context["lookups"]["#{lane}"]
-        assert is_map(stored) == (came == :data), "#{lane} stored as #{inspect(stored)}: #{label}"
+
+        assert stored == %{"fallback" => true} == (came == :default),
+               "#{lane} stored as #{inspect(stored)}: #{label}"
+
+        assert is_map(stored), "#{lane} stored as #{inspect(stored)}: #{label}"
       end
     end
 
@@ -600,7 +604,7 @@ defmodule Durable.Fuzz.NamedTest do
       Enum.each(runs, &check_optional/1)
     end
 
-    assert Probe.hits({:handed, [:data, :nothing]}) > 0, "never went on without the optional lane"
+    assert Probe.hits({:handed, [:data, :default]}) > 0, "never went on without the optional lane"
     assert Probe.hits({:handed, [:data]}) > 0, "never reduced lanes that all finished"
   end
 

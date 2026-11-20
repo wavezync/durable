@@ -11,7 +11,7 @@ defmodule Durable.CompensationTest do
     use Durable
     use Durable.Helpers
 
-    workflow "book_trip" do
+    workflow "book_trip", on_failure: :rollback do
       step(:book_flight, [compensate: :cancel_flight], fn data ->
         {:ok,
          data
@@ -46,7 +46,7 @@ defmodule Durable.CompensationTest do
     use Durable
     use Durable.Helpers
 
-    workflow "failing_compensation" do
+    workflow "failing_compensation", on_failure: :rollback do
       step(:do_work, [compensate: :undo_work], fn data ->
         {:ok, assign(data, :work_done, true)}
       end)
@@ -82,7 +82,7 @@ defmodule Durable.CompensationTest do
     use Durable
     use Durable.Helpers
 
-    workflow "successful" do
+    workflow "successful", on_failure: :rollback do
       step(:step_one, [compensate: :undo_one], fn data ->
         {:ok, assign(data, :one, true)}
       end)
@@ -102,7 +102,7 @@ defmodule Durable.CompensationTest do
     use Durable
     use Durable.Helpers
 
-    workflow "partial_compensation" do
+    workflow "partial_compensation", on_failure: :rollback do
       step(:step_one, [compensate: :undo_one], fn data ->
         {:ok, assign(data, :one, true)}
       end)
@@ -131,7 +131,7 @@ defmodule Durable.CompensationTest do
   defmodule UndoReturns do
     use Durable
 
-    workflow "undo_returns" do
+    workflow "undo_returns", on_failure: :rollback do
       step(:book, [compensate: :unbook], fn data -> {:ok, data} end)
       step(:charge, fn _data -> {:fail, "card declined"} end)
 
@@ -144,7 +144,7 @@ defmodule Durable.CompensationTest do
   defmodule UndoRetries do
     use Durable
 
-    workflow "undo_retries" do
+    workflow "undo_retries", on_failure: :rollback do
       step(:book, [compensate: :unbook], fn data -> {:ok, data} end)
       step(:charge, fn _data -> {:fail, "card declined"} end)
 
@@ -164,7 +164,7 @@ defmodule Durable.CompensationTest do
   defmodule UndoChain do
     use Durable
 
-    workflow "undo_chain" do
+    workflow "undo_chain", on_failure: :rollback do
       step(:first, [compensate: :undo_first], fn data -> {:ok, data} end)
       step(:second, [compensate: :undo_second], fn data -> {:ok, data} end)
       step(:charge, fn _data -> {:fail, "card declined"} end)
@@ -178,7 +178,7 @@ defmodule Durable.CompensationTest do
   defmodule StepReturnsError do
     use Durable
 
-    workflow "step_returns_error" do
+    workflow "step_returns_error", on_failure: :rollback do
       step(:charge, fn data ->
         Durable.CompensationTest.returned(data[:returns] || data["returns"], data)
       end)
@@ -343,8 +343,8 @@ defmodule Durable.CompensationTest do
           defmodule ParallelCompensationRejected do
             use Durable
 
-            workflow "parallel_compensation_rejected" do
-              parallel do
+            workflow "parallel_compensation_rejected", on_failure: :rollback do
+              parallel :tasks do
                 step(:task_a, [compensate: :undo_task_a], fn data -> {:ok, data} end)
               end
 
@@ -354,6 +354,7 @@ defmodule Durable.CompensationTest do
           """)
         end
 
+      assert Exception.message(error) =~ "compensate:"
       assert Exception.message(error) =~ "parallel block"
     end
   end
@@ -543,7 +544,7 @@ defmodule SingleStepRaisingCompensationWorkflow do
   use Durable
   use Durable.Helpers
 
-  workflow "single_step_raising_compensation" do
+  workflow "single_step_raising_compensation", on_failure: :rollback do
     step(:setup_step, [compensate: :undo_setup], fn data ->
       {:ok, assign(data, :setup_done, true)}
     end)
@@ -562,7 +563,7 @@ defmodule ErrorMapCompensationWorkflow do
   use Durable
   use Durable.Helpers
 
-  workflow "error_map_compensation" do
+  workflow "error_map_compensation", on_failure: :rollback do
     step(:do_work, [compensate: :undo_work], fn data ->
       {:ok, assign(data, :work_done, true)}
     end)
