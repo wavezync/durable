@@ -196,6 +196,9 @@ defmodule Durable.Queue.Adapters.Postgres do
           error: error,
           completed_at: now,
           updated_at: now,
+          # On a failed run this is when to roll it back (the timeout sweep),
+          # and what a retry's backoff or a delayed start left there isn't.
+          scheduled_at: nil,
           locked_by: nil,
           locked_at: nil,
           lock_token: nil
@@ -406,6 +409,8 @@ defmodule Durable.Queue.Adapters.Postgres do
           set: [
             status: :failed,
             error: zombie_error,
+            # As in fail_unrecorded/4: not a time to roll back at.
+            scheduled_at: nil,
             locked_by: nil,
             locked_at: nil,
             completed_at: now,

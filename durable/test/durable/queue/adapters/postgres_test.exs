@@ -445,6 +445,30 @@ defmodule Durable.Queue.Adapters.PostgresTest do
       assert %{status: :failed} = repo().get!(StepExecution, row.id)
     end
 
+    test "a compensating zombie isn't left with a time the sweep would roll it back at" do
+      long_ago = DateTime.add(DateTime.utc_now(), -3600, :second)
+
+      # Claimed after a retry's backoff, which is still in scheduled_at.
+      zombie =
+        insert_execution(
+          workflow_name: "comp_killed_after_backoff",
+          status: :compensating,
+          locked_by: "gone",
+          locked_at: long_ago,
+          scheduled_at: long_ago
+        )
+
+      {1, _} =
+        repo().update_all(
+          from(w in WorkflowExecution, where: w.id == ^zombie.id),
+          set: [updated_at: long_ago]
+        )
+
+      {:ok, 1} = Postgres.recover_zombie_workflows(config(), 300)
+
+      assert %{status: :failed, scheduled_at: nil} = repo().get!(WorkflowExecution, zombie.id)
+    end
+
     test "handles multiple zombies in a single sweep" do
       long_ago = DateTime.add(DateTime.utc_now(), -3600, :second)
 
