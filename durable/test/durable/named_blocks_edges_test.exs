@@ -59,6 +59,39 @@ defmodule Durable.NamedBlocksEdgesTest do
     end
   end
 
+  defmodule Checks do
+    use Durable
+    use Durable.Helpers
+    use Durable.Orchestration
+    use Durable.Wait
+
+    # The applicant uploads a document while the credit bureau is asked.
+    workflow "checks" do
+      parallel :checks do
+        step(:identity, fn application ->
+          case call_workflow(__MODULE__, %{"applicant" => application["applicant"]},
+                 ref: :identity,
+                 workflow: "verify_identity"
+               ) do
+            {:ok, result} -> {:ok, %{verified: result["verified"]}}
+            {:error, reason} -> {:error, reason}
+          end
+        end)
+
+        step(:credit, [retry: [max_attempts: 2]], fn _application ->
+          if Seen.get(:bureau_down), do: {:error, "bureau is down"}, else: {:ok, %{score: 710}}
+        end)
+      end
+    end
+
+    workflow "verify_identity" do
+      step(:check_document, fn applicant ->
+        document = wait_for_input("document")
+        {:ok, assign(applicant, :verified, document["valid"])}
+      end)
+    end
+  end
+
   defmodule TwoWorkflows do
     use Durable
     use Durable.Helpers
@@ -299,6 +332,37 @@ defmodule Durable.NamedBlocksEdgesTest do
       assert length(run.context["scores"]) == 2
       # The lanes had finished: nothing ran twice.
       assert length(lanes(run)) == 2
+    end
+  end
+
+  describe "retrying a block that stopped a lane waiting for its child workflow" do
+    # Needs a decision. Stopping the block cancelled the lane's child, and a
+    # retry puts the lane back but not the child: `call_workflow` finds it
+    # cancelled and the lane fails again with "parent_cancelled". Either the
+    # retry reopens the child where it stopped, as it does a lane's own block,
+    # or `call_workflow` starts a new child, repeating what the first had done.
+    @tag :skip
+    test "puts that lane back to work, child and all" do
+      on_exit(fn -> Seen.clear(:bureau_down) end)
+      Seen.put(:bureau_down, true)
+      run = run_workflow(Checks, %{"applicant" => "A-1"}, workflow: "checks")
+      assert run.status == :failed
+      assert run.error["message"] == "bureau is down"
+
+      Seen.clear(:bureau_down)
+      {:ok, _} = Durable.retry(run.id)
+      run = drain(run)
+      assert run.status == :waiting
+
+      identity = Enum.find(lanes(run), &(&1.current_step == "checks__identity"))
+      [child] = Enum.filter(lanes(identity), &(&1.status == :waiting))
+      :ok = Durable.provide_input(child.id, "document", %{"valid" => true})
+      run = drain(run)
+
+      assert run.status == :completed
+
+      assert %{"identity" => %{"verified" => true}, "credit" => %{"score" => 710}} =
+               run.context["checks"]
     end
   end
 
