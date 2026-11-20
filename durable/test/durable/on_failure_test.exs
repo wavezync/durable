@@ -61,6 +61,13 @@ defmodule Durable.OnFailureTest do
       compensate(:cancel_flight, fn trip -> Steps.cancel_flight(trip) end)
     end
 
+    # A booking has to be through within the hour.
+    workflow "book_trip_within_the_hour", timeout: hours(1) do
+      step(:book_flight, [compensate: :cancel_flight], fn trip -> Steps.book_flight(trip) end)
+      step(:charge_card, fn trip -> Steps.charge_card(trip) end)
+      compensate(:cancel_flight, fn trip -> Steps.cancel_flight(trip) end)
+    end
+
     workflow "quotes_wait_five_days", on_failure: [rollback_after: days(5)] do
       parallel :insurers do
         step(:north, fn _trip -> {:error, "insurer is down"} end)
@@ -200,6 +207,30 @@ defmodule Durable.OnFailureTest do
       assert run.status == :failed
       assert run.error["message"] == "payments timed out"
       assert {:ok, _} = Durable.retry(run.id)
+    end
+
+    test "claimed by a node without the workflow's code, long past the run's timeout, waits for one that has it" do
+      run = book("down", "book_trip_within_the_hour")
+      assert run.status == :failed
+
+      # The next day, in the middle of a deploy.
+      set = fn fields ->
+        run |> reload() |> Ecto.Changeset.change(fields) |> Durable.TestRepo.update!()
+      end
+
+      set.(deadline_at: DateTime.add(DateTime.utc_now(), -1, :day))
+      {:ok, _} = Durable.rollback(run.id)
+      set.(workflow_module: "Elixir.NotOnThisNode")
+      Durable.Executor.execute_workflow(run.id, Durable.Config.get(Durable))
+
+      assert %{status: :pending, error: %{"message" => "payments timed out"}} = reload(run)
+
+      set.(workflow_module: Atom.to_string(BookTrip), scheduled_at: nil)
+      run = drain(run)
+
+      assert run.status == :compensated
+      assert run.error["message"] == "payments timed out"
+      assert :cancel_flight in Seen.all()
     end
   end
 

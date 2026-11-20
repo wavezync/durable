@@ -788,11 +788,15 @@ defmodule Durable.Executor do
   # compensations, which are in the code nobody has.
   defp definition_or_leave(config, execution) do
     with {:error, reason} <- get_workflow_definition_from_execution(execution) do
-      if past_deadline_by?(execution, @missing_code_grace_ms),
+      if past_deadline_by?(execution, @missing_code_grace_ms) and not to_roll_back?(execution),
         do: time_out_without_code(config, execution),
         else: leave_for_its_code(config, execution, reason)
     end
   end
+
+  # Back on its queue to be undone, not to run: its deadline, long past by
+  # now, says nothing, and timing it out would drop the undo and its error.
+  defp to_roll_back?(execution), do: is_map_key(execution.context || %{}, @rollback)
 
   defp leave_for_its_code(config, execution, reason) do
     Logger.warning(
