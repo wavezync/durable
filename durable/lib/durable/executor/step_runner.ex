@@ -356,7 +356,6 @@ defmodule Durable.Executor.StepRunner do
 
     # Create step execution record
     {:ok, step_exec} = create_step_execution(config, workflow_id, step, attempt)
-    {:ok, step_exec} = update_step_execution(config, step_exec, :running)
 
     # Start log capture for this step
     Durable.LogCapture.start_capture(
@@ -371,8 +370,12 @@ defmodule Durable.Executor.StepRunner do
     span_meta = step_span_meta(config, step_exec, step, attempt, max_attempts)
 
     # The row is written inside the span: its end event belongs to whoever
-    # closes the row, and that may turn out not to be this process.
+    # closes the row, and that may turn out not to be this process. It is
+    # marked running in there too, after the start event: only a running row
+    # can be closed by someone else, so an end never comes without a start.
     Durable.Telemetry.span([:durable, :step], span_meta, fn ->
+      {:ok, step_exec} = update_step_execution(config, step_exec, :running)
+
       result = run_body(step, without_wait_markers(data), time_limit(step, deadline))
       duration_ms = System.monotonic_time(:millisecond) - start_time
 
