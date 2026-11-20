@@ -56,6 +56,35 @@ defmodule Durable.Integration.RegressionsRollbackTest do
     end
   end
 
+  defmodule Claim do
+    use Durable
+    alias Durable.IntegrationProbe, as: Probe
+
+    # The assessor is booked while the policy is looked up. Closing the claim
+    # stands the assessor down if one was booked, as the parallel guide says to.
+    workflow "rb_claim", on_failure: :rollback do
+      step(:open_claim, [compensate: :close_claim], fn claim -> {:ok, claim} end)
+
+      parallel :checks do
+        step(:policy, fn _claim ->
+          Process.sleep(50)
+          {:error, "no such policy"}
+        end)
+
+        step(:assessor, fn claim ->
+          Process.sleep(300)
+          Probe.note(:assessor_booked)
+          {:ok, claim}
+        end)
+      end
+
+      compensate(:close_claim, fn claim ->
+        Probe.note({:closed_with_assessor_booked, Probe.hits(:assessor_booked)})
+        {:ok, claim}
+      end)
+    end
+  end
+
   # Kills the worker's task as it reads which steps to undo: after it has
   # been handed the rollback, before it has undone anything.
   def kill_reading_what_to_undo(_event, _measurements, %{query: query}, _config) do
@@ -97,6 +126,22 @@ defmodule Durable.Integration.RegressionsRollbackTest do
     assert Probe.hits({:release, id}) == 1
     # What the retry's backoff left behind isn't a time to roll back at.
     assert get(id).scheduled_at == nil
+  end
+
+  # Needs a decision. A lane that fails stops the others at their workers' next
+  # heartbeat, but the block's run is undone at once: a step still running in
+  # a stopped lane lands its effect after the compensation looked for it.
+  # Cancelling with `rollback: true` waits a heartbeat for the run's own
+  # worker, and not for its lanes' either.
+  @tag :skip
+  test "a run isn't undone while a stopped lane's step can still finish" do
+    start_durable!(%{default: 4}, heartbeat_interval: 1_000)
+
+    {:ok, id} = Durable.start(Claim, %{})
+    await_status(id, :compensated)
+    Process.sleep(500)
+
+    assert Probe.hits(:assessor_booked) == Probe.hits({:closed_with_assessor_booked, 1})
   end
 
   test "a cancelled run whose worker dies as its rollback starts doesn't carry on with its steps" do
