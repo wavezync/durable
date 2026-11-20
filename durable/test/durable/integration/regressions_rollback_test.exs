@@ -32,6 +32,50 @@ defmodule Durable.Integration.RegressionsRollbackTest do
     end
   end
 
+  defmodule Booking do
+    use Durable
+    use Durable.Wait
+    alias Durable.IntegrationProbe, as: Probe
+
+    # The seat is held while the traveller confirms, and only then paid for.
+    workflow "rb_booking" do
+      step(:hold_seat, [compensate: :release_seat], fn trip -> {:ok, trip} end)
+
+      step(:confirm, fn trip ->
+        Probe.note({:ask, Durable.Context.workflow_id()})
+        wait_for_input("confirmation")
+        {:ok, trip}
+      end)
+
+      step(:charge_card, fn trip -> {:ok, trip} end)
+
+      compensate(:release_seat, fn trip ->
+        Probe.note({:release, Durable.Context.workflow_id()})
+        {:ok, trip}
+      end)
+    end
+  end
+
+  # Kills the worker's task as it reads which steps to undo: after it has
+  # been handed the rollback, before it has undone anything.
+  def kill_reading_what_to_undo(_event, _measurements, %{query: query}, _config) do
+    if query =~ ~s("is_compensation" = FALSE) and not Probe.set?(:killed) do
+      Probe.set(:killed)
+      Process.exit(self(), :kill)
+    end
+  end
+
+  defp kill_worker_reading_what_to_undo do
+    :telemetry.attach(
+      "rb-kill",
+      [:durable, :integration_repo, :query],
+      &__MODULE__.kill_reading_what_to_undo/4,
+      nil
+    )
+
+    on_exit(fn -> :telemetry.detach("rb-kill") end)
+  end
+
   defp sweep do
     TimeoutWorker.check_timeouts(Durable)
     :sys.get_state(TimeoutWorker.worker_name(Durable))
@@ -53,5 +97,32 @@ defmodule Durable.Integration.RegressionsRollbackTest do
     assert Probe.hits({:release, id}) == 1
     # What the retry's backoff left behind isn't a time to roll back at.
     assert get(id).scheduled_at == nil
+  end
+
+  test "a cancelled run whose worker dies as its rollback starts doesn't carry on with its steps" do
+    start_durable!(%{default: 2})
+
+    {:ok, id} = Durable.start(Booking, %{})
+    await_status(id, :waiting)
+
+    kill_worker_reading_what_to_undo()
+    :ok = Durable.cancel(id, "traveller walked away", rollback: true)
+    assert_eventually(fn -> Probe.set?(:killed) end)
+
+    # The run is over, whoever finishes undoing it: nobody is asked to confirm
+    # a cancelled booking, and no answer could get its card charged.
+    assert_eventually(fn -> get(id).status not in [:pending, :running, :compensating] end)
+    Process.sleep(200)
+
+    assert Probe.hits({:ask, id}) == 1
+    assert Durable.provide_input(id, "confirmation", %{}) != :ok
+    run = get(id)
+    assert run.status == :failed
+    refute Map.has_key?(run.context, "__rollback__")
+
+    # What it held can still be released.
+    assert {:ok, ^id} = Durable.rollback(id)
+    await_status(id, :compensated)
+    assert Probe.hits({:release, id}) == 1
   end
 end

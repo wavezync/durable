@@ -3015,8 +3015,14 @@ defmodule Durable.Executor do
   defp roll_back(execution, workflow_def, config) do
     {%{"error" => error, "status" => was}, context} = Map.pop(execution.context, @rollback)
 
+    # The marker goes in the write that takes the run out of :running. A
+    # worker lost after it then leaves a run that failed while compensating,
+    # not one the next claim carries on with, a cancelled run's steps and all.
     {:ok, execution} =
-      execution |> Ecto.Changeset.change(context: context) |> cas_update!(config)
+      execution
+      |> WorkflowExecution.compensating_changeset()
+      |> Ecto.Changeset.change(context: context)
+      |> cas_update!(config)
 
     case build_compensation_stack(execution.id, workflow_def, config) do
       [] when was == "cancelled" -> back_to_cancelled(config, execution, error)
