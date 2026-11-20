@@ -226,6 +226,17 @@ defmodule Durable.Executor do
         select: w
       )
 
+    # A rollback has to know whether a worker had the run, so the cancel only
+    # lands on the status it saw.
+    seen =
+      opts[:rollback] &&
+        Repo.one(
+          config,
+          from(w in WorkflowExecution, where: w.id == ^workflow_id, select: w.status)
+        )
+
+    cancellable = if seen, do: where(cancellable, [w], w.status == ^seen), else: cancellable
+
     case Repo.update_all(config, cancellable,
            set: [
              status: :cancelled,
@@ -239,19 +250,33 @@ defmodule Durable.Executor do
          ) do
       {1, [cancelled]} ->
         after_cancel(config, cancelled)
-        if opts[:rollback], do: roll_back_cancelled(config, cancelled)
+        if opts[:rollback], do: roll_back_cancelled(config, cancelled, seen)
         :ok
 
       {0, _} ->
-        if Repo.get(config, WorkflowExecution, workflow_id),
-          do: {:error, :already_completed},
-          else: {:error, :not_found}
+        case Repo.get(config, WorkflowExecution, workflow_id) do
+          nil ->
+            {:error, :not_found}
+
+          # It moved between the read and the cancel: go by what it is now.
+          %{status: status} when seen != nil and status in [:pending, :running, :waiting] ->
+            cancel_run(workflow_id, reason, opts)
+
+          _ended ->
+            {:error, :already_completed}
+        end
     end
   end
 
   # `rollback: true`: the cancelled run goes back on its queue to be undone.
-  defp roll_back_cancelled(config, cancelled) do
-    with {:ok, queued} <- queue_rollback(config, cancelled),
+  # A worker that had it is told at its next heartbeat, and until then a step
+  # of its can still finish. The undo waits that long, so it sees that step.
+  defp roll_back_cancelled(config, cancelled, seen) do
+    at =
+      if seen == :running,
+        do: DateTime.add(DateTime.utc_now(), config.heartbeat_interval, :millisecond)
+
+    with {:ok, queued} <- queue_rollback(config, cancelled, at),
          do: DurablePubSub.wake(config, queued)
   end
 
@@ -367,7 +392,7 @@ defmodule Durable.Executor do
     end
   end
 
-  defp queue_rollback(config, execution) do
+  defp queue_rollback(config, execution, at \\ nil) do
     execution
     |> Ecto.Changeset.change(
       status: :pending,
@@ -377,7 +402,7 @@ defmodule Durable.Executor do
           "status" => Atom.to_string(execution.status)
         }),
       completed_at: nil,
-      scheduled_at: nil,
+      scheduled_at: at,
       locked_by: nil,
       locked_at: nil,
       lock_token: nil

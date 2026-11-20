@@ -406,7 +406,8 @@ defmodule Durable.FuzzWorkflows do
     end
   end
 
-  # A block that fails fast, with a lane it can do without.
+  # A block that fails fast, with a lane it can do without. The lane has a
+  # default, and a timeout far longer than any case takes: it changes nothing.
   defmodule NamedOptional do
     @moduledoc false
     use Durable
@@ -416,7 +417,7 @@ defmodule Durable.FuzzWorkflows do
       step(:first, fn d -> F.named(:first, d) end)
 
       parallel :lookups do
-        lane :a, optional: true do
+        lane :a, optional: true, default: %{fallback: true}, timeout: minutes(5) do
           step(:a1, [retry: [max_attempts: 3, backoff: :constant, base: 1]], fn d ->
             F.named(:a1, d)
           end)
@@ -494,6 +495,7 @@ defmodule Durable.FuzzWorkflows do
 
   defp came_as({:ok, %{} = output}), do: if(produced?(output), do: :ok, else: :unknown)
   defp came_as({:error, %{}}), do: :error
+  defp came_as(%{"fallback" => true} = default) when map_size(default) == 1, do: :default
   defp came_as(%{} = output), do: if(produced?(output), do: :data, else: :unknown)
   defp came_as(nil), do: :nothing
   defp came_as(_other), do: :unknown

@@ -335,9 +335,11 @@ defmodule Durable do
   as well: once cancelled it goes back on its queue, a worker runs the
   `compensate:` of every step that completed, newest first, and the run ends
   `:compensated` (or `:compensation_failed`). What that would run is
-  `rollback_plan/2`; with nothing to undo the run stays `:cancelled`. A step
-  that was still running when the cancel landed never completed, so it isn't
-  undone, and child workflows are cancelled, not rolled back.
+  `rollback_plan/2`; with nothing to undo the run stays `:cancelled`. If a
+  worker had the run, the undo starts one `:heartbeat_interval` later, once
+  that worker has stopped: a step that finished in that time is undone, and
+  one that was killed part-way isn't, as it never completed. Child workflows
+  are cancelled, not rolled back.
 
   Returns `{:error, :already_completed}` if the run has already finished, and
   `{:error, :not_found}` for an unknown id.
