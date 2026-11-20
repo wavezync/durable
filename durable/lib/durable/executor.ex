@@ -2421,7 +2421,10 @@ defmodule Durable.Executor do
     {:ok, execution}
   end
 
-  defp mark_failed(config, execution, error) do
+  # `rollback_at` is when a halted run is to be undone if nobody has acted by
+  # then (`on_failure: [rollback_after: ms]`). It's kept in `scheduled_at`,
+  # which means nothing else on a failed run; the timeout sweep reads it.
+  defp mark_failed(config, execution, error, rollback_at \\ nil) do
     # Sanitize the error before persisting — a step crash may hand us a map
     # containing tuples, PIDs, or functions (via stacktrace, raw values, etc).
     # Postgres JSONB can't store those, so we recursively replace unencodable
@@ -2436,7 +2439,7 @@ defmodule Durable.Executor do
           error: safe_error,
           completed_at: DateTime.utc_now()
         })
-        |> Ecto.Changeset.change(locked_by: nil, locked_at: nil, scheduled_at: nil)
+        |> Ecto.Changeset.change(locked_by: nil, locked_at: nil, scheduled_at: rollback_at)
         |> cas_update!(config)
       rescue
         e ->
@@ -2961,8 +2964,15 @@ defmodule Durable.Executor do
 
     if workflow_def.opts[:on_failure] == :rollback or asks_rollback?(error),
       do: compensate_or_fail(execution, error, workflow_def, config),
-      else: mark_failed(config, execution, error)
+      else: mark_failed(config, execution, error, rollback_at(execution, workflow_def))
   end
+
+  # A lane has nothing of its own to undo: its block's run is the one that waits.
+  defp rollback_at(execution, %{opts: %{on_failure: [rollback_after: ms]}}) do
+    unless parallel_branch?(execution), do: DateTime.add(DateTime.utc_now(), ms, :millisecond)
+  end
+
+  defp rollback_at(_execution, _workflow_def), do: nil
 
   # `{:rollback, reason}` from a step, or from a lane's step by way of its block.
   defp asks_rollback?(error), do: "rollback" in [error[:type], error["type"]]

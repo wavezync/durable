@@ -53,6 +53,19 @@ defmodule Durable.OnFailureTest do
       compensate(:cancel_flight, fn trip -> Steps.cancel_flight(trip) end)
     end
 
+    # The seat is held for a week; five days is long enough to wait for a fix.
+    workflow "book_trip_waits_five_days", on_failure: [rollback_after: days(5)] do
+      step(:book_flight, [compensate: :cancel_flight], fn trip -> Steps.book_flight(trip) end)
+      step(:charge_card, fn trip -> Steps.charge_card(trip) end)
+      compensate(:cancel_flight, fn trip -> Steps.cancel_flight(trip) end)
+    end
+
+    workflow "quotes_wait_five_days", on_failure: [rollback_after: days(5)] do
+      parallel :insurers do
+        step(:north, fn _trip -> {:error, "insurer is down"} end)
+      end
+    end
+
     workflow "nothing_to_undo" do
       step(:charge_card, fn trip -> Steps.charge_card(trip) end)
     end
@@ -257,6 +270,104 @@ defmodule Durable.OnFailureTest do
       assert run.status == :compensated
       assert run.error["message"] == "no insurer will cover this trip"
       assert :cancel_flight in Seen.all()
+    end
+  end
+
+  describe "on_failure: [rollback_after: ms]" do
+    setup do
+      start_supervised!(
+        {Durable.Wait.TimeoutWorker, config: Durable.Config.get(Durable), interval: 3_600_000}
+      )
+
+      :ok
+    end
+
+    defp sweep do
+      Durable.Wait.TimeoutWorker.check_timeouts(Durable)
+      :sys.get_state(Durable.Wait.TimeoutWorker.worker_name(Durable))
+    end
+
+    defp days_pass(run, days) do
+      at = DateTime.add(reload(run).scheduled_at, -days, :day)
+      run |> reload() |> Ecto.Changeset.change(scheduled_at: at) |> Durable.TestRepo.update!()
+    end
+
+    test "halts, and says when the run will be rolled back" do
+      run = book("down", "book_trip_waits_five_days")
+
+      assert run.status == :failed
+      assert :cancel_flight not in Seen.all()
+      assert_in_delta DateTime.diff(run.scheduled_at, DateTime.utc_now()), 5 * 86_400, 5
+    end
+
+    test "leaves the run alone before the time is up" do
+      run = book("down", "book_trip_waits_five_days")
+      days_pass(run, 3)
+      sweep()
+
+      assert reload(run).status == :failed
+      assert :cancel_flight not in Seen.all()
+    end
+
+    test "rolls the run back once nobody has acted in time" do
+      run = book("down", "book_trip_waits_five_days")
+      days_pass(run, 5)
+      sweep()
+      assert reload(run).status == :pending
+
+      run = drain(run)
+      assert run.status == :compensated
+      assert run.error["message"] == "payments timed out"
+      assert Enum.count(Seen.all(), &(&1 == :cancel_flight)) == 1
+      assert run.scheduled_at == nil
+
+      # Nothing left for a later sweep to do.
+      sweep()
+      assert reload(run).status == :compensated
+    end
+
+    test "a retry takes the run out of it, and a second failure starts the wait again" do
+      run = book("down", "book_trip_waits_five_days")
+      days_pass(run, 4)
+
+      {:ok, _} = Durable.retry(run.id)
+      assert reload(run).scheduled_at == nil
+      sweep()
+      run = drain(run)
+
+      assert run.status == :failed
+      assert :cancel_flight not in Seen.all()
+      assert_in_delta DateTime.diff(run.scheduled_at, DateTime.utc_now()), 5 * 86_400, 5
+    end
+
+    test "a lane's own run isn't given a time: its block's run is" do
+      run = run_workflow(BookTrip, %{}, workflow: "quotes_wait_five_days")
+      assert run.status == :failed
+      assert %DateTime{} = run.scheduled_at
+
+      [lane] =
+        Durable.TestRepo.all(
+          from(w in Durable.Storage.Schemas.WorkflowExecution,
+            where: w.parent_workflow_id == ^run.id
+          )
+        )
+
+      assert {lane.status, lane.scheduled_at} == {:failed, nil}
+    end
+
+    test "takes a number of milliseconds" do
+      for bad <- ["[rollback_after: :soon]", "[rollback_in: 5]", ":later"] do
+        assert_raise ArgumentError, ~r/invalid on_failure/, fn ->
+          Code.compile_string("""
+          defmodule Durable.OnFailureTest.BadAfter#{System.unique_integer([:positive])} do
+            use Durable
+            workflow "bad", on_failure: #{bad} do
+              step(:a, fn d -> {:ok, d} end)
+            end
+          end
+          """)
+        end
+      end
     end
   end
 
