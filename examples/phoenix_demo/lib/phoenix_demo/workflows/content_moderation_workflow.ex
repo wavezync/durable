@@ -4,7 +4,7 @@ defmodule PhoenixDemo.Workflows.ContentModerationWorkflow do
   max-score, branch routes based on severity, and ambiguous content is sent
   to a human via `wait_for_choice`.
 
-  Showcases: `parallel into:`, `branch on:`, `wait_for_choice`.
+  Showcases: a named `parallel` with `into:`, `branch on:`, `wait_for_choice`.
 
   Input:
       %{"content_id" => "POST-123", "content_type" => "image"}
@@ -29,25 +29,26 @@ defmodule PhoenixDemo.Workflows.ContentModerationWorkflow do
       {:ok, assign(data, "content_id", content_id)}
     end)
 
-    parallel into: fn _ctx, results ->
-               scores = %{
-                 "toxicity" => extract_score(results, :toxicity_scan),
-                 "nsfw" => extract_score(results, :nsfw_scan),
-                 "spam" => extract_score(results, :spam_scan)
-               }
+    parallel :scans,
+      into: fn _ctx, results ->
+        scores = %{
+          "toxicity" => extract_score(results, :toxicity_scan),
+          "nsfw" => extract_score(results, :nsfw_scan),
+          "spam" => extract_score(results, :spam_scan)
+        }
 
-               max_score =
-                 scores
-                 |> Map.values()
-                 |> Enum.max()
+        max_score =
+          scores
+          |> Map.values()
+          |> Enum.max()
 
-               Logger.info("[Mod] Scan complete: #{inspect(scores)} (max=#{max_score})")
+        Logger.info("[Mod] Scan complete: #{inspect(scores)} (max=#{max_score})")
 
-               put_context(:scores, scores)
-               put_context(:max_score, max_score)
+        put_context(:scores, scores)
+        put_context(:max_score, max_score)
 
-               {:ok, %{"scores" => scores, "max_score" => max_score}}
-             end do
+        {:ok, %{"scores" => scores, "max_score" => max_score}}
+      end do
       step(:toxicity_scan, fn _data ->
         Process.sleep(:rand.uniform(300))
         score = :rand.uniform(100) / 100
@@ -143,8 +144,8 @@ defmodule PhoenixDemo.Workflows.ContentModerationWorkflow do
 
   defp extract_score(results, key) do
     case Map.get(results, key) do
-      {:ok, %{score: s}} -> s
-      %{score: s} -> s
+      # A lane hands back what it stored, so its keys are strings.
+      {:ok, %{"score" => s}} -> s
       _ -> 0
     end
   end

@@ -165,78 +165,25 @@ defmodule MyApp.DashboardBuilder do
       {:ok, %{user_id: input["user_id"]}}
     end
 
-    # Parallel steps produce results in __results__ map
-    parallel do
+    # Each lookup is a lane of its own; none depends on another
+    parallel :lookups do
       step :user, fn ctx ->
-        {:ok, %{user: Users.get(ctx.user_id)}}
+        {:ok, %{profile: Users.get(ctx.user_id)}}
       end
 
       step :orders, fn ctx ->
-        {:ok, %{orders: Orders.recent(ctx.user_id)}}
+        {:ok, %{recent: Orders.recent(ctx.user_id)}}
       end
 
-      step :notifications, fn ctx ->
-        {:ok, %{notifs: Notifications.unread(ctx.user_id)}}
+      # The page can be built without these
+      step :notifications, [optional: true, default: %{unread: []}], fn ctx ->
+        {:ok, %{unread: Notifications.unread(ctx.user_id)}}
       end
     end
 
-    # Access results from __results__ map
-    step :render, fn ctx ->
-      results = ctx[:__results__]
-
-      # Results are tagged tuples: ["ok", data] or ["error", reason]
-      user = case results["user"] do
-        ["ok", data] -> data.user
-        _ -> nil
-      end
-
-      orders = case results["orders"] do
-        ["ok", data] -> data.orders
-        _ -> []
-      end
-
-      notifs = case results["notifications"] do
-        ["ok", data] -> data.notifs
-        _ -> []
-      end
-
-      dashboard = Dashboard.build(user, orders, notifs)
-      {:ok, assign(ctx, :dashboard, dashboard)}
-    end
-  end
-end
-
-# Or use into: to transform results directly
-defmodule MyApp.DashboardBuilderWithInto do
-  use Durable
-  use Durable.Helpers
-
-  workflow "build_dashboard_v2" do
-    step :init, fn input ->
-      {:ok, %{user_id: input["user_id"]}}
-    end
-
-    parallel into: fn ctx, results ->
-      # results contains tuples: %{user: {:ok, data}, orders: {:ok, data}, ...}
-      case {results[:user], results[:orders], results[:notifications]} do
-        {{:ok, user_data}, {:ok, orders_data}, {:ok, notifs_data}} ->
-          {:ok, Map.merge(ctx, %{
-            user: user_data.user,
-            orders: orders_data.orders,
-            notifs: notifs_data.notifs
-          })}
-
-        _ ->
-          {:error, "Failed to fetch dashboard data"}
-      end
-    end do
-      step :user, fn ctx -> {:ok, %{user: Users.get(ctx.user_id)}} end
-      step :orders, fn ctx -> {:ok, %{orders: Orders.recent(ctx.user_id)}} end
-      step :notifications, fn ctx -> {:ok, %{notifs: Notifications.unread(ctx.user_id)}} end
-    end
-
-    step :render, fn ctx ->
-      dashboard = Dashboard.build(ctx.user, ctx.orders, ctx.notifs)
+    # What each lane produced is under the block's name, by lane
+    step :render, fn %{lookups: %{user: user, orders: orders, notifications: notifs}} = ctx ->
+      dashboard = Dashboard.build(user["profile"], orders["recent"], notifs["unread"])
       {:ok, assign(ctx, :dashboard, dashboard)}
     end
   end
@@ -488,8 +435,8 @@ end
 # Fire-and-forget: start child and continue
 {:ok, child_id} = start_workflow(MyApp.EmailWorkflow, %{"to" => email}, ref: :welcome)
 
-# call_workflow also works inside parallel blocks: each branch waits for its child
-parallel do
+# call_workflow also works inside parallel blocks: each lane waits for its child
+parallel :fulfil do
   step :payment, fn data ->
     case call_workflow(MyApp.PaymentWorkflow, %{"amount" => data.total}, ref: :pay) do
       {:ok, result} -> {:ok, assign(data, :payment, result)}
@@ -518,7 +465,8 @@ workflow "process_order", timeout: hours(2), queue: :orders do
   worker's one-minute sweep).
 - `:on_failure` — `:halt` (default) leaves a failed run as it is, to retry or
   to undo with `Durable.rollback/2`. `:rollback` runs its compensations on any
-  failure. See [Compensations](guides/compensations.md).
+  failure. `[rollback_after: days(5)]` halts, then rolls back a run nobody
+  retried or rolled back in that time. See [Compensations](guides/compensations.md).
 - `:queue` — the queue runs start on unless `Durable.start/3` names one. A
   step's own `queue:` moves the run for that step (see
   [Step Queues](#step-queues)).

@@ -4,7 +4,7 @@
 import { RefreshCw, GitBranch, Split, Undo2, Hourglass, Webhook, UserCheck, CalendarClock, Network, Timer, KeyRound, Layers, AlarmClock, OctagonX, Tags } from '@lucide/astro';
 
 const tiles = [
-  { icon: Split, wide: 'parallel', name: 'Parallel steps', text: 'Fan out, run at the same time, and collect each result as {:ok, _} or {:error, _}.', code: 'parallel do ... end', href: '/docs/parallel/' },
+  { icon: Split, wide: 'parallel', name: 'Parallel steps', text: 'Independent lookups run at the same time, each in its own lane. The next step gets what every lane found.', code: 'parallel :lookups do ... end', href: '/docs/parallel/' },
   { icon: RefreshCw, name: 'Retries with backoff', text: 'Exponential, linear or constant, per step. The wait holds no worker.', code: 'retry: [max_attempts: 3]', href: '/docs/#reference' },
   { icon: GitBranch, name: 'Branching', text: 'Pattern-match on the context to pick one path.', code: 'branch on: fn ctx -> ... end', href: '/docs/branching/' },
   { icon: Webhook, name: 'Events', text: 'Resume when your app calls Durable.send_event/3.', code: 'wait_for_event("paid")', href: '/docs/waiting/' },

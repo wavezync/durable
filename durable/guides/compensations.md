@@ -71,6 +71,8 @@ A run that fails is left as it failed. Compensations run only when something ask
 |----------|-----|
 | A step | It returns `{:rollback, reason}`. The run fails now, with no more retries, and is undone |
 | You | `Durable.rollback(id)` on a failed run. A worker runs the compensations |
+| You, cancelling | `Durable.cancel(id, reason, rollback: true)`. The run is cancelled, then a worker undoes it |
+| Time | `on_failure: [rollback_after: days(5)]`: the run halts, and is undone if nobody has retried it or rolled it back by then |
 | The workflow | `workflow "book_trip", on_failure: :rollback do` undoes the run on any failure: a step out of retries, `{:fail, reason}`, a timeout |
 
 Use `on_failure: :rollback` when no failure is worth retrying by hand. Otherwise leave the default, `:halt`, and say which failures undo.
@@ -78,6 +80,25 @@ Use `on_failure: :rollback` when no failure is worth retrying by hand. Otherwise
 A run that was rolled back can't be retried, because the work its later steps depend on is gone. `Durable.retry/2` returns `{:error, :rolled_back}`; `Durable.rerun/2` starts a fresh run.
 
 `Durable.rollback_plan(id)` returns what a rollback would run, newest first, without running it: `[book_hotel: :cancel_hotel, book_flight: :cancel_flight]`.
+
+### A failed run that holds something that lapses
+
+A run left failed still holds what its steps did, and some of that doesn't wait. A card authorization lapses after about a week; a reservation may be shorter. Past that, a retry can't finish the run and there is nothing left to release.
+
+```elixir
+workflow "fulfil_order", on_failure: [rollback_after: days(5)] do
+  step :authorize_card, [compensate: :release_hold], fn order -> ... end
+  step :reserve_stock, [compensate: :release_stock], fn order -> ... end
+  step :create_shipment, fn order -> ... end
+  ...
+end
+```
+
+The run stops failed like any other, and can be retried or rolled back by hand. If it is still failed after five days, Durable rolls it back, by a check that runs once a minute. A retry takes the run out of that; if it fails again the wait starts over. The time is on the run as `scheduled_at`, and the dashboard shows it.
+
+### Cancelling and undoing
+
+`Durable.cancel/2` stops a run and leaves what it did. `Durable.cancel(id, reason, rollback: true)` also undoes it: the run is cancelled, goes back on its queue, and ends `:compensated`, or stays `:cancelled` if there was nothing to undo. If a worker had the run, the undo starts one heartbeat later (30 s by default), once that worker has stopped, so a step that finished in that time is undone too. Child workflows are cancelled, not undone.
 
 ### Upgrading to 1.6
 
