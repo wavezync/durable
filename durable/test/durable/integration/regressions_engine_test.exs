@@ -33,7 +33,7 @@ defmodule Durable.Integration.EngineRegressionsTest do
         {:ok, data}
       end)
 
-      parallel do
+      parallel :charge do
         # Several to cancel, and new atoms, because a small map orders atom keys
         # by when each atom was made: a cancelled error has to come up first.
         step(:ff_cancelled_one, fn data ->
@@ -65,12 +65,12 @@ defmodule Durable.Integration.EngineRegressionsTest do
     end
   end
 
-  defmodule CompleteAll do
+  defmodule Collect do
     use Durable
     alias Durable.IntegrationProbe, as: Probe
 
-    workflow "eng_complete_all" do
-      parallel on_error: :complete_all do
+    workflow "eng_collect" do
+      parallel :work, on_error: :collect do
         step(:bad, fn _data -> {:error, "nope"} end)
 
         step(:slow, fn data ->
@@ -87,7 +87,7 @@ defmodule Durable.Integration.EngineRegressionsTest do
     alias Durable.IntegrationProbe, as: Probe
 
     workflow "eng_into" do
-      parallel into: fn data, _results -> {:ok, data} end do
+      parallel :work, into: fn data, _results -> {:ok, data} end do
         step(:bad, fn _data -> {:error, "nope"} end)
 
         step(:slow, fn data ->
@@ -252,7 +252,7 @@ defmodule Durable.Integration.EngineRegressionsTest do
       assert background.status == :running
     end
 
-    for {mod, name} <- [{CompleteAll, "on_error: :complete_all"}, {Into, "into:"}] do
+    for {mod, name} <- [{Collect, "on_error: :collect"}, {Into, "into:"}] do
       @mod mod
       test "doesn't apply with #{name}" do
         start_durable!(%{default: 5})

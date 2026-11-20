@@ -66,7 +66,7 @@ defmodule Durable.Integration.FailurePathsTest do
     use Durable
     alias Durable.IntegrationProbe, as: Probe
 
-    workflow "fp_crash_compensated" do
+    workflow "fp_crash_compensated", on_failure: :rollback do
       step(:book, [compensate: :unbook], fn data -> {:ok, data} end)
 
       step(:work, fn data ->
@@ -162,7 +162,7 @@ defmodule Durable.Integration.FailurePathsTest do
     use Durable
     alias Durable.IntegrationProbe, as: Probe
 
-    workflow "fp_killed_compensation" do
+    workflow "fp_killed_compensation", on_failure: :rollback do
       step(:a, [compensate: :undo_a], fn data -> {:ok, data} end)
       step(:b, fn _data -> {:fail, "stop here"} end)
 
@@ -196,6 +196,21 @@ defmodule Durable.Integration.FailurePathsTest do
     end
   end
 
+  defmodule KeyedParallel do
+    use Durable
+    alias Durable.IntegrationProbe, as: Probe
+
+    workflow "fp_keyed_parallel" do
+      parallel :sides do
+        step(:left, fn data -> {:ok, data} end)
+
+        step(:right, fn data ->
+          if Probe.set?(:fixed), do: {:ok, data}, else: {:fail, "right is broken"}
+        end)
+      end
+    end
+  end
+
   # One zone, five hours behind UTC, so a test doesn't need a real tz database.
   defmodule FixedZone do
     @behaviour Calendar.TimeZoneDatabase
@@ -219,7 +234,7 @@ defmodule Durable.Integration.FailurePathsTest do
     alias Durable.IntegrationProbe, as: Probe
 
     workflow "fp_parallel_then_reads" do
-      parallel do
+      parallel :both do
         step(:a, fn d -> {:ok, Map.put(d, "a", String.duplicate("x", 50))} end)
         step(:b, fn d -> {:ok, Map.put(d, "b", 1)} end)
       end
@@ -276,7 +291,7 @@ defmodule Durable.Integration.FailurePathsTest do
     use Durable
     alias Durable.IntegrationProbe, as: Probe
 
-    workflow "fp_slow_compensation" do
+    workflow "fp_slow_compensation", on_failure: :rollback do
       step(:book, [compensate: :unbook], fn d -> {:ok, d} end)
       step(:charge, fn _d -> {:fail, "declined"} end)
 
@@ -338,7 +353,7 @@ defmodule Durable.Integration.FailurePathsTest do
     require Logger
 
     workflow "fp_logs_in_branch" do
-      parallel do
+      parallel :logs do
         step(:branch, fn d ->
           Logger.info("from a branch")
           {:ok, d}
@@ -411,7 +426,7 @@ defmodule Durable.Integration.FailurePathsTest do
     use Durable.Wait
 
     workflow "fp_cancels_many_branches" do
-      parallel do
+      parallel :waits do
         step(:stops, fn _data ->
           # Long enough for the other branches to be under way.
           Process.sleep(150)
@@ -562,7 +577,7 @@ defmodule Durable.Integration.FailurePathsTest do
     alias Durable.IntegrationProbe, as: Probe
 
     workflow "fp_reads_in_parallel" do
-      parallel do
+      parallel :reads do
         step(:branch, fn d ->
           Probe.note({:branch, d["id"]})
           {:ok, d}
@@ -602,7 +617,7 @@ defmodule Durable.Integration.FailurePathsTest do
     use Durable
     alias Durable.IntegrationProbe, as: Probe
 
-    workflow "fp_reads_after_crash" do
+    workflow "fp_reads_after_crash", on_failure: :rollback do
       step(:first, fn d -> {:ok, Map.put(d, "x", 1)} end)
 
       step(:second, [retry: [max_attempts: 2, backoff: :constant, base: 1]], fn d ->
@@ -812,23 +827,28 @@ defmodule Durable.Integration.FailurePathsTest do
       assert run.error["message"] =~ "boom"
     end
 
-    test "with no running step row fails the run instead of looping" do
+    test "with no running step row is run again, and fails after three in a row" do
       start_durable!(%{default: 1})
 
       {:ok, id} = Durable.start(Held, %{})
-      assert_eventually(fn -> Probe.hits(:body) == 1 end)
 
-      # As if it had died outside a step, in a branch condition or `into:`.
-      {1, _} =
-        IntegrationRepo.update_all(from(s in StepExecution, where: s.workflow_id == ^id),
+      for n <- 1..3 do
+        assert_eventually(fn -> Probe.hits(:body) == n end)
+        assert_eventually(fn -> worker_pid!(id) end)
+
+        # As if it had died outside a step, in a branch condition or `into:`.
+        IntegrationRepo.update_all(
+          from(s in StepExecution, where: s.workflow_id == ^id and s.status == :running),
           set: [status: :completed]
         )
 
-      Process.exit(:sys.get_state(worker_pid!(id)).task_pid, :kill)
+        Process.exit(:sys.get_state(worker_pid!(id)).task_pid, :kill)
+        if n < 3, do: assert_eventually(fn -> Probe.hits(:body) == n + 1 end)
+      end
 
       run = await_status(id, :failed)
       assert run.error["type"] == "task_crash"
-      assert Probe.hits(:body) == 1
+      assert Probe.hits(:body) == 3
     end
 
     test "a fenced worker records it" do
@@ -1100,6 +1120,67 @@ defmodule Durable.Integration.FailurePathsTest do
       assert_receive {:many, [{:error, %Postgrex.Error{}}, {:error, %Postgrex.Error{}}]}
 
       Task.await(holder)
+    end
+
+    test "a retry whose key lock fails is an error, not a MatchError" do
+      idle_durable!()
+      parent = self()
+      {:ok, lost} = Durable.start(Keyed, %{}, key: "lost")
+
+      # It failed, and its key went to a later run.
+      IntegrationRepo.update_all(from(w in WorkflowExecution, where: w.id == ^lost),
+        set: [status: :failed, holds_key: false]
+      )
+
+      holder =
+        Task.async(fn ->
+          IntegrationRepo.transaction(fn ->
+            {:ok, _} = Durable.start(Keyed, %{}, key: "lost")
+            send(parent, :holding)
+            Process.sleep(600)
+          end)
+        end)
+
+      assert_receive :holding, 2_000
+
+      {:error, :rollback} =
+        IntegrationRepo.transaction(fn ->
+          IntegrationRepo.query!("SET LOCAL lock_timeout = '50ms'")
+          send(parent, {:retried, Durable.retry(lost)})
+        end)
+
+      assert_receive {:retried, {:error, %Postgrex.Error{postgres: %{code: :lock_not_available}}}}
+      Task.await(holder)
+    end
+
+    test "a retry of a run failed in a parallel block and a start for its key don't both win" do
+      idle_durable!()
+      config = Durable.Config.get(Durable)
+
+      failed =
+        for n <- 1..30 do
+          key = "race:#{n}"
+          {:ok, id} = Durable.start(KeyedParallel, %{}, key: key)
+          Durable.Executor.execute_workflow(id, config)
+          Durable.DataCase.execute_children(IntegrationRepo, id, config)
+          Durable.Executor.execute_workflow(id, config)
+          assert %{status: :failed, holds_key: true} = get(id)
+          {key, id}
+        end
+
+      for {key, id} <- failed do
+        [fn -> Durable.retry(id) end, fn -> Durable.start(KeyedParallel, %{}, key: key) end]
+        |> Enum.map(&Task.async/1)
+        |> Task.await_many()
+
+        open =
+          from(w in WorkflowExecution,
+            where: w.key == ^key and w.status in [:pending, :running, :waiting],
+            select: {w.id, w.status, w.holds_key}
+          )
+
+        assert [{_, _, true}] = IntegrationRepo.all(open)
+      end
     end
   end
 
@@ -1503,10 +1584,7 @@ defmodule Durable.Integration.FailurePathsTest do
   end
 
   describe "audit 5 internal keys" do
-    defp internal(keys),
-      do:
-        Enum.filter(keys, &String.starts_with?(to_string(&1), "__")) --
-          [:__results__, "__results__"]
+    defp internal(keys), do: Enum.filter(keys, &String.starts_with?(to_string(&1), "__"))
 
     test "stay out of the data after a parallel block" do
       start_durable!(%{default: 3})

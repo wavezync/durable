@@ -3,8 +3,6 @@ defmodule Durable.LogCaptureTest do
 
   alias Durable.LogCapture
 
-  require Logger
-
   describe "start_capture/0 and stop_capture/0" do
     test "initializes empty log buffer" do
       LogCapture.start_capture()

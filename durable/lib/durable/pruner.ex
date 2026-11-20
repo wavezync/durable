@@ -62,11 +62,18 @@ defmodule Durable.Pruner do
         where: w.status in ^statuses,
         where: fragment("coalesce(?, ?)", w.completed_at, w.updated_at) < ^cutoff,
         # A parallel block reads its branches' results from their rows when the
-        # last one ends, however long after the first that is.
+        # last one ends, however long after the first that is. So does a retry
+        # of a block that failed, so a failed parent keeps its children too.
+        # A lane can hold a block of its own, whose lanes that retry needs as
+        # well, though their own parent was only stopped: so the top run of
+        # the tree counts like the parent.
         where:
           not exists(
             from(p in WorkflowExecution,
-              where: p.id == parent_as(:run).parent_workflow_id and p.status in @open,
+              where:
+                (p.id == parent_as(:run).parent_workflow_id or
+                   p.id == parent_as(:run).root_workflow_id) and
+                  (p.status in @open or p.status == :failed),
               select: 1
             )
           ),

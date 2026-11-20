@@ -100,6 +100,7 @@ defmodule Durable.Wait.TimeoutWorker do
           &process_timed_out_events/2,
           &process_timed_out_wait_groups/2,
           &process_expired_runs/2,
+          &process_overdue_rollbacks/2,
           &process_unpolled_runs/2
         ] do
       run_sweep(sweep, config, now)
@@ -112,6 +113,23 @@ defmodule Durable.Wait.TimeoutWorker do
     sweep.(config, now)
   rescue
     error -> Logger.error("[Durable] timeout sweep failed: #{Exception.message(error)}")
+  end
+
+  # A failed run nobody retried or rolled back within its workflow's
+  # `on_failure: [rollback_after: ms]` is rolled back, on a worker. Two nodes
+  # sweeping at once ask twice, and the run's status lets one through.
+  defp process_overdue_rollbacks(config, now) do
+    ids =
+      Repo.all(
+        config,
+        from(w in WorkflowExecution,
+          where: w.status == :failed and w.scheduled_at <= ^now,
+          select: w.id,
+          limit: 500
+        )
+      )
+
+    Enum.each(ids, &Executor.rollback_workflow(&1, durable: config.name))
   end
 
   # A waiting run past its deadline is resumed; the executor sees the deadline

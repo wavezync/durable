@@ -22,10 +22,18 @@ defmodule Durable.DSL.Workflow do
 
   - `:timeout` - How long a run may take, in milliseconds, from when it is due
     to start — waits and sleeps included. A run past it fails with a
-    `"timeout"` error, running compensations like any failure: a step still
+    `"timeout"` error, like any failure (see `:on_failure`): a step still
     running is stopped (and not retried), and a waiting run is woken to fail.
     Steps in a run with a timeout run in their own process; see the step
     `:timeout` option.
+  - `:on_failure` - What a run does when it fails for good. `:halt` (default)
+    leaves it failed with nothing undone, so `Durable.retry/2` can carry it on
+    once the cause is fixed, or `Durable.rollback/2` can undo it. `:rollback`
+    runs the `compensate:` of every completed step at once; a run rolled back
+    can't be retried. `[rollback_after: ms]` halts, and rolls the run back if
+    nobody has retried it or rolled it back by then: for a run holding
+    something that lapses, such as a card authorization. Whichever is set, a
+    step that returns `{:rollback, reason}` rolls the run back
   - `:queue` - The queue runs start on unless `Durable.start/3` names one. A
     step's own `:queue` moves the run for that step
   - `:reuse` - When a start with a `key:` may run again after the run holding
@@ -56,6 +64,9 @@ defmodule Durable.DSL.Workflow do
   """
   defmacro workflow(name, opts \\ [], do: block) do
     validate_workflow_opts!(opts, name)
+    # Read by the step macros as they expand, to tell this workflow's steps
+    # from another's in the same module.
+    Module.put_attribute(__CALLER__.module, :__durable_workflow__, name)
 
     # Generate unique function names for this workflow
     definition_fn = :"__workflow_def_#{name}__"
@@ -78,6 +89,12 @@ defmodule Durable.DSL.Workflow do
       # Store in module attribute for use in the steps function
       @durable_collected_steps_list Module.get_attribute(__MODULE__, :durable_current_steps)
                                     |> Enum.reverse()
+
+      Durable.DSL.Workflow.unique_step_names!(
+        @durable_collected_steps_list,
+        unquote(name),
+        __ENV__
+      )
 
       # Get collected compensations
       @durable_collected_comps_list Module.get_attribute(__MODULE__, :durable_compensations)
@@ -110,6 +127,8 @@ defmodule Durable.DSL.Workflow do
         }
       end
 
+      Durable.DSL.Workflow.__on_failure__(Keyword.get(unquote(opts), :on_failure), unquote(name))
+
       # Register just the workflow name and function reference
       @durable_workflows {unquote(name), unquote(definition_fn)}
 
@@ -120,13 +139,48 @@ defmodule Durable.DSL.Workflow do
     end
   end
 
-  @workflow_opts [:timeout, :queue, :reuse, :on_duplicate, :debounce, :log_metadata]
+  @doc false
+  # A step is found by its name: on resume, for a goto, for its attempts. Two
+  # with one name would share all of that. Checked on the steps the block
+  # produced, not as each `step` expands: only one arm of a compile-time `if`
+  # is ever a step.
+  def unique_step_names!(steps, workflow, env) do
+    names = Enum.map(steps, & &1.name)
+
+    case names -- Enum.uniq(names) do
+      [] ->
+        :ok
+
+      [name | _] ->
+        raise CompileError,
+          file: env.file,
+          line: env.line,
+          description:
+            "step #{inspect(name)} is defined twice in workflow #{inspect(workflow)}; " <>
+              "step names must be unique within a workflow"
+    end
+  end
+
+  @workflow_opts [:timeout, :on_failure, :queue, :reuse, :on_duplicate, :debounce, :log_metadata]
 
   # Literal values are checked here; anything computed is checked when a run starts.
   @allowed_values %{
+    on_failure: [:halt, :rollback],
     reuse: [:after_close, :after_failure, :never],
     on_duplicate: [:use_existing, :error, :cancel_existing, :run_again]
   }
+
+  @doc false
+  # Checked in the workflow module, where `rollback_after: days(5)` is a number.
+  def __on_failure__(on_failure, _name) when on_failure in [nil, :halt, :rollback], do: :ok
+
+  def __on_failure__([rollback_after: ms], _name) when is_integer(ms) and ms > 0, do: :ok
+
+  def __on_failure__(on_failure, name) do
+    raise ArgumentError,
+          "invalid on_failure: #{inspect(on_failure)} for workflow #{inspect(name)}; expected " <>
+            ":halt, :rollback or [rollback_after: ms], as in [rollback_after: days(5)]"
+  end
 
   defp validate_workflow_opts!(opts, name) when is_list(opts) do
     case Keyword.keys(opts) -- @workflow_opts do

@@ -157,6 +157,7 @@ defmodule Durable.Integration.WaitsAndCaptureRegressionsTest do
         groups = IntegrationRepo.all(from(g in WaitGroup, where: g.workflow_id == ^id))
 
         assert run.status == :completed
+        assert Enum.map(groups, & &1.status) == [:timeout]
       end
     end
   end
@@ -178,6 +179,7 @@ defmodule Durable.Integration.WaitsAndCaptureRegressionsTest do
         |> Enum.map(& &1.status)
 
       refute run.status == :waiting
+      assert events == [:cancelled]
     end
   end
 
@@ -295,6 +297,7 @@ defmodule Durable.Integration.WaitsAndCaptureRegressionsTest do
 
       # Either it stayed open so the caller can try again, or the run resumed.
       assert input.status == :pending or run.status != :waiting
+      assert retry == :ok or run.status != :waiting
       _ = step_rows(id)
     end
   end

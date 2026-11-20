@@ -68,7 +68,8 @@ defmodule Durable.LogCapture.Handler do
   end
 
   @doc false
-  # Only lines that get saved are held back, so nothing is lost altogether.
+  # Only lines that get saved are held back. They're saved when the step ends,
+  # so a step that's killed (a cancel, a dead node, a lost lock) loses them.
   def console_filter(%{level: level, meta: meta}, _arg) do
     if Durable.LogCapture.saves?(level) and not Map.get(meta, :durable_internal, false),
       do: :stop,

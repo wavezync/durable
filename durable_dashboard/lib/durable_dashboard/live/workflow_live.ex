@@ -103,6 +103,7 @@ defmodule DurableDashboard.Live.WorkflowLive do
        action_error: nil,
        rerun_editor: nil,
        release_confirm?: false,
+       rollback_confirm?: false,
        graph_pick: false
      )
      |> load_workflow()
@@ -221,6 +222,26 @@ defmodule DurableDashboard.Live.WorkflowLive do
     {:noreply, socket |> assign(release_confirm?: false) |> after_action(result)}
   end
 
+  def handle_event("confirm-rollback", _params, socket),
+    do: {:noreply, assign(socket, rollback_confirm?: true, action_error: nil)}
+
+  def handle_event("keep-run", _params, socket),
+    do: {:noreply, assign(socket, rollback_confirm?: false)}
+
+  def handle_event("rollback", _params, socket) do
+    %{workflow_id: id, durable: durable} = socket.assigns
+
+    result =
+      Access.perform(socket, :operator, :rollback, [id], fn ->
+        # A run that is still live is cancelled first, in the same call.
+        if socket.assigns.workflow.status == :failed,
+          do: Durable.rollback(id, durable: durable),
+          else: Durable.cancel(id, nil, rollback: true, durable: durable)
+      end)
+
+    {:noreply, socket |> assign(rollback_confirm?: false) |> after_action(result)}
+  end
+
   def handle_event("edit-input", _params, socket) do
     input = Jason.encode!(socket.assigns.workflow.input || %{}, pretty: true)
     {:noreply, assign(socket, rerun_editor: input, action_error: nil)}
@@ -256,7 +277,7 @@ defmodule DurableDashboard.Live.WorkflowLive do
 
   defp describe_error(:forbidden), do: "You don't have permission to do that."
   defp describe_error(:rolled_back), do: "This run was rolled back — rerun it instead."
-  defp describe_error(:not_failed), do: "Only failed runs can be retried."
+  defp describe_error(:not_failed), do: "Only a failed run can be retried or rolled back."
   defp describe_error(:not_finished), do: "Only finished runs can be rerun."
   defp describe_error(:already_completed), do: "The run already finished."
   defp describe_error(:invalid_json), do: "That input isn't valid JSON."
@@ -310,6 +331,8 @@ defmodule DurableDashboard.Live.WorkflowLive do
           action_error={@action_error}
           key_info={@key_info}
           release_confirm?={@release_confirm?}
+          rollback_plan={@rollback_plan}
+          rollback_confirm?={@rollback_confirm?}
           parked={@parked}
         />
         <.rerun_editor :if={@rerun_editor} input={@rerun_editor} />
@@ -388,6 +411,8 @@ defmodule DurableDashboard.Live.WorkflowLive do
   attr :key_info, :map, default: nil
   attr :parked, :map, default: nil
   attr :release_confirm?, :boolean, default: false
+  attr :rollback_plan, :list, default: []
+  attr :rollback_confirm?, :boolean, default: false
 
   defp run_header(assigns) do
     %{workflow: w, key_info: info} = assigns
@@ -434,6 +459,15 @@ defmodule DurableDashboard.Live.WorkflowLive do
           Cancel
         </Core.button>
         <Core.button
+          :if={@workflow.status in [:pending, :running, :waiting] and @rollback_plan != []}
+          kind="destructive"
+          phx-click="confirm-rollback"
+          data-tip-title="Cancel and roll back"
+          data-tip="Stop the run, then undo the steps that finished, newest first"
+        >
+          Cancel and roll back
+        </Core.button>
+        <Core.button
           :if={@releasable?}
           phx-click="confirm-release"
           data-tip="Let this run's key go, so the next start with it makes a new run · this run keeps its history"
@@ -456,6 +490,15 @@ defmodule DurableDashboard.Live.WorkflowLive do
           data-tip="Start a new run from the first step with the same input · linked back here"
         >
           Rerun
+        </Core.button>
+        <Core.button
+          :if={@workflow.status == :failed and @rollback_plan != []}
+          kind="destructive"
+          phx-click="confirm-rollback"
+          data-tip-title="Roll back run"
+          data-tip="Undo the steps that finished, newest first · the run can't be retried afterwards"
+        >
+          Roll back
         </Core.button>
         <Core.button
           :if={@workflow.status == :failed}
@@ -501,6 +544,25 @@ defmodule DurableDashboard.Live.WorkflowLive do
         <span class="flex items-center gap-2">
           <Core.button size="sm" kind="destructive" phx-click="release-key">Release key</Core.button>
           <Core.button size="sm" kind="ghost" phx-click="keep-key">Keep it</Core.button>
+        </span>
+      </div>
+      <div
+        :if={@can_operate? and @rollback_confirm? and @rollback_plan != []}
+        class="flex w-full flex-wrap items-center justify-between gap-3 rounded-[10px] border border-destructive/35 bg-popover px-3.5 py-2.5"
+        role="alertdialog"
+        aria-label="Roll back the run"
+      >
+        <p>
+          {if @workflow.status == :failed, do: "Roll back this run?", else: "Cancel this run and roll it back?"}
+          This runs
+          <span class="font-mono">{Enum.map_join(@rollback_plan, ", then ", &elem(&1, 1))}</span>.
+          It can't be retried afterwards.
+        </p>
+        <span class="flex items-center gap-2">
+          <Core.button size="sm" kind="destructive" phx-click="rollback">
+            {if @workflow.status == :failed, do: "Roll back", else: "Cancel and roll back"}
+          </Core.button>
+          <Core.button size="sm" kind="ghost" phx-click="keep-run">Keep it</Core.button>
         </span>
       </div>
       <p :if={@action_error} class="w-full text-xs text-destructive" role="alert">{@action_error}</p>
@@ -583,6 +645,15 @@ defmodule DurableDashboard.Live.WorkflowLive do
           <span :if={@error} class="font-mono text-destructive">
             — {error_line(@error)}
           </span>
+        </p>
+        <p
+          :if={@workflow.status == :failed and @workflow.scheduled_at}
+          class="text-xs text-subtle-foreground"
+          data-rolls-back-at
+        >
+          Rolls back by itself <Core.local_time at={@workflow.scheduled_at} format="datetime" />
+          unless it is retried or rolled back first
+          (<span class="font-mono">on_failure: [rollback_after: …]</span>).
         </p>
         <p :if={@workflow.status == :compensated} class="text-xs text-subtle-foreground">
           Rolled back: {Enum.map_join(@comps, ", ", & &1.name)}. Retry-from-step is off for
@@ -1717,6 +1788,7 @@ defmodule DurableDashboard.Live.WorkflowLive do
       failed_row: nil,
       parked: nil,
       key_info: nil,
+      rollback_plan: [],
       selected: nil,
       family: %{root: nil, parent: nil, children: [], related_ids: []}
     )
@@ -1739,6 +1811,7 @@ defmodule DurableDashboard.Live.WorkflowLive do
           kept_events: fetch_kept_events(config, execution.id),
           family: family,
           key_info: KeyTab.load(config, execution),
+          rollback_plan: rollback_plan(execution, socket.assigns.durable),
           page_title: execution.workflow_name
         )
         |> assign_trace()
@@ -1746,6 +1819,12 @@ defmodule DurableDashboard.Live.WorkflowLive do
   rescue
     Ecto.Query.CastError -> not_found(socket)
   end
+
+  defp rollback_plan(%{status: status, id: id}, durable)
+       when status in [:failed, :pending, :running, :waiting],
+       do: Durable.rollback_plan(id, durable: durable)
+
+  defp rollback_plan(_execution, _durable), do: []
 
   # Walk up to the root, then collect its descendants: the graph paints the
   # whole family's progress whichever member's URL is open.

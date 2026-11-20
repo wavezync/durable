@@ -45,7 +45,7 @@ defmodule DurableDashboard.Fixtures do
     @moduledoc false
     use Durable
 
-    workflow "fulfill_order" do
+    workflow "fulfill_order", on_failure: :rollback do
       step(:reserve, [compensate: :release], fn data ->
         {:ok, Map.put(data, "reservation", "RES-1")}
       end)
@@ -57,6 +57,51 @@ defmodule DurableDashboard.Fixtures do
       end)
 
       step(:ship, fn data -> {:ok, Map.put(data, "tracking", "TRK-1")} end)
+
+      compensate(:release, fn data -> {:ok, data} end)
+    end
+  end
+
+  defmodule Holds do
+    @moduledoc false
+    use Durable
+
+    # No `on_failure:`, so a failed charge leaves the reservation in place.
+    workflow "hold_order" do
+      step(:reserve, [compensate: :release], fn data ->
+        {:ok, Map.put(data, "reservation", "RES-1")}
+      end)
+
+      step(:charge, fn _data -> {:error, %{reason: "payments_down"}} end)
+
+      compensate(:release, fn data -> {:ok, data} end)
+    end
+  end
+
+  defmodule ExpiringHold do
+    @moduledoc false
+    use Durable
+
+    # The reservation lapses, so a failed run isn't left for ever.
+    workflow "hold_order_five_days", on_failure: [rollback_after: days(5)] do
+      step(:reserve, [compensate: :release], fn data -> {:ok, data} end)
+      step(:charge, fn _data -> {:error, %{reason: "payments_down"}} end)
+      compensate(:release, fn data -> {:ok, data} end)
+    end
+  end
+
+  defmodule HoldAwaitingCustomer do
+    @moduledoc false
+    use Durable
+    use Durable.Wait
+
+    workflow "hold_order_until_confirmed" do
+      step(:reserve, [compensate: :release], fn data -> {:ok, data} end)
+
+      step(:confirm, fn data ->
+        wait_for_input("confirmation")
+        {:ok, data}
+      end)
 
       compensate(:release, fn data -> {:ok, data} end)
     end
@@ -97,7 +142,7 @@ defmodule DurableDashboard.Fixtures do
     workflow "moderate_content" do
       step(:ingest, fn data -> {:ok, data} end)
 
-      parallel do
+      parallel :scans do
         step(:spam_scan, fn data -> {:ok, Map.put(data, "spam", 0.1)} end)
         step(:nsfw_scan, fn data -> {:ok, Map.put(data, "nsfw", 0.2)} end)
       end

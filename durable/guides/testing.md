@@ -144,12 +144,13 @@ Steps run in the test process, so Mox expectations apply without
 
 ## Compensations
 
-A failure that's rolled back ends as `:compensated`, or as
+A run that's rolled back ends as `:compensated`, or as
 `:compensation_failed` if a compensation failed too. Compensation steps are
-recorded as `compensate_<name>`:
+recorded as `compensate_<name>`. Here the step returns `{:rollback, reason}`;
+after `Durable.rollback(run.id)`, call `drain(run)` to run the compensations:
 
 ```elixir
-run = run_workflow(MyApp.BookTripWorkflow, %{})
+run = run_workflow(MyApp.BookTripWorkflow, %{"card" => "declined"})
 
 assert_status(run, :compensated)
 assert_step(run, :book_hotel, :failed)

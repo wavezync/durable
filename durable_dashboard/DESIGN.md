@@ -564,7 +564,8 @@ One run, one page — header, banner, facts, then a view switch.
 
 - **Header**: workflow name + status pill, short id, the `<.key_chip>` when
   the run has a key, and the actions that fit the run's state: Cancel (live
-  runs), Retry from step (failed), Rerun and Rerun with edited input
+  runs), Retry from step (failed), Roll back (a failed run with something to
+  undo), Rerun and Rerun with edited input
   (finished), Release key (a closed run that holds its key, when the
   workflow's `reuse:` would otherwise keep it — releasing a key `reuse:`
   already lets go would change nothing, so the button isn't offered). Actions need
@@ -579,6 +580,17 @@ One run, one page — header, banner, facts, then a view switch.
   (§10), that says what happens next: "Release `invoice:INV-2208`? This run
   keeps its history. The next start for this key sends the invoice again."
   Release (destructive) and Keep it (ghost).
+- **Roll back confirms inline** the same way, and names what will run, newest
+  first: "Roll back this run? This runs `cancel_hotel`, then `cancel_flight`.
+  It can't be retried afterwards." Roll back (destructive) and Keep it
+  (ghost). The button is offered only when `Durable.rollback_plan/2` has
+  something in it: a failed run with nothing to undo gets Retry alone.
+  A live run with something to undo gets **Cancel and roll back** beside
+  Cancel, confirmed in the same strip ("Cancel this run and roll it back?
+  This runs …"); plain Cancel still leaves what the run did.
+- **A failed run that will roll back by itself says when**, as a muted line
+  in its banner: "Rolls back by itself 26 Nov, 14:02 unless it is retried or
+  rolled back first (`on_failure: [rollback_after: …]`)." (`local_time`).
 - **Banner** says what happened in a sentence — "`charge_card` failed after
   3 attempts — <error line>", "Cancelled — <reason>. Steps that finished stay
   finished." — with "Show error" linking straight to the inspector pane, and
@@ -970,6 +982,37 @@ step before it and meets in its join; a branch is one gateway with an edge
 per clause, in the order they're written. Without them, a parallel block
 followed by a branch wired every child to every clause (N × M labelled
 edges).
+
+**Named blocks nest.** A named branch's gateway is its deciding step: it
+carries that step's status and execution, labels itself with the branch's
+name, and shows the arm the step recorded ("→ review"), so an arm with
+nothing in it can still read as taken. Each arm and each lane is a sequence
+that may hold further blocks. A named parallel block's join counts lanes,
+not steps: a lane is done when the step it ends on is, and where it ends on
+a branch, the last step of whichever arm ran. Steps inside named blocks are
+matched to their executions by exact name only, since two arms may hold a
+step of the same name. Block statuses settle from the inside out, so a lane
+that ends on a block is done when that block's join is.
+
+A block that collects (`on_error: :collect`) goes on whatever its lanes did:
+its join turns the success tone once every lane has ended and reads
+"2 done · 1 failed", and nothing a collecting block holds can fail the lane
+that block sits in. The failed lane's own cards stay in the failure tone.
+A lane marked `optional: true` is treated the same way in a block that fails
+fast: its failure counts in "1 failed" and doesn't fail the join.
+
+A named gateway's pill leads with the branch's name: "risk · 3 paths", then
+"risk → review". If the deciding step failed, the pill takes the failure tone
+and its tooltip carries the error.
+
+In the structure map a named branch is one card labelled with its name, its
+traffic the deciding step's; a named parallel block is one card listing its
+lanes, each lane's traffic its first step's and its failures and p95 from
+every step it holds.
+
+Known gap: a branch followed directly by a parallel block still wires every
+way out of the branch to every lane. A fork pill before the lanes would fix
+it.
 
 ### Cards
 

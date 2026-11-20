@@ -320,6 +320,8 @@ defmodule Durable.Wait do
   """
   @spec wait_for_any([String.t()], keyword()) :: {String.t(), term()}
   def wait_for_any(event_names, opts \\ []) when is_list(event_names) do
+    # A name listed twice is one event to wait for.
+    event_names = Enum.uniq(event_names)
     # Check if we're resuming with event data already in context
     context = Process.get(:durable_context, %{})
 
@@ -358,6 +360,7 @@ defmodule Durable.Wait do
   """
   @spec wait_for_all([String.t()], keyword()) :: map()
   def wait_for_all(event_names, opts \\ []) when is_list(event_names) do
+    event_names = Enum.uniq(event_names)
     # Check if we're resuming with all events already in context
     context = Process.get(:durable_context, %{})
     answers = Enum.map(event_names, &answer(context, &1, PendingEvent))

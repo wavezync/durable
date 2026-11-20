@@ -50,7 +50,7 @@ const promises = [
     word: 'Reliable',
     art: 'reliable',
     title: 'Retries, deadlines and rollbacks built in',
-    text: 'Steps retry with exponential, linear or constant backoff. Workflows have timeouts. When a step fails for good, compensations undo what already happened, in reverse.',
+    text: 'Steps retry with exponential, linear or constant backoff. Workflows have timeouts. When a step asks for a rollback, compensations undo what already happened, in reverse.',
     code: 'retry: [max_attempts: 3, backoff: :exponential]\ncompensate: :cancel_hotel',
   },
   {

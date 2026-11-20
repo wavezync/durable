@@ -80,7 +80,7 @@ defmodule Durable.StatsTest do
 
     test "is all zeros and nils on an empty instance" do
       stats = Stats.overview(opts())
-      assert %{started: 0, finished: %{}, failure_rate: 0.0, backlog: 0} = stats
+      assert %{started: 0, finished: %{}, failure_rate: +0.0, backlog: 0} = stats
       assert stats.duration_ms == %{p50: nil, p95: nil, max: nil}
     end
   end
@@ -287,7 +287,7 @@ defmodule Durable.StatsTest do
            } =
              rows["orders"]
 
-    assert %{started: 1, finished: 0, waiting: 1, failure_rate: 0.0} = rows["emails"]
+    assert %{started: 1, finished: 0, waiting: 1, failure_rate: +0.0} = rows["emails"]
   end
 
   property "the timeline and the overview agree on what finished" do

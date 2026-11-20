@@ -11,7 +11,7 @@ defmodule Durable.TestingTest do
     workflow "order" do
       step(:reserve, fn data -> {:ok, assign(data, :reserved, true)} end)
 
-      parallel do
+      parallel :notify do
         step(:email, fn data -> {:ok, assign(data, :emailed, true)} end)
         step(:invoice, fn data -> {:ok, assign(data, :invoiced, true)} end)
       end
@@ -55,7 +55,7 @@ defmodule Durable.TestingTest do
     use Durable.Helpers
     use Durable.Orchestration
 
-    workflow "trip" do
+    workflow "trip", on_failure: :rollback do
       step(:pay, [compensate: :refund], fn data ->
         {:ok, child} = call_workflow(Payment, %{})
         {:ok, assign(data, :payment_id, child["payment_id"])}
@@ -70,7 +70,7 @@ defmodule Durable.TestingTest do
   defmodule Declined do
     use Durable
 
-    workflow "declined" do
+    workflow "declined", on_failure: :rollback do
       step(:charge, fn _data -> {:error, "card declined"} end)
     end
   end
@@ -103,7 +103,7 @@ defmodule Durable.TestingTest do
     :ok = Durable.provide_input(run.id, "approval", %{"approved" => true})
     run = run |> drain() |> assert_status(:completed)
 
-    assert %{"approved" => true, "__results__" => %{"email" => ["ok", _]}} = run.context
+    assert %{"approved" => true, "notify" => %{"email" => %{"emailed" => true}}} = run.context
   end
 
   test "retries skip their backoff" do

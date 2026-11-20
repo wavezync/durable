@@ -2,6 +2,46 @@
 
 Execute different steps based on runtime conditions.
 
+## Named Branches
+
+Give a branch a name and a function, and the function runs as a step. It returns `{arm, data}`, naming one of the arms in the block:
+
+```elixir
+step :score_risk, [retry: [max_attempts: 3]], fn order ->
+  {:ok, Map.put(order, :risk, Risk.score(order))}
+end
+
+branch :risk, fn order ->
+  cond do
+    order.risk < 40 -> {:clear, order}
+    order.risk < 80 -> {:review, order}
+    true -> {:blocked, order}
+  end
+end do
+  :clear ->
+    pass()
+
+  :review ->
+    step :ask_reviewer, fn order -> ... end
+    step :record_review, fn order -> ... end
+
+  :blocked ->
+    step :tell_customer, fn order -> ... end
+    step :cancel_order, fn _order -> {:cancel, "blocked by risk check"} end
+end
+
+step :charge_card, fn order -> ... end
+```
+
+- **The function is a step.** It has its own row, logs and span, and takes `retry:` and `timeout:`: `branch :risk, [retry: [max_attempts: 3]], fn order -> ... end do`. It can return anything a step can: `{:error, reason}` is retried, `{:fail, reason}` isn't.
+- **The choice is stored with its result.** A run that is stopped and comes back takes the arm it already chose. Like any step, the function runs again only if it never got to save its result.
+- **An arm the block doesn't have fails the run** at once, with an error that names what was returned and the arms there are. The same goes for data that isn't a map.
+- **An arm is a sequence.** It holds steps, other named branches and named parallel blocks, or `pass()` for nothing. Its last result goes to whatever follows the block.
+- **Steps are stored under the block and the arm**, as `risk__review__ask_reviewer`. Two arms can use the same step name, and renaming a step renames only that step.
+- **An arm can't be called** `:ok`, `:error`, `:fail`, `:snooze`, `:cancel` or `:goto`: those are step results.
+
+The rest of this guide covers the older form, `branch on: fn`, which keeps working. Its `on:` function is not a step: it has no retries or timeout, and an error in it fails the run.
+
 ## Basic Usage
 
 The `branch` macro evaluates a condition function and executes only the matching clause:
@@ -53,9 +93,11 @@ The `on:` option takes a function that returns a value. That value is matched ag
 |---------|---------|
 | Atoms | `:invoice`, `:pending`, `:active` |
 | Strings | `"pdf"`, `"high"` |
-| Integers | `1`, `2`, `100` |
+| Integers | `1`, `-2`, `100` |
 | Booleans | `true`, `false` |
 | Default | `_` (matches anything) |
+
+A clause matches by equality, so any other pattern (a float, a tuple, a map, a guard) is a compile error. Compute the value to match on in `on:` instead.
 
 ```elixir
 # Matching atoms

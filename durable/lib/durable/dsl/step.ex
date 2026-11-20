@@ -31,6 +31,15 @@ defmodule Durable.DSL.Step do
         end
       end
 
+  ## A step can run more than once
+
+  A step that finished is not run again. A step whose worker is lost part-way
+  is: after a payment provider accepted a charge, say, and before the step was
+  recorded as done. Make any step with an effect outside your database safe to
+  repeat, by giving the provider an idempotency key that is the same on every
+  attempt, such as `"\#{Durable.Context.workflow_id()}:charge_card"`. See
+  "Make steps safe to run twice" in the Production guide.
+
   ## Options
 
   - `:retry` - Retry configuration
@@ -65,8 +74,10 @@ defmodule Durable.DSL.Step do
 
   - `{:ok, data}` - Done; `data` goes to the next step
   - `{:error, reason}` - Failed; retried while attempts are left
-  - `{:fail, reason}` - Failed, and not retried: the run fails now and its
-    compensations run
+  - `{:fail, reason}` - Failed, and not retried: the run fails now
+  - `{:rollback, reason}` - Failed, not retried, and undone: the run fails now
+    and the `compensate:` of every completed step runs, whatever the
+    workflow's `on_failure:` is
   - `{:snooze, ms}` or `{:snooze, ms, reason}` - Run the step again in `ms`
     milliseconds, without using an attempt. The run is parked meanwhile, like
     between retries. Snoozes have no limit; the workflow's `timeout:` is what
@@ -96,18 +107,17 @@ defmodule Durable.DSL.Step do
 
   defmacro step(name, {:fn, _, _} = body_fn, nil) do
     # step :name, fn data -> ... end
-    build_step(name, [], body_fn)
+    build_step(name, [], body_fn, __CALLER__)
   end
 
   defmacro step(name, opts, {:fn, _, _} = body_fn) when is_list(opts) do
     # step :name, [opts], fn data -> ... end
-    build_step(name, opts, body_fn)
+    build_step(name, opts, body_fn, __CALLER__)
   end
 
-  defp build_step(name, opts, body_fn) do
+  defp build_step(name, opts, body_fn, caller) do
     normalized_opts = normalize_step_opts(opts)
-    # Generate a unique function name for this step's body
-    func_name = :"__step_body_#{name}__"
+    func_name = body_name(caller, :step_body, name)
 
     quote do
       # Define a named function for the step body
@@ -122,6 +132,23 @@ defmodule Durable.DSL.Step do
         opts: unquote(quote_opts(normalized_opts))
       }
     end
+  end
+
+  # A body is a function of the module, and two workflows in one module can
+  # each have a `step :work`. The first keeps the plain name, which is what
+  # shows in a stack trace; a later one gets its workflow added.
+  defp body_name(caller, kind, name) do
+    workflow = Module.get_attribute(caller.module, :__durable_workflow__)
+    taken = Module.get_attribute(caller.module, :__durable_bodies__) || MapSet.new()
+    plain = :"__#{kind}_#{name}__"
+
+    func_name =
+      if MapSet.member?(taken, plain),
+        do: :"__#{kind}_#{name}__in_#{:erlang.phash2(workflow)}__",
+        else: plain
+
+    Module.put_attribute(caller.module, :__durable_bodies__, MapSet.put(taken, func_name))
+    func_name
   end
 
   @doc false
@@ -172,14 +199,14 @@ defmodule Durable.DSL.Step do
   defmacro decision(name, opts_or_fn, maybe_fn \\ nil)
 
   defmacro decision(name, {:fn, _, _} = body_fn, nil) do
-    build_decision(name, [], body_fn)
+    build_decision(name, [], body_fn, __CALLER__)
   end
 
   defmacro decision(name, opts, {:fn, _, _} = body_fn) when is_list(opts) do
-    build_decision(name, opts, body_fn)
+    build_decision(name, opts, body_fn, __CALLER__)
   end
 
-  defp build_decision(name, opts, body_fn) do
+  defp build_decision(name, opts, body_fn, caller) do
     # Walk the body AST for `{:goto, atom, _}` patterns so the dashboard
     # can render the conditional branches in the workflow graph. Best-
     # effort: `:goto` calls with computed atoms (`{:goto, var, _}`) are
@@ -192,7 +219,7 @@ defmodule Durable.DSL.Step do
       |> normalize_step_opts()
       |> Map.put(:branches, branches)
 
-    func_name = :"__decision_body_#{name}__"
+    func_name = body_name(caller, :decision_body, name)
 
     quote do
       @doc false
@@ -249,16 +276,16 @@ defmodule Durable.DSL.Step do
   defmacro compensate(name, opts_or_fn, maybe_fn \\ nil)
 
   defmacro compensate(name, {:fn, _, _} = body_fn, nil) do
-    build_compensate(name, [], body_fn)
+    build_compensate(name, [], body_fn, __CALLER__)
   end
 
   defmacro compensate(name, opts, {:fn, _, _} = body_fn) when is_list(opts) do
-    build_compensate(name, opts, body_fn)
+    build_compensate(name, opts, body_fn, __CALLER__)
   end
 
-  defp build_compensate(name, opts, body_fn) do
+  defp build_compensate(name, opts, body_fn, caller) do
     normalized_opts = normalize_compensate_opts(opts)
-    func_name = :"__compensate_body_#{name}__"
+    func_name = body_name(caller, :compensate_body, name)
 
     quote do
       @doc false
@@ -304,19 +331,20 @@ defmodule Durable.DSL.Step do
 
   """
   defmacro branch(opts, do: block) do
+    caller = __CALLER__
     condition_fn = Keyword.fetch!(opts, :on)
-    clauses = extract_clauses(block)
+    clauses = extract_clauses(block, caller)
 
-    {shape, _} = process_branch_clauses(clauses, 0, __CALLER__)
+    {shape, _} = process_branch_clauses(clauses, 0, caller)
 
     branch_id =
       block_id(
-        __CALLER__,
+        caller,
         :branch,
         for({pattern, _, names, _} <- shape, do: {pattern_to_key(pattern), names})
       )
 
-    {clause_data, all_step_defs} = process_branch_clauses(clauses, branch_id, __CALLER__)
+    {clause_data, all_step_defs} = process_branch_clauses(clauses, branch_id, caller)
 
     branch_clauses =
       Enum.map(clause_data, fn {pattern, idx, step_names, _step_defs} ->
@@ -329,7 +357,7 @@ defmodule Durable.DSL.Step do
     # Generate named functions for each nested step
     step_registrations =
       Enum.map(all_step_defs, fn {qualified_name, body_fn, step_opts} ->
-        func_name = :"__step_body_#{qualified_name}__"
+        func_name = body_name(caller, :step_body, qualified_name)
 
         quote do
           @doc false
@@ -386,7 +414,7 @@ defmodule Durable.DSL.Step do
     id
   end
 
-  defp extract_clauses(block) do
+  defp extract_clauses(block, env) do
     clauses =
       case block do
         {:__block__, _, items} -> items
@@ -394,12 +422,25 @@ defmodule Durable.DSL.Step do
         clause -> [clause]
       end
 
-    Enum.map(clauses, &parse_clause/1)
+    Enum.map(clauses, &parse_clause(&1, env))
   end
 
-  defp parse_clause({:->, _meta, [[pattern], body]}) do
+  defp parse_clause({:->, meta, [[pattern], body]}, env) do
+    if not matchable?(pattern) do
+      raise CompileError,
+        file: env.file,
+        line: Keyword.get(meta, :line, env.line),
+        description:
+          "a branch clause matches the `on:` value by equality, against an atom, a string, " <>
+            "an integer or `_`, but found: #{Macro.to_string(pattern)}"
+    end
+
     {pattern, body}
   end
+
+  defp matchable?({:_, _, _}), do: true
+  defp matchable?({:-, _, [int]}), do: is_integer(int)
+  defp matchable?(literal), do: is_atom(literal) or is_binary(literal) or is_integer(literal)
 
   defp process_branch_clauses(clauses, branch_id, env) do
     {clause_data, all_steps} =
@@ -489,229 +530,39 @@ defmodule Durable.DSL.Step do
         "a #{block} can only hold `step :name, fn data -> ... end`, but found: #{found}"
   end
 
-  defp pattern_to_clause_name({:_, _, _}), do: :default
-  defp pattern_to_clause_name(atom) when is_atom(atom), do: atom
-  defp pattern_to_clause_name(string) when is_binary(string), do: String.to_atom(string)
-  defp pattern_to_clause_name(int) when is_integer(int), do: :"val_#{int}"
-  defp pattern_to_clause_name(_), do: :match
+  defp pattern_to_clause_name(pattern) do
+    case pattern_to_key(pattern) do
+      atom when is_atom(atom) -> atom
+      string when is_binary(string) -> String.to_atom(string)
+      int when is_integer(int) -> :"val_#{int}"
+    end
+  end
 
   defp pattern_to_key({:_, _, _}), do: :default
   defp pattern_to_key(atom) when is_atom(atom), do: atom
   defp pattern_to_key(string) when is_binary(string), do: string
   defp pattern_to_key(int) when is_integer(int), do: int
-  defp pattern_to_key(_), do: :match
+  defp pattern_to_key({:-, _, [int]}) when is_integer(int), do: -int
 
   # ============================================================================
   # Parallel Macro
   # ============================================================================
 
   @doc """
-  Defines a parallel execution block.
-
-  All steps inside execute concurrently. Each step receives a copy of the context.
-  Results are collected into a `__results__` map with tagged tuples.
-
-  ## Options
-
-  - `:into` - Optional callback to transform results (default: none)
-    - Receives `(ctx, results)` where results = `%{step_name => {:ok, data} | {:error, reason}}`
-    - Returns `{:ok, ctx}` | `{:error, reason}` | `{:goto, step, ctx}`
-  - `:on_error` - Error handling (default: `:fail_fast`)
-    - `:fail_fast` - Cancel siblings on first failure
-    - `:complete_all` - Wait for all, collect results
-
-  ## Behavior
-
-  Without `:into`, results go to `ctx.__results__` and the next step handles them:
-
-      parallel do
-        step :payment, fn ctx -> {:ok, %{id: 123}} end
-        step :delivery, fn ctx -> {:error, :not_found} end
-      end
-      # Next step receives:
-      # %{...ctx, __results__: %{payment: {:ok, %{id: 123}}, delivery: {:error, :not_found}}}
-
-  With `:into`, you control what the next step receives:
-
-      parallel into: fn ctx, results ->
-        case {results.payment, results.delivery} do
-          {{:ok, payment}, {:ok, _}} ->
-            {:ok, Map.put(ctx, :payment_id, payment.id)}
-          {{:ok, _}, {:error, :not_found}} ->
-            {:goto, :handle_backorder, ctx}
-          _ ->
-            {:error, "Critical failure"}
-        end
-      end do
-        step :payment, fn ctx -> {:ok, %{id: 123}} end
-        step :delivery, fn ctx -> {:error, :not_found} end
-      end
-
-  ## Step Options
-
-  - `:returns` - Key name for this step's result (default: step name)
-
-      parallel do
-        step :fetch_order, returns: :order do
-          fn ctx -> {:ok, %{items: [...]}} end
-        end
-      end
-      # Result: %{...ctx, __results__: %{order: {:ok, %{items: [...]}}}}
-
+  A parallel block. It takes a name: see `parallel/3`.
   """
-  defmacro parallel(opts \\ [], do: block) do
-    shape =
-      for {_, _, %{original_name: name}} <- extract_parallel_steps(block, 0, __CALLER__), do: name
+  defmacro parallel(opts_or_name \\ [], do_block)
 
-    parallel_id = block_id(__CALLER__, :parallel, shape)
+  defmacro parallel(name, do: block) when is_atom(name),
+    do: emit(named_parallel(name, [], block, top_level(), __CALLER__))
 
-    step_defs = extract_parallel_steps(block, parallel_id, __CALLER__)
-    step_names = Enum.map(step_defs, fn {name, _, _} -> name end)
-
-    error_strategy = Keyword.get(opts, :on_error, :fail_fast)
-    into_fn = Keyword.get(opts, :into)
-
-    # Generate named functions for each parallel step
-    step_registrations =
-      Enum.map(step_defs, fn {qualified_name, body_fn, step_opts} ->
-        func_name = :"__step_body_#{qualified_name}__"
-
-        quote do
-          @doc false
-          def unquote(func_name)(data), do: unquote(body_fn).(data)
-
-          @durable_current_steps %Durable.Definition.Step{
-            name: unquote(qualified_name),
-            type: :step,
-            module: __MODULE__,
-            body_fn: &(__MODULE__.unquote(func_name) / 1),
-            opts: unquote(quote_opts(step_opts))
-          }
-        end
-      end)
-
-    # Generate named function for into callback if provided
-    {into_fn_ref, into_fn_def} =
-      if into_fn do
-        into_func_name = :"__parallel_into_#{parallel_id}__"
-
-        def_ast =
-          quote do
-            @doc false
-            def unquote(into_func_name)(ctx, results), do: unquote(into_fn).(ctx, results)
-          end
-
-        ref_ast =
-          quote do
-            &(__MODULE__.unquote(into_func_name) / 2)
-          end
-
-        {ref_ast, def_ast}
-      else
-        {nil, nil}
-      end
-
-    quote do
-      unquote(into_fn_def)
-
-      @durable_current_steps %Durable.Definition.Step{
-        name: unquote(:"parallel_#{parallel_id}"),
-        type: :parallel,
-        module: __MODULE__,
-        opts: %{
-          steps: unquote(step_names),
-          all_steps: unquote(step_names),
-          error_strategy: unquote(error_strategy),
-          into_fn: unquote(into_fn_ref)
-        }
-      }
-
-      unquote_splicing(step_registrations)
-    end
+  defmacro parallel(_opts, do: _block) do
+    block_error!(
+      __CALLER__,
+      "a parallel block needs a name, as in `parallel :lookups do`. The step after it " <>
+        "gets each lane's result under that name: %{lookups: %{credit: ...}}"
+    )
   end
-
-  defp extract_parallel_steps(body, parallel_id, env) do
-    case body do
-      {:__block__, _, statements} ->
-        Enum.flat_map(statements, &extract_parallel_step_call(&1, parallel_id, env))
-
-      statement ->
-        extract_parallel_step_call(statement, parallel_id, env)
-    end
-  end
-
-  # step :name, fn data -> ... end
-  defp extract_parallel_step_call(
-         {:step, _meta, [name, {:fn, _, _} = body_fn]},
-         parallel_id,
-         _env
-       )
-       when is_atom(name) do
-    qualified_name = :"parallel_#{parallel_id}__#{name}"
-
-    step_opts = %{
-      parallel_id: parallel_id,
-      original_name: name,
-      returns: name
-    }
-
-    [{qualified_name, body_fn, step_opts}]
-  end
-
-  # step :name, [opts], fn data -> ... end
-  defp extract_parallel_step_call(
-         {:step, _meta, [name, opts, {:fn, _, _} = body_fn]},
-         parallel_id,
-         env
-       )
-       when is_atom(name) and is_list(opts) do
-    if Keyword.has_key?(opts, :compensate), do: no_parallel_compensation!(name, env)
-
-    qualified_name = :"parallel_#{parallel_id}__#{name}"
-
-    # Extract returns option, default to original name
-    returns_key = Keyword.get(opts, :returns, name)
-
-    step_opts =
-      opts
-      |> normalize_parallel_step_opts()
-      |> Map.merge(%{
-        parallel_id: parallel_id,
-        original_name: name,
-        returns: returns_key
-      })
-
-    [{qualified_name, body_fn, step_opts}]
-  end
-
-  # step :name, returns: :key do fn data -> ... end end
-  defp extract_parallel_step_call(
-         {:step, _meta, [name, opts, [do: {:fn, _, _} = body_fn]]},
-         parallel_id,
-         env
-       )
-       when is_atom(name) and is_list(opts) do
-    if Keyword.has_key?(opts, :compensate), do: no_parallel_compensation!(name, env)
-
-    qualified_name = :"parallel_#{parallel_id}__#{name}"
-
-    # Extract returns option, default to original name
-    returns_key = Keyword.get(opts, :returns, name)
-
-    step_opts =
-      opts
-      |> normalize_parallel_step_opts()
-      |> Map.merge(%{
-        parallel_id: parallel_id,
-        original_name: name,
-        returns: returns_key
-      })
-
-    [{qualified_name, body_fn, step_opts}]
-  end
-
-  defp extract_parallel_step_call(other, _parallel_id, env),
-    do: not_a_step!(other, "parallel block", env)
 
   # A parent only undoes its own steps, so this would quietly never run.
   defp no_parallel_compensation!(name, env) do
@@ -723,11 +574,432 @@ defmodule Durable.DSL.Step do
           "Put the undo on a step before the block, and have it check what actually happened."
   end
 
-  # Normalize parallel step options (includes :returns)
-  defp normalize_parallel_step_opts(opts) do
-    opts
-    |> Keyword.take([:retry, :timeout, :queue, :returns])
-    |> Enum.into(%{})
-    |> normalize_retry_opts()
+  # ============================================================================
+  # Named blocks
+  # ============================================================================
+
+  @doc """
+  A branch with a name: a step decides, and its arms hold what runs next.
+
+  The function is run like a step body, with the same `:retry` and `:timeout`
+  options, its own row, logs and span. It returns `{arm, data}`, naming one of
+  the arms in the block; `data` goes to that arm's first step, and the arm's
+  last result goes to whatever follows the block. Naming an arm the block
+  doesn't have fails the run, without retries. Any other step return
+  (`{:error, reason}`, `{:fail, reason}`, `{:rollback, reason}`, `{:snooze, ms}`,
+  `{:cancel, reason}`)
+  means what it means in a step.
+
+      branch :risk, [retry: [max_attempts: 3]], fn order ->
+        cond do
+          order.risk < 40 -> {:clear, order}
+          order.risk < 80 -> {:review, order}
+          true -> {:blocked, order}
+        end
+      end do
+        :clear ->
+          pass()
+
+        :review ->
+          step :ask_reviewer, fn order -> {:ok, order} end
+          step :record_review, fn order -> {:ok, order} end
+
+        :blocked ->
+          step :cancel_order, fn _order -> {:cancel, "blocked by risk check"} end
+      end
+
+  An arm holds steps, named branches and named parallel blocks, or `pass()`
+  for nothing. Steps inside are stored as `<branch>__<arm>__<step>`, so the
+  same step name can be used in two arms, and renaming one step renames only
+  that step.
+  """
+  defmacro branch(name, decider, do: block) when is_atom(name),
+    do: emit(named_branch(name, [], decider, block, top_level(), __CALLER__))
+
+  defmacro branch(name, opts, decider, do: block) when is_atom(name) and is_list(opts),
+    do: emit(named_branch(name, opts, decider, block, top_level(), __CALLER__))
+
+  @doc """
+  A parallel block with a name: each lane is a sequence that runs on its own.
+
+      parallel :fulfil do
+        lane :shipment do
+          step :pick_and_pack, fn order -> {:ok, order} end
+          step :send_tracking, fn order -> {:ok, order} end
+        end
+
+        lane :loyalty do
+          step :add_points, fn order -> {:ok, order} end
+        end
+      end
+
+      step :close_order, fn %{fulfil: %{shipment: shipment, loyalty: loyalty}} = order ->
+        {:ok, order}
+      end
+
+  Every lane starts from the data the block was given and sees none of what
+  another lane does. A lane holds steps, named branches and named parallel
+  blocks; a `step` written straight in the block is a lane of one step. The
+  step after the block gets the data from before it, with what each lane
+  produced under the block's name: the keys its steps added or changed, not
+  the data it was started with. That has been stored, so its own keys are
+  strings.
+
+  A lane that fails fails the block and stops the others. Pass
+  `on_error: :collect` to run every lane and hand the next step each one as
+  `{:ok, data}` or `{:error, reason}`, or `:into` to decide for yourself: the
+  function gets every lane's `{:ok, data}` or `{:error, reason}` by lane name.
+
+  ## Lane options
+
+  On `lane :name, opts do`, or in the options of a step written straight in
+  the block:
+
+  - `:optional` - `true` for a lane the block can do without: if it fails,
+    the next step gets `nil` for it and the run goes on
+  - `:default` - what the next step gets for an optional lane that failed,
+    in place of `nil`. Like a lane's own data it has been stored, so a map's
+    keys are strings
+  - `:timeout` - on `lane` only: how long the whole lane may take, in
+    milliseconds, its retries and waits included. Past it the lane fails with
+    a `"timeout"` error, like any failed lane. A step's own `:timeout` limits
+    one attempt
+  """
+  defmacro parallel(name, opts, do: block) when is_atom(name) and is_list(opts),
+    do: emit(named_parallel(name, opts, block, top_level(), __CALLER__))
+
+  defp emit({_names, registrations}), do: {:__block__, [], registrations}
+
+  # `prefix` is what a step inside is named under; `lane?` is whether the
+  # steps run in a lane's own run, which a compensation can't reach.
+  defp top_level, do: %{prefix: nil, lane?: false}
+
+  defp qualify(nil, name), do: name
+  defp qualify(prefix, name), do: :"#{prefix}__#{name}"
+
+  @reserved_arms [:ok, :error, :fail, :rollback, :snooze, :cancel, :goto]
+
+  defp named_branch(name, opts, decider, block, scope, caller) do
+    if is_list(decider) do
+      block_error!(
+        caller,
+        "branch #{inspect(name)} takes a function that returns {arm, data}, as in " <>
+          "`branch #{inspect(name)}, fn data -> {:ok_arm, data} end do`, " <>
+          "but found: #{first_line(decider)}"
+      )
+    end
+
+    qualified = qualify(scope.prefix, name)
+    arms = block |> statements(:->) |> Enum.map(&parse_arm(&1, name, caller))
+    arm_names = Enum.map(arms, &elem(&1, 0))
+
+    if arm_names != Enum.uniq(arm_names),
+      do: block_error!(caller, "branch #{inspect(name)} has an arm written twice")
+
+    compiled =
+      for {arm, body} <- arms do
+        compile_body(body, %{scope | prefix: qualify(qualified, arm)}, caller, "branch arm")
+      end
+
+    clauses =
+      for {{names, _}, {arm, idx}} <- Enum.zip(compiled, Enum.with_index(arm_names)),
+          into: %{},
+          do: {{arm, idx}, names}
+
+    inner = Enum.flat_map(compiled, &elem(&1, 0))
+    func_name = body_name(caller, :branch_body, qualified)
+    step_opts = opts |> normalize_step_opts() |> Map.take([:retry, :timeout])
+
+    registration =
+      quote do
+        @doc false
+        def unquote(func_name)(data) do
+          Durable.DSL.Step.__arm__(unquote(decider).(data), unquote(name), unquote(arm_names))
+        end
+
+        @durable_current_steps %Durable.Definition.Step{
+          name: unquote(qualified),
+          type: :branch,
+          module: __MODULE__,
+          body_fn: &(__MODULE__.unquote(func_name) / 1),
+          opts:
+            Map.merge(unquote(quote_opts(step_opts)), %{
+              decider: true,
+              original_name: unquote(name),
+              clauses: unquote(Macro.escape(clauses)),
+              all_steps: unquote(inner)
+            })
+        }
+      end
+
+    {[qualified | inner], [registration | Enum.flat_map(compiled, &elem(&1, 1))]}
   end
+
+  defp parse_arm({:->, _meta, [[arm], body]}, name, caller) when is_atom(arm) do
+    if arm in @reserved_arms do
+      block_error!(
+        caller,
+        "branch #{inspect(name)} can't have an arm called #{inspect(arm)}: " <>
+          "a decider returning {#{inspect(arm)}, ...} already means something"
+      )
+    end
+
+    {arm, body}
+  end
+
+  defp parse_arm({:->, _meta, [[other], _body]}, name, caller) do
+    block_error!(
+      caller,
+      "an arm of branch #{inspect(name)} is named by an atom, as in `:review ->`, " <>
+        "but found: #{Macro.to_string(other)}"
+    )
+  end
+
+  @doc false
+  # What a decider returned, as a step result: the arm becomes a jump the
+  # executor follows, and the step's row records it.
+  def __arm__({tag, _} = result, _name, _arms)
+      when tag in [:error, :fail, :rollback, :snooze, :cancel],
+      do: result
+
+  def __arm__({tag, _, _} = result, _name, _arms) when tag in [:snooze, :cancel], do: result
+
+  def __arm__({arm, data} = result, name, arms) when is_atom(arm) and is_map(data) do
+    if arm in arms, do: {:goto, arm, data}, else: no_such_arm(result, name, arms)
+  end
+
+  def __arm__(result, name, arms), do: no_such_arm(result, name, arms)
+
+  defp no_such_arm(result, name, arms) do
+    {:fail,
+     %{
+       type: "branch_error",
+       message:
+         "branch #{inspect(name)} must return {arm, data}, with data a map and arm one of " <>
+           "#{inspect(arms)}, got: #{inspect(result, limit: 5, printable_limit: 200)}"
+     }}
+  end
+
+  defp named_parallel(name, opts, block, scope, caller) do
+    qualified = qualify(scope.prefix, name)
+    into_fn = Keyword.get(opts, :into)
+    error_strategy = Keyword.get(opts, :on_error, :fail_fast)
+
+    if error_strategy not in [:fail_fast, :collect] do
+      block_error!(
+        caller,
+        "parallel #{inspect(name)} has on_error: #{inspect(error_strategy)}. A named block " <>
+          "takes :fail_fast (a failed lane fails the block) or :collect (every lane runs, " <>
+          "and the next step gets each one as {:ok, data} or {:error, reason})"
+      )
+    end
+
+    written = statements(block, :lane)
+    lanes = Enum.map(written, &compile_lane(&1, name, qualified, caller))
+    {optional, defaults, timeouts} = lane_settings(written, name, caller)
+    lane_names = Enum.map(lanes, &elem(&1, 0))
+
+    if lanes == [],
+      do:
+        block_error!(
+          caller,
+          "parallel #{inspect(name)} has no lanes: give it a `lane` or a `step`"
+        )
+
+    if lane_names != Enum.uniq(lane_names),
+      do: block_error!(caller, "parallel #{inspect(name)} has a lane written twice")
+
+    lane_meta = for {lane, {names, _}} <- lanes, do: {qualify(qualified, lane), lane, names}
+    inner = Enum.flat_map(lanes, fn {_, {names, _}} -> names end)
+    into_name = if into_fn, do: body_name(caller, :parallel_into, qualified)
+
+    into_def =
+      if into_fn do
+        quote do
+          @doc false
+          def unquote(into_name)(ctx, results), do: unquote(into_fn).(ctx, results)
+        end
+      end
+
+    into_ref = if into_fn, do: quote(do: &(__MODULE__.unquote(into_name) / 2))
+
+    registration =
+      quote do
+        unquote(into_def)
+
+        @durable_current_steps %Durable.Definition.Step{
+          name: unquote(qualified),
+          type: :parallel,
+          module: __MODULE__,
+          opts: %{
+            original_name: unquote(name),
+            result_key: unquote(name),
+            lanes: unquote(Macro.escape(lane_meta)),
+            steps: [],
+            all_steps: unquote(inner),
+            optional: unquote(optional),
+            defaults: Map.new(unquote(defaults)),
+            timeouts: Durable.DSL.Step.__lane_timeouts__(unquote(timeouts), unquote(name)),
+            error_strategy: unquote(error_strategy),
+            into_fn: unquote(into_ref)
+          }
+        }
+      end
+
+    {[qualified | inner], [registration | Enum.flat_map(lanes, fn {_, {_, regs}} -> regs end)]}
+  end
+
+  defp compile_lane({:lane, _meta, [lane, [do: body]]}, _name, qualified, caller)
+       when is_atom(lane) do
+    {lane, compile_body(body, %{prefix: qualify(qualified, lane), lane?: true}, caller, "lane")}
+  end
+
+  defp compile_lane({:lane, meta, [lane, opts, [do: body]]}, name, qualified, caller)
+       when is_atom(lane) and is_list(opts) do
+    if Keyword.keys(opts) -- [:optional, :default, :timeout] != [] or
+         not is_boolean(Keyword.get(opts, :optional, false)) do
+      block_error!(
+        caller,
+        "lane #{inspect(lane)} of parallel #{inspect(name)} takes optional: true, " <>
+          "default: and timeout:, got: #{Macro.to_string(opts)}"
+      )
+    end
+
+    compile_lane({:lane, meta, [lane, [do: body]]}, name, qualified, caller)
+  end
+
+  # A step on its own is a lane of one step, named after it.
+  defp compile_lane({:step, _meta, [step_name | _]} = step, _name, qualified, caller)
+       when is_atom(step_name) do
+    {step_name, compile_body(step, %{prefix: qualified, lane?: true}, caller, "parallel block")}
+  end
+
+  defp compile_lane(other, name, _qualified, caller) do
+    block_error!(
+      caller,
+      "parallel #{inspect(name)} can hold `lane :name do ... end` and `step`, " <>
+        "but found: #{first_line(other)}"
+    )
+  end
+
+  # Which lanes are optional, and the `default:` and `timeout:` written on them.
+  defp lane_settings(written, name, caller) do
+    set = Enum.flat_map(written, &lane_opts/1)
+    optional = for {_kind, lane, opts} <- set, opts[:optional] == true, do: lane
+
+    defaults =
+      for {_kind, lane, opts} <- set, Keyword.has_key?(opts, :default), do: {lane, opts[:default]}
+
+    if lane = Enum.find(Keyword.keys(defaults), &(&1 not in optional)) do
+      block_error!(
+        caller,
+        "#{inspect(lane)} of parallel #{inspect(name)} has default:, which is what the " <>
+          "next step gets when an optional lane fails: give it optional: true as well"
+      )
+    end
+
+    timeouts = for {:lane, lane, opts} <- set, opts[:timeout], do: {lane, opts[:timeout]}
+    {optional, defaults, timeouts}
+  end
+
+  # The options written on a lane: `lane :x, optional: true do` or, for a lane
+  # of one step, `step :x, [optional: true], fn`.
+  defp lane_opts({kind, _meta, [lane, opts, _body]})
+       when kind in [:lane, :step] and is_atom(lane) and is_list(opts) do
+    if Keyword.keyword?(opts), do: [{kind, lane, opts}], else: []
+  end
+
+  defp lane_opts(_statement), do: []
+
+  @doc false
+  # Checked in the workflow module, where `timeout: seconds(20)` is a number.
+  def __lane_timeouts__(timeouts, block) do
+    for {lane, ms} <- timeouts, not (is_integer(ms) and ms > 0) do
+      raise ArgumentError,
+            "lane #{inspect(lane)} of parallel #{inspect(block)} has timeout: #{inspect(ms)}. " <>
+              "It takes milliseconds, as in timeout: seconds(20)"
+    end
+
+    Map.new(timeouts)
+  end
+
+  # The statements of a do block. A block with one `->` clause or one call
+  # arrives as that alone.
+  defp statements({:__block__, _, items}, _kind), do: items
+  defp statements(clauses, :->) when is_list(clauses), do: clauses
+  defp statements(one, _kind), do: [one]
+
+  # What an arm or a lane holds, as the names of its steps and the code that
+  # registers them, in order.
+  defp compile_body(body, scope, caller, where) do
+    compiled = body |> statements(:body) |> Enum.map(&compile_statement(&1, scope, caller, where))
+    {Enum.flat_map(compiled, &elem(&1, 0)), Enum.flat_map(compiled, &elem(&1, 1))}
+  end
+
+  defp compile_statement(nil, _scope, _caller, _where), do: {[], []}
+
+  defp compile_statement({:pass, _, args}, _scope, _caller, _where) when args in [nil, []],
+    do: {[], []}
+
+  defp compile_statement({:step, _, [name, {:fn, _, _} = body_fn]}, scope, caller, _where)
+       when is_atom(name),
+       do: nested_step(name, [], body_fn, scope, caller)
+
+  defp compile_statement({:step, _, [name, opts, {:fn, _, _} = body_fn]}, scope, caller, _where)
+       when is_atom(name) and is_list(opts),
+       do: nested_step(name, opts, body_fn, scope, caller)
+
+  defp compile_statement({:branch, _, [name, decider, [do: block]]}, scope, caller, _where)
+       when is_atom(name),
+       do: named_branch(name, [], decider, block, scope, caller)
+
+  defp compile_statement({:branch, _, [name, opts, decider, [do: block]]}, scope, caller, _where)
+       when is_atom(name) and is_list(opts),
+       do: named_branch(name, opts, decider, block, scope, caller)
+
+  defp compile_statement({:parallel, _, [name, [do: block]]}, scope, caller, _where)
+       when is_atom(name),
+       do: named_parallel(name, [], block, scope, caller)
+
+  defp compile_statement({:parallel, _, [name, opts, [do: block]]}, scope, caller, _where)
+       when is_atom(name) and is_list(opts),
+       do: named_parallel(name, opts, block, scope, caller)
+
+  defp compile_statement(other, _scope, caller, where) do
+    block_error!(
+      caller,
+      "a #{where} can hold `step`, a named `branch`, a named `parallel` or `pass()`, " <>
+        "but found: #{first_line(other)}"
+    )
+  end
+
+  defp nested_step(name, opts, body_fn, scope, caller) do
+    if scope.lane? and Keyword.has_key?(opts, :compensate),
+      do: no_parallel_compensation!(name, caller)
+
+    qualified = qualify(scope.prefix, name)
+    func_name = body_name(caller, :step_body, qualified)
+    step_opts = opts |> normalize_step_opts() |> Map.put(:original_name, name)
+
+    registration =
+      quote do
+        @doc false
+        def unquote(func_name)(data), do: unquote(body_fn).(data)
+
+        @durable_current_steps %Durable.Definition.Step{
+          name: unquote(qualified),
+          type: :step,
+          module: __MODULE__,
+          body_fn: &(__MODULE__.unquote(func_name) / 1),
+          opts: unquote(quote_opts(step_opts))
+        }
+      end
+
+    {[qualified], [registration]}
+  end
+
+  defp first_line(ast), do: ast |> Macro.to_string() |> String.split("\n") |> hd()
+
+  defp block_error!(caller, description),
+    do: raise(CompileError, file: caller.file, line: caller.line, description: description)
 end

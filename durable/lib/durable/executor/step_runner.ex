@@ -74,6 +74,8 @@ defmodule Durable.Executor.StepRunner do
   """
   @spec execute(Step.t(), map(), String.t(), Config.t(), DateTime.t() | nil) :: result()
   def execute(%Step{} = step, data, workflow_id, %Config{} = config, deadline \\ nil) do
+    # Which lane a run is belongs to its stored context, not to a step's data.
+    data = Map.drop(data, ["__parallel_step", :__parallel_step])
     max_attempts = get_max_attempts(step)
     %{failed: failed, lost: lost} = attempts_used(config, workflow_id, Atom.to_string(step.name))
     attempt = failed + 1
@@ -354,7 +356,6 @@ defmodule Durable.Executor.StepRunner do
 
     # Create step execution record
     {:ok, step_exec} = create_step_execution(config, workflow_id, step, attempt)
-    {:ok, step_exec} = update_step_execution(config, step_exec, :running)
 
     # Start log capture for this step
     Durable.LogCapture.start_capture(
@@ -369,8 +370,12 @@ defmodule Durable.Executor.StepRunner do
     span_meta = step_span_meta(config, step_exec, step, attempt, max_attempts)
 
     # The row is written inside the span: its end event belongs to whoever
-    # closes the row, and that may turn out not to be this process.
+    # closes the row, and that may turn out not to be this process. It is
+    # marked running in there too, after the start event: only a running row
+    # can be closed by someone else, so an end never comes without a start.
     Durable.Telemetry.span([:durable, :step], span_meta, fn ->
+      {:ok, step_exec} = update_step_execution(config, step_exec, :running)
+
       result = run_body(step, without_wait_markers(data), time_limit(step, deadline))
       duration_ms = System.monotonic_time(:millisecond) - start_time
 
@@ -462,8 +467,15 @@ defmodule Durable.Executor.StepRunner do
     }
   end
 
-  defp timeout_error(step, :run),
-    do: %{type: "timeout", message: "the run passed its timeout during #{step.name}"}
+  defp timeout_error(step, :run) do
+    whose =
+      case Process.get(:durable_lane_timeout) do
+        {lane, _ms} -> "lane #{lane}"
+        nil -> "the run"
+      end
+
+    %{type: "timeout", message: "#{whose} passed its timeout during #{step.name}"}
+  end
 
   defp step_span_meta(config, step_exec, step, attempt, max_attempts) do
     run_meta = Durable.Telemetry.run_meta()
@@ -491,6 +503,10 @@ defmodule Durable.Executor.StepRunner do
   defp step_outcome({:throw, {kind, _opts}}) when kind in @suspending, do: %{result: :suspended}
   defp step_outcome({:error, error}), do: %{result: :error, error: error_summary(error)}
   defp step_outcome({:fail, error}), do: %{result: :error, error: error_summary(error)}
+
+  defp step_outcome({:rollback, reason}),
+    do: %{result: :error, error: error_summary(rollback_error(reason))}
+
   defp step_outcome({:snooze, ms}) when is_integer(ms) and ms >= 0, do: %{result: :snoozed}
 
   defp step_outcome({:snooze, ms, _reason}) when is_integer(ms) and ms >= 0,
@@ -615,6 +631,10 @@ defmodule Durable.Executor.StepRunner do
   # The step says retrying won't help: fail now, whatever attempts are left.
   defp handle_result({:fail, error}, ctx), do: give_up(error, ctx)
 
+  # The step says the run can't go on and what it did should be undone: fail
+  # now, and the executor compensates whatever the workflow's on_failure: is.
+  defp handle_result({:rollback, reason}, ctx), do: give_up(rollback_error(reason), ctx)
+
   # The step says the run should stop: the executor cancels the scope's run
   # (nil = the default for where the step runs).
   defp handle_result({:cancel, reason}, ctx), do: cancel(reason, nil, ctx)
@@ -630,7 +650,8 @@ defmodule Durable.Executor.StepRunner do
       type: "invalid_step_return",
       message:
         "Step must return {:ok, map}, {:goto, :step, map}, {:error, reason}, " <>
-          "{:fail, reason}, {:snooze, ms}, {:snooze, ms, reason}, {:cancel, reason} or " <>
+          "{:fail, reason}, {:rollback, reason}, {:snooze, ms}, {:snooze, ms, reason}, " <>
+          "{:cancel, reason} or " <>
           "{:cancel, reason, scope: :run | :workflow | :root}, " <>
           "got: #{inspect(other)}"
     }
@@ -683,25 +704,14 @@ defmodule Durable.Executor.StepRunner do
     {:park, ms}
   end
 
+  defp rollback_error(reason), do: %{type: "rollback", message: reason_text(reason)}
+
   defp reason_text(reason) when is_binary(reason), do: reason
   defp reason_text(reason) when is_atom(reason), do: Atom.to_string(reason)
   defp reason_text(reason), do: inspect(reason)
 
-  defp handle_step_success(config, step, step_exec, new_data, logs, duration_ms) do
-    stored_output =
-      if step.opts[:parallel_id] do
-        # Include result snapshot for parallel step resumption
-        # Store the raw result data for the new results-based model
-        %{
-          "__output__" => new_data,
-          "__context__" => new_data,
-          "__result__" => new_data
-        }
-      else
-        new_data
-      end
-
-    {:ok, _} = complete_step_execution(config, step_exec, stored_output, logs, duration_ms)
+  defp handle_step_success(config, _step, step_exec, new_data, logs, duration_ms) do
+    {:ok, _} = complete_step_execution(config, step_exec, new_data, logs, duration_ms)
     {:ok, new_data}
   end
 

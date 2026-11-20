@@ -116,7 +116,18 @@ defmodule Durable.Testing do
       Repo.all(
         config,
         from(w in WorkflowExecution,
+          as: :run,
           where: w.id in ^ids and w.status == :pending,
+          # As a poller would: a run waiting behind its key's holder isn't due.
+          where:
+            not exists(
+              from(h in WorkflowExecution,
+                where:
+                  h.id == parent_as(:run).runs_after_id and
+                    h.status in [:pending, :running, :waiting, :compensating],
+                select: 1
+              )
+            ),
           order_by: w.inserted_at,
           select: w.id
         )
@@ -165,21 +176,29 @@ defmodule Durable.Testing do
     config = config(opts)
     root = Repo.get(config, WorkflowExecution, run_id(run))
 
-    branches =
-      from(w in WorkflowExecution,
-        where:
-          w.parent_workflow_id == ^root.id and w.workflow_module == ^root.workflow_module and
-            w.workflow_name == ^root.workflow_name,
-        select: w.id
-      )
+    ids = branch_ids(config, root, [root.id])
 
     Repo.all(
       config,
-      from(s in StepExecution,
-        where: s.workflow_id == ^root.id or s.workflow_id in subquery(branches),
-        order_by: [asc: s.inserted_at]
-      )
+      from(s in StepExecution, where: s.workflow_id in ^ids, order_by: [asc: s.inserted_at])
     )
+  end
+
+  # The run and the runs of its parallel blocks, which a lane can hold more of.
+  defp branch_ids(config, root, ids) do
+    found =
+      Repo.all(
+        config,
+        from(w in WorkflowExecution,
+          where:
+            w.parent_workflow_id in ^ids and w.id not in ^ids and
+              w.workflow_module == ^root.workflow_module and
+              w.workflow_name == ^root.workflow_name,
+          select: w.id
+        )
+      )
+
+    if found == [], do: ids, else: branch_ids(config, root, ids ++ found)
   end
 
   @doc """
@@ -238,7 +257,7 @@ defmodule Durable.Testing do
   end
 
   # Steps inside parallel and branch blocks are stored qualified, such as
-  # "parallel_123__email" or "branch_456__digital__ship".
+  # "lookups__credit" or "branch_456__digital__ship".
   defp short_name(%StepExecution{step_name: name}),
     do: name |> String.split("__") |> List.last()
 

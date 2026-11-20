@@ -93,8 +93,10 @@ defmodule DurableDashboard.Live.RunPageLiveTest do
     end
   end
 
-  test "Context folds the engine's own keys away", %{conn: conn, ids: ids} do
-    {:ok, _view, html} = live(conn, dash("/executions/#{ids.family}/context"))
+  test "Context folds the engine's own keys away", %{conn: conn} do
+    # Waiting on its lanes, the run holds the block's bookkeeping.
+    id = Fixtures.run!(Fixtures.Moderation)
+    {:ok, _view, html} = live(conn, dash("/executions/#{id}/context"))
     assert html =~ "Engine bookkeeping"
   end
 
@@ -155,6 +157,72 @@ defmodule DurableDashboard.Live.RunPageLiveTest do
       refute Fixtures.get_run!(ids.failed).status == :failed
     end
 
+    test "Roll back names what it will run, and undoes a failed run once confirmed", %{conn: conn} do
+      id = Fixtures.run!(Fixtures.Holds)
+      assert Fixtures.get_run!(id).status == :failed
+
+      {:ok, view, _html} = live(conn, dash("/executions/#{id}"))
+      refute has_element?(view, "[role=alertdialog]")
+
+      view |> element("[phx-click=confirm-rollback]") |> render_click()
+      assert view |> element("[role=alertdialog]") |> render() =~ "release"
+
+      view |> element("[phx-click=keep-run]") |> render_click()
+      refute has_element?(view, "[role=alertdialog]")
+      assert Fixtures.get_run!(id).status == :failed
+
+      view |> element("[phx-click=confirm-rollback]") |> render_click()
+      view |> element("[phx-click=rollback]") |> render_click()
+
+      # A worker picks the rollback up; the run is no longer failed or retryable.
+      assert Fixtures.get_run!(id).status == :pending
+      refute has_element?(view, "[phx-click=retry]")
+      assert Durable.Testing.drain(Fixtures.get_run!(id)).status == :compensated
+    end
+
+    test "a failed run that will roll back by itself says when", %{conn: conn} do
+      id = Fixtures.run!(Fixtures.ExpiringHold)
+      {:ok, view, _html} = live(conn, dash("/executions/#{id}"))
+
+      line = view |> element("[data-rolls-back-at]") |> render()
+      assert line =~ "Rolls back by itself"
+      assert line =~ DateTime.to_iso8601(Fixtures.get_run!(id).scheduled_at)
+
+      # A failed run of a workflow without the option says nothing of the kind.
+      {:ok, view, _html} = live(conn, dash("/executions/#{Fixtures.run!(Fixtures.Holds)}"))
+      refute has_element?(view, "[data-rolls-back-at]")
+    end
+
+    test "Cancel and roll back cancels a live run, then undoes what it did", %{conn: conn} do
+      id = Fixtures.run!(Fixtures.HoldAwaitingCustomer)
+      assert Fixtures.get_run!(id).status == :waiting
+
+      {:ok, view, _html} = live(conn, dash("/executions/#{id}"))
+      assert has_element?(view, "[phx-click=cancel]")
+
+      view |> element("[phx-click=confirm-rollback]") |> render_click()
+      strip = view |> element("[role=alertdialog]") |> render()
+      assert strip =~ "Cancel this run and roll it back?"
+      assert strip =~ "release"
+
+      view |> element("[phx-click=rollback]") |> render_click()
+
+      run = Durable.Testing.drain(Fixtures.get_run!(id))
+      assert run.status == :compensated
+      assert run.error["type"] == "cancelled"
+    end
+
+    test "a live run with nothing to undo gets Cancel alone", %{conn: conn, ids: ids} do
+      {:ok, view, _html} = live(conn, dash("/executions/#{ids.waiting_input}"))
+      assert has_element?(view, "[phx-click=cancel]")
+      refute has_element?(view, "[phx-click=confirm-rollback]")
+    end
+
+    test "a failed run with nothing to undo gets no Roll back", %{conn: conn, ids: ids} do
+      {:ok, view, _html} = live(conn, dash("/executions/#{ids.failed}"))
+      refute has_element?(view, "[phx-click=confirm-rollback]")
+    end
+
     test "Cancel stops a waiting run", %{conn: conn, ids: ids} do
       {:ok, view, _html} = live(conn, dash("/executions/#{ids.waiting_input}"))
 
@@ -168,7 +236,8 @@ defmodule DurableDashboard.Live.RunPageLiveTest do
     test "a viewer gets no actions, and pushing one anyway is refused", %{conn: conn, ids: ids} do
       {:ok, view, _html} = live(conn, dash("/executions/#{ids.failed}"))
 
-      for event <- ~w(rerun retry cancel), do: refute(has_element?(view, "[phx-click=#{event}]"))
+      for event <- ~w(rerun retry cancel confirm-rollback),
+          do: refute(has_element?(view, "[phx-click=#{event}]"))
 
       assert render_hook(view, "retry", %{}) =~ "You don&#39;t have permission to do that."
       assert Fixtures.get_run!(ids.failed).status == :failed

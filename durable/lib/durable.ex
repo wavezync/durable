@@ -329,7 +329,17 @@ defmodule Durable do
   later step runs. A step in flight is stopped at the worker's next heartbeat
   (`:heartbeat_interval`, 30 s by default), killed like any process. To stop
   cleanly before that, a step can check `Durable.Context.cancelled?/0` between
-  chunks of work. Cancelling does not run compensations.
+  chunks of work.
+
+  Cancelling does not run compensations. Pass `rollback: true` to undo the run
+  as well: once cancelled it goes back on its queue, a worker runs the
+  `compensate:` of every step that completed, newest first, and the run ends
+  `:compensated` (or `:compensation_failed`). What that would run is
+  `rollback_plan/2`; with nothing to undo the run stays `:cancelled`. If a
+  worker had the run, the undo starts one `:heartbeat_interval` later, once
+  that worker has stopped: a step that finished in that time is undone, and
+  one that was killed part-way isn't, as it never completed. Child workflows
+  are cancelled, not rolled back.
 
   Returns `{:error, :already_completed}` if the run has already finished, and
   `{:error, :not_found}` for an unknown id.
@@ -339,16 +349,26 @@ defmodule Durable do
       :ok = Durable.cancel(workflow_id)
       :ok = Durable.cancel(workflow_id, "User requested cancellation")
 
+      # The customer cancelled the order: release the card hold and the stock
+      :ok = Durable.cancel(workflow_id, "customer cancelled", rollback: true)
+
+  ## Options
+
+  - `:rollback` - undo the run after cancelling it (default: `false`)
+  - `:durable` - the Durable instance (default: `Durable`)
+
   """
-  @spec cancel(String.t(), String.t() | nil) :: :ok | {:error, term()}
-  def cancel(workflow_id, reason \\ nil) do
-    Durable.Executor.cancel_workflow(workflow_id, reason)
+  @spec cancel(String.t(), String.t() | nil, keyword()) :: :ok | {:error, term()}
+  def cancel(workflow_id, reason \\ nil, opts \\ []) do
+    Durable.Executor.cancel_workflow(workflow_id, reason, opts)
   end
 
   @doc """
   Cancels every pending, running or waiting run that matches `filters`, the
   filters of `list_executions/1`, one by one as `cancel/2` would (children
-  included). Returns `{:ok, count}`. At least one filter is required.
+  included). Returns `{:ok, count}`. At least one filter is required, and one
+  that wouldn't narrow the runs (a misspelt name, a `nil`) raises rather than
+  cancel everything else.
 
   ## Examples
 
@@ -389,6 +409,47 @@ defmodule Durable do
   @spec retry(String.t(), keyword()) :: {:ok, String.t()} | {:error, term()}
   def retry(workflow_id, opts \\ []) do
     Durable.Executor.retry_workflow(workflow_id, opts)
+  end
+
+  @doc """
+  Undoes a failed run: runs the `compensate:` of every step that completed,
+  newest first, on a worker.
+
+  A failed run is left as it failed unless its workflow says
+  `on_failure: :rollback`, so it can be retried once the cause is fixed. Call
+  this when it shouldn't be: the customer gave up, the order was cancelled.
+  The run ends `:compensated` (or `:compensation_failed`) and can't be retried
+  after; a run with nothing to undo stays `:failed`.
+
+  Returns `{:error, :rolled_back}` for a run already rolled back and
+  `{:error, :not_failed}` for one that isn't failed.
+
+  ## Options
+
+  - `:durable` - The Durable instance name (default: Durable)
+
+  ## Examples
+
+      {:ok, ^workflow_id} = Durable.rollback(workflow_id)
+
+  """
+  @spec rollback(String.t(), keyword()) :: {:ok, String.t()} | {:error, term()}
+  def rollback(workflow_id, opts \\ []) do
+    Durable.Executor.rollback_workflow(workflow_id, opts)
+  end
+
+  @doc """
+  What `rollback/2` would run for a run: the compensation of every step that
+  completed, newest first.
+
+      Durable.rollback_plan(workflow_id)
+      #=> [book_hotel: :cancel_hotel, book_flight: :cancel_flight]
+
+  Empty when there is nothing to undo. Takes `:durable` like `rollback/2`.
+  """
+  @spec rollback_plan(String.t(), keyword()) :: [{atom(), atom()}]
+  def rollback_plan(workflow_id, opts \\ []) do
+    Durable.Executor.rollback_plan(workflow_id, opts)
   end
 
   @doc """

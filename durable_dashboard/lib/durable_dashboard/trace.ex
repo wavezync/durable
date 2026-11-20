@@ -242,11 +242,11 @@ defmodule DurableDashboard.Trace do
 
   @doc false
   def display_name(name) when is_binary(name) do
+    # A step in a block is stored under the block, and under each block that
+    # one is in: "fulfil__ship__where__home__courier" is the step "courier".
     case String.split(name, "__") do
-      [_prefix, _clause, step] -> step
-      [_prefix, step] -> step
       [block] -> Regex.replace(~r/^(parallel|branch)_\d+$/, block, "\\1")
-      _ -> name
+      parts -> List.last(parts)
     end
   end
 
@@ -347,7 +347,7 @@ defmodule DurableDashboard.Trace do
   # The DSL compiles each step, decision, compensation, branch `on:` and
   # parallel `into:` to a generated function; name it the way it was written:
   # "MyApp.Orders.__step_body_charge__/1" → "Orders · step :charge".
-  @generated ~r/(?:([\w.]+)\.)?__(step_body|decision_body|compensate_body|branch_condition|parallel_into)_(\w+?)__\/\d+/
+  @generated ~r/(?:([\w.]+)\.)?__(step_body|decision_body|compensate_body|branch_body|branch_condition|parallel_into)_(\w+?)(?:__in_\d+)?__\/\d+/
 
   defp readable(function) do
     Regex.replace(@generated, function, fn _all, module, kind, name ->
@@ -359,6 +359,7 @@ defmodule DurableDashboard.Trace do
   defp written("step_body", name), do: "step :#{display_name(name)}"
   defp written("decision_body", name), do: "decision :#{name}"
   defp written("compensate_body", name), do: "compensation :#{name}"
+  defp written("branch_body", name), do: "branch :#{display_name(name)}"
   defp written("branch_condition", _id), do: "branch on:"
   defp written("parallel_into", _id), do: "parallel into:"
 end

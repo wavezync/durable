@@ -32,7 +32,7 @@ defmodule Durable.ParkTest do
     use Durable.Context
 
     workflow "fails_in_branch" do
-      parallel do
+      parallel :calls do
         step(:flaky, [retry: [max_attempts: 2, backoff: :constant, base: 1]], fn data ->
           if attempt() == 1, do: {:error, :down}, else: {:ok, assign(data, :flaky, true)}
         end)
@@ -139,7 +139,9 @@ defmodule Durable.ParkTest do
     run = run_workflow(FailsInBranch)
 
     assert run.status == :completed
-    assert %{"flaky" => ["ok", _], "steady" => ["ok", _]} = run.context["__results__"]
+
+    assert %{"flaky" => %{"flaky" => true}, "steady" => %{"steady" => true}} =
+             run.context["calls"]
   end
 
   test "a retry inside a branch goes on with its own clause, then past the block" do

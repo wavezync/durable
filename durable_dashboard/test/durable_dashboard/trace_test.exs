@@ -214,6 +214,13 @@ defmodule DurableDashboard.TraceTest do
     assert Trace.display_name("branch_12") == "branch"
   end
 
+  test "a step in named blocks is shown by its own name, however deep" do
+    assert Trace.display_name("risk__review__ask") == "ask"
+    assert Trace.display_name("fulfil__points") == "points"
+    assert Trace.display_name("fulfil__ship__where__home__courier") == "courier"
+    assert Trace.display_name("risk") == "risk"
+  end
+
   test "error_parts splits app frames from library frames" do
     error = %{
       "type" => "RuntimeError",
@@ -239,6 +246,10 @@ defmodule DurableDashboard.TraceTest do
     (my_app 0.1.0) lib/my_app/orders.ex:12: MyApp.Orders.__step_body_parallel_7__charge__/1
     (my_app 0.1.0) lib/my_app/orders.ex:30: anonymous fn/1 in MyApp.Orders.__compensate_body_refund__/1
     (my_app 0.1.0) lib/my_app/orders.ex:40: MyApp.Orders.__branch_condition_3__/1
+    (my_app 0.1.0) lib/my_app/orders.ex:50: MyApp.Orders.__step_body_charge__in_91234__/1
+    (my_app 0.1.0) lib/my_app/orders.ex:60: MyApp.Orders.__branch_body_risk__/1
+    (my_app 0.1.0) lib/my_app/orders.ex:70: MyApp.Orders.__step_body_fulfil__ship__where__home__courier__/1
+    (my_app 0.1.0) lib/my_app/orders.ex:80: MyApp.Orders.__branch_body_fulfil__ship__where__/1
     """
 
     %{frames: frames} = Trace.error_parts(%{"message" => "x", "stacktrace" => stack})
@@ -246,7 +257,11 @@ defmodule DurableDashboard.TraceTest do
     assert Enum.map(frames, & &1.function) == [
              "Orders · step :charge",
              "anonymous fn/1 in Orders · compensation :refund",
-             "Orders · branch on:"
+             "Orders · branch on:",
+             "Orders · step :charge",
+             "Orders · branch :risk",
+             "Orders · step :courier",
+             "Orders · branch :where"
            ]
   end
 

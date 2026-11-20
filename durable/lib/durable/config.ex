@@ -191,7 +191,10 @@ defmodule Durable.Config do
   defp node_id do
     if node() == :nonode@nohost do
       {:ok, host} = :inet.gethostname()
-      "#{host}-#{System.unique_integer([:positive])}"
+      # Random: System.unique_integer/1 starts from the same place on every
+      # boot, so two VMs on one host got one id, and one's shutdown handed back
+      # the other's running runs.
+      "#{host}-#{Base.encode16(:crypto.strong_rand_bytes(4), case: :lower)}"
     else
       Atom.to_string(node())
     end

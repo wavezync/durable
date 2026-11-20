@@ -92,7 +92,7 @@ defmodule Durable.Integration.OpenTelemetryTest do
     use Durable
 
     workflow "otel_branches" do
-      parallel do
+      parallel :fan do
         step(:branch, fn d -> {:ok, d} end)
       end
     end
@@ -101,7 +101,7 @@ defmodule Durable.Integration.OpenTelemetryTest do
   defmodule Compensated do
     use Durable
 
-    workflow "otel_compensated" do
+    workflow "otel_compensated", on_failure: :rollback do
       step(:book, [compensate: :unbook], fn d -> {:ok, d} end)
       step(:charge, fn _d -> {:fail, "declined"} end)
       compensate(:unbook, fn d -> {:ok, d} end)

@@ -97,20 +97,31 @@ defmodule Durable.Orchestration do
 
     context = Process.get(:durable_context, %{})
 
-    cond do
-      Map.has_key?(context, result_key) ->
-        parse_child_result(Map.get(context, result_key))
+    case {fetch(context, result_key), fetch(context, child_key)} do
+      {{:ok, %{"status" => "completed"} = result}, _child} ->
+        parse_child_result(result)
 
-      Map.has_key?(context, child_key) ->
-        child_id = Map.get(context, child_key)
-
+      # A failure the parent was told about may be out of date: the child can
+      # have been retried since, so its row has the last word.
+      {_result, {:ok, child_id}} ->
         if timed_out?(context, child_id),
           do: {:ok, Keyword.get(opts, :timeout_value, :child_timeout)},
           else: handle_existing_child(child_id, opts)
 
-      true ->
+      {{:ok, result}, :error} ->
+        parse_child_result(result)
+
+      {:error, :error} ->
         create_and_wait(module, input, parent_id, child_key, opts)
     end
+  end
+
+  # These keys are strings, but a context saved by an older version has them as
+  # atoms where the atom existed. Read as atoms only, a node that had never run
+  # the call (after a restart or a deploy) missed the key and started the
+  # child again, every time the parent resumed.
+  defp fetch(context, key) do
+    with :error <- Map.fetch(context, key), do: Map.fetch(context, Context.known_key(key))
   end
 
   @doc """
@@ -139,15 +150,17 @@ defmodule Durable.Orchestration do
 
     context = Process.get(:durable_context, %{})
 
-    if Map.has_key?(context, fire_key) do
+    case fetch(context, fire_key) do
       # Idempotent: already created
-      {:ok, Map.get(context, fire_key)}
-    else
+      {:ok, child_id} ->
+        {:ok, child_id}
+
       # Create child and continue (no throw)
-      {:ok, child_id} = create_child_execution(module, input, parent_id, [wake: true] ++ opts)
-      Context.put_context(fire_key, child_id)
-      record_call_child(child_id, :fire, ref)
-      {:ok, child_id}
+      :error ->
+        {:ok, child_id} = create_child_execution(module, input, parent_id, [wake: true] ++ opts)
+        Context.put_context(fire_key, child_id)
+        record_call_child(child_id, :fire, ref)
+        {:ok, child_id}
     end
   end
 
@@ -164,12 +177,9 @@ defmodule Durable.Orchestration do
       "ref" => to_string(ref)
     }
 
-    children =
-      Context.get_context(:__call_children, %{}) ||
-        Context.get_context("__call_children", %{}) ||
-        %{}
+    children = Context.get_context("__call_children", %{}) || %{}
 
-    Context.put_context(:__call_children, Map.put(children, child_id, meta))
+    Context.put_context("__call_children", Map.put(children, child_id, meta))
     :ok
   end
 
@@ -275,16 +285,16 @@ defmodule Durable.Orchestration do
   end
 
   @doc false
-  def child_context_key(ref), do: :"__child:#{ref}"
+  def child_context_key(ref), do: "__child:#{ref}"
 
   @doc false
-  def child_result_key(ref), do: :"__child_done:#{ref}"
+  def child_result_key(ref), do: "__child_done:#{ref}"
 
   @doc false
   def child_event_name(child_id), do: "__child_done:#{child_id}"
 
   @doc false
-  def fire_forget_key(ref), do: :"__fire_forget:#{ref}"
+  def fire_forget_key(ref), do: "__fire_forget:#{ref}"
 
   @doc false
   def build_result_payload(status, data) do

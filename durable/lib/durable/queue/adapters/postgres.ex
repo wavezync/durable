@@ -174,32 +174,48 @@ defmodule Durable.Queue.Adapters.Postgres do
         if fenced?(execution, lock_token) or execution.status not in [:running, :compensating] do
           :ok
         else
-          fail_unrecorded(config, execution, Executor.storable_error(reason))
+          fail_unrecorded(config, execution, Executor.storable_error(reason), lock_token)
         end
     end
   end
 
-  defp fail_unrecorded(config, execution, error) do
-    # What raised has reported this attempt's end already, as an :exception.
-    StepRunner.close_attempts(config, [execution.id], :failed, error)
+  # One conditional UPDATE: a cancel or a takeover that lands after the row was
+  # read wins, and this writes nothing.
+  defp fail_unrecorded(config, execution, error, lock_token) do
+    now = DateTime.utc_now()
 
-    with {:ok, failed} <-
-           execution
-           |> Ecto.Changeset.change(
-             status: :failed,
-             error: error,
-             completed_at: DateTime.utc_now(),
-             locked_by: nil,
-             locked_at: nil,
-             lock_token: nil
-           )
-           |> Repo.update(config) do
+    {_count, failed} =
+      Repo.update_all(
+        config,
+        from(w in still_claimed(execution.id, lock_token),
+          where: w.status in [:running, :compensating],
+          select: w
+        ),
+        set: [
+          status: :failed,
+          error: error,
+          completed_at: now,
+          updated_at: now,
+          locked_by: nil,
+          locked_at: nil,
+          lock_token: nil
+        ]
+      )
+
+    for run <- failed do
+      # What raised has reported this attempt's end already, as an :exception.
+      StepRunner.close_attempts(config, [run.id], :failed, error)
       # The executor never got to tell a parent waiting on this run.
-      Executor.maybe_notify_parent(config, failed, :failed, error)
+      Executor.maybe_notify_parent(config, run, :failed, error)
     end
 
     :ok
   end
+
+  defp still_claimed(id, nil), do: from(w in WorkflowExecution, where: w.id == ^id)
+
+  defp still_claimed(id, lock_token),
+    do: from(w in WorkflowExecution, where: w.id == ^id and w.lock_token == ^lock_token)
 
   @impl true
   def reschedule(%Config{} = config, job_id, run_at) when is_binary(job_id) do
@@ -225,15 +241,22 @@ defmodule Durable.Queue.Adapters.Postgres do
         if fenced?(execution, lock_token) do
           :ok
         else
-          execution
-          |> Ecto.Changeset.change(
-            status: :pending,
-            scheduled_at: run_at,
-            locked_by: nil,
-            locked_at: nil,
-            lock_token: nil
+          # Conditional, so a run that ended or changed hands since it was
+          # read isn't reopened.
+          Repo.update_all(
+            config,
+            from(w in still_claimed(execution.id, lock_token),
+              where: w.status in [:pending, :running, :waiting, :compensating]
+            ),
+            set: [
+              status: :pending,
+              scheduled_at: run_at,
+              locked_by: nil,
+              locked_at: nil,
+              lock_token: nil,
+              updated_at: DateTime.utc_now()
+            ]
           )
-          |> Repo.update(config)
 
           :ok
         end
@@ -370,10 +393,16 @@ defmodule Durable.Queue.Adapters.Postgres do
         "detected_at" => DateTime.to_iso8601(now)
       }
 
+      # Still as they were found: one that was resumed or finished meanwhile
+      # isn't a zombie any more.
       {count, zombies} =
         Repo.update_all(
           config,
-          from(w in WorkflowExecution, where: w.id in ^zombie_ids, select: w),
+          from(w in WorkflowExecution,
+            where: w.id in ^zombie_ids and w.status in [:waiting, :compensating],
+            where: w.updated_at < ^cutoff,
+            select: w
+          ),
           set: [
             status: :failed,
             error: zombie_error,
@@ -384,12 +413,15 @@ defmodule Durable.Queue.Adapters.Postgres do
           ]
         )
 
+      zombie_ids = Enum.map(zombies, & &1.id)
       StepRunner.close_running(config, zombie_ids, :failed, zombie_error)
       Enum.each(zombies, &Executor.maybe_notify_parent(config, &1, :failed, zombie_error))
 
-      Logger.warning(
-        "[Durable] Zombie recovery marked #{count} workflow(s) as :failed: #{inspect(zombie_ids)}"
-      )
+      if count > 0 do
+        Logger.warning(
+          "[Durable] Zombie recovery marked #{count} workflow(s) as :failed: #{inspect(zombie_ids)}"
+        )
+      end
 
       {:ok, count}
     end
