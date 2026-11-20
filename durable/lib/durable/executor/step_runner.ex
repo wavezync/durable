@@ -700,21 +700,8 @@ defmodule Durable.Executor.StepRunner do
   defp reason_text(reason) when is_atom(reason), do: Atom.to_string(reason)
   defp reason_text(reason), do: inspect(reason)
 
-  defp handle_step_success(config, step, step_exec, new_data, logs, duration_ms) do
-    stored_output =
-      if step.opts[:parallel_id] do
-        # Include result snapshot for parallel step resumption
-        # Store the raw result data for the new results-based model
-        %{
-          "__output__" => new_data,
-          "__context__" => new_data,
-          "__result__" => new_data
-        }
-      else
-        new_data
-      end
-
-    {:ok, _} = complete_step_execution(config, step_exec, stored_output, logs, duration_ms)
+  defp handle_step_success(config, _step, step_exec, new_data, logs, duration_ms) do
+    {:ok, _} = complete_step_execution(config, step_exec, new_data, logs, duration_ms)
     {:ok, new_data}
   end
 

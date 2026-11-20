@@ -821,8 +821,13 @@ defmodule Durable.Executor do
         lane_steps ->
           run_lane(execution, lane_steps, {parallel_step_flag, done}, workflow_def, config)
 
+        # A lane the deployed code no longer has. Run as a whole workflow, it
+        # would repeat every step after the block.
         parallel_step_flag ->
-          execute_parallel_step(execution, workflow_def, config)
+          mark_failed(config, execution, %{
+            type: "parallel_step_not_found",
+            message: "Lane #{parallel_step_flag} not found in workflow"
+          })
 
         true ->
           # Pipeline model: start with workflow input or restored context
@@ -838,8 +843,7 @@ defmodule Durable.Executor do
     result
   end
 
-  # The steps of the lane a run was started for, if its marker names a lane
-  # (and not one step of an unnamed parallel block).
+  # The steps of the lane a run was started for, if the workflow still has it.
   defp lane_steps(workflow_def, lane_id) do
     Enum.find_value(workflow_def.steps, fn
       %{type: :parallel, opts: %{lanes: lanes}} ->
@@ -1801,7 +1805,7 @@ defmodule Durable.Executor do
     error_strategy = opts[:error_strategy] || :fail_fast
     into_fn = opts[:into_fn]
 
-    ordered_steps = block_children(opts, remaining_steps)
+    ordered_steps = block_children(opts)
 
     # Save data before parallel execution
     {:ok, exec} = save_data_as_context(config, exec, data)
@@ -1830,15 +1834,11 @@ defmodule Durable.Executor do
     end
   end
 
-  # What runs as a child: each lane of a named block, or each step of an
-  # unnamed one. A lane is started like a step, under its own id.
-  defp block_children(%{lanes: lanes} = opts, _remaining_steps) do
+  # What runs as a child: each lane, started like a step, under its own id.
+  defp block_children(%{lanes: lanes} = opts) do
     for {id, lane, _names} <- lanes,
         do: %{name: id, opts: %{returns: lane, optional: lane in (opts[:optional] || [])}}
   end
-
-  defp block_children(opts, remaining_steps),
-    do: find_ordered_steps(remaining_steps, opts[:steps] || [])
 
   # Fan-out: create child workflow executions for each parallel step and wait
   # In one transaction: a branch that a worker could claim while the parent was
@@ -1958,92 +1958,6 @@ defmodule Durable.Executor do
     |> Repo.insert(config)
   end
 
-  # Execute a single parallel step (called when a child execution is picked up)
-  # The marker stays in the saved context: without it, a branch that wakes up
-  # would run as a whole workflow and repeat every step after the block.
-  defp save_branch_context(config, execution, data, step_name) do
-    save_data_as_context(config, execution, Map.put(data, "__parallel_step", step_name))
-  end
-
-  defp execute_parallel_step(execution, workflow_def, config) do
-    step_name_str =
-      Map.get(execution.context, "__parallel_step") ||
-        Map.get(execution.context, :__parallel_step)
-
-    step_name = String.to_existing_atom(step_name_str)
-
-    step_def = Enum.find(workflow_def.steps, &(&1.name == step_name))
-
-    cond do
-      is_nil(step_def) ->
-        mark_failed(config, execution, %{
-          type: "parallel_step_not_found",
-          message: "Step #{step_name} not found in workflow"
-        })
-
-      # An `on_timeout: :fail` wait timed out. Run again, the step would only
-      # ask again, for ever.
-      error = resume_failure(execution) ->
-        {:ok, execution} =
-          execution
-          |> Ecto.Changeset.change(context: Map.delete(execution.context, "__fail__"))
-          |> cas_update!(config)
-
-        mark_failed(config, execution, error)
-
-      true ->
-        run_parallel_step(execution, step_def, workflow_def, config)
-    end
-  end
-
-  defp run_parallel_step(execution, step_def, workflow_def, config) do
-    step_name_str = Atom.to_string(step_def.name)
-
-    # Merge the inherited parent context into the pipeline data so that
-    # get_context/1 inside the step body resolves keys set by prior
-    # put_context/2 calls in the parent's non-parallel steps.
-    #
-    # StepRunner will Process.put(:durable_context, data) before running
-    # the body, which is why we need these keys to live inside `data`.
-    # The __parallel_step marker is internal plumbing — strip it from
-    # what the user sees.
-    data =
-      execution.context
-      |> Map.drop(["__parallel_step", :__parallel_step, @atom_keys])
-      |> Map.merge(execution.input)
-      |> restore_keys()
-      |> restore_lane_keys(workflow_def)
-
-    case StepRunner.execute(step_def, data, execution.id, config, execution.deadline_at) do
-      {:ok, output_data} ->
-        mark_completed(config, execution, output_data)
-
-      {:error, error} ->
-        mark_failed(config, execution, error)
-
-      {:cancel, reason, scope} ->
-        cancel_from_step(config, execution, reason, scope)
-
-      {:park, delay_ms} ->
-        park(config, execution, delay_ms)
-
-      {wait_type, wait_opts}
-      when wait_type in [:sleep, :wait_for_event, :wait_for_input, :wait_for_any, :wait_for_all] ->
-        {:ok, exec} = save_branch_context(config, execution, data, step_name_str)
-        handle_wait_result(config, exec, wait_type, wait_opts)
-
-      {:call_workflow, call_opts} ->
-        {:ok, exec} = save_branch_context(config, execution, data, step_name_str)
-        handle_call_workflow(config, exec, call_opts)
-
-      {:decision, _target, _data} ->
-        mark_failed(config, execution, %{
-          type: "parallel_decision_not_supported",
-          message: "decisions not supported in parallel blocks"
-        })
-    end
-  end
-
   # Collect results from completed child executions (called when parent resumes)
   defp collect_parallel_results(exec, _base_data, into_fn, _error_strategy, opts) do
     %{
@@ -2139,16 +2053,6 @@ defmodule Durable.Executor do
     end)
   end
 
-  defp find_ordered_steps(remaining_steps, step_names) do
-    steps_to_execute =
-      Enum.filter(remaining_steps, fn step -> step.name in step_names end)
-
-    Enum.map(step_names, fn name ->
-      Enum.find(steps_to_execute, fn s -> s.name == name end)
-    end)
-    |> Enum.reject(&is_nil/1)
-  end
-
   # Handle completion of parallel block - apply into_fn or add __results__
   # Uses opts map to reduce arity below credo's limit of 8
   defp handle_parallel_completion(results, base_ctx, into_fn, opts) do
@@ -2164,10 +2068,7 @@ defmodule Durable.Executor do
 
     block = Enum.find(workflow_def.steps, &(&1.name == parallel_step_name))
 
-    results =
-      if is_map_key(block.opts, :result_key),
-        do: lane_outputs(results, base_ctx),
-        else: results
+    results = lane_outputs(results, base_ctx)
 
     case apply_parallel_into(into_fn, base_ctx, results, block.opts) do
       {:ok, final_ctx} ->
@@ -2230,7 +2131,7 @@ defmodule Durable.Executor do
 
   defp left_alone?({key, value}, started_with), do: Map.fetch(started_with, key) == {:ok, value}
 
-  # Apply into function or default to __results__
+  # Apply the into function, or put each lane under the block's name.
   # A named block: each lane goes under the block's name. Every lane finished
   # (one that didn't has failed the block), so that is its data; a block that
   # collects says how each lane ended.
@@ -2249,13 +2150,6 @@ defmodule Durable.Executor do
     {:ok, base_ctx |> Map.delete(to_string(result_key)) |> Map.put(result_key, lanes)}
   end
 
-  defp apply_parallel_into(nil, base_ctx, results, _unnamed) do
-    # No into function - add results to __results__ key
-    # Serialize tuples to lists for JSON storage
-    serialized_results = serialize_parallel_results(results)
-    {:ok, Map.put(base_ctx, :__results__, serialized_results)}
-  end
-
   defp apply_parallel_into(into_fn, base_ctx, results, _opts)
        when is_function(into_fn, 2) do
     # User callbacks get raw {:ok, value} / {:error, reason} tuples so they
@@ -2269,29 +2163,6 @@ defmodule Durable.Executor do
     # past its compensations.
     kind, reason -> {:error, caught_error(kind, reason, __STACKTRACE__)}
   end
-
-  # Serialize tagged tuples to lists for JSON storage
-  # {:ok, data} -> ["ok", data], {:error, reason} -> ["error", reason]
-  defp serialize_parallel_results(results) do
-    Map.new(results, fn {key, value} ->
-      serialized_key = if is_atom(key), do: Atom.to_string(key), else: key
-
-      serialized_value =
-        case value do
-          {:ok, data} -> ["ok", data]
-          {:error, reason} -> ["error", serialize_error_reason(reason)]
-          other -> other
-        end
-
-      {serialized_key, serialized_value}
-    end)
-  end
-
-  # Serialize error reasons that might contain atoms
-  defp serialize_error_reason(reason) when is_atom(reason), do: Atom.to_string(reason)
-  defp serialize_error_reason(reason) when is_map(reason), do: reason
-  defp serialize_error_reason(reason) when is_binary(reason), do: reason
-  defp serialize_error_reason(reason), do: inspect(reason)
 
   # Normalize error to map format
   defp normalize_error(error) when is_map(error), do: error

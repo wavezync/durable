@@ -549,219 +549,20 @@ defmodule Durable.DSL.Step do
   # ============================================================================
 
   @doc """
-  Defines a parallel execution block.
-
-  All steps inside execute concurrently. Each step receives a copy of the context.
-  Results are collected into a `__results__` map with tagged tuples.
-
-  ## Options
-
-  - `:into` - Optional callback to transform results (default: none)
-    - Receives `(ctx, results)` where results = `%{step_name => {:ok, data} | {:error, reason}}`
-    - Returns `{:ok, ctx}` | `{:error, reason}` | `{:goto, step, ctx}`
-  - `:on_error` - Error handling (default: `:fail_fast`)
-    - `:fail_fast` - Cancel siblings on first failure
-    - `:complete_all` - Wait for all, collect results
-
-  ## Behavior
-
-  Without `:into`, results go to `ctx.__results__` and the next step handles them:
-
-      parallel do
-        step :payment, fn ctx -> {:ok, %{id: 123}} end
-        step :delivery, fn ctx -> {:error, :not_found} end
-      end
-      # Next step receives:
-      # %{...ctx, __results__: %{payment: {:ok, %{id: 123}}, delivery: {:error, :not_found}}}
-
-  With `:into`, you control what the next step receives:
-
-      parallel into: fn ctx, results ->
-        case {results.payment, results.delivery} do
-          {{:ok, payment}, {:ok, _}} ->
-            {:ok, Map.put(ctx, :payment_id, payment.id)}
-          {{:ok, _}, {:error, :not_found}} ->
-            {:goto, :handle_backorder, ctx}
-          _ ->
-            {:error, "Critical failure"}
-        end
-      end do
-        step :payment, fn ctx -> {:ok, %{id: 123}} end
-        step :delivery, fn ctx -> {:error, :not_found} end
-      end
-
-  ## Step Options
-
-  - `:returns` - Key name for this step's result (default: step name)
-
-      parallel do
-        step :fetch_order, returns: :order do
-          fn ctx -> {:ok, %{items: [...]}} end
-        end
-      end
-      # Result: %{...ctx, __results__: %{order: {:ok, %{items: [...]}}}}
-
+  A parallel block. It takes a name: see `parallel/3`.
   """
   defmacro parallel(opts_or_name \\ [], do_block)
 
   defmacro parallel(name, do: block) when is_atom(name),
     do: emit(named_parallel(name, [], block, top_level(), __CALLER__))
 
-  defmacro parallel(opts, do: block) do
-    caller = __CALLER__
-
-    shape =
-      for {_, _, %{original_name: name}} <- extract_parallel_steps(block, 0, caller), do: name
-
-    parallel_id = block_id(caller, :parallel, shape)
-
-    step_defs = extract_parallel_steps(block, parallel_id, caller)
-    step_names = Enum.map(step_defs, fn {name, _, _} -> name end)
-
-    error_strategy = Keyword.get(opts, :on_error, :fail_fast)
-    into_fn = Keyword.get(opts, :into)
-
-    # Generate named functions for each parallel step
-    step_registrations =
-      Enum.map(step_defs, fn {qualified_name, body_fn, step_opts} ->
-        func_name = body_name(caller, :step_body, qualified_name)
-
-        quote do
-          @doc false
-          def unquote(func_name)(data), do: unquote(body_fn).(data)
-
-          @durable_current_steps %Durable.Definition.Step{
-            name: unquote(qualified_name),
-            type: :step,
-            module: __MODULE__,
-            body_fn: &(__MODULE__.unquote(func_name) / 1),
-            opts: unquote(quote_opts(step_opts))
-          }
-        end
-      end)
-
-    # Generate named function for into callback if provided
-    {into_fn_ref, into_fn_def} =
-      if into_fn do
-        into_func_name = :"__parallel_into_#{parallel_id}__"
-
-        def_ast =
-          quote do
-            @doc false
-            def unquote(into_func_name)(ctx, results), do: unquote(into_fn).(ctx, results)
-          end
-
-        ref_ast =
-          quote do
-            &(__MODULE__.unquote(into_func_name) / 2)
-          end
-
-        {ref_ast, def_ast}
-      else
-        {nil, nil}
-      end
-
-    quote do
-      unquote(into_fn_def)
-
-      @durable_current_steps %Durable.Definition.Step{
-        name: unquote(:"parallel_#{parallel_id}"),
-        type: :parallel,
-        module: __MODULE__,
-        opts: %{
-          steps: unquote(step_names),
-          all_steps: unquote(step_names),
-          error_strategy: unquote(error_strategy),
-          into_fn: unquote(into_fn_ref)
-        }
-      }
-
-      unquote_splicing(step_registrations)
-    end
+  defmacro parallel(_opts, do: _block) do
+    block_error!(
+      __CALLER__,
+      "a parallel block needs a name, as in `parallel :lookups do`. The step after it " <>
+        "gets each lane's result under that name: %{lookups: %{credit: ...}}"
+    )
   end
-
-  defp extract_parallel_steps(body, parallel_id, env) do
-    case body do
-      {:__block__, _, statements} ->
-        Enum.flat_map(statements, &extract_parallel_step_call(&1, parallel_id, env))
-
-      statement ->
-        extract_parallel_step_call(statement, parallel_id, env)
-    end
-  end
-
-  # step :name, fn data -> ... end
-  defp extract_parallel_step_call(
-         {:step, _meta, [name, {:fn, _, _} = body_fn]},
-         parallel_id,
-         _env
-       )
-       when is_atom(name) do
-    qualified_name = :"parallel_#{parallel_id}__#{name}"
-
-    step_opts = %{
-      parallel_id: parallel_id,
-      original_name: name,
-      returns: name
-    }
-
-    [{qualified_name, body_fn, step_opts}]
-  end
-
-  # step :name, [opts], fn data -> ... end
-  defp extract_parallel_step_call(
-         {:step, _meta, [name, opts, {:fn, _, _} = body_fn]},
-         parallel_id,
-         env
-       )
-       when is_atom(name) and is_list(opts) do
-    if Keyword.has_key?(opts, :compensate), do: no_parallel_compensation!(name, env)
-
-    qualified_name = :"parallel_#{parallel_id}__#{name}"
-
-    # Extract returns option, default to original name
-    returns_key = Keyword.get(opts, :returns, name)
-
-    step_opts =
-      opts
-      |> normalize_parallel_step_opts()
-      |> Map.merge(%{
-        parallel_id: parallel_id,
-        original_name: name,
-        returns: returns_key
-      })
-
-    [{qualified_name, body_fn, step_opts}]
-  end
-
-  # step :name, returns: :key do fn data -> ... end end
-  defp extract_parallel_step_call(
-         {:step, _meta, [name, opts, [do: {:fn, _, _} = body_fn]]},
-         parallel_id,
-         env
-       )
-       when is_atom(name) and is_list(opts) do
-    if Keyword.has_key?(opts, :compensate), do: no_parallel_compensation!(name, env)
-
-    qualified_name = :"parallel_#{parallel_id}__#{name}"
-
-    # Extract returns option, default to original name
-    returns_key = Keyword.get(opts, :returns, name)
-
-    step_opts =
-      opts
-      |> normalize_parallel_step_opts()
-      |> Map.merge(%{
-        parallel_id: parallel_id,
-        original_name: name,
-        returns: returns_key
-      })
-
-    [{qualified_name, body_fn, step_opts}]
-  end
-
-  defp extract_parallel_step_call(other, _parallel_id, env),
-    do: not_a_step!(other, "parallel block", env)
 
   # A parent only undoes its own steps, so this would quietly never run.
   defp no_parallel_compensation!(name, env) do
@@ -771,14 +572,6 @@ defmodule Durable.DSL.Step do
       description:
         "step #{inspect(name)} has compensate:, which isn't supported in a parallel block. " <>
           "Put the undo on a step before the block, and have it check what actually happened."
-  end
-
-  # Normalize parallel step options (includes :returns)
-  defp normalize_parallel_step_opts(opts) do
-    opts
-    |> Keyword.take([:retry, :timeout, :queue, :returns])
-    |> Enum.into(%{})
-    |> normalize_retry_opts()
   end
 
   # ============================================================================
