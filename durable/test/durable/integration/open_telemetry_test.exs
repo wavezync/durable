@@ -92,7 +92,7 @@ defmodule Durable.Integration.OpenTelemetryTest do
     use Durable
 
     workflow "otel_branches" do
-      parallel do
+      parallel :fan do
         step(:branch, fn d -> {:ok, d} end)
       end
     end

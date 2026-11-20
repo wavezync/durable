@@ -349,7 +349,7 @@ defmodule Durable.IntegrationWorkflows do
         {:ok, assign(data, :prepared, true)}
       end)
 
-      parallel do
+      parallel :fan_out do
         step(:on_llm, [queue: :llm], fn data ->
           Probe.here(:on_llm)
           {:ok, assign(data, :on_llm, true)}

@@ -23,7 +23,7 @@ defmodule Durable.Integration.AuditRegressionsTest do
     alias Durable.IntegrationProbe, as: Probe
 
     workflow "a_asks_in_parallel" do
-      parallel do
+      parallel :asks do
         step(:ask, fn data ->
           Probe.note(:ask)
           wait_for_input("ok", timeout: 1, on_timeout: :fail)
@@ -61,7 +61,7 @@ defmodule Durable.Integration.AuditRegressionsTest do
     workflow "a_into_throws", on_failure: :rollback do
       step(:a, [compensate: :undo_a], fn data -> {:ok, data} end)
 
-      parallel into: fn _ctx, _results -> throw(:nope) end do
+      parallel :work, into: fn _ctx, _results -> throw(:nope) end do
         step(:x, fn data -> {:ok, data} end)
       end
 

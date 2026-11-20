@@ -201,7 +201,7 @@ defmodule Durable.Integration.FailurePathsTest do
     alias Durable.IntegrationProbe, as: Probe
 
     workflow "fp_keyed_parallel" do
-      parallel do
+      parallel :sides do
         step(:left, fn data -> {:ok, data} end)
 
         step(:right, fn data ->
@@ -234,7 +234,7 @@ defmodule Durable.Integration.FailurePathsTest do
     alias Durable.IntegrationProbe, as: Probe
 
     workflow "fp_parallel_then_reads" do
-      parallel do
+      parallel :both do
         step(:a, fn d -> {:ok, Map.put(d, "a", String.duplicate("x", 50))} end)
         step(:b, fn d -> {:ok, Map.put(d, "b", 1)} end)
       end
@@ -353,7 +353,7 @@ defmodule Durable.Integration.FailurePathsTest do
     require Logger
 
     workflow "fp_logs_in_branch" do
-      parallel do
+      parallel :logs do
         step(:branch, fn d ->
           Logger.info("from a branch")
           {:ok, d}
@@ -426,7 +426,7 @@ defmodule Durable.Integration.FailurePathsTest do
     use Durable.Wait
 
     workflow "fp_cancels_many_branches" do
-      parallel do
+      parallel :waits do
         step(:stops, fn _data ->
           # Long enough for the other branches to be under way.
           Process.sleep(150)
@@ -577,7 +577,7 @@ defmodule Durable.Integration.FailurePathsTest do
     alias Durable.IntegrationProbe, as: Probe
 
     workflow "fp_reads_in_parallel" do
-      parallel do
+      parallel :reads do
         step(:branch, fn d ->
           Probe.note({:branch, d["id"]})
           {:ok, d}
@@ -1584,10 +1584,7 @@ defmodule Durable.Integration.FailurePathsTest do
   end
 
   describe "audit 5 internal keys" do
-    defp internal(keys),
-      do:
-        Enum.filter(keys, &String.starts_with?(to_string(&1), "__")) --
-          [:__results__, "__results__"]
+    defp internal(keys), do: Enum.filter(keys, &String.starts_with?(to_string(&1), "__"))
 
     test "stay out of the data after a parallel block" do
       start_durable!(%{default: 3})

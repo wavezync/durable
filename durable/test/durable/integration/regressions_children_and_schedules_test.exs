@@ -43,7 +43,7 @@ defmodule Durable.Integration.ChildrenAndSchedulesRegressionsTest do
     alias Durable.IntegrationProbe, as: Probe
 
     workflow "r_branched" do
-      parallel do
+      parallel :both do
         step(:fast, fn data -> {:ok, Map.put(data, "fast", 1)} end)
 
         step(:slow, fn data ->

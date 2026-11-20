@@ -1,5 +1,5 @@
 defmodule Durable.Integration.ParallelRegressionsTest do
-  @moduledoc "Lost notices from children, fail_fast, and the helpers that read a parallel block's results."
+  @moduledoc "Lost notices from children and fail_fast."
   use Durable.IntegrationCase, async: false
 
   @moduletag :capture_log
@@ -40,7 +40,7 @@ defmodule Durable.Integration.ParallelRegressionsTest do
     alias Durable.IntegrationProbe, as: Probe
 
     workflow "r_g_parallel" do
-      parallel do
+      parallel :block do
         step(:only, fn data ->
           Probe.note(:child)
           Probe.wait_for(:release_child)
@@ -57,7 +57,7 @@ defmodule Durable.Integration.ParallelRegressionsTest do
     alias Durable.IntegrationProbe, as: Probe
 
     workflow "r_g_fail_fast" do
-      parallel on_error: :fail_fast do
+      parallel :block, on_error: :fail_fast do
         step(:bad, fn _data -> {:error, "boom"} end)
 
         step(:slow, fn data ->
@@ -67,28 +67,6 @@ defmodule Durable.Integration.ParallelRegressionsTest do
           {:ok, data}
         end)
       end
-    end
-  end
-
-  defmodule ReadsResults do
-    use Durable
-    use Durable.Context
-    alias Durable.IntegrationProbe, as: Probe
-
-    workflow "r_g_reads_results" do
-      parallel do
-        step(:payment, fn data -> {:ok, Map.put(data, :id, 123)} end)
-      end
-
-      step(:handle, fn ctx ->
-        Probe.put(:all, parallel_results())
-        Probe.put(:ok?, parallel_ok?(:payment))
-
-        case parallel_result(:payment) do
-          {:ok, _payment} -> {:ok, ctx}
-          {:error, _} -> {:error, "failed"}
-        end
-      end)
     end
   end
 
@@ -186,15 +164,5 @@ defmodule Durable.Integration.ParallelRegressionsTest do
     :ok = Probe.set(:release_slow)
     assert run.status == :failed
     assert Enum.all?(branches, fn {_step, status} -> status in [:failed, :cancelled] end)
-  end
-
-  test "parallel_results/0, parallel_result/1 and parallel_ok?/1 read what a branch returned" do
-    start_durable!(%{default: 3})
-    {:ok, id} = Durable.start(ReadsResults, %{})
-
-    await_status(id, :completed)
-
-    assert %{payment: {:ok, %{"id" => 123}}} = Probe.fetch(:all)
-    assert Probe.fetch(:ok?) == true
   end
 end

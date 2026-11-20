@@ -194,7 +194,7 @@ defmodule Durable.FuzzWorkflows do
           step(:c1, [queue: :q_b], fn d -> F.tree(:c1, d) end)
       end
 
-      parallel do
+      parallel :fan do
         step(:p1, [queue: :q_a], fn d -> F.tree(:p1, d) end)
         step(:p2, [queue: :q_b], fn d -> F.tree(:p2, d) end)
         step(:p3, fn d -> F.tree(:p3, d) end)
