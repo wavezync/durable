@@ -132,6 +132,11 @@ there:
 - **Roll back** undoes the steps that finished, newest first, when the run
   has something to undo. It asks first and names the compensations it will
   run. The run can't be retried afterwards.
+- **Cancel and roll back**, on a run that is still live and has something to
+  undo, cancels it and then undoes what it did. Plain **Cancel** leaves what
+  the run did.
+- A failed run of a workflow with `on_failure: [rollback_after: …]` says in
+  its banner when it will roll back by itself.
 - **Rerun** starts a new run from the first step with the same input, linked
   back to this one.
 - **Rerun with edited input** does the same after you've fixed the input.
