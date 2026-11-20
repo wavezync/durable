@@ -209,6 +209,28 @@ defmodule Durable.OnFailureTest do
       assert {:ok, _} = Durable.retry(run.id)
     end
 
+    # Needs a decision. A failed run's key is free for the next start (`reuse:
+    # :after_close`), but not from when its rollback is queued until it has
+    # been undone: the run is pending, then compensating, so the start is
+    # handed the run that is being undone and nothing books the trip.
+    @tag :skip
+    test "a start with the key of a run that is being rolled back gets a run of its own" do
+      book = fn trip ->
+        Durable.start(BookTrip, trip, workflow: "book_trip", key: "traveller:7")
+      end
+
+      {:ok, first} = book.(%{"payments" => "down"})
+      assert drain(first).status == :failed
+      {:ok, _} = Durable.rollback(first)
+
+      # The traveller tries again before a worker has got to the undo.
+      {:ok, second} = book.(%{"payments" => "up"})
+
+      assert second != first
+      assert drain(second).status == :completed
+      assert drain(first).status == :compensated
+    end
+
     test "claimed by a node without the workflow's code, long past the run's timeout, waits for one that has it" do
       run = book("down", "book_trip_within_the_hour")
       assert run.status == :failed
