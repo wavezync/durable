@@ -1,5 +1,5 @@
 defmodule Durable.NamedBlocksEdgesTest do
-  @moduledoc "Named blocks next to the rest of the engine: retries, queues, unnamed blocks, `into:`."
+  @moduledoc "Named blocks next to the rest of the engine: retries, queues, other blocks, `into:`."
   use Durable.DataCase, async: false
 
   import Durable.Testing
@@ -32,19 +32,6 @@ defmodule Durable.NamedBlocksEdgesTest do
             do: {:error, "scorer is down"},
             else: {:ok, assign(application, :scores, results |> Map.keys() |> Enum.sort())}
         end do
-        step(:credit, fn application -> {:ok, assign(application, :credit, 710)} end)
-        step(:fraud, fn application -> {:ok, assign(application, :fraud, 0.02)} end)
-      end
-
-      step(:decide, fn application -> {:ok, assign(application, :decided, true)} end)
-    end
-
-    workflow "scoring_unnamed" do
-      parallel into: fn application, results ->
-                 if Seen.get(:scorer_down),
-                   do: {:error, "scorer is down"},
-                   else: {:ok, assign(application, :scores, results |> Map.keys() |> Enum.sort())}
-               end do
         step(:credit, fn application -> {:ok, assign(application, :credit, 710)} end)
         step(:fraud, fn application -> {:ok, assign(application, :fraud, 0.02)} end)
       end
@@ -85,9 +72,9 @@ defmodule Durable.NamedBlocksEdgesTest do
         {:ok, loan}
       end)
 
-      parallel do
+      parallel :send do
         step(:notify, fn loan ->
-          Seen.put(:unnamed, loan.lookups |> Map.keys() |> Enum.sort())
+          Seen.put(:later, loan.lookups |> Map.keys() |> Enum.sort())
           {:ok, loan}
         end)
       end
@@ -278,23 +265,21 @@ defmodule Durable.NamedBlocksEdgesTest do
     do: Repo.all(from(w in WorkflowExecution, where: w.parent_workflow_id == ^run.id))
 
   describe "retrying a run whose into: failed once every lane had finished" do
-    for workflow <- ["scoring", "scoring_unnamed"] do
-      test "runs into: again and goes on (#{workflow})" do
-        Seen.put(:scorer_down, true)
-        run = run_workflow(Scoring, %{}, workflow: unquote(workflow))
-        assert run.status == :failed
-        assert Enum.all?(lanes(run), &(&1.status == :completed))
+    test "runs into: again and goes on" do
+      Seen.put(:scorer_down, true)
+      run = run_workflow(Scoring, %{}, workflow: "scoring")
+      assert run.status == :failed
+      assert Enum.all?(lanes(run), &(&1.status == :completed))
 
-        Seen.clear(:scorer_down)
-        {:ok, _} = Durable.retry(run.id)
-        run = drain(run)
+      Seen.clear(:scorer_down)
+      {:ok, _} = Durable.retry(run.id)
+      run = drain(run)
 
-        assert run.status == :completed
-        assert run.context["decided"]
-        assert length(run.context["scores"]) == 2
-        # The lanes had finished: nothing ran twice.
-        assert length(lanes(run)) == 2
-      end
+      assert run.status == :completed
+      assert run.context["decided"]
+      assert length(run.context["scores"]) == 2
+      # The lanes had finished: nothing ran twice.
+      assert length(lanes(run)) == 2
     end
   end
 
@@ -303,10 +288,10 @@ defmodule Durable.NamedBlocksEdgesTest do
     assert run_workflow(TwoWorkflows, %{}, workflow: "business").context["desk"] == "business"
   end
 
-  test "a step of an unnamed block finds an earlier block's lanes by name, as any step does" do
+  test "a step of a later block finds an earlier block's lanes by name, as any step does" do
     assert run_workflow(Mixed, %{}).status == :completed
     assert Seen.get(:plain) == [:credit, :fraud]
-    assert Seen.get(:unnamed) == [:credit, :fraud]
+    assert Seen.get(:later) == [:credit, :fraud]
   end
 
   test "a decider runs on the run's own queue, not the one the step before it used" do

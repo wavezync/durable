@@ -14,43 +14,33 @@ defmodule Durable.ParallelTest do
 
       parallel_step = Enum.find(definition.steps, &(&1.type == :parallel))
 
-      assert parallel_step != nil
-      assert parallel_step.type == :parallel
-      assert parallel_step.opts[:steps] != nil
-      assert is_list(parallel_step.opts[:steps])
+      assert parallel_step.name == :tasks
+      assert parallel_step.opts[:result_key] == :tasks
+
+      assert parallel_step.opts[:lanes] == [
+               {:tasks__task_a, :task_a, [:tasks__task_a]},
+               {:tasks__task_b, :task_b, [:tasks__task_b]}
+             ]
     end
 
     test "parallel creates qualified step names for nested steps" do
       {:ok, definition} =
         SimpleParallelTestWorkflow.__workflow_definition__("simple_parallel")
 
-      step_names = Enum.map(definition.steps, & &1.name) |> Enum.map(&Atom.to_string/1)
+      step_names = Enum.map(definition.steps, & &1.name)
 
-      # Should have qualified names like parallel_<id>__<step>
-      assert Enum.any?(step_names, &String.contains?(&1, "parallel_"))
-      assert Enum.any?(step_names, &String.contains?(&1, "__task_a"))
-      assert Enum.any?(step_names, &String.contains?(&1, "__task_b"))
+      # The block is stored under its name, its steps as <block>__<step>
+      assert :tasks in step_names
+      assert :tasks__task_a in step_names
+      assert :tasks__task_b in step_names
     end
 
     test "parallel includes all nested step definitions in workflow" do
       {:ok, definition} =
         SimpleParallelTestWorkflow.__workflow_definition__("simple_parallel")
 
-      # Should have: setup, parallel_X, parallel steps (task_a, task_b), final
-      assert length(definition.steps) >= 4
-    end
-
-    test "parallel step opts include returns key" do
-      {:ok, definition} =
-        SimpleParallelTestWorkflow.__workflow_definition__("simple_parallel")
-
-      # Find a parallel step
-      parallel_step =
-        Enum.find(definition.steps, fn step ->
-          String.contains?(Atom.to_string(step.name), "__task_a")
-        end)
-
-      assert parallel_step.opts[:returns] == :task_a
+      assert definition.steps |> Enum.map(& &1.name) |> Enum.sort() ==
+               [:final, :setup, :tasks, :tasks__task_a, :tasks__task_b]
     end
   end
 
@@ -100,11 +90,14 @@ defmodule Durable.ParallelTest do
 
       assert parent.status == :completed
 
-      # Results should be in __results__ map
-      results = parent.context["__results__"]
-      assert is_map(results)
-      assert ["ok", %{"from_task_a" => true, "initialized" => true}] = results["task_a"]
-      assert ["ok", %{"from_task_b" => true, "initialized" => true}] = results["task_b"]
+      # Each lane's output is under the block's name: what the lane added
+      assert parent.context["tasks"] == %{
+               "task_a" => %{"from_task_a" => true},
+               "task_b" => %{"from_task_b" => true}
+             }
+
+      # and the data from before the block is still there
+      assert parent.context["initialized"] == true
     end
 
     test "WaitGroup and PendingEvents are created for parallel children" do
@@ -127,7 +120,7 @@ defmodule Durable.ParallelTest do
   end
 
   describe "parallel execution - results model" do
-    test "next step can access __results__ from context" do
+    test "next step gets each lane's output under the block's name" do
       config = Config.get(Durable)
       repo = config.repo
 
@@ -156,7 +149,7 @@ defmodule Durable.ParallelTest do
 
       assert parent.status == :completed
 
-      results = parent.context["__results__"]
+      results = parent.context["checks"]
       assert results["good_task"] == ["ok", %{"good" => true}]
       assert match?(["error", _], results["bad_task"])
     end
@@ -177,7 +170,7 @@ defmodule Durable.ParallelTest do
       assert parent.status == :completed
       assert parent.context["payment_id"] == 123
       assert parent.context["delivery_status"] == "confirmed"
-      refute Map.has_key?(parent.context, "__results__")
+      refute Map.has_key?(parent.context, "charge")
     end
 
     test "into: callback returning {:error, reason} fails workflow" do
@@ -212,28 +205,6 @@ defmodule Durable.ParallelTest do
     end
   end
 
-  describe "parallel execution - returns: option" do
-    test "returns: option changes result key name" do
-      config = Config.get(Durable)
-      repo = config.repo
-
-      {:ok, parent} = create_and_execute_workflow(ReturnsKeyWorkflow, %{})
-      execute_children(repo, parent.id, config)
-
-      parent = repo.get!(WorkflowExecution, parent.id)
-      Executor.execute_workflow(parent.id, config)
-      parent = repo.get!(WorkflowExecution, parent.id)
-
-      assert parent.status == :completed
-
-      results = parent.context["__results__"]
-      assert Map.has_key?(results, "order_data")
-      assert Map.has_key?(results, "user_data")
-      refute Map.has_key?(results, "fetch_order")
-      refute Map.has_key?(results, "fetch_user")
-    end
-  end
-
   describe "parallel execution - error handling" do
     test "fail_fast stops on first error by default" do
       config = Config.get(Durable)
@@ -248,24 +219,6 @@ defmodule Durable.ParallelTest do
 
       assert parent.status == :failed
       assert parent.error["type"] == "test_error"
-    end
-
-    test "complete_all collects all results including errors" do
-      config = Config.get(Durable)
-      repo = config.repo
-
-      {:ok, parent} = create_and_execute_workflow(CompleteAllWithResultsWorkflow, %{})
-      execute_children(repo, parent.id, config)
-
-      parent = repo.get!(WorkflowExecution, parent.id)
-      Executor.execute_workflow(parent.id, config)
-      parent = repo.get!(WorkflowExecution, parent.id)
-
-      assert parent.status == :completed
-
-      results = parent.context["__results__"]
-      assert results["good_task"] == ["ok", %{"good" => true}]
-      assert match?(["error", _], results["bad_task"])
     end
   end
 
@@ -302,7 +255,7 @@ defmodule Durable.ParallelTest do
       assert parent.status == :completed
 
       # Both readers saw the inherited values
-      results = parent.context["__results__"]
+      results = parent.context["read"]
       assert results["reader_a"] == ["ok", %{"saw" => "hello", "count" => 42}]
       assert results["reader_b"] == ["ok", %{"saw" => "hello"}]
     end
@@ -322,7 +275,7 @@ defmodule Durable.ParallelTest do
       parent = repo.get!(WorkflowExecution, parent.id)
 
       assert parent.status == :completed
-      results = parent.context["__results__"]
+      results = parent.context["read"]
       # writer_step put_context(:sibling_wrote, true), but peer_step can't see it
       assert results["peer_step"] == ["ok", %{"saw_sibling" => nil}]
     end
@@ -395,9 +348,21 @@ defmodule Durable.ParallelTest do
           )
         )
 
-      queues = Enum.map(children, & &1.queue) |> Enum.sort()
-      assert "default" in queues
-      assert "gpu" in queues
+      # A lane is its own run: it starts on the parent's queue and moves to
+      # its step's queue when it gets there, as any run does.
+      assert Enum.map(children, & &1.queue) == ["default", "default"]
+
+      Enum.each(children, &Executor.execute_workflow(&1.id, config))
+
+      moved =
+        for child <- children,
+            now = repo.get!(WorkflowExecution, child.id),
+            do: {child.context["__parallel_step"], now.status, now.queue}
+
+      assert Enum.sort(moved) == [
+               {"tasks__default_task", :completed, "default"},
+               {"tasks__gpu_task", :pending, "gpu"}
+             ]
     end
   end
 
@@ -415,8 +380,7 @@ defmodule Durable.ParallelTest do
 
       assert parent.status == :completed
 
-      results = parent.context["__results__"]
-      assert results["only_task"] == ["ok", %{"from_only_task" => true, "initialized" => true}]
+      assert parent.context["solo"] == %{"only_task" => %{"from_only_task" => true}}
     end
   end
 
@@ -434,7 +398,7 @@ defmodule Durable.ParallelTest do
 
       assert parent.status == :completed
 
-      results = parent.context["__results__"]
+      results = parent.context["batch"]
 
       for i <- 1..15 do
         key = "step_#{i}"
@@ -515,7 +479,7 @@ defmodule Durable.ParallelTest do
             use Durable
 
             workflow "w" do
-              parallel do
+              parallel :work do
                 decision :check, fn data -> {:ok, data} end
                 step :work, fn data -> {:ok, data} end
               end
@@ -525,7 +489,23 @@ defmodule Durable.ParallelTest do
         end
 
       assert error.description =~ "decision(:check"
-      assert error.description =~ "parallel"
+      assert error.description =~ "parallel :work"
+    end
+
+    test "a block without a name is a compile error" do
+      assert_raise CompileError, ~r/needs a name/, fn ->
+        Code.compile_string("""
+        defmodule ParallelWithoutAName do
+          use Durable
+
+          workflow "w" do
+            parallel do
+              step :work, fn data -> {:ok, data} end
+            end
+          end
+        end
+        """)
+      end
     end
   end
 
@@ -558,7 +538,7 @@ defmodule SimpleParallelTestWorkflow do
       {:ok, assign(data, :initialized, true)}
     end)
 
-    parallel do
+    parallel :tasks do
       step(:task_a, fn data ->
         {:ok, assign(data, :from_task_a, true)}
       end)
@@ -584,7 +564,7 @@ defmodule ResultsAccessWorkflow do
       {:ok, assign(data, :initialized, true)}
     end)
 
-    parallel do
+    parallel :tasks do
       step(:task_a, fn data ->
         {:ok, assign(data, :value_a, 42)}
       end)
@@ -595,18 +575,16 @@ defmodule ResultsAccessWorkflow do
     end
 
     step(:process_results, fn data ->
-      # Results are serialized with string keys and list format: ["ok", data] or ["error", reason]
-      results = data[:__results__] || %{}
-
+      # What a lane added has been stored, so its own keys are strings
       data =
-        case results["task_a"] do
-          ["ok", _] -> assign(data, :processed_task_a, true)
+        case data.tasks.task_a do
+          %{"value_a" => 42} -> assign(data, :processed_task_a, true)
           _ -> data
         end
 
       data =
-        case results["task_b"] do
-          ["ok", _] -> assign(data, :processed_task_b, true)
+        case data.tasks.task_b do
+          %{"value_b" => 99} -> assign(data, :processed_task_b, true)
           _ -> data
         end
 
@@ -624,7 +602,7 @@ defmodule ErrorPreservingParallelWorkflow do
       {:ok, data}
     end)
 
-    parallel on_error: :complete_all do
+    parallel :checks, on_error: :collect do
       step(:good_task, fn data ->
         {:ok, assign(data, :good, true)}
       end)
@@ -649,20 +627,21 @@ defmodule IntoOkWorkflow do
       {:ok, assign(data, :initialized, true)}
     end)
 
-    parallel into: fn ctx, results ->
-               case {results[:payment], results[:delivery]} do
-                 {{:ok, payment}, {:ok, delivery}} ->
-                   new_ctx =
-                     ctx
-                     |> Map.put(:payment_id, payment["id"])
-                     |> Map.put(:delivery_status, delivery["status"])
+    parallel :charge,
+      into: fn ctx, results ->
+        case {results[:payment], results[:delivery]} do
+          {{:ok, payment}, {:ok, delivery}} ->
+            new_ctx =
+              ctx
+              |> Map.put(:payment_id, payment["id"])
+              |> Map.put(:delivery_status, delivery["status"])
 
-                   {:ok, new_ctx}
+            {:ok, new_ctx}
 
-                 _ ->
-                   {:error, "Unexpected result combination"}
-               end
-             end do
+          _ ->
+            {:error, "Unexpected result combination"}
+        end
+      end do
       step(:payment, fn _data ->
         {:ok, %{id: 123, status: "paid"}}
       end)
@@ -687,15 +666,16 @@ defmodule IntoErrorWorkflow do
       {:ok, assign(data, :initialized, true)}
     end)
 
-    parallel into: fn _ctx, results ->
-               case {results[:payment], results[:delivery]} do
-                 {{:ok, _}, {:ok, _}} ->
-                   {:error, "Both succeeded but we expected failure"}
+    parallel :charge,
+      into: fn _ctx, results ->
+        case {results[:payment], results[:delivery]} do
+          {{:ok, _}, {:ok, _}} ->
+            {:error, "Both succeeded but we expected failure"}
 
-                 _ ->
-                   {:error, "Payment and delivery both failed"}
-               end
-             end do
+          _ ->
+            {:error, "Payment and delivery both failed"}
+        end
+      end do
       step(:payment, fn _data ->
         {:error, "Payment failed"}
       end)
@@ -720,15 +700,16 @@ defmodule IntoGotoWorkflow do
       {:ok, assign(data, :initialized, true)}
     end)
 
-    parallel into: fn ctx, results ->
-               case results[:delivery] do
-                 {:error, _} ->
-                   {:goto, :handle_backorder, ctx}
+    parallel :charge,
+      into: fn ctx, results ->
+        case results[:delivery] do
+          {:error, _} ->
+            {:goto, :handle_backorder, ctx}
 
-                 {:ok, _} ->
-                   {:ok, ctx}
-               end
-             end do
+          {:ok, _} ->
+            {:ok, ctx}
+        end
+      end do
       step(:payment, fn _data ->
         {:ok, %{id: 123}}
       end)
@@ -752,31 +733,6 @@ defmodule IntoGotoWorkflow do
   end
 end
 
-defmodule ReturnsKeyWorkflow do
-  use Durable
-  use Durable.Helpers
-
-  workflow "returns_key" do
-    step(:setup, fn data ->
-      {:ok, assign(data, :initialized, true)}
-    end)
-
-    parallel do
-      step(:fetch_order, [returns: :order_data], fn _data ->
-        {:ok, %{items: ["item1", "item2"]}}
-      end)
-
-      step(:fetch_user, [returns: :user_data], fn _data ->
-        {:ok, %{name: "John", email: "john@example.com"}}
-      end)
-    end
-
-    step(:final, fn data ->
-      {:ok, assign(data, :completed, true)}
-    end)
-  end
-end
-
 defmodule FailFastParallelWorkflow do
   use Durable
   use Durable.Helpers
@@ -786,7 +742,7 @@ defmodule FailFastParallelWorkflow do
       {:ok, data}
     end)
 
-    parallel on_error: :fail_fast do
+    parallel :checks, on_error: :fail_fast do
       step(:good_task, fn data ->
         {:ok, assign(data, :good, true)}
       end)
@@ -802,31 +758,6 @@ defmodule FailFastParallelWorkflow do
   end
 end
 
-defmodule CompleteAllWithResultsWorkflow do
-  use Durable
-  use Durable.Helpers
-
-  workflow "complete_all_with_results" do
-    step(:setup, fn data ->
-      {:ok, data}
-    end)
-
-    parallel on_error: :complete_all do
-      step(:good_task, fn data ->
-        {:ok, assign(data, :good, true)}
-      end)
-
-      step(:bad_task, fn _data ->
-        {:error, %{type: "test_error", message: "intentional failure"}}
-      end)
-    end
-
-    step(:final, fn data ->
-      {:ok, data}
-    end)
-  end
-end
-
 defmodule SingleStepParallelWorkflow do
   use Durable
   use Durable.Helpers
@@ -836,7 +767,7 @@ defmodule SingleStepParallelWorkflow do
       {:ok, assign(data, :initialized, true)}
     end)
 
-    parallel do
+    parallel :solo do
       step(:only_task, fn data ->
         {:ok, assign(data, :from_only_task, true)}
       end)
@@ -857,7 +788,7 @@ defmodule ManyParallelStepsWorkflow do
       {:ok, assign(data, :initialized, true)}
     end)
 
-    parallel do
+    parallel :batch do
       step(:step_1, fn data -> {:ok, assign(data, :step_1, true)} end)
       step(:step_2, fn data -> {:ok, assign(data, :step_2, true)} end)
       step(:step_3, fn data -> {:ok, assign(data, :step_3, true)} end)
@@ -890,7 +821,7 @@ defmodule QueueRoutingWorkflow do
       {:ok, assign(data, :initialized, true)}
     end)
 
-    parallel do
+    parallel :tasks do
       step(:gpu_task, [queue: "gpu"], fn data ->
         {:ok, assign(data, :gpu_done, true)}
       end)
@@ -922,7 +853,7 @@ defmodule ParallelContextInheritWorkflow do
       {:ok, %{shared_key: "hello", shared_count: 42, seeded: true}}
     end)
 
-    parallel into: fn _ctx, results -> {:ok, %{__results__: results}} end do
+    parallel :readers, into: fn _ctx, results -> {:ok, %{read: results}} end do
       step(:reader_a, fn _data ->
         # Before the fix, these would return nil because parallel children
         # did not inherit the parent's accumulated context.
@@ -946,7 +877,7 @@ defmodule ParallelIsolationWorkflow do
       {:ok, %{}}
     end)
 
-    parallel into: fn _ctx, results -> {:ok, %{__results__: results}} end do
+    parallel :peers, into: fn _ctx, results -> {:ok, %{read: results}} end do
       step(:writer_step, fn _data ->
         # Writes made inside one parallel sibling must NOT be visible to another.
         put_context(:sibling_wrote, true)
@@ -980,7 +911,7 @@ defmodule IntoPassthroughWorkflow do
     # The user's into: callback passes the `results` map through untouched.
     # Before the fix, `results` contained raw {:ok, _} tuples and storage
     # crashed. After the fix, results are pre-serialized to lists.
-    parallel into: fn _ctx, results -> {:ok, %{pass_through: results}} end do
+    parallel :tasks, into: fn _ctx, results -> {:ok, %{pass_through: results}} end do
       step(:task_x, fn _data -> {:ok, %{x: 1}} end)
       step(:task_y, fn _data -> {:ok, %{y: 2}} end)
     end

@@ -68,7 +68,7 @@ defmodule Durable.StepQueueTest do
     workflow "queue_then_parallel" do
       step(:prepare, [queue: :ocr], fn data -> {:ok, data} end)
 
-      parallel do
+      parallel :extract do
         step(:plain, fn data -> {:ok, assign(data, :plain, true)} end)
         step(:llm, [queue: :llm], fn data -> {:ok, assign(data, :llm, true)} end)
       end
@@ -380,7 +380,22 @@ defmodule Durable.StepQueueTest do
         from(w in WorkflowExecution, where: w.parent_workflow_id == ^id, select: w.queue)
       )
 
-    assert Enum.sort(queues) == ["default", "llm"]
+    # A lane starts where its parent is: on "default", not on the "ocr" the
+    # step before the block ran on. Its own step's queue comes after.
+    assert queues == ["default", "default"]
+
+    for %{id: lane} <- claim("default"),
+        do: Executor.execute_workflow(lane, Config.get(Durable))
+
+    moved =
+      TestRepo.all(
+        from(w in WorkflowExecution,
+          where: w.parent_workflow_id == ^id,
+          select: {w.status, w.queue}
+        )
+      )
+
+    assert Enum.sort(moved) == [completed: "default", pending: "llm"]
     assert drain(id).status == :completed
   end
 

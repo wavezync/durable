@@ -796,7 +796,7 @@ defmodule Durable.NamedBlocksTest do
       assert error.description =~ "compensate:"
     end
 
-    test "a way to take a failure that only unnamed blocks have" do
+    test "on_error: :complete_all, which is now :collect" do
       error =
         compile_error("""
         parallel :p, on_error: :complete_all do

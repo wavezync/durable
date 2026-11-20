@@ -11,7 +11,7 @@ defmodule Durable.TestingTest do
     workflow "order" do
       step(:reserve, fn data -> {:ok, assign(data, :reserved, true)} end)
 
-      parallel do
+      parallel :notify do
         step(:email, fn data -> {:ok, assign(data, :emailed, true)} end)
         step(:invoice, fn data -> {:ok, assign(data, :invoiced, true)} end)
       end
@@ -103,7 +103,7 @@ defmodule Durable.TestingTest do
     :ok = Durable.provide_input(run.id, "approval", %{"approved" => true})
     run = run |> drain() |> assert_status(:completed)
 
-    assert %{"approved" => true, "__results__" => %{"email" => ["ok", _]}} = run.context
+    assert %{"approved" => true, "notify" => %{"email" => %{"emailed" => true}}} = run.context
   end
 
   test "retries skip their backoff" do

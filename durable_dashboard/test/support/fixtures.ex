@@ -113,7 +113,7 @@ defmodule DurableDashboard.Fixtures do
     workflow "moderate_content" do
       step(:ingest, fn data -> {:ok, data} end)
 
-      parallel do
+      parallel :scans do
         step(:spam_scan, fn data -> {:ok, Map.put(data, "spam", 0.1)} end)
         step(:nsfw_scan, fn data -> {:ok, Map.put(data, "nsfw", 0.2)} end)
       end

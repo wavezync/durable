@@ -71,7 +71,7 @@ defmodule Durable.StepStopTest do
     use Durable.Helpers
 
     workflow "skips_one_branch" do
-      parallel on_error: :complete_all do
+      parallel :mail, on_error: :collect do
         step(:skipped, fn _data -> {:cancel, "nothing to send", scope: :run} end)
         step(:sent, fn data -> {:ok, assign(data, :sent, true)} end)
       end
@@ -85,7 +85,7 @@ defmodule Durable.StepStopTest do
     workflow "cancels_from_branch", on_failure: :rollback do
       step(:book, [compensate: :unbook], fn data -> {:ok, assign(data, :booked, true)} end)
 
-      parallel do
+      parallel :checks do
         step(:check, fn _data -> {:cancel, "order withdrawn"} end)
         step(:other, fn data -> {:ok, data} end)
       end
@@ -172,7 +172,7 @@ defmodule Durable.StepStopTest do
     run = run_workflow(SkipsOneBranch)
 
     assert run.status == :completed
-    assert %{"skipped" => ["error", cancelled], "sent" => ["ok", _]} = run.context["__results__"]
+    assert %{"skipped" => ["error", cancelled], "sent" => ["ok", _]} = run.context["mail"]
     assert cancelled == %{"type" => "cancelled", "message" => "nothing to send"}
   end
 

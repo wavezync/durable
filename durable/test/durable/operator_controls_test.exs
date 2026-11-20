@@ -63,7 +63,7 @@ defmodule Durable.OperatorControlsTest do
     workflow "flaky_parallel" do
       step(:setup, fn data -> Flaky.act(1, data) end)
 
-      parallel do
+      parallel :sides do
         step(:left, fn data -> Flaky.act(2, data) end)
         step(:right, fn data -> Flaky.act(3, data) end)
       end

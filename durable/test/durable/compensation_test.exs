@@ -344,7 +344,7 @@ defmodule Durable.CompensationTest do
             use Durable
 
             workflow "parallel_compensation_rejected", on_failure: :rollback do
-              parallel do
+              parallel :tasks do
                 step(:task_a, [compensate: :undo_task_a], fn data -> {:ok, data} end)
               end
 
@@ -354,6 +354,7 @@ defmodule Durable.CompensationTest do
           """)
         end
 
+      assert Exception.message(error) =~ "compensate:"
       assert Exception.message(error) =~ "parallel block"
     end
   end

@@ -100,7 +100,7 @@ defmodule Durable.WorkflowTimeoutTest do
     use Durable.Helpers
 
     workflow "stuck_branch", timeout: hours(1) do
-      parallel do
+      parallel :work do
         step(:stuck, [queue: :nobody], fn data -> {:ok, assign(data, :stuck, true)} end)
       end
     end
@@ -408,6 +408,10 @@ defmodule Durable.WorkflowTimeoutTest do
       [child] =
         repo().all(from(w in WorkflowExecution, where: w.parent_workflow_id == ^parent))
 
+      # The lane starts on the parent's queue, which hands it on to its step's.
+      Executor.execute_workflow(child.id, Config.get(Durable))
+      assert %{status: :pending, queue: "nobody"} = run(child.id)
+
       repo().insert!(polling_node(["default"]))
       expire(child.id)
       sweep()
@@ -422,6 +426,10 @@ defmodule Durable.WorkflowTimeoutTest do
 
       [child] =
         repo().all(from(w in WorkflowExecution, where: w.parent_workflow_id == ^parent))
+
+      # The lane starts on the parent's queue, which hands it on to its step's.
+      Executor.execute_workflow(child.id, Config.get(Durable))
+      assert %{status: :pending, queue: "nobody"} = run(child.id)
 
       repo().insert!(polling_node(["default"]))
       expire(parent)

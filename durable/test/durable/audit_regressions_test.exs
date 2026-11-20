@@ -105,7 +105,7 @@ defmodule Durable.AuditRegressionsTest do
     use Durable.Context
 
     workflow "probe_half_broken", on_failure: :rollback do
-      parallel do
+      parallel :sides do
         step(:left, fn data -> {:ok, Map.put(data, "left", 1)} end)
 
         step(:right, fn data ->
@@ -120,7 +120,7 @@ defmodule Durable.AuditRegressionsTest do
          Map.put(
            data,
            "seen",
-           parallel_results() |> Map.keys() |> Enum.map(&to_string/1) |> Enum.sort()
+           data[:sides] |> Map.keys() |> Enum.map(&to_string/1) |> Enum.sort()
          )}
       end)
     end
