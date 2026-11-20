@@ -238,6 +238,32 @@ defmodule Durable.OnFailureTest do
       assert drain(run).status == :cancelled
     end
 
+    test "with rollback: true, a run that never started is cancelled there and then" do
+      {:ok, id} =
+        Durable.start(BookTrip, %{"payments" => "up"}, workflow: "book_trip", key: "traveller:7")
+
+      assert :ok = Durable.cancel(id, "traveller walked away", rollback: true)
+      assert %{status: :cancelled, context: context} = reload(%{id: id})
+      refute Map.has_key?(context, "__rollback__")
+    end
+
+    test "with rollback: true on a run that never started, its key is free for the next start" do
+      book = fn trip ->
+        Durable.start(BookTrip, trip, workflow: "book_trip", key: "traveller:7")
+      end
+
+      {:ok, first} = book.(%{"payments" => "down"})
+      :ok = Durable.cancel(first, "traveller walked away", rollback: true)
+
+      # The traveller comes back and books again.
+      {:ok, second} = book.(%{"payments" => "up"})
+      assert second != first
+
+      assert drain(second).status == :completed
+      assert drain(first).status == :cancelled
+      assert Seen.all() == [:charge_card, :book_flight]
+    end
+
     test "with rollback: true closes the input the run was waiting for" do
       run = book("up", "awaits_traveller")
       :ok = Durable.cancel(run.id, nil, rollback: true)

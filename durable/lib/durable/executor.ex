@@ -268,6 +268,11 @@ defmodule Durable.Executor do
   # `rollback: true`: the cancelled run goes back on its queue to be undone.
   # A worker that had it is told at its next heartbeat, and until then a step
   # of its can still finish. The undo waits that long, so it sees that step.
+  #
+  # A run that never started has nothing to undo. Back on its queue it would
+  # still be its key's holder, a run yet to come, to the next start.
+  defp roll_back_cancelled(_config, %{started_at: nil}, _seen), do: :ok
+
   defp roll_back_cancelled(config, cancelled, seen) do
     at =
       if seen == :running,
