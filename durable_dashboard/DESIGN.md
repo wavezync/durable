@@ -585,6 +585,12 @@ One run, one page — header, banner, facts, then a view switch.
   It can't be retried afterwards." Roll back (destructive) and Keep it
   (ghost). The button is offered only when `Durable.rollback_plan/2` has
   something in it: a failed run with nothing to undo gets Retry alone.
+  A live run with something to undo gets **Cancel and roll back** beside
+  Cancel, confirmed in the same strip ("Cancel this run and roll it back?
+  This runs …"); plain Cancel still leaves what the run did.
+- **A failed run that will roll back by itself says when**, as a muted line
+  in its banner: "Rolls back by itself 26 Nov, 14:02 unless it is retried or
+  rolled back first (`on_failure: [rollback_after: …]`)." (`local_time`).
 - **Banner** says what happened in a sentence — "`charge_card` failed after
   3 attempts — <error line>", "Cancelled — <reason>. Steps that finished stay
   finished." — with "Show error" linking straight to the inspector pane, and
