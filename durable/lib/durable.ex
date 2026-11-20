@@ -329,7 +329,15 @@ defmodule Durable do
   later step runs. A step in flight is stopped at the worker's next heartbeat
   (`:heartbeat_interval`, 30 s by default), killed like any process. To stop
   cleanly before that, a step can check `Durable.Context.cancelled?/0` between
-  chunks of work. Cancelling does not run compensations.
+  chunks of work.
+
+  Cancelling does not run compensations. Pass `rollback: true` to undo the run
+  as well: once cancelled it goes back on its queue, a worker runs the
+  `compensate:` of every step that completed, newest first, and the run ends
+  `:compensated` (or `:compensation_failed`). What that would run is
+  `rollback_plan/2`; with nothing to undo the run stays `:cancelled`. A step
+  that was still running when the cancel landed never completed, so it isn't
+  undone, and child workflows are cancelled, not rolled back.
 
   Returns `{:error, :already_completed}` if the run has already finished, and
   `{:error, :not_found}` for an unknown id.
@@ -339,10 +347,18 @@ defmodule Durable do
       :ok = Durable.cancel(workflow_id)
       :ok = Durable.cancel(workflow_id, "User requested cancellation")
 
+      # The customer cancelled the order: release the card hold and the stock
+      :ok = Durable.cancel(workflow_id, "customer cancelled", rollback: true)
+
+  ## Options
+
+  - `:rollback` - undo the run after cancelling it (default: `false`)
+  - `:durable` - the Durable instance (default: `Durable`)
+
   """
-  @spec cancel(String.t(), String.t() | nil) :: :ok | {:error, term()}
-  def cancel(workflow_id, reason \\ nil) do
-    Durable.Executor.cancel_workflow(workflow_id, reason)
+  @spec cancel(String.t(), String.t() | nil, keyword()) :: :ok | {:error, term()}
+  def cancel(workflow_id, reason \\ nil, opts \\ []) do
+    Durable.Executor.cancel_workflow(workflow_id, reason, opts)
   end
 
   @doc """

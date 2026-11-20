@@ -39,6 +39,7 @@ defmodule Durable.OnFailureTest do
 
   defmodule BookTrip do
     use Durable
+    use Durable.Wait
 
     workflow "book_trip" do
       step(:book_flight, [compensate: :cancel_flight], fn trip -> Steps.book_flight(trip) end)
@@ -54,6 +55,25 @@ defmodule Durable.OnFailureTest do
 
     workflow "nothing_to_undo" do
       step(:charge_card, fn trip -> Steps.charge_card(trip) end)
+    end
+
+    # The seat is held while the traveller confirms.
+    workflow "awaits_traveller" do
+      step(:book_flight, [compensate: :cancel_flight], fn trip -> Steps.book_flight(trip) end)
+
+      step(:confirm, fn trip ->
+        wait_for_input("confirmation")
+        {:ok, trip}
+      end)
+
+      compensate(:cancel_flight, fn trip -> Steps.cancel_flight(trip) end)
+    end
+
+    workflow "awaits_nothing_booked" do
+      step(:confirm, fn trip ->
+        wait_for_input("confirmation")
+        {:ok, trip}
+      end)
     end
 
     workflow "by_fare" do
@@ -166,6 +186,51 @@ defmodule Durable.OnFailureTest do
       assert run.status == :failed
       assert run.error["message"] == "payments timed out"
       assert {:ok, _} = Durable.retry(run.id)
+    end
+  end
+
+  describe "Durable.cancel/3" do
+    test "leaves what the run did, without rollback: true" do
+      run = book("up", "awaits_traveller")
+      assert run.status == :waiting
+
+      assert :ok = Durable.cancel(run.id, "traveller walked away")
+      run = drain(run)
+
+      assert run.status == :cancelled
+      assert :cancel_flight not in Seen.all()
+      assert Durable.rollback(run.id) == {:error, :not_failed}
+    end
+
+    test "with rollback: true undoes the run on a worker, and it ends compensated" do
+      run = book("up", "awaits_traveller")
+
+      assert :ok = Durable.cancel(run.id, "traveller walked away", rollback: true)
+      assert reload(run).status == :pending
+      assert :cancel_flight not in Seen.all()
+
+      run = drain(run)
+      assert run.status == :compensated
+      assert run.error == %{"type" => "cancelled", "message" => "traveller walked away"}
+      assert Enum.count(Seen.all(), &(&1 == :cancel_flight)) == 1
+      refute Map.has_key?(run.context, "__rollback__")
+      assert Durable.retry(run.id) == {:error, :rolled_back}
+    end
+
+    test "with rollback: true and nothing to undo, the run stays cancelled" do
+      run = book("up", "awaits_nothing_booked")
+
+      assert :ok = Durable.cancel(run.id, nil, rollback: true)
+      assert drain(run).status == :cancelled
+    end
+
+    test "with rollback: true closes the input the run was waiting for" do
+      run = book("up", "awaits_traveller")
+      :ok = Durable.cancel(run.id, nil, rollback: true)
+      drain(run)
+
+      assert Durable.provide_input(run.id, "confirmation", %{}) != :ok
+      assert drain(run).status == :compensated
     end
   end
 

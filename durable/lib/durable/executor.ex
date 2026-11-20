@@ -239,6 +239,7 @@ defmodule Durable.Executor do
          ) do
       {1, [cancelled]} ->
         after_cancel(config, cancelled)
+        if opts[:rollback], do: roll_back_cancelled(config, cancelled)
         :ok
 
       {0, _} ->
@@ -246,6 +247,12 @@ defmodule Durable.Executor do
           do: {:error, :already_completed},
           else: {:error, :not_found}
     end
+  end
+
+  # `rollback: true`: the cancelled run goes back on its queue to be undone.
+  defp roll_back_cancelled(config, cancelled) do
+    with {:ok, queued} <- queue_rollback(config, cancelled),
+         do: DurablePubSub.wake(config, queued)
   end
 
   @doc """
@@ -364,7 +371,11 @@ defmodule Durable.Executor do
     execution
     |> Ecto.Changeset.change(
       status: :pending,
-      context: Map.put(execution.context || %{}, @rollback, execution.error || %{}),
+      context:
+        Map.put(execution.context || %{}, @rollback, %{
+          "error" => execution.error || %{},
+          "status" => Atom.to_string(execution.status)
+        }),
       completed_at: nil,
       scheduled_at: nil,
       locked_by: nil,
@@ -2920,12 +2931,30 @@ defmodule Durable.Executor do
 
   # `rollback_workflow/2` asked: undo the run, keeping the error it failed with.
   defp roll_back(execution, workflow_def, config) do
-    {error, context} = Map.pop(execution.context, @rollback)
+    {%{"error" => error, "status" => was}, context} = Map.pop(execution.context, @rollback)
 
     {:ok, execution} =
       execution |> Ecto.Changeset.change(context: context) |> cas_update!(config)
 
-    compensate_or_fail(execution, error, workflow_def, config)
+    case build_compensation_stack(execution.id, workflow_def, config) do
+      [] when was == "cancelled" -> back_to_cancelled(config, execution, error)
+      [] -> mark_failed(config, execution, error)
+      stack -> run_compensations(execution, error, stack, workflow_def, config)
+    end
+  end
+
+  # A cancelled run that turned out to have nothing to undo.
+  defp back_to_cancelled(config, execution, error) do
+    {:ok, _} =
+      execution
+      |> WorkflowExecution.status_changeset(:cancelled, %{
+        error: error,
+        completed_at: DateTime.utc_now()
+      })
+      |> Ecto.Changeset.change(locked_by: nil, locked_at: nil, scheduled_at: nil)
+      |> cas_update!(config)
+
+    {:error, error}
   end
 
   # Builds the compensation stack from completed steps in reverse order
