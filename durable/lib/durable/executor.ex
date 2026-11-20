@@ -2233,18 +2233,34 @@ defmodule Durable.Executor do
     {:ok, base_ctx |> Map.delete(to_string(result_key)) |> Map.put(result_key, lanes)}
   end
 
-  defp apply_parallel_into(into_fn, base_ctx, results, _opts)
+  defp apply_parallel_into(into_fn, base_ctx, results, opts)
        when is_function(into_fn, 2) do
     # User callbacks get raw {:ok, value} / {:error, reason} tuples so they
     # can pattern-match cleanly — this is the intended ergonomic API.
     # Any tuples that leak into the callback's return are sanitized at the
     # save boundary (save_data_as_context -> sanitize_for_json), so storage
     # can't crash regardless of what shape the user returns.
-    into_fn.(base_ctx, results)
+    case into_fn.(base_ctx, results) do
+      {:ok, data} = ok when is_map(data) -> ok
+      {:goto, step, data} = goto when is_atom(step) and is_map(data) -> goto
+      {:error, _reason} = error -> error
+      # Unmatched, it would crash the worker like the throw below.
+      other -> {:error, invalid_into_return(other, opts)}
+    end
   catch
     # A throw or an exit too: uncaught, it would fail the run from the worker,
     # past its compensations.
     kind, reason -> {:error, caught_error(kind, reason, __STACKTRACE__)}
+  end
+
+  defp invalid_into_return(returned, opts) do
+    %{
+      type: "parallel_into_error",
+      message:
+        "into: of parallel #{inspect(opts[:original_name])} must return {:ok, data}, " <>
+          "{:error, reason} or {:goto, step, data}, with data a map, " <>
+          "got: #{inspect(returned, limit: 5, printable_limit: 200)}"
+    }
   end
 
   # Normalize error to map format

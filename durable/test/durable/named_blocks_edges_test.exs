@@ -40,6 +40,25 @@ defmodule Durable.NamedBlocksEdgesTest do
     end
   end
 
+  defmodule RateLock do
+    use Durable
+    use Durable.Helpers
+
+    # The rate is held while the lookups run. `into:` forgets its `{:ok, _}`.
+    workflow "rate_lock", on_failure: :rollback do
+      step(:lock_rate, [compensate: :release_rate], fn loan -> {:ok, assign(loan, :rate, 4.1)} end)
+
+      parallel :lookups, into: fn loan, _results -> assign(loan, :scored, true) end do
+        step(:credit, fn loan -> {:ok, assign(loan, :credit, 710)} end)
+      end
+
+      compensate(:release_rate, fn loan ->
+        Seen.put(:rate_released, true)
+        {:ok, loan}
+      end)
+    end
+  end
+
   defmodule TwoWorkflows do
     use Durable
     use Durable.Helpers
@@ -281,6 +300,16 @@ defmodule Durable.NamedBlocksEdgesTest do
       # The lanes had finished: nothing ran twice.
       assert length(lanes(run)) == 2
     end
+  end
+
+  test "an into: that returns something else fails the run as a step would, compensations and all" do
+    on_exit(fn -> Seen.clear(:rate_released) end)
+    run = run_workflow(RateLock, %{})
+
+    assert run.status == :compensated
+    assert run.error["type"] == "parallel_into_error"
+    assert run.error["message"] =~ "into: of parallel :lookups must return {:ok, data}"
+    assert Seen.get(:rate_released)
   end
 
   test "two workflows in one module each keep their own into:" do
