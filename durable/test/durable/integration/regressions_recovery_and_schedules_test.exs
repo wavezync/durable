@@ -451,8 +451,8 @@ defmodule Durable.Integration.RecoveryAndSchedulesRegressionsTest do
       idle_durable!()
 
       {:ok, s} = API.schedule(Tick, "* * * * *", name: "made_in_fold", timezone: "Test/Fold")
-      diff = DateTime.diff(s.next_run_at, now, :second)
-      assert diff > 0
+      # Not their difference in seconds: that is 0 in a minute's last second.
+      assert DateTime.after?(s.next_run_at, now)
     end
   end
 
