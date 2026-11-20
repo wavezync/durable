@@ -464,8 +464,15 @@ defmodule Durable.Executor.StepRunner do
     }
   end
 
-  defp timeout_error(step, :run),
-    do: %{type: "timeout", message: "the run passed its timeout during #{step.name}"}
+  defp timeout_error(step, :run) do
+    whose =
+      case Process.get(:durable_lane_timeout) do
+        {lane, _ms} -> "lane #{lane}"
+        nil -> "the run"
+      end
+
+    %{type: "timeout", message: "#{whose} passed its timeout during #{step.name}"}
+  end
 
   defp step_span_meta(config, step_exec, step, attempt, max_attempts) do
     run_meta = Durable.Telemetry.run_meta()

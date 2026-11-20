@@ -574,6 +574,13 @@ defmodule Durable.Executor do
       )
     end
 
+    # A lane with a `timeout:` gets all of it again.
+    for {id, _ctx} <- stopped, ms = parallel_children(context)[id]["timeout"] do
+      Repo.update_all(config, from(c in WorkflowExecution, where: c.id == ^id),
+        set: [deadline_at: lane_deadline(retry_attrs[:deadline_at], ms)]
+      )
+    end
+
     for {_id, child_context} <- blocks, do: reopen_children(config, child_context, retry_attrs)
 
     reopen_group(config, group_id, %{
@@ -821,6 +828,8 @@ defmodule Durable.Executor do
         Map.get(execution.context, :__parallel_step)
 
     lane_steps = parallel_step_flag && lane_steps(workflow_def, parallel_step_flag)
+    # Whose deadline a timeout names: the lane's own, if it has one.
+    Process.put(:durable_lane_timeout, lane_timeout(execution, workflow_def))
     {done, context} = Map.pop(execution.context, @done)
     execution = %{execution | context: context}
 
@@ -860,6 +869,21 @@ defmodule Durable.Executor do
       %{type: :parallel, opts: %{lanes: lanes}} ->
         with {_id, _lane, names} <- Enum.find(lanes, &(to_string(elem(&1, 0)) == lane_id)),
              do: Enum.filter(workflow_def.steps, &(&1.name in names))
+
+      _step ->
+        nil
+    end)
+  end
+
+  # The lane a run was started for and its `timeout:`, if it has one.
+  defp lane_timeout(execution, workflow_def) do
+    lane_id = execution.context["__parallel_step"]
+
+    Enum.find_value(workflow_def.steps, fn
+      %{type: :parallel, opts: %{lanes: lanes} = opts} ->
+        with {_id, lane, _names} <- Enum.find(lanes, &(to_string(elem(&1, 0)) == lane_id)),
+             ms when is_integer(ms) <- Map.get(opts[:timeouts] || %{}, lane),
+             do: {lane, ms}
 
       _step ->
         nil
@@ -1154,12 +1178,13 @@ defmodule Durable.Executor do
 
   # The deadline passed before `step` began.
   defp time_out(execution, step, workflow_def, config) do
-    error = %{
-      type: "timeout",
-      message:
-        "the run passed its #{format_timeout(workflow_def.opts[:timeout])} timeout " <>
-          "before #{step.name}"
-    }
+    passed =
+      case Process.get(:durable_lane_timeout) do
+        {lane, ms} -> "lane #{lane} passed its #{format_timeout(ms)} timeout"
+        nil -> "the run passed its #{format_timeout(workflow_def.opts[:timeout])} timeout"
+      end
+
+    error = %{type: "timeout", message: "#{passed} before #{step.name}"}
 
     fail_at(execution, step, error, workflow_def, config)
   end
@@ -1848,7 +1873,14 @@ defmodule Durable.Executor do
   # What runs as a child: each lane, started like a step, under its own id.
   defp block_children(%{lanes: lanes} = opts) do
     for {id, lane, _names} <- lanes,
-        do: %{name: id, opts: %{returns: lane, optional: lane in (opts[:optional] || [])}}
+        do: %{
+          name: id,
+          opts: %{
+            returns: lane,
+            optional: lane in (opts[:optional] || []),
+            timeout: Map.get(opts[:timeouts] || %{}, lane)
+          }
+        }
   end
 
   # Fan-out: create child workflow executions for each parallel step and wait
@@ -1879,16 +1911,18 @@ defmodule Durable.Executor do
         child_queue = step.opts[:queue] || parent_queue
 
         {:ok, child} = create_parallel_child(exec, step, data, child_queue, config)
-        {child.id, Atom.to_string(step.name), returns_key, step.opts[:optional] == true}
+
+        {child.id, Atom.to_string(step.name), returns_key,
+         %{"optional" => step.opts[:optional] == true, "timeout" => step.opts[:timeout]}}
       end)
 
     # Build event names and children metadata map
     event_names = Enum.map(children_meta, fn {id, _, _, _} -> "__parallel_done:#{id}" end)
 
     children_map =
-      Map.new(children_meta, fn {id, step_name, returns_key, optional} ->
+      Map.new(children_meta, fn {id, step_name, returns_key, lane_opts} ->
         returns_str = if is_atom(returns_key), do: Atom.to_string(returns_key), else: returns_key
-        {id, %{"step_name" => step_name, "returns_key" => returns_str, "optional" => optional}}
+        {id, Map.merge(lane_opts, %{"step_name" => step_name, "returns_key" => returns_str})}
       end)
 
     # Create WaitGroup + PendingEvents for all children
@@ -1937,6 +1971,14 @@ defmodule Durable.Executor do
     exec
   end
 
+  # A lane with a `timeout:` has until then, or until the run's own deadline.
+  defp lane_deadline(run_deadline, nil), do: run_deadline
+
+  defp lane_deadline(run_deadline, ms) do
+    at = DateTime.add(DateTime.utc_now(), ms, :millisecond)
+    if run_deadline && DateTime.before?(run_deadline, at), do: run_deadline, else: at
+  end
+
   # Create a child workflow execution for a single parallel step
   defp create_parallel_child(parent_exec, step, data, queue, config) do
     # Inherit the parent's accumulated context so prior put_context/2 calls
@@ -1961,7 +2003,7 @@ defmodule Durable.Executor do
       trigger: :parent,
       current_step: Atom.to_string(step.name),
       # A branch is part of the run, so the run's deadline stops it too.
-      deadline_at: parent_exec.deadline_at
+      deadline_at: lane_deadline(parent_exec.deadline_at, step.opts[:timeout])
     }
 
     %WorkflowExecution{}
@@ -2129,7 +2171,7 @@ defmodule Durable.Executor do
   # so the block's is put the same way to compare. A lane can't hand back that
   # it removed a key.
   defp lane_outputs(results, started_with) do
-    started_with = started_with |> sanitize_for_json() |> Jason.encode!() |> Jason.decode!()
+    started_with = stored(started_with)
 
     Map.new(results, fn
       {lane, {:ok, data}} ->
@@ -2139,6 +2181,8 @@ defmodule Durable.Executor do
         failed
     end)
   end
+
+  defp stored(data), do: data |> sanitize_for_json() |> Jason.encode!() |> Jason.decode!()
 
   defp left_alone?({key, value}, started_with), do: Map.fetch(started_with, key) == {:ok, value}
 
@@ -2154,8 +2198,9 @@ defmodule Durable.Executor do
         {lane, {:ok, data}} when collect? -> {lane, {:ok, Map.delete(data, @string_keys)}}
         {lane, {:ok, data}} -> {lane, Map.delete(data, @string_keys)}
         {lane, {:error, reason}} when collect? -> {lane, {:error, reason}}
-        # Only an optional lane gets here failed: the block did without it.
-        {lane, {:error, _reason}} -> {lane, nil}
+        # Only an optional lane gets here failed: the block did without it,
+        # and hands on its `default:`, put as a lane's stored data would be.
+        {lane, {:error, _reason}} -> {lane, stored(Map.get(opts[:defaults] || %{}, lane))}
       end)
 
     {:ok, base_ctx |> Map.delete(to_string(result_key)) |> Map.put(result_key, lanes)}

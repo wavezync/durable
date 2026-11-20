@@ -645,9 +645,25 @@ defmodule Durable.DSL.Step do
   the data it was started with. That has been stored, so its own keys are
   strings.
 
-  A lane that fails fails the block and stops the others. Pass `:into` to
-  decide for yourself, as in an unnamed block: the function gets every lane's
-  `{:ok, data}` or `{:error, reason}` by lane name.
+  A lane that fails fails the block and stops the others. Pass
+  `on_error: :collect` to run every lane and hand the next step each one as
+  `{:ok, data}` or `{:error, reason}`, or `:into` to decide for yourself: the
+  function gets every lane's `{:ok, data}` or `{:error, reason}` by lane name.
+
+  ## Lane options
+
+  On `lane :name, opts do`, or in the options of a step written straight in
+  the block:
+
+  - `:optional` - `true` for a lane the block can do without: if it fails,
+    the next step gets `nil` for it and the run goes on
+  - `:default` - what the next step gets for an optional lane that failed,
+    in place of `nil`. Like a lane's own data it has been stored, so a map's
+    keys are strings
+  - `:timeout` - on `lane` only: how long the whole lane may take, in
+    milliseconds, its retries and waits included. Past it the lane fails with
+    a `"timeout"` error, like any failed lane. A step's own `:timeout` limits
+    one attempt
   """
   defmacro parallel(name, opts, do: block) when is_atom(name) and is_list(opts),
     do: emit(named_parallel(name, opts, block, top_level(), __CALLER__))
@@ -780,7 +796,20 @@ defmodule Durable.DSL.Step do
 
     written = statements(block, :lane)
     lanes = Enum.map(written, &compile_lane(&1, name, qualified, caller))
-    optional = Enum.flat_map(written, &optional_lane/1)
+    set = Enum.flat_map(written, &lane_opts/1)
+    optional = for {_kind, lane, opts} <- set, opts[:optional] == true, do: lane
+    defaults = for {_kind, lane, opts} <- set, Keyword.has_key?(opts, :default), do: lane
+    timeouts = for {:lane, lane, opts} <- set, opts[:timeout], do: {lane, opts[:timeout]}
+
+    if lane = Enum.find(defaults, &(&1 not in optional)) do
+      block_error!(
+        caller,
+        "#{inspect(lane)} of parallel #{inspect(name)} has default:, which is what the " <>
+          "next step gets when an optional lane fails: give it optional: true as well"
+      )
+    end
+
+    defaults = for {_kind, lane, opts} <- set, lane in defaults, do: {lane, opts[:default]}
     lane_names = Enum.map(lanes, &elem(&1, 0))
 
     if lanes == [],
@@ -822,6 +851,8 @@ defmodule Durable.DSL.Step do
             steps: [],
             all_steps: unquote(inner),
             optional: unquote(optional),
+            defaults: Map.new(unquote(defaults)),
+            timeouts: Durable.DSL.Step.__lane_timeouts__(unquote(timeouts), unquote(name)),
             error_strategy: unquote(error_strategy),
             into_fn: unquote(into_ref)
           }
@@ -838,11 +869,12 @@ defmodule Durable.DSL.Step do
 
   defp compile_lane({:lane, meta, [lane, opts, [do: body]]}, name, qualified, caller)
        when is_atom(lane) and is_list(opts) do
-    if Keyword.keys(opts) != [:optional] or not is_boolean(opts[:optional]) do
+    if Keyword.keys(opts) -- [:optional, :default, :timeout] != [] or
+         not is_boolean(Keyword.get(opts, :optional, false)) do
       block_error!(
         caller,
-        "lane #{inspect(lane)} of parallel #{inspect(name)} takes optional: true and " <>
-          "nothing else, got: #{Macro.to_string(opts)}"
+        "lane #{inspect(lane)} of parallel #{inspect(name)} takes optional: true, " <>
+          "default: and timeout:, got: #{Macro.to_string(opts)}"
       )
     end
 
@@ -863,14 +895,26 @@ defmodule Durable.DSL.Step do
     )
   end
 
-  # A lane the block can do without: `lane :x, optional: true do` or, for a
-  # lane of one step, `step :x, [optional: true], fn`.
-  defp optional_lane({kind, _meta, [lane, opts, _body]})
+  # The options written on a lane: `lane :x, optional: true do` or, for a lane
+  # of one step, `step :x, [optional: true], fn`.
+  defp lane_opts({kind, _meta, [lane, opts, _body]})
        when kind in [:lane, :step] and is_atom(lane) and is_list(opts) do
-    if Keyword.keyword?(opts) and opts[:optional] == true, do: [lane], else: []
+    if Keyword.keyword?(opts), do: [{kind, lane, opts}], else: []
   end
 
-  defp optional_lane(_statement), do: []
+  defp lane_opts(_statement), do: []
+
+  @doc false
+  # Checked in the workflow module, where `timeout: seconds(20)` is a number.
+  def __lane_timeouts__(timeouts, block) do
+    for {lane, ms} <- timeouts, not (is_integer(ms) and ms > 0) do
+      raise ArgumentError,
+            "lane #{inspect(lane)} of parallel #{inspect(block)} has timeout: #{inspect(ms)}. " <>
+              "It takes milliseconds, as in timeout: seconds(20)"
+    end
+
+    Map.new(timeouts)
+  end
 
   # The statements of a do block. A block with one `->` clause or one call
   # arrives as that alone.
