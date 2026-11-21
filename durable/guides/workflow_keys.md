@@ -40,10 +40,11 @@ end
 
 - **One holder per key.** Among the runs of one workflow, at most one *holds* a key. A start that finds the key held returns the holder (or an error, see below) and creates nothing: no run, no `:workflow_started` broadcast, nothing run inline. The exception is `on_duplicate: :cancel_existing`, which replaces the holder with a new run.
 - **Keys are scoped per workflow.** `"article:42"` on `process_article` and on `index_article` are two different keys.
-- **A run that's still going always holds its key.** Pending, running, waiting (sleep, events, input) and compensating runs keep it, including while a step is between retry attempts.
+- **A run that's still going always holds its key.** Pending, running and waiting (sleep, events, input) runs keep it, including while a step is between retry attempts.
+- **A run that is being rolled back has failed or been cancelled, and its key says so.** It lets the key go when its rollback begins, unless the workflow says `reuse: :never`, so the next start gets a run of its own and not one that is only undoing. Both runs are then going at once, so a compensation should undo what its own run did (cancel booking `FL-123`) and not whatever the key names (cancel traveller 7's flight). If the rollback finds nothing to undo and the run is left failed, a retry takes the key back.
 - **After the run finishes, `reuse:` decides** whether the next start may take the key or gets the finished run back.
 
-Status isn't part of the uniqueness rule. A key changes hands only when a new start asks for it, when a retry takes it back, when you release it, or when the holder is pruned. Moving a run between statuses (claiming it, recovering it from a dead node, cancelling it) never frees a key or fails on one.
+Status isn't part of the uniqueness rule. A key changes hands only when a new start asks for it, when a retry takes it back, when the holder's rollback begins, when you release it, or when the holder is pruned. Moving a run between statuses (claiming it, recovering it from a dead node, cancelling it) never frees a key or fails on one.
 
 ## Choosing `reuse:`
 
@@ -55,7 +56,8 @@ workflow "process_article", reuse: :after_failure do
 
 | Holder's status | `:after_close` (default) | `:after_failure` | `:never` |
 |-----------------|--------------------------|------------------|----------|
-| Pending, running, waiting, compensating | taken | taken | taken |
+| Pending, running, waiting | taken | taken | taken |
+| Being rolled back | free | free | taken |
 | Completed | free | taken | taken |
 | Failed, cancelled, compensated, compensation failed | free | free | taken |
 
@@ -172,7 +174,7 @@ Durable.start(ProcessArticle, %{"id" => 42, "rev" => 8}, key: "article:42", on_d
 #=> {:ok, new_id}
 ```
 
-The holder is cancelled and gives up its key in one step, and a new run starts with the new input. It works under any `reuse:`, `:never` included, because the holder hadn't finished. The cancel is the same as `Durable.cancel/2`: a step already running is stopped at its next heartbeat, no later step runs, and compensations don't run. The cancelled run's error says which run replaced it. A compensating holder can't be cancelled, so that start returns `{:error, {:key_taken, holder_id}}`. This is Temporal's TERMINATE_EXISTING, and Inngest's singleton `cancel` mode.
+The holder is cancelled and gives up its key in one step, and a new run starts with the new input. It works under any `reuse:`, `:never` included, because the holder hadn't finished. The cancel is the same as `Durable.cancel/2`: a step already running is stopped at its next heartbeat, no later step runs, and compensations don't run. The cancelled run's error says which run replaced it. A holder that is being rolled back under `reuse: :never` can't be cancelled, so that start returns `{:error, {:key_taken, holder_id}}`. This is Temporal's TERMINATE_EXISTING, and Inngest's singleton `cancel` mode.
 
 ### Run Once More After It: `:run_again`
 

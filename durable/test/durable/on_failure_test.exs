@@ -74,6 +74,29 @@ defmodule Durable.OnFailureTest do
       end
     end
 
+    # One booking per traveller, ever.
+    workflow "book_trip_once", reuse: :never do
+      step(:book_flight, [compensate: :cancel_flight], fn trip -> Steps.book_flight(trip) end)
+      step(:charge_card, fn trip -> Steps.charge_card(trip) end)
+      compensate(:cancel_flight, fn trip -> Steps.cancel_flight(trip) end)
+    end
+
+    workflow "rolls_back_and_looks", on_failure: :rollback do
+      step(:book_flight, [compensate: :cancel_flight], fn trip -> Steps.book_flight(trip) end)
+      step(:charge_card, fn trip -> Steps.charge_card(trip) end)
+
+      compensate(:cancel_flight, fn trip ->
+        run =
+          Durable.TestRepo.get!(
+            Durable.Storage.Schemas.WorkflowExecution,
+            Durable.Context.workflow_id()
+          )
+
+        Seen.note({:holds_key_while_undone, run.holds_key})
+        {:ok, trip}
+      end)
+    end
+
     workflow "nothing_to_undo" do
       step(:charge_card, fn trip -> Steps.charge_card(trip) end)
     end
@@ -209,11 +232,9 @@ defmodule Durable.OnFailureTest do
       assert {:ok, _} = Durable.retry(run.id)
     end
 
-    # Needs a decision. A failed run's key is free for the next start (`reuse:
-    # :after_close`), but not from when its rollback is queued until it has
-    # been undone: the run is pending, then compensating, so the start is
-    # handed the run that is being undone and nothing books the trip.
-    @tag :skip
+    # A failed run's key is free for the next start (`reuse: :after_close`),
+    # and stays free while the run is undone. Held until then, the start would
+    # be handed the run that is being undone and nothing would book the trip.
     test "a start with the key of a run that is being rolled back gets a run of its own" do
       book = fn trip ->
         Durable.start(BookTrip, trip, workflow: "book_trip", key: "traveller:7")
@@ -229,6 +250,44 @@ defmodule Durable.OnFailureTest do
       assert second != first
       assert drain(second).status == :completed
       assert drain(first).status == :compensated
+    end
+
+    test "a run rolled back as it fails lets its key go before it undoes anything" do
+      {:ok, id} =
+        Durable.start(BookTrip, %{"payments" => "down"},
+          workflow: "rolls_back_and_looks",
+          key: "traveller:7"
+        )
+
+      assert drain(id).status == :compensated
+      assert {:holds_key_while_undone, false} in Seen.all()
+    end
+
+    test "under reuse: :never the run being rolled back keeps its key" do
+      book = fn trip ->
+        Durable.start(BookTrip, trip, workflow: "book_trip_once", key: "traveller:7")
+      end
+
+      {:ok, first} = book.(%{"payments" => "down"})
+      assert drain(first).status == :failed
+      {:ok, _} = Durable.rollback(first)
+
+      assert {:ok, ^first} = book.(%{"payments" => "up"})
+    end
+
+    test "a run that gave its key up and had nothing to undo takes it back on a retry" do
+      {:ok, id} =
+        Durable.start(BookTrip, %{"payments" => "down"},
+          workflow: "nothing_to_undo",
+          key: "traveller:7"
+        )
+
+      assert drain(id).status == :failed
+      {:ok, _} = Durable.rollback(id)
+      assert %{status: :failed, holds_key: false} = drain(id)
+
+      assert {:ok, _} = Durable.retry(id)
+      assert reload(%{id: id}).holds_key
     end
 
     test "claimed by a node without the workflow's code, long past the run's timeout, waits for one that has it" do

@@ -85,6 +85,30 @@ defmodule Durable.Integration.RegressionsRollbackTest do
     end
   end
 
+  defmodule Repair do
+    use Durable
+    alias Durable.IntegrationProbe, as: Probe
+
+    # The garage is booked while the job is open. Closing the job cancels the
+    # garage if one was booked.
+    workflow "rb_repair" do
+      step(:open_job, [compensate: :close_job], fn job -> {:ok, job} end)
+
+      parallel :bookings do
+        step(:garage, fn job ->
+          Process.sleep(300)
+          Probe.note(:garage_booked)
+          {:ok, job}
+        end)
+      end
+
+      compensate(:close_job, fn job ->
+        Probe.note({:closed_with_garage_booked, Probe.hits(:garage_booked)})
+        {:ok, job}
+      end)
+    end
+  end
+
   # Kills the worker's task as it reads which steps to undo: after it has
   # been handed the rollback, before it has undone anything.
   def kill_reading_what_to_undo(_event, _measurements, %{query: query}, _config) do
@@ -128,12 +152,9 @@ defmodule Durable.Integration.RegressionsRollbackTest do
     assert get(id).scheduled_at == nil
   end
 
-  # Needs a decision. A lane that fails stops the others at their workers' next
-  # heartbeat, but the block's run is undone at once: a step still running in
-  # a stopped lane lands its effect after the compensation looked for it.
-  # Cancelling with `rollback: true` waits a heartbeat for the run's own
-  # worker, and not for its lanes' either.
-  @tag :skip
+  # A lane that fails stops the others at their workers' next heartbeat, and
+  # until then a step of theirs can still finish. The undo waits that long, or
+  # the step's effect would land after the compensation looked for it.
   test "a run isn't undone while a stopped lane's step can still finish" do
     start_durable!(%{default: 4}, heartbeat_interval: 1_000)
 
@@ -142,6 +163,20 @@ defmodule Durable.Integration.RegressionsRollbackTest do
     Process.sleep(500)
 
     assert Probe.hits(:assessor_booked) == Probe.hits({:closed_with_assessor_booked, 1})
+  end
+
+  test "a cancelled run isn't undone while a lane's step can still finish" do
+    start_durable!(%{default: 4}, heartbeat_interval: 1_000)
+
+    {:ok, id} = Durable.start(Repair, %{})
+    await_status(id, :waiting)
+    Process.sleep(100)
+
+    :ok = Durable.cancel(id, "the customer withdrew", rollback: true)
+    await_status(id, :compensated)
+    Process.sleep(500)
+
+    assert Probe.hits(:garage_booked) == Probe.hits({:closed_with_garage_booked, 1})
   end
 
   test "a cancelled run whose worker dies as its rollback starts doesn't carry on with its steps" do

@@ -336,12 +336,9 @@ defmodule Durable.NamedBlocksEdgesTest do
   end
 
   describe "retrying a block that stopped a lane waiting for its child workflow" do
-    # Needs a decision. Stopping the block cancelled the lane's child, and a
-    # retry puts the lane back but not the child: `call_workflow` finds it
-    # cancelled and the lane fails again with "parent_cancelled". Either the
-    # retry reopens the child where it stopped, as it does a lane's own block,
-    # or `call_workflow` starts a new child, repeating what the first had done.
-    @tag :skip
+    # Stopping the block cancelled the lane's child. A retry that put the lane
+    # back without it would have `call_workflow` find the child cancelled and
+    # fail the lane again with "parent_cancelled".
     test "puts that lane back to work, child and all" do
       on_exit(fn -> Seen.clear(:bureau_down) end)
       Seen.put(:bureau_down, true)
