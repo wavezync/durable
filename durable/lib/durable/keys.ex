@@ -9,6 +9,8 @@ defmodule Durable.Keys do
   #     by an open run it replaces (`on_duplicate: :cancel_existing`)
   #     (`insert/4`),
   #   * a retry taking back the key it lost (`retake/3`),
+  #   * a rollback beginning, which lets the key go as a start would have
+  #     taken it from the failed or cancelled run (`Executor.without_key/2`),
   #   * an operator releasing it (`release/2`),
   #   * pruning, which deletes the holder.
   #

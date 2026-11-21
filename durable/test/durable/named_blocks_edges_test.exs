@@ -40,6 +40,58 @@ defmodule Durable.NamedBlocksEdgesTest do
     end
   end
 
+  defmodule RateLock do
+    use Durable
+    use Durable.Helpers
+
+    # The rate is held while the lookups run. `into:` forgets its `{:ok, _}`.
+    workflow "rate_lock", on_failure: :rollback do
+      step(:lock_rate, [compensate: :release_rate], fn loan -> {:ok, assign(loan, :rate, 4.1)} end)
+
+      parallel :lookups, into: fn loan, _results -> assign(loan, :scored, true) end do
+        step(:credit, fn loan -> {:ok, assign(loan, :credit, 710)} end)
+      end
+
+      compensate(:release_rate, fn loan ->
+        Seen.put(:rate_released, true)
+        {:ok, loan}
+      end)
+    end
+  end
+
+  defmodule Checks do
+    use Durable
+    use Durable.Helpers
+    use Durable.Orchestration
+    use Durable.Wait
+
+    # The applicant uploads a document while the credit bureau is asked.
+    workflow "checks" do
+      parallel :checks do
+        step(:identity, fn application ->
+          case call_workflow(__MODULE__, %{"applicant" => application["applicant"]},
+                 ref: :identity,
+                 workflow: "verify_identity"
+               ) do
+            {:ok, result} -> {:ok, %{verified: result["verified"]}}
+            {:error, reason} -> {:error, reason}
+          end
+        end)
+
+        step(:credit, [retry: [max_attempts: 2]], fn _application ->
+          if Seen.get(:bureau_down), do: {:error, "bureau is down"}, else: {:ok, %{score: 710}}
+        end)
+      end
+    end
+
+    workflow "verify_identity" do
+      step(:check_document, fn applicant ->
+        document = wait_for_input("document")
+        {:ok, assign(applicant, :verified, document["valid"])}
+      end)
+    end
+  end
+
   defmodule TwoWorkflows do
     use Durable
     use Durable.Helpers
@@ -281,6 +333,44 @@ defmodule Durable.NamedBlocksEdgesTest do
       # The lanes had finished: nothing ran twice.
       assert length(lanes(run)) == 2
     end
+  end
+
+  describe "retrying a block that stopped a lane waiting for its child workflow" do
+    # Stopping the block cancelled the lane's child. A retry that put the lane
+    # back without it would have `call_workflow` find the child cancelled and
+    # fail the lane again with "parent_cancelled".
+    test "puts that lane back to work, child and all" do
+      on_exit(fn -> Seen.clear(:bureau_down) end)
+      Seen.put(:bureau_down, true)
+      run = run_workflow(Checks, %{"applicant" => "A-1"}, workflow: "checks")
+      assert run.status == :failed
+      assert run.error["message"] == "bureau is down"
+
+      Seen.clear(:bureau_down)
+      {:ok, _} = Durable.retry(run.id)
+      run = drain(run)
+      assert run.status == :waiting
+
+      identity = Enum.find(lanes(run), &(&1.current_step == "checks__identity"))
+      [child] = Enum.filter(lanes(identity), &(&1.status == :waiting))
+      :ok = Durable.provide_input(child.id, "document", %{"valid" => true})
+      run = drain(run)
+
+      assert run.status == :completed
+
+      assert %{"identity" => %{"verified" => true}, "credit" => %{"score" => 710}} =
+               run.context["checks"]
+    end
+  end
+
+  test "an into: that returns something else fails the run as a step would, compensations and all" do
+    on_exit(fn -> Seen.clear(:rate_released) end)
+    run = run_workflow(RateLock, %{})
+
+    assert run.status == :compensated
+    assert run.error["type"] == "parallel_into_error"
+    assert run.error["message"] =~ "into: of parallel :lookups must return {:ok, data}"
+    assert Seen.get(:rate_released)
   end
 
   test "two workflows in one module each keep their own into:" do

@@ -98,7 +98,7 @@ The run stops failed like any other, and can be retried or rolled back by hand. 
 
 ### Cancelling and undoing
 
-`Durable.cancel/2` stops a run and leaves what it did. `Durable.cancel(id, reason, rollback: true)` also undoes it: the run is cancelled, goes back on its queue, and ends `:compensated`, or stays `:cancelled` if there was nothing to undo. If a worker had the run, the undo starts one heartbeat later (30 s by default), once that worker has stopped, so a step that finished in that time is undone too. Child workflows are cancelled, not undone.
+`Durable.cancel/2` stops a run and leaves what it did. `Durable.cancel(id, reason, rollback: true)` also undoes it: the run is cancelled, goes back on its queue, and ends `:compensated`, or stays `:cancelled` if there was nothing to undo. If a worker had the run, or a run under it such as a parallel lane, the undo starts one heartbeat later (30 s by default), once that worker has stopped, so a step that finished in that time is undone too. Child workflows are cancelled, not undone.
 
 ### Upgrading to 1.6
 

@@ -61,6 +61,9 @@ defmodule Durable.Pruner do
         as: :run,
         where: w.status in ^statuses,
         where: fragment("coalesce(?, ?)", w.completed_at, w.updated_at) < ^cutoff,
+        # A failed run with a time to be rolled back at is still owed its undo
+        # (`on_failure: [rollback_after: ms]`). It's pruned once that's done.
+        where: w.status != :failed or is_nil(w.scheduled_at),
         # A parallel block reads its branches' results from their rows when the
         # last one ends, however long after the first that is. So does a retry
         # of a block that failed, so a failed parent keeps its children too.

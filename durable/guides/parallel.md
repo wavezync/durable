@@ -33,9 +33,10 @@ end
 - **Every lane starts from the same data** and sees nothing another lane does.
 - **The next step gets what each lane produced under the block's name**, by lane name: `%{lookups: %{credit: %{"score" => 712}, fraud: ..., sanctions: ...}}`. That is the block's collect step; you don't write one. What a lane produced is every key its steps added or changed. The data it was started with is left out, so a large application isn't copied once per lane. A lane's output has been stored, so the keys inside it are strings. A lane can't hand back that it removed a key.
 - **A lane that fails fails the block** and stops the other lanes. That is `on_error: :fail_fast`, the default.
-- **`Durable.retry/1` on the failed run** puts the lanes that didn't finish back to work where they stopped, including a lane inside a lane. Lanes that finished aren't run again. A lane stopped in the middle of a step is told at its worker's next heartbeat; retry before that and the step can run once more beside the one still finishing, so keep steps in a lane safe to repeat, as lookups are.
+- **`Durable.retry/1` on the failed run** puts the lanes that didn't finish back to work where they stopped, including a lane inside a lane and a child workflow a lane was waiting for (`call_workflow`). Lanes that finished aren't run again. A lane stopped in the middle of a step is told at its worker's next heartbeat; retry before that and the step can run once more beside the one still finishing, so keep steps in a lane safe to repeat, as lookups are.
 - **Steps are stored under the block and the lane**, as `lookups__sanctions__query`.
 - **`compensate:` isn't allowed in a lane.** Put the undo on a step before the block.
+- **A rollback waits for stopped lanes.** When a lane fails and the run is rolled back (`on_failure: :rollback`, or `{:rollback, reason}`), the other lanes are told at their workers' next heartbeat, and a step of theirs can finish before that. The undo starts one heartbeat (30 s by default) after the lanes were stopped, so a compensation sees what those steps did. A lane that was only waiting makes the undo wait as well.
 
 ### Carrying on when a lane fails
 

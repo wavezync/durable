@@ -268,10 +268,16 @@ defmodule Durable.Executor do
   # `rollback: true`: the cancelled run goes back on its queue to be undone.
   # A worker that had it is told at its next heartbeat, and until then a step
   # of its can still finish. The undo waits that long, so it sees that step.
+  #
+  # A run that never started has nothing to undo. Back on its queue it would
+  # still be its key's holder, a run yet to come, to the next start.
+  defp roll_back_cancelled(_config, %{started_at: nil}, _seen), do: :ok
+
   defp roll_back_cancelled(config, cancelled, seen) do
     at =
       if seen == :running,
-        do: DateTime.add(DateTime.utc_now(), config.heartbeat_interval, :millisecond)
+        do: DateTime.add(DateTime.utc_now(), config.heartbeat_interval, :millisecond),
+        else: settles_at(config, cancelled)
 
     with {:ok, queued} <- queue_rollback(config, cancelled, at),
          do: DurablePubSub.wake(config, queued)
@@ -404,9 +410,26 @@ defmodule Durable.Executor do
       locked_at: nil,
       lock_token: nil
     )
+    |> without_key(execution)
     |> cas_update(config)
     |> not_failed_if_superseded()
   end
+
+  # A run being undone is over for its key: it failed or was cancelled, and a
+  # start may take the key from such a run unless the workflow says
+  # `reuse: :never`. Kept until it was undone, the key would hand that start a
+  # run that does no work. If the undo finds nothing to do and the run is left
+  # failed, a retry takes the key back as for any run that lost it.
+  defp without_key(changeset, %{holds_key: true} = execution) do
+    with {:ok, workflow_def} <- get_workflow_definition_from_execution(execution),
+         true <- Keys.reuse(workflow_def) != :never do
+      Ecto.Changeset.change(changeset, holds_key: false)
+    else
+      _ -> changeset
+    end
+  end
+
+  defp without_key(changeset, _execution), do: changeset
 
   defp ensure_retryable(:failed), do: :ok
 
@@ -586,15 +609,7 @@ defmodule Durable.Executor do
     stopped =
       for {id, s, child_context} <- children, s in [:failed, :cancelled], do: {id, child_context}
 
-    {blocks, steps} = Enum.split_with(stopped, fn {_id, ctx} -> stopped_block?(config, ctx) end)
-
-    for {runs, status} <- [{steps, :pending}, {blocks, :waiting}] do
-      Repo.update_all(
-        config,
-        from(c in WorkflowExecution, where: c.id in ^Enum.map(runs, &elem(&1, 0))),
-        set: [status: status, updated_at: now] ++ retry_attrs
-      )
-    end
+    put_back(config, stopped, retry_attrs)
 
     # A lane with a `timeout:` gets all of it again.
     for {id, _ctx} <- stopped, ms = parallel_children(context)[id]["timeout"] do
@@ -602,8 +617,6 @@ defmodule Durable.Executor do
         set: [deadline_at: lane_deadline(retry_attrs[:deadline_at], ms)]
       )
     end
-
-    for {_id, child_context} <- blocks, do: reopen_children(config, child_context, retry_attrs)
 
     reopen_group(config, group_id, %{
       stopped: Enum.map(stopped, fn {id, _} -> "__parallel_done:#{id}" end),
@@ -613,6 +626,38 @@ defmodule Durable.Executor do
         for(id <- child_ids -- Enum.map(children, &elem(&1, 0)), do: "__parallel_done:#{id}"),
       now: now
     })
+  end
+
+  # Stopped runs go back to work: one that waits on a block of its own waits
+  # on it again, with that block's children put back the same way. The child
+  # workflows a run was waiting for (`call_workflow`) were cancelled with it,
+  # and are put back too, or the run would wake to find its child cancelled.
+  defp put_back(_config, [], _retry_attrs), do: :ok
+
+  defp put_back(config, stopped, retry_attrs) do
+    {blocks, steps} = Enum.split_with(stopped, fn {_id, ctx} -> stopped_block?(config, ctx) end)
+
+    for {runs, status} <- [{steps, :pending}, {blocks, :waiting}] do
+      Repo.update_all(
+        config,
+        from(c in WorkflowExecution, where: c.id in ^Enum.map(runs, &elem(&1, 0))),
+        set: [status: status, updated_at: DateTime.utc_now()] ++ retry_attrs
+      )
+    end
+
+    for {_id, context} <- blocks, do: reopen_children(config, context, retry_attrs)
+
+    called =
+      Repo.all(
+        config,
+        from(c in WorkflowExecution,
+          where: c.parent_workflow_id in ^Enum.map(steps, &elem(&1, 0)),
+          where: c.status == :cancelled and c.error["message"] == "parent_cancelled",
+          select: {c.id, c.context}
+        )
+      )
+
+    put_back(config, called, retry_attrs)
   end
 
   defp reopen_group(config, group_id, %{stopped: stopped, finished: finished, now: now}) do
@@ -783,11 +828,15 @@ defmodule Durable.Executor do
   # compensations, which are in the code nobody has.
   defp definition_or_leave(config, execution) do
     with {:error, reason} <- get_workflow_definition_from_execution(execution) do
-      if past_deadline_by?(execution, @missing_code_grace_ms),
+      if past_deadline_by?(execution, @missing_code_grace_ms) and not to_roll_back?(execution),
         do: time_out_without_code(config, execution),
         else: leave_for_its_code(config, execution, reason)
     end
   end
+
+  # Back on its queue to be undone, not to run: its deadline, long past by
+  # now, says nothing, and timing it out would drop the undo and its error.
+  defp to_roll_back?(execution), do: is_map_key(execution.context || %{}, @rollback)
 
   defp leave_for_its_code(config, execution, reason) do
     Logger.warning(
@@ -2228,18 +2277,34 @@ defmodule Durable.Executor do
     {:ok, base_ctx |> Map.delete(to_string(result_key)) |> Map.put(result_key, lanes)}
   end
 
-  defp apply_parallel_into(into_fn, base_ctx, results, _opts)
+  defp apply_parallel_into(into_fn, base_ctx, results, opts)
        when is_function(into_fn, 2) do
     # User callbacks get raw {:ok, value} / {:error, reason} tuples so they
     # can pattern-match cleanly — this is the intended ergonomic API.
     # Any tuples that leak into the callback's return are sanitized at the
     # save boundary (save_data_as_context -> sanitize_for_json), so storage
     # can't crash regardless of what shape the user returns.
-    into_fn.(base_ctx, results)
+    case into_fn.(base_ctx, results) do
+      {:ok, data} = ok when is_map(data) -> ok
+      {:goto, step, data} = goto when is_atom(step) and is_map(data) -> goto
+      {:error, _reason} = error -> error
+      # Unmatched, it would crash the worker like the throw below.
+      other -> {:error, invalid_into_return(other, opts)}
+    end
   catch
     # A throw or an exit too: uncaught, it would fail the run from the worker,
     # past its compensations.
     kind, reason -> {:error, caught_error(kind, reason, __STACKTRACE__)}
+  end
+
+  defp invalid_into_return(returned, opts) do
+    %{
+      type: "parallel_into_error",
+      message:
+        "into: of parallel #{inspect(opts[:original_name])} must return {:ok, data}, " <>
+          "{:error, reason} or {:goto, step, data}, with data a map, " <>
+          "got: #{inspect(returned, limit: 5, printable_limit: 200)}"
+    }
   end
 
   # Normalize error to map format
@@ -3002,16 +3067,81 @@ defmodule Durable.Executor do
   defp compensate_or_fail(execution, error, workflow_def, config) do
     case build_compensation_stack(execution.id, workflow_def, config) do
       [] -> mark_failed(config, execution, error)
-      stack -> run_compensations(execution, error, stack, workflow_def, config)
+      stack -> undo_once_settled(execution, error, stack, workflow_def, config)
     end
+  end
+
+  defp undo_once_settled(execution, error, stack, workflow_def, config) do
+    case settles_at(config, execution) do
+      nil -> run_compensations(execution, error, stack, workflow_def, config)
+      at -> undo_later(config, execution, error, at)
+    end
+  end
+
+  # When the last step of a run under this one can still finish. A stopped
+  # run's worker is told at its next heartbeat, and until then its step runs
+  # on: undone before that, the run would miss what the step did. nil when
+  # nothing under it was stopped in the last heartbeat.
+  #
+  # ponytail: a stopped run that was waiting, with no worker, makes the undo
+  # wait as well. Record whether a worker had it when it was stopped if that
+  # wait matters.
+  defp settles_at(config, execution) do
+    beat = config.heartbeat_interval
+    since = DateTime.add(DateTime.utc_now(), -beat, :millisecond)
+    root = execution.root_workflow_id || execution.id
+
+    stopped =
+      from(w in WorkflowExecution,
+        where: w.root_workflow_id == ^root and w.id != ^execution.id,
+        where: w.status == :cancelled and not is_nil(w.started_at) and w.completed_at > ^since,
+        select: max(w.completed_at)
+      )
+
+    with %DateTime{} = last <- Repo.one(config, stopped),
+         do: DateTime.add(last, beat, :millisecond)
+  end
+
+  # Back on its queue to be undone at `at`, as `queue_rollback/3` leaves a run
+  # that failed. The context is read back: this process may hold less of it.
+  defp undo_later(config, execution, error, at) do
+    context =
+      Repo.one(
+        config,
+        from(w in WorkflowExecution, where: w.id == ^execution.id, select: w.context)
+      )
+
+    {:ok, _} =
+      execution
+      |> Ecto.Changeset.change(
+        status: :pending,
+        scheduled_at: at,
+        locked_by: nil,
+        locked_at: nil,
+        lock_token: nil
+      )
+      |> Ecto.Changeset.force_change(
+        :context,
+        Map.put(context || %{}, @rollback, %{"error" => error, "status" => "failed"})
+      )
+      |> without_key(execution)
+      |> cas_update!(config)
+
+    {:error, error}
   end
 
   # `rollback_workflow/2` asked: undo the run, keeping the error it failed with.
   defp roll_back(execution, workflow_def, config) do
     {%{"error" => error, "status" => was}, context} = Map.pop(execution.context, @rollback)
 
+    # The marker goes in the write that takes the run out of :running. A
+    # worker lost after it then leaves a run that failed while compensating,
+    # not one the next claim carries on with, a cancelled run's steps and all.
     {:ok, execution} =
-      execution |> Ecto.Changeset.change(context: context) |> cas_update!(config)
+      execution
+      |> WorkflowExecution.compensating_changeset()
+      |> Ecto.Changeset.change(context: context)
+      |> cas_update!(config)
 
     case build_compensation_stack(execution.id, workflow_def, config) do
       [] when was == "cancelled" -> back_to_cancelled(config, execution, error)
@@ -3077,6 +3207,7 @@ defmodule Durable.Executor do
     {:ok, exec} =
       execution
       |> WorkflowExecution.compensating_changeset()
+      |> without_key(execution)
       |> cas_update!(config)
 
     # A run that failed as it resumed (a parallel failure, its deadline, a

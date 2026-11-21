@@ -145,3 +145,7 @@ Each of these was learned from a real bug. Breaking one brings it back.
 CI runs the last two both direct and through PgBouncer in transaction mode. Set `INTEGRATION_DB_PORT` to do the same locally.
 11. **Whoever closes an attempt's row sends its end event** (`StepRunner.report_closed/5`). A worker that finds its row closed (`Executor.finish_attempt!/2`) stays quiet, so each attempt gets exactly one, from any node.
 12. **The database's clock is read as UTC** (`(NOW() AT TIME ZONE 'UTC')`). Timestamp columns hold UTC in a type with no zone, so a bare `NOW()` is wrong on any server not set to UTC.
+13. **Whoever marks a run failed sets `scheduled_at` or clears it.** On a failed run it is when the sweep rolls the run back, and a claim leaves a retry's backoff or a delayed start there.
+14. **The rollback marker goes in the write that makes the run `compensating`** (`roll_back/3`). A run still `running` without it is one the next claim carries on with.
+15. **A run is undone only once nothing under it can still finish a step** (`settles_at/2`). A stopped run's worker hears of it at its next heartbeat, so the undo waits one heartbeat after the last run under it was stopped.
+16. **A run being rolled back doesn't hold its key** (`without_key/2`), unless `reuse: :never`. A start with the key must not be handed a run that only undoes.

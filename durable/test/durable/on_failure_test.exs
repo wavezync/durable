@@ -61,10 +61,40 @@ defmodule Durable.OnFailureTest do
       compensate(:cancel_flight, fn trip -> Steps.cancel_flight(trip) end)
     end
 
+    # A booking has to be through within the hour.
+    workflow "book_trip_within_the_hour", timeout: hours(1) do
+      step(:book_flight, [compensate: :cancel_flight], fn trip -> Steps.book_flight(trip) end)
+      step(:charge_card, fn trip -> Steps.charge_card(trip) end)
+      compensate(:cancel_flight, fn trip -> Steps.cancel_flight(trip) end)
+    end
+
     workflow "quotes_wait_five_days", on_failure: [rollback_after: days(5)] do
       parallel :insurers do
         step(:north, fn _trip -> {:error, "insurer is down"} end)
       end
+    end
+
+    # One booking per traveller, ever.
+    workflow "book_trip_once", reuse: :never do
+      step(:book_flight, [compensate: :cancel_flight], fn trip -> Steps.book_flight(trip) end)
+      step(:charge_card, fn trip -> Steps.charge_card(trip) end)
+      compensate(:cancel_flight, fn trip -> Steps.cancel_flight(trip) end)
+    end
+
+    workflow "rolls_back_and_looks", on_failure: :rollback do
+      step(:book_flight, [compensate: :cancel_flight], fn trip -> Steps.book_flight(trip) end)
+      step(:charge_card, fn trip -> Steps.charge_card(trip) end)
+
+      compensate(:cancel_flight, fn trip ->
+        run =
+          Durable.TestRepo.get!(
+            Durable.Storage.Schemas.WorkflowExecution,
+            Durable.Context.workflow_id()
+          )
+
+        Seen.note({:holds_key_while_undone, run.holds_key})
+        {:ok, trip}
+      end)
     end
 
     workflow "nothing_to_undo" do
@@ -201,6 +231,88 @@ defmodule Durable.OnFailureTest do
       assert run.error["message"] == "payments timed out"
       assert {:ok, _} = Durable.retry(run.id)
     end
+
+    # A failed run's key is free for the next start (`reuse: :after_close`),
+    # and stays free while the run is undone. Held until then, the start would
+    # be handed the run that is being undone and nothing would book the trip.
+    test "a start with the key of a run that is being rolled back gets a run of its own" do
+      book = fn trip ->
+        Durable.start(BookTrip, trip, workflow: "book_trip", key: "traveller:7")
+      end
+
+      {:ok, first} = book.(%{"payments" => "down"})
+      assert drain(first).status == :failed
+      {:ok, _} = Durable.rollback(first)
+
+      # The traveller tries again before a worker has got to the undo.
+      {:ok, second} = book.(%{"payments" => "up"})
+
+      assert second != first
+      assert drain(second).status == :completed
+      assert drain(first).status == :compensated
+    end
+
+    test "a run rolled back as it fails lets its key go before it undoes anything" do
+      {:ok, id} =
+        Durable.start(BookTrip, %{"payments" => "down"},
+          workflow: "rolls_back_and_looks",
+          key: "traveller:7"
+        )
+
+      assert drain(id).status == :compensated
+      assert {:holds_key_while_undone, false} in Seen.all()
+    end
+
+    test "under reuse: :never the run being rolled back keeps its key" do
+      book = fn trip ->
+        Durable.start(BookTrip, trip, workflow: "book_trip_once", key: "traveller:7")
+      end
+
+      {:ok, first} = book.(%{"payments" => "down"})
+      assert drain(first).status == :failed
+      {:ok, _} = Durable.rollback(first)
+
+      assert {:ok, ^first} = book.(%{"payments" => "up"})
+    end
+
+    test "a run that gave its key up and had nothing to undo takes it back on a retry" do
+      {:ok, id} =
+        Durable.start(BookTrip, %{"payments" => "down"},
+          workflow: "nothing_to_undo",
+          key: "traveller:7"
+        )
+
+      assert drain(id).status == :failed
+      {:ok, _} = Durable.rollback(id)
+      assert %{status: :failed, holds_key: false} = drain(id)
+
+      assert {:ok, _} = Durable.retry(id)
+      assert reload(%{id: id}).holds_key
+    end
+
+    test "claimed by a node without the workflow's code, long past the run's timeout, waits for one that has it" do
+      run = book("down", "book_trip_within_the_hour")
+      assert run.status == :failed
+
+      # The next day, in the middle of a deploy.
+      set = fn fields ->
+        run |> reload() |> Ecto.Changeset.change(fields) |> Durable.TestRepo.update!()
+      end
+
+      set.(deadline_at: DateTime.add(DateTime.utc_now(), -1, :day))
+      {:ok, _} = Durable.rollback(run.id)
+      set.(workflow_module: "Elixir.NotOnThisNode")
+      Durable.Executor.execute_workflow(run.id, Durable.Config.get(Durable))
+
+      assert %{status: :pending, error: %{"message" => "payments timed out"}} = reload(run)
+
+      set.(workflow_module: Atom.to_string(BookTrip), scheduled_at: nil)
+      run = drain(run)
+
+      assert run.status == :compensated
+      assert run.error["message"] == "payments timed out"
+      assert :cancel_flight in Seen.all()
+    end
   end
 
   describe "Durable.cancel/3" do
@@ -236,6 +348,32 @@ defmodule Durable.OnFailureTest do
 
       assert :ok = Durable.cancel(run.id, nil, rollback: true)
       assert drain(run).status == :cancelled
+    end
+
+    test "with rollback: true, a run that never started is cancelled there and then" do
+      {:ok, id} =
+        Durable.start(BookTrip, %{"payments" => "up"}, workflow: "book_trip", key: "traveller:7")
+
+      assert :ok = Durable.cancel(id, "traveller walked away", rollback: true)
+      assert %{status: :cancelled, context: context} = reload(%{id: id})
+      refute Map.has_key?(context, "__rollback__")
+    end
+
+    test "with rollback: true on a run that never started, its key is free for the next start" do
+      book = fn trip ->
+        Durable.start(BookTrip, trip, workflow: "book_trip", key: "traveller:7")
+      end
+
+      {:ok, first} = book.(%{"payments" => "down"})
+      :ok = Durable.cancel(first, "traveller walked away", rollback: true)
+
+      # The traveller comes back and books again.
+      {:ok, second} = book.(%{"payments" => "up"})
+      assert second != first
+
+      assert drain(second).status == :completed
+      assert drain(first).status == :cancelled
+      assert Seen.all() == [:charge_card, :book_flight]
     end
 
     test "with rollback: true closes the input the run was waiting for" do
@@ -323,6 +461,27 @@ defmodule Durable.OnFailureTest do
       # Nothing left for a later sweep to do.
       sweep()
       assert reload(run).status == :compensated
+    end
+
+    test "isn't pruned before it has been rolled back" do
+      run = book("down", "book_trip_waits_five_days")
+
+      # Four days on, with failed runs kept for three.
+      four_days_ago = DateTime.add(DateTime.utc_now(), -4, :day)
+
+      run
+      |> days_pass(4)
+      |> Ecto.Changeset.change(completed_at: four_days_ago, updated_at: four_days_ago)
+      |> Durable.TestRepo.update!()
+
+      config = %{Durable.Config.get(Durable) | prune: [failed: :timer.hours(24 * 3)]}
+      assert Durable.Pruner.prune(config) == %{failed: 0}
+
+      # The fifth day: the seat it held is released.
+      days_pass(run, 1)
+      sweep()
+      assert drain(run).status == :compensated
+      assert :cancel_flight in Seen.all()
     end
 
     test "a retry takes the run out of it, and a second failure starts the wait again" do
