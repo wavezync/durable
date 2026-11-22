@@ -40,14 +40,15 @@ lib/durable/
 ├── supervisor.ex           # Main supervisor for embedding
 ├── dsl/                    # Workflow DSL macros
 │   ├── workflow.ex         # workflow/2 macro
-│   ├── step.ex             # step/2/3, decision/2, each/3 macros
+│   ├── step.ex             # step, decision, branch, parallel, lane, compensate macros
 │   └── time_helpers.ex     # seconds/1, minutes/1, hours/1, days/1
 ├── definition.ex           # Runtime workflow/step definitions
 ├── executor.ex             # Workflow execution engine
 ├── executor/
 │   ├── step_runner.ex      # Individual step execution
 │   └── backoff.ex          # Retry backoff strategies
-├── context.ex              # Workflow context (input/get_context/put_context)
+├── engine_state.ex         # The engine's own state for a run, and the names it keeps
+├── context.ex              # Workflow context (get_context/put_context)
 ├── wait.ex                 # Sleep/wait_for_event/wait_for_input
 ├── query.ex                # Query API for executions
 ├── query/opts.ex           # The read contract: option checks, unwrap!/3 for the ! twins
@@ -73,23 +74,23 @@ lib/durable/
 ```elixir
 defmodule MyWorkflow do
   use Durable
-  use Durable.Context
+  use Durable.Helpers
 
   workflow "my_workflow", timeout: hours(2) do
-    step :first do
-      # Access input with input()
-      data = input().data
-      # Store in context with put_context/2
-      put_context(:key, data)
+    # The first step gets the run's input; each step gets what the last returned
+    step :first, fn input ->
+      {:ok, %{key: input["data"]}}
     end
 
-    step :second, retry: [max_attempts: 3, backoff: :exponential] do
-      # Retrieve from context with get_context/1
-      get_context(:key)
+    step :second, [retry: [max_attempts: 3, backoff: :exponential]], fn data ->
+      {:ok, assign(data, :seen, data.key)}
     end
   end
 end
 ```
+
+The DSL is written without parentheses (`step :name, fn data -> ... end`), and
+a step returns `{:ok, data}` or one of the other results in `Durable.DSL.Step`.
 
 ### Queue System
 
@@ -158,7 +159,7 @@ use Durable.DataCase, async: false
 
 All tables live in the `durable` PostgreSQL schema: `durable.workflow_executions`, `durable.step_executions`, `durable.pending_inputs`, `durable.scheduled_workflows`
 
-On `workflow_executions`, `context` is the user's data and `engine_state` is the engine's own (markers, key shapes, children). Never read a marker from `context` or write one there: see `Durable.EngineState` and ARCHITECTURE rules 21 to 23.
+On `workflow_executions`, `context` is the user's data and `engine_state` is the engine's own (markers, key shapes, children). Never read a marker from `context` or write one there: see `Durable.EngineState` and ARCHITECTURE rules 22 to 24.
 
 Uses binary UUIDs as primary keys.
 
