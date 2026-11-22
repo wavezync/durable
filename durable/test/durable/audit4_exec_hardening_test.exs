@@ -328,7 +328,7 @@ defmodule Durable.Audit4ExecHardeningTest do
       run = claim("risk__blocked__refuse")
 
       assert %{status: :failed, error: %{"type" => "decision_error"}} = run
-      assert run.error["message"] =~ "not found in remaining steps"
+      assert run.error["message"] =~ "a step inside :risk"
     end
 
     test "can't go back to its own decider" do

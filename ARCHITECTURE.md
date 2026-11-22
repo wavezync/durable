@@ -87,6 +87,8 @@ All tables live in the `durable` schema.
 
 **Named branches.** The deciding function runs through the step runner as a step that jumps: the arm is what the step's row records. The executor then runs the arm's steps followed by what comes after the block.
 
+**Jumps.** A `{:goto, step, data}` goes forward only. The steps of every arm and every lane sit side by side in the definition, so a jump from outside a branch or a parallel block to a step inside one is refused: the run would go on through the other arms, or run a lane's steps in the block's own run. A step inside an arm can jump ahead in its arm, or out of the block.
+
 **What a save records.** A step's result is saved with the name of the step it came from, and for a branch the arm, for a jump its target, and for a parallel block the fact that it finished. A run that comes back to that step, because it was stopped or lost its worker before moving on, continues from what follows. Without this the step would run again on its own result, a branch or a jump would decide again, and a parallel block would start its lanes a second time.
 
 **Child workflows.** The parent waits on an internal event named after the child. The child commits its final status and then looks for that event. The parent commits its event and then reads the child. Whichever goes second sees the other, so a child that finishes early can't be missed.

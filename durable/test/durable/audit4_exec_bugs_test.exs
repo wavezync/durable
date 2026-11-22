@@ -49,6 +49,27 @@ defmodule Durable.Audit4ExecBugsTest do
 
     def stored_now, do: Repo.get!(WorkflowExecution, Durable.Context.workflow_id()).context
 
+    # A clause's step is named after its branch, which has no name of its own.
+    def step_named(workflow, suffix) do
+      {:ok, definition} = __workflow_definition__(workflow)
+
+      Enum.find_value(definition.steps, fn %{name: name} ->
+        if String.ends_with?(Atom.to_string(name), suffix), do: name
+      end)
+    end
+
+    # A notice is posted, and the block then tries to post it again.
+    workflow "audit4_notice" do
+      parallel :send, into: fn notice, _sent -> {:goto, :send__post__stamp, notice} end do
+        lane :post do
+          step(:stamp, fn notice ->
+            Audit4ExecBugSeen.hit(:posted)
+            {:ok, notice}
+          end)
+        end
+      end
+    end
+
     # An order arrives as the webhook sent it and is carried from step to step.
     workflow "audit4_order" do
       step(:receive_order, fn order -> {:ok, assign(order, :received, true)} end)
@@ -221,6 +242,11 @@ defmodule Durable.Audit4ExecBugsTest do
             {:ok, parcel}
           end)
 
+        "tiny" ->
+          step(:slip_in, fn parcel ->
+            {:goto, Audit4ExecBugOrders.step_named("audit4_parcel", "__queue_at_counter"), parcel}
+          end)
+
         _ ->
           step(:frank, fn parcel ->
             {:goto, :hand_over, Map.update(parcel, "franked", 1, &(&1 + 1))}
@@ -338,14 +364,8 @@ defmodule Durable.Audit4ExecBugsTest do
   defp order(input, opts), do: run_workflow(Audit4ExecBugOrders, input, opts)
   defp reload(run), do: Repo.get!(WorkflowExecution, run.id)
 
-  # A clause's step is named after its branch, which has no name of its own.
-  defp clause_step(workflow, suffix) do
-    {:ok, definition} = Audit4ExecBugOrders.__workflow_definition__(workflow)
-
-    Enum.find_value(definition.steps, fn %{name: name} ->
-      if String.ends_with?(Atom.to_string(name), suffix), do: Atom.to_string(name)
-    end)
-  end
+  defp clause_step(workflow, suffix),
+    do: Atom.to_string(Audit4ExecBugOrders.step_named(workflow, suffix))
 
   defp children(run),
     do: Repo.all(from(w in WorkflowExecution, where: w.parent_workflow_id == ^run.id))
@@ -605,25 +625,58 @@ defmodule Durable.Audit4ExecBugsTest do
   end
 
   describe "a jump from outside a block to a step inside it" do
-    # executor.ex:2330 (find_jump_target/4) checks that the target exists and is
-    # ahead, not where it is. The steps of every arm sit side by side in the
-    # definition, so a run that lands in one arm runs on through the arms after it.
-    @tag :skip
-    test "doesn't run the steps of another arm" do
+    # A jump was checked for a target that exists and is ahead, not for where
+    # it is. The steps of every arm sit side by side in the definition, so a run
+    # that landed in one arm ran on through the arms after it.
+    test "is refused, and doesn't run the steps of another arm" do
       run = order(%{"to" => "risk__review__ask_assessor"}, "audit4_claim")
 
-      refute run.status == :completed and run.context["refused"],
-             "ran the :blocked arm after the :review arm: #{inspect(run.context)}"
+      assert %{status: :failed, error: %{"type" => "decision_error"} = error} = run
+      assert error["message"] =~ "a step inside :risk"
+      refute run.context["asked"] || run.context["refused"]
     end
 
-    # The same jump into a lane runs every lane's steps in the block's own run,
-    # one after another, and the block never happens: no lanes, no `notify` key.
-    @tag :skip
-    test "doesn't run a lane's steps in the block's run" do
+    # The same jump into a lane ran every lane's steps in the block's own run,
+    # one after another, and the block never happened: no lanes, no `notify` key.
+    test "is refused, and doesn't run a lane's steps in the block's run" do
       run = order(%{"to" => "notify__customer__email"}, "audit4_claim")
 
-      refute run.status == :completed and children(run) == [],
-             "the block's lanes ran as plain steps: #{inspect(run.context)}"
+      assert %{status: :failed, error: %{"type" => "decision_error"} = error} = run
+      assert error["message"] =~ "a step inside :notify"
+      refute run.context["emailed"] || run.context["lettered"]
+    end
+
+    test "is refused from one clause of a `branch on:` to another" do
+      run = order(%{"size" => "tiny"}, "audit4_parcel")
+
+      assert %{status: :failed, error: %{"type" => "decision_error"}} = run
+      refute run.context["queued"]
+    end
+
+    test "is refused from a block's into: to a step of its own lane, and a retry doesn't make it" do
+      run = order(%{}, "audit4_notice")
+      assert %{status: :failed, error: %{"type" => "parallel_goto_error"} = error} = run
+      assert error["message"] =~ "a step inside :send"
+      assert Audit4ExecBugSeen.get(:posted) == 1
+
+      {:ok, _} = Durable.retry(run.id)
+      assert drain(run).status == :failed
+      assert Audit4ExecBugSeen.get(:posted) == 2
+      assert length(children(run)) == 2
+    end
+
+    test "still reaches the block itself, and a step after it" do
+      assert %{status: :completed, context: %{"paid" => true}} =
+               order(%{"to" => "risk"}, "audit4_claim")
+
+      assert %{status: :completed, context: %{"notify" => %{}} = context} =
+               order(%{"to" => "notify"}, "audit4_claim")
+
+      refute context["paid"]
+
+      run = order(%{"to" => "close"}, "audit4_claim")
+      assert run.status == :completed
+      assert children(run) == []
     end
   end
 

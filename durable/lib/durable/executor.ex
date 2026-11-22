@@ -1584,7 +1584,7 @@ defmodule Durable.Executor do
          workflow_def,
          config
        ) do
-    case find_jump_target(target_step, remaining_steps, step.name, step_index) do
+    case find_jump_target(target_step, remaining_steps, step.name, {step_index, workflow_def}) do
       {:ok, target_steps} ->
         # Saved with the jump it made, so a run that comes back to this step
         # goes on from its target, not through the step again.
@@ -2244,11 +2244,19 @@ defmodule Durable.Executor do
         )
 
       {:goto, target_step, goto_ctx} ->
-        {:ok, exec} =
-          save_data_as_context(config, exec, goto_ctx, :drop, {parallel_step_name, target_step})
+        index = {step_index, workflow_def}
 
-        case find_jump_target(target_step, remaining_steps, parallel_step_name, step_index) do
+        case find_jump_target(target_step, remaining_steps, parallel_step_name, index) do
           {:ok, target_steps} ->
+            {:ok, exec} =
+              save_data_as_context(
+                config,
+                exec,
+                goto_ctx,
+                :drop,
+                {parallel_step_name, target_step}
+              )
+
             execute_steps_recursive(
               target_steps,
               exec,
@@ -2258,7 +2266,11 @@ defmodule Durable.Executor do
               goto_ctx
             )
 
+          # Saved without the jump: a retry runs `into:` again, and doesn't
+          # make a jump that was refused.
           {:error, reason} ->
+            {:ok, exec} = save_data_as_context(config, exec, goto_ctx)
+
             handle_step_failure(
               exec,
               %{type: "parallel_goto_error", message: reason},
@@ -2362,13 +2374,37 @@ defmodule Durable.Executor do
     end)
   end
 
-  defp find_jump_target(target_step, remaining_steps, current_step, step_index) do
+  defp find_jump_target(target_step, remaining_steps, current_step, {step_index, workflow_def}) do
     with :ok <- validate_target_exists(target_step, step_index),
          :ok <- validate_not_self(target_step, current_step),
-         :ok <- validate_forward_jump(target_step, current_step, step_index) do
+         :ok <- validate_forward_jump(target_step, current_step, step_index),
+         :ok <- validate_same_arm(target_step, current_step, workflow_def.steps) do
       find_target_in_remaining(target_step, remaining_steps)
     end
   end
+
+  # The steps of every arm of a branch, and of every lane of a block, sit side
+  # by side in the definition. A run that landed in one from outside it would
+  # run on through the arms after it, or run a lane's steps in the block's own
+  # run. A step can jump on within its own arm, or out of it.
+  defp validate_same_arm(target_step, current_step, steps) do
+    entered =
+      Enum.find(steps, fn block ->
+        Enum.any?(arms(block), &(target_step in &1 and current_step not in &1))
+      end)
+
+    if entered do
+      {:error,
+       "Cannot jump from :#{current_step} to :#{target_step}, a step inside :#{entered.name}. " <>
+         "Jump to :#{entered.name}, or to a step outside it."}
+    else
+      :ok
+    end
+  end
+
+  defp arms(%{type: :branch, opts: %{clauses: clauses}}), do: Enum.map(clauses, &elem(&1, 1))
+  defp arms(%{type: :parallel, opts: %{lanes: lanes}}), do: Enum.map(lanes, &elem(&1, 2))
+  defp arms(_step), do: []
 
   defp validate_target_exists(target_step, step_index) do
     if Map.has_key?(step_index, target_step) do
