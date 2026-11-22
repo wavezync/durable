@@ -106,6 +106,43 @@ defmodule Audit4Dash.ScopedRouter do
   end
 end
 
+defmodule Audit4Dash.BillingRepo do
+  @moduledoc false
+  # A second database, for a second Durable instance: two instances on one
+  # repo would read the same tables. Created here; migrated by the tests that
+  # start it.
+  use Ecto.Repo, otp_app: :durable_dashboard, adapter: Ecto.Adapters.Postgres
+
+  def config! do
+    config =
+      :durable_dashboard
+      |> Application.fetch_env!(DurableDashboard.TestRepo)
+      |> Keyword.update!(:database, &(&1 <> "_billing"))
+      |> Keyword.put(:pool_size, 3)
+
+    Application.put_env(:durable_dashboard, __MODULE__, config)
+    _ = Ecto.Adapters.Postgres.storage_up(config)
+  end
+end
+
+defmodule Audit4Dash.TwoRouter do
+  @moduledoc false
+  use Phoenix.Router
+  import Phoenix.LiveView.Router
+  import DurableDashboard.Router
+
+  # One dashboard per Durable instance, inside a scope.
+  scope "/admin" do
+    dashboard_routes("/durable", resolver: DurableDashboard.TestResolver)
+
+    dashboard_routes("/durable-billing",
+      durable: Audit4Dash.Billing,
+      as: :billing_dashboard,
+      resolver: DurableDashboard.TestResolver
+    )
+  end
+end
+
 defmodule Audit4Dash.Endpoint do
   @moduledoc false
   use Phoenix.Endpoint, otp_app: :durable_dashboard
@@ -134,3 +171,4 @@ defmodule Audit4Dash.Endpoint do
 end
 
 Audit4Dash.Endpoint.config!()
+Audit4Dash.BillingRepo.config!()

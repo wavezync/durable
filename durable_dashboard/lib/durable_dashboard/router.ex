@@ -35,7 +35,7 @@ defmodule DurableDashboard.Router do
   follow.
 
   This emits two pipelines (`:durable_dashboard_browser` and
-  `:durable_dashboard_assets`) and two scopes:
+  `:durable_dashboard_assets`, once per router) and two scopes:
 
   - `GET /dashboard` (Overview)
   - `GET /dashboard/workflows` (list of workflow definitions)
@@ -58,6 +58,21 @@ defmodule DurableDashboard.Router do
     LiveView, e.g. authentication (default: `[]`)
   - `:resolver` — a `DurableDashboard.Access` module deciding who may
     retry, cancel, pause and so on. Without one the dashboard is read-only.
+  - `:as` — the name of this mount's `live_session` (default:
+    `:durable_dashboard`). Only needed to mount the dashboard more than once.
+
+  ## One dashboard per Durable instance
+
+  An app that runs several Durable instances mounts the dashboard once for
+  each, at its own path, and names every mount after the first with `:as`:
+
+      scope "/admin" do
+        dashboard_routes "/durable"
+        dashboard_routes "/durable-billing", durable: MyApp.Billing, as: :billing_dashboard
+      end
+
+  Each mount shows its own instance and links only to its own pages. A second
+  mount without a distinct `:as` doesn't compile.
   """
 
   @doc """
@@ -88,18 +103,22 @@ defmodule DurableDashboard.Router do
     live_socket_path = Keyword.get(opts, :live_socket_path, "/live")
     on_mount = Keyword.get(opts, :on_mount, [])
     resolver = Keyword.get(opts, :resolver)
+    as = Keyword.get(opts, :as, :durable_dashboard)
 
     quote do
-      pipeline :durable_dashboard_browser do
-        plug :accepts, ["html"]
-        plug :fetch_session
-        plug :fetch_live_flash
-        plug :protect_from_forgery
-        plug :put_secure_browser_headers
-      end
+      # The pipelines are the same for every mount, so the first one defines them.
+      if DurableDashboard.Router.__mount__(__MODULE__, unquote(as), unquote(prefix)) == :first do
+        pipeline :durable_dashboard_browser do
+          plug :accepts, ["html"]
+          plug :fetch_session
+          plug :fetch_live_flash
+          plug :protect_from_forgery
+          plug :put_secure_browser_headers
+        end
 
-      pipeline :durable_dashboard_assets do
-        plug :accepts, ["html", "json", "css", "js", "woff2", "woff", "ttf", "map"]
+        pipeline :durable_dashboard_assets do
+          plug :accepts, ["html", "json", "css", "js", "woff2", "woff", "ttf", "map"]
+        end
       end
 
       # Where the pages really are: under any `scope` this is called in.
@@ -113,7 +132,7 @@ defmodule DurableDashboard.Router do
       scope path: unquote(prefix), alias: false, as: false do
         pipe_through :durable_dashboard_browser
 
-        live_session :durable_dashboard,
+        live_session unquote(as),
           root_layout: {DurableDashboard.Layouts, :root},
           on_mount: [
             {DurableDashboard.Access, :default},
@@ -146,5 +165,28 @@ defmodule DurableDashboard.Router do
         end
       end
     end
+  end
+
+  @doc false
+  # Records a mount in the router being compiled; `:first` for its first one.
+  def __mount__(router, as, prefix) do
+    unless is_atom(as) and not is_nil(as) do
+      raise ArgumentError, "dashboard_routes: :as must be an atom, got: #{inspect(as)}"
+    end
+
+    mounts = Module.get_attribute(router, :durable_dashboard_mounts, [])
+
+    if as in mounts do
+      raise ArgumentError, """
+      the Durable dashboard is already mounted in #{inspect(router)} as #{inspect(as)}.
+
+      To mount it again, for another Durable instance, give that mount its own name with :as
+
+          dashboard_routes #{inspect(prefix)}, durable: MyApp.OtherDurable, as: :other_dashboard
+      """
+    end
+
+    Module.put_attribute(router, :durable_dashboard_mounts, [as | mounts])
+    if mounts == [], do: :first, else: :again
   end
 end

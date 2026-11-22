@@ -79,6 +79,25 @@ inline in your router. Inside a `scope` it mounts under the scope's path.
   auth or other concerns (default: `[]`)
 - `:resolver` — a `DurableDashboard.Access` module that decides who can change
   things. Without one the dashboard is read-only
+- `:as` — the name of this mount's `live_session` (default:
+  `:durable_dashboard`). Only needed to mount the dashboard more than once
+
+### One dashboard per Durable instance
+
+If your app runs several Durable instances, mount the dashboard once for each,
+at its own path, and name every mount after the first with `:as`:
+
+```elixir
+import DurableDashboard.Router
+
+scope "/admin" do
+  dashboard_routes "/durable"
+  dashboard_routes "/durable-billing", durable: MyApp.Billing, as: :billing_dashboard
+end
+```
+
+Each mount shows its own instance and links only to its own pages. A second
+mount without its own `:as` doesn't compile, and the error says so.
 
 ### URL surface
 

@@ -14,6 +14,19 @@ defmodule DurableDashboard.Live.Audit4RegressionsTest do
 
   setup_all do
     start_supervised!(Audit4Dash.Endpoint)
+
+    # The second instance's database, for the two-dashboards tests.
+    start_supervised!(Audit4Dash.BillingRepo)
+
+    Ecto.Migrator.run(
+      Audit4Dash.BillingRepo,
+      [{Durable.Migration.Migrator.current_version(), DurableDashboard.TestRepo.Migration}],
+      :up,
+      all: true,
+      log: false
+    )
+
+    Ecto.Adapters.SQL.Sandbox.mode(Audit4Dash.BillingRepo, :manual)
     :ok
   end
 
@@ -608,6 +621,225 @@ defmodule DurableDashboard.Live.Audit4RegressionsTest do
         assert crash(fn -> render_submit(view, "answer", params) end) == nil
         assert input_of(run).status == :pending, inspect({type, params})
       end
+    end
+  end
+
+  describe "two dashboards in one router, one per Durable instance" do
+    # `dashboard_routes/2` always named its live_session `:durable_dashboard`
+    # and defined its pipelines on every call, so a host with two Durable
+    # instances couldn't mount a dashboard for each: the router didn't compile.
+    # `:as` names a mount's live_session, and the pipelines are defined once.
+    setup %{conn: conn} do
+      owner = Ecto.Adapters.SQL.Sandbox.start_owner!(Audit4Dash.BillingRepo, shared: true)
+      on_exit(fn -> Ecto.Adapters.SQL.Sandbox.stop_owner(owner) end)
+
+      start_supervised!(
+        Supervisor.child_spec(
+          {Durable,
+           name: Audit4Dash.Billing,
+           repo: Audit4Dash.BillingRepo,
+           queues: %{invoicing: [concurrency: 2]},
+           queue_enabled: false,
+           pubsub: DurableDashboard.TestPubSub},
+          id: Audit4Dash.Billing
+        )
+      )
+
+      {:ok, billed} =
+        Durable.Executor.start_workflow(Fixtures.Approvals, %{},
+          inline: true,
+          durable: Audit4Dash.Billing
+        )
+
+      {:ok,
+       conn: Plug.Conn.put_private(conn, :audit4_router, Audit4Dash.TwoRouter),
+       paid: Fixtures.run!(Fixtures.Payments),
+       billed: billed}
+    end
+
+    @main "/admin/durable"
+    @billing "/admin/durable-billing"
+
+    defp hrefs(html, selector, attribute) do
+      html
+      |> LazyHTML.from_document()
+      |> LazyHTML.query(selector)
+      |> LazyHTML.attribute(attribute)
+    end
+
+    defp under?(link, base),
+      do: link == base or String.starts_with?(link, [base <> "/", base <> "?"])
+
+    test "each mount shows its own instance's runs", %{conn: conn, paid: paid, billed: billed} do
+      {:ok, _view, html} = live(conn, @main <> "/executions")
+      assert html =~ "process_payment"
+      refute html =~ "expense_approval"
+
+      {:ok, _view, html} = live(conn, @billing <> "/executions")
+      assert html =~ "expense_approval"
+      refute html =~ "process_payment"
+
+      {:ok, _view, html} = live(conn, "#{@billing}/executions/#{billed}")
+      assert html =~ "expense_approval"
+      {:ok, _view, html} = live(conn, "#{@billing}/executions/#{paid}")
+      assert html =~ "Run not found"
+      {:ok, _view, html} = live(conn, "#{@main}/executions/#{billed}")
+      assert html =~ "Run not found"
+
+      # Each instance's own queues, and its own Inbox count.
+      {:ok, _view, html} = live(conn, @billing <> "/queues")
+      assert html =~ "invoicing"
+      {:ok, _view, html} = live(conn, @main <> "/queues")
+      refute html =~ "invoicing"
+
+      {:ok, view, _html} = live(conn, @billing <> "/inputs")
+      assert has_element?(view, ~s([aria-label="1 waiting"]))
+      {:ok, view, _html} = live(conn, @main <> "/inputs")
+      refute has_element?(view, ~s([aria-label="1 waiting"]))
+    end
+
+    test "no link, asset or redirect on one mount points into the other",
+         %{conn: conn, paid: paid, billed: billed} do
+      for {base, other, run} <- [{@billing, @main, billed}, {@main, @billing, paid}],
+          page <-
+            ~w(/ /executions /executions/#{run} /executions/#{run}/graph /executions/#{run}/logs
+               /executions/#{run}/context /workflows /inputs /inputs?tab=events /keys /queues
+               /schedules /telemetry /settings) do
+        path = String.trim_trailing(base <> page, "/")
+        {:ok, view, html} = live(conn, path)
+
+        links =
+          Enum.filter(
+            hrefs(html, "a[href]", "href") ++ hrefs(render(view), "a[href]", "href"),
+            &String.starts_with?(&1, "/")
+          )
+
+        assert links != []
+        assert Enum.all?(links, &under?(&1, base)), "#{path}: #{inspect(links)}"
+        refute Enum.any?(links, &under?(&1, other)), "#{path}: #{inspect(links)}"
+
+        # The stylesheet and script come from this mount's own asset route.
+        document = conn |> get(path) |> html_response(200)
+
+        assets =
+          Enum.filter(
+            hrefs(document, "link[rel=stylesheet]", "href") ++
+              hrefs(document, "script[src]", "src"),
+            &String.starts_with?(&1, "/")
+          )
+
+        assert length(assets) == 2
+
+        assert Enum.all?(assets, &String.starts_with?(&1, base <> "/__assets__/")),
+               inspect(assets)
+
+        for asset <- assets, do: assert(get(conn, asset).status == 200)
+      end
+    end
+
+    test "navigation, the palette and actions stay on their mount", %{conn: conn, billed: billed} do
+      # A sidebar link is a live navigation inside the mount's own live_session.
+      {:ok, view, _html} = live(conn, @billing)
+
+      {:ok, view, html} =
+        view
+        |> element(~s(a[href="#{@billing}/executions"]))
+        |> render_click()
+        |> follow_redirect(conn, @billing <> "/executions")
+
+      assert html =~ "expense_approval"
+
+      view |> with_target("#command-palette") |> render_hook("palette:open", %{})
+      view |> element("#command-palette form") |> render_change(%{value: "Inbox"})
+      view |> with_target("#command-palette") |> render_hook("palette:activate", %{})
+      assert_redirect(view, @billing <> "/inputs")
+
+      # The palette searches this mount's instance.
+      {:ok, view, _html} = live(conn, @billing)
+      view |> with_target("#command-palette") |> render_hook("palette:open", %{})
+      palette = view |> element("#command-palette") |> render()
+      assert palette =~ "expense_approval"
+      refute palette =~ "process_payment"
+
+      # Cancel, then Rerun: both on the billing instance, and the new run
+      # opens under the billing mount.
+      {:ok, view, _html} = live(conn, "#{@billing}/executions/#{billed}")
+      render_click(view, "cancel", %{})
+      assert Audit4Dash.BillingRepo.get!(WorkflowExecution, billed).status == :cancelled
+
+      render_click(view, "rerun", %{})
+      {path, _flash} = assert_redirect(view)
+      assert String.starts_with?(path, @billing <> "/executions/")
+      rerun = path |> String.split("/") |> List.last()
+      assert Audit4Dash.BillingRepo.get(WorkflowExecution, rerun)
+      refute repo().get(WorkflowExecution, rerun)
+    end
+
+    # Compiles a router with these routes and returns its module.
+    defp compile_router(routes) do
+      name = "Audit4Dash.CompiledRouter#{System.unique_integer([:positive])}"
+
+      """
+      defmodule #{name} do
+        use Phoenix.Router
+        import Phoenix.LiveView.Router
+        import DurableDashboard.Router
+
+        #{routes}
+      end
+      """
+      |> Code.compile_string()
+      |> Enum.find_value(fn {module, _bytecode} -> inspect(module) == name and module end)
+    end
+
+    test "a second mount needs its own :as, and says so" do
+      router =
+        compile_router("""
+        dashboard_routes "/durable", durable: Durable
+        dashboard_routes "/durable-billing", durable: Audit4Dash.Billing, as: :billing_dashboard
+        use DurableDashboard.Router, mount: "/third", as: :third_dashboard
+        """)
+
+      paths = Enum.map(router.__routes__(), & &1.path)
+
+      for base <- ~w(/durable /durable-billing /third),
+          do: assert((base <> "/executions") in paths)
+
+      for routes <- [
+            """
+            dashboard_routes "/durable", durable: Durable
+            dashboard_routes "/durable-billing", durable: Audit4Dash.Billing
+            """,
+            """
+            dashboard_routes "/a", as: :ops
+            scope "/admin" do
+              dashboard_routes "/b", as: :ops
+            end
+            """
+          ] do
+        error = assert_raise ArgumentError, fn -> compile_router(routes) end
+        assert error.message =~ "already mounted"
+        assert error.message =~ "as: :other_dashboard"
+      end
+
+      assert_raise ArgumentError, ~r/:as must be an atom/, fn ->
+        compile_router(~s(dashboard_routes "/durable", as: "ops"))
+      end
+    end
+
+    test "a single mount keeps the live_session name it always had; :as renames it" do
+      session = fn router, path ->
+        route = Enum.find(router.__routes__(), &(&1.path == path))
+        route.metadata.phoenix_live_view |> elem(3) |> Map.fetch!(:name)
+      end
+
+      router = compile_router(~s(dashboard_routes "/durable"))
+      assert session.(router, "/durable/executions") == :durable_dashboard
+
+      assert session.(Audit4Dash.TwoRouter, "/admin/durable/executions") == :durable_dashboard
+
+      assert session.(Audit4Dash.TwoRouter, "/admin/durable-billing/executions") ==
+               :billing_dashboard
     end
   end
 end
