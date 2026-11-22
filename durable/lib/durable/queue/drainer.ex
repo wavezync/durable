@@ -88,15 +88,20 @@ defmodule Durable.Queue.Drainer do
   # locked until `stale_lock_timeout`. Clearing the fencing token means a worker
   # still finishing up can't record anything over the next claim.
   defp hand_back_running(config) do
-    {:ok, count} = Adapter.default_adapter().release_node_jobs(config, config.node_id)
+    case Adapter.default_adapter().release_node_jobs(config, config.node_id) do
+      {:ok, count} ->
+        Logger.warning(
+          "[Durable] #{count} run(s) outlasted the #{config.shutdown_grace_period} ms " <>
+            "shutdown grace period and went back on their queues"
+        )
 
-    Logger.warning(
-      "[Durable] #{count} run(s) outlasted the #{config.shutdown_grace_period} ms " <>
-        "shutdown grace period and went back on their queues"
-    )
+        for queue <- Map.keys(config.queues) do
+          DurablePubSub.broadcast_wake(config, to_string(queue))
+        end
 
-    for queue <- Map.keys(config.queues) do
-      DurablePubSub.broadcast_wake(config, to_string(queue))
+      # They stay locked until `stale_lock_timeout`, and the node still stops.
+      {:error, reason} ->
+        Logger.error("[Durable] couldn't hand back this node's runs: #{inspect(reason)}")
     end
   end
 end

@@ -309,13 +309,8 @@ defmodule Durable.Integration.Audit4QueueRecoveryTest do
   end
 
   describe "a repo that isn't running" do
-    # BUG: the poller dies, and its replacement polls at once and dies too, so
-    # four crashes take a moment and the queue manager goes down with every
-    # worker. Poller.poll_and_process/1 (poller.ex:251) lets a raise from
-    # fetch_jobs through ("could not lookup Ecto repo"), where the scheduler
-    # and the sweeps rescue it.
-    @tag :skip
-    test "doesn't take the queue manager down" do
+    # Durable on a repo of its own, which the test can stop.
+    defp start_on_own_repo!(opts \\ []) do
       Application.put_env(
         :durable,
         Audit4QueueRepo,
@@ -325,14 +320,51 @@ defmodule Durable.Integration.Audit4QueueRecoveryTest do
       start_supervised!(Audit4QueueRepo)
 
       Durable.DataCase.start_supervised_durable!(
-        repo: Audit4QueueRepo,
-        queues: queue_opts(%{default: 1})
+        [repo: Audit4QueueRepo, queues: queue_opts(%{default: 1})] ++ opts
       )
+    end
+
+    # A poll raises ("could not lookup Ecto repo"): the poller logs it and
+    # polls again, as the scheduler and the sweeps do.
+    test "doesn't take the queue manager down" do
+      start_on_own_repo!()
 
       manager = Process.monitor(Process.whereis(@manager))
       stop_supervised!(Audit4QueueRepo)
 
       refute_receive {:DOWN, ^manager, :process, _pid, _reason}, 500
+    end
+
+    test "leaves the same poller to pick up work once the repo is back" do
+      start_on_own_repo!()
+      poller = Process.whereis(@poller)
+
+      {:ok, id} = Durable.start(Audit4QueueOnce, %{}, queue: :elsewhere)
+      stop_supervised!(Audit4QueueRepo)
+      # Long enough for several polls to raise.
+      Process.sleep(200)
+      start_supervised!(Audit4QueueRepo)
+
+      {1, _} =
+        IntegrationRepo.update_all(
+          from(w in WorkflowExecution, where: w.id == ^id),
+          set: [queue: "default"]
+        )
+
+      await_status(id, :completed)
+      assert Process.whereis(@poller) == poller
+    end
+
+    test "when the node stops past its grace period doesn't crash the drainer" do
+      start_on_own_repo!(shutdown_grace_period: 100)
+
+      {:ok, _id} = Durable.start(Audit4QueueGate, %{"flag" => "never"})
+      assert_eventually(fn -> Probe.hits(:gate) == 1 end)
+      stop_supervised!(Audit4QueueRepo)
+
+      log = ExUnit.CaptureLog.capture_log(fn -> stop_supervised!(Durable) end)
+      assert log =~ "couldn't hand back this node's runs"
+      refute log =~ "MatchError"
     end
   end
 

@@ -254,8 +254,7 @@ defmodule Durable.Queue.Poller do
     available_slots = state.concurrency - map_size(state.workers)
 
     if available_slots > 0 do
-      adapter = Adapter.default_adapter()
-      jobs = adapter.fetch_jobs(state.config, state.queue_name, available_slots, state.node_id)
+      jobs = safely_fetch_jobs(state, available_slots)
 
       emit_poll_telemetry(state.queue_name, length(jobs), available_slots)
 
@@ -263,6 +262,21 @@ defmodule Durable.Queue.Poller do
     else
       state
     end
+  end
+
+  # A poll that raises (the repo is away) is a poll that found nothing: the
+  # next one tries again. Crashing here restarts the poller into the same
+  # raise, and a few of those take the manager and every worker down.
+  defp safely_fetch_jobs(state, slots) do
+    Adapter.default_adapter().fetch_jobs(state.config, state.queue_name, slots, state.node_id)
+  rescue
+    error ->
+      Logger.error("[Durable] poll of #{state.queue_name} failed: #{Exception.message(error)}")
+      []
+  catch
+    :exit, reason ->
+      Logger.error("[Durable] poll of #{state.queue_name} failed: #{inspect(reason)}")
+      []
   end
 
   defp start_worker(job, state) do
