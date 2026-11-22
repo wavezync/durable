@@ -327,4 +327,26 @@ defmodule DurableDashboard.Live.Audit4RegressionsTest do
       assert crash(fn -> {:ok, _view, _html} = live(conn, dash("/inputs")) end) == nil
     end
   end
+
+  # "decide" is the approval form's event, but it never checked the request
+  # was an approval: sent at a form request it completed it with
+  # `%{"approved" => true}`, skipping the required-field checks `answer/2`
+  # makes, and the run resumed with an answer of the wrong shape.
+  test "an approval pushed at a form request is refused", %{conn: conn} do
+    {:ok, id} =
+      Durable.Executor.start_workflow(Audit4Dash.Bugs, %{},
+        workflow: "audit4_required_form",
+        inline: true
+      )
+
+    {:ok, view, _html} = live(conn, dash("/inputs"))
+
+    html =
+      render_submit(view, "decide", %{"decision" => "approve", "request" => input_of(id).id})
+
+    assert html =~ "Only an approval can be approved or rejected."
+    assert input_of(id).status == :pending
+    assert input_of(id).response == nil
+    assert Fixtures.get_run!(id).status == :waiting
+  end
 end

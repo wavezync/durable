@@ -38,25 +38,6 @@ defmodule DurableDashboard.Live.Audit4KnownBugsTest do
 
   defp crashes(cases), do: for({label, fun} <- cases, reason = crash(fun), do: {label, reason})
 
-  # "decide" is the approval form's event, but `handle_event("decide", …)`
-  # (inputs_live.ex:90) never checks the selected request is an approval: sent
-  # at a form request it completes it with `%{"approved" => true}`, skipping
-  # the required-field checks `answer/2` makes. The run resumes with an
-  # answer of the wrong shape.
-  test "an approval pushed at a form request is refused", %{conn: conn} do
-    {:ok, id} =
-      Durable.Executor.start_workflow(Audit4Dash.Bugs, %{},
-        workflow: "audit4_required_form",
-        inline: true
-      )
-
-    {:ok, view, _html} = live(conn, dash("/inputs"))
-    render_submit(view, "decide", %{"decision" => "approve"})
-
-    assert input_of(id).status == :pending
-    assert input_of(id).response == nil
-  end
-
   # QueuesLive (queues_live.ex:54) and TelemetryLive (telemetry_live.ex:189)
   # define `handle_info/2` for their own timer message only, with no catch-all,
   # so any other message is a FunctionClauseError and the page dies. Every

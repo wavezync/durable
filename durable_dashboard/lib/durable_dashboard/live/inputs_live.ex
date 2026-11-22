@@ -90,8 +90,13 @@ defmodule DurableDashboard.Live.InputsLive do
   @impl true
   def handle_event("decide", params, socket) do
     case requested(socket, params) do
-      {:ok, input} ->
+      {:ok, %{input_type: :approval} = input} ->
         respond(socket, input, approval(params["decision"] == "approve", params, socket))
+
+      # Approve and Reject belong to the approval form. Any other request has
+      # its own form, and `answer/2` checks what it sends.
+      {:ok, _input} ->
+        {:noreply, assign(socket, action_error: "Only an approval can be approved or rejected.")}
 
       :error ->
         request_changed(socket)
