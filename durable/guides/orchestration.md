@@ -118,6 +118,12 @@ Durable.cancel(parent_workflow_id, "User cancelled order")
 
 Children that already completed are not affected.
 
+A parent that runs out of its `timeout:` cancels its children the same way:
+the ones it was waiting on with `call_workflow`, and the ones it started with
+`start_workflow` and never waited for. They end `cancelled`, with the reason
+`parent_cancelled`. A parent that fails for any other reason leaves its
+`start_workflow` children running.
+
 ## Querying Children
 
 List child workflows for a parent:

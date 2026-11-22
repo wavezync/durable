@@ -133,6 +133,19 @@ defmodule Durable.Audit4ExecBugsTest do
       end
     end
 
+    # The receipt is sent on its way and not waited for.
+    workflow "audit4_order_receipt_then_courier", timeout: hours(1) do
+      step :send_receipt, fn order ->
+        {:ok, _id} = start_workflow(Audit4ExecBugCharge, %{"total" => 40})
+        {:ok, order}
+      end
+
+      step :await_courier, fn order ->
+        wait_for_event("courier_arrived")
+        {:ok, order}
+      end
+    end
+
     workflow "audit4_order_with_receipt" do
       step :send_receipt, fn order ->
         {:ok, _id} = start_workflow(Audit4ExecBugCharge, %{"total" => 40})
@@ -521,6 +534,17 @@ defmodule Durable.Audit4ExecBugsTest do
       assert run.status == :completed
       assert run.context["payment"]["paid"]
     end
+  end
+
+  # As cancelling a parent does. The guide says so.
+  test "a run that times out cancels a child it started and didn't wait for" do
+    run = order(%{}, "audit4_order_receipt_then_courier")
+    assert run.status == :waiting
+    assert [%{status: :waiting}] = children(run)
+
+    run = timed_out(run)
+    assert %{status: :failed, error: %{"type" => "timeout"}} = run
+    assert [%{status: :cancelled, error: %{"message" => "parent_cancelled"}}] = children(run)
   end
 
   test "a retry that is refused leaves the cancelled child as it was" do
