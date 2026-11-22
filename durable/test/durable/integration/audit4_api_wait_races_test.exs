@@ -10,7 +10,7 @@ defmodule Durable.Integration.Audit4ApiWaitRacesTest do
   @moduletag :capture_log
   @moduletag timeout: 60_000
 
-  alias Durable.Storage.Schemas.{PendingEvent, PendingInput}
+  alias Durable.Storage.Schemas.{PendingEvent, PendingInput, WaitGroup}
   alias Durable.Wait
   alias Durable.Wait.TimeoutWorker
 
@@ -34,6 +34,18 @@ defmodule Durable.Integration.Audit4ApiWaitRacesTest do
       step(:wait, fn data ->
         got = wait_for_input("answer", timeout: 3_600_000, timeout_value: "timed out")
         {:ok, Map.put(data, "got", got)}
+      end)
+    end
+  end
+
+  defmodule Audit4ApiWaitsAny do
+    use Durable
+    use Durable.Wait
+
+    workflow "audit4_api_race_any" do
+      step(:wait, fn data ->
+        got = wait_for_any(["go", "stop"], timeout: 3_600_000, timeout_value: "timed out")
+        {:ok, Map.put(data, "got", inspect(got))}
       end)
     end
   end
@@ -186,11 +198,8 @@ defmodule Durable.Integration.Audit4ApiWaitRacesTest do
       assert event.status == :timeout
     end
 
-    # atomic_resume_after_timeout/4 writes :timeout onto the row it read before
-    # the lock (timeout_worker.ex:344) and only then sees the run has moved on
-    # (timeout_worker.ex:362): an input that was answered in time is recorded as
-    # timed out.
-    @tag :skip
+    # The sweep read the wait as pending before it got the lock; by then it had
+    # been answered, and the sweep leaves it as it finds it.
     test "an input answered just before the sweep stays answered" do
       id = waiting(Audit4ApiAsks)
       make_due(PendingInput, id)
@@ -210,6 +219,54 @@ defmodule Durable.Integration.Audit4ApiWaitRacesTest do
       :sys.get_state(TimeoutWorker.worker_name(Durable))
       [input] = IntegrationRepo.all(from(p in PendingInput, where: p.workflow_id == ^id))
       assert input.status == :completed
+    end
+
+    test "an event sent just before the sweep stays received" do
+      id = waiting(Audit4ApiWaitsEvent)
+      make_due(PendingEvent, id)
+      holder = hold_lock(id)
+
+      sender = Task.async(fn -> Durable.send_event(id, "go", %{"real" => true}) end)
+      await_blocked(1)
+      sweep_async()
+      await_blocked(2)
+      send(holder, :release)
+
+      assert Task.await(sender, 10_000) == :ok
+      assert await_status(id, :completed).context["got"] == %{"real" => true}
+
+      :sys.get_state(TimeoutWorker.worker_name(Durable))
+      [event] = IntegrationRepo.all(from(p in PendingEvent, where: p.workflow_id == ^id))
+      assert event.status == :received
+    end
+
+    test "a wait_for_any answered just before the sweep stays answered" do
+      id = waiting(Audit4ApiWaitsAny)
+
+      past = DateTime.add(DateTime.utc_now(), -1, :second)
+
+      {1, _} =
+        IntegrationRepo.update_all(from(g in WaitGroup, where: g.workflow_id == ^id),
+          set: [timeout_at: past]
+        )
+
+      holder = hold_lock(id)
+
+      sender = Task.async(fn -> Durable.send_event(id, "go", %{"real" => true}) end)
+      await_blocked(1)
+      sweep_async()
+      await_blocked(2)
+      send(holder, :release)
+
+      assert Task.await(sender, 10_000) == :ok
+      assert await_status(id, :completed).context["got"] == ~s({"go", %{"real" => true}})
+
+      :sys.get_state(TimeoutWorker.worker_name(Durable))
+      [group] = IntegrationRepo.all(from(g in WaitGroup, where: g.workflow_id == ^id))
+      events = IntegrationRepo.all(from(p in PendingEvent, where: p.workflow_id == ^id))
+
+      assert group.status == :completed
+      assert events |> Enum.map(& &1.status) |> Enum.sort() == [:cancelled, :received]
     end
 
     test "whichever wins, the run finishes once with one of the two values" do
