@@ -158,6 +158,17 @@ defmodule Durable.Audit4QueueEdgesTest do
       {:error, _declined} = Executor.execute_workflow(id, Config.get(Durable))
       assert Durable.rollback_plan(id) == [save: :unsave]
 
+      # A step that completed twice, as one that isn't read back from its row
+      # still can (a step that jumps), is one step to undo.
+      TestRepo.insert!(%Durable.Storage.Schemas.StepExecution{
+        workflow_id: id,
+        step_name: "save",
+        status: :completed,
+        completed_at: DateTime.add(DateTime.utc_now(), -1, :second)
+      })
+
+      assert Durable.rollback_plan(id) == [save: :unsave]
+
       before = undo_row!(id, DateTime.add(DateTime.utc_now(), -3_600, :second))
       assert Durable.rollback_plan(id) == [save: :unsave]
 
