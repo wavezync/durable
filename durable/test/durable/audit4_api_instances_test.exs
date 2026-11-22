@@ -275,26 +275,50 @@ defmodule Durable.Audit4ApiInstancesTest do
       assert message =~ "unknown options [:retries]"
     end
 
-    # `queues:` is only checked to be a map with atom keys (config.ex:106). A
-    # queue that can never claim (concurrency 0 or below) boots and sits there,
-    # and options that aren't a keyword list crash Queue.Manager at boot with a
-    # FunctionClauseError instead of a validation error.
-    for queue <- [
-          "[concurrency: 0]",
-          "[concurrency: -3]",
-          ~s([concurrency: "10"]),
-          "[poll_interval: 0]",
-          "[poll_interval: -1]",
-          ":nope",
-          "[concurency: 5]"
+    # A queue that could never claim, or whose options the queue manager can't
+    # read, is refused when the instance starts, by queue and by option.
+    for {queue, names} <- [
+          {"[concurrency: 0]", ":concurrency"},
+          {"[concurrency: -3]", ":concurrency"},
+          {~s([concurrency: "10"]), ":concurrency"},
+          {"[poll_interval: 0]", ":poll_interval"},
+          {"[poll_interval: -1]", ":poll_interval"},
+          {"[poll_interval: 1.5]", ":poll_interval"},
+          {":nope", "takes a keyword list"},
+          {"[1, 2]", "takes a keyword list"},
+          {"[concurency: 5]", "unknown options [:concurency]"}
         ] do
-      @tag :skip
       test "queues: %{default: #{queue}} is refused" do
         {options, _binding} = Code.eval_string(unquote(queue))
 
-        assert {:error, %NimbleOptions.ValidationError{}} =
-                 Config.new(repo: Durable.TestRepo, queues: %{default: options})
+        assert {:error, %NimbleOptions.ValidationError{key: :queues, message: message}} =
+                 Config.new(repo: Durable.TestRepo, queues: %{default: [], slow: options})
+
+        assert message =~ "queue :slow"
+        assert message =~ unquote(names)
       end
+    end
+
+    test "a queue with no options, one option or both is taken as written" do
+      queues = %{
+        a: [],
+        b: [concurrency: 1],
+        c: [poll_interval: 50],
+        d: [concurrency: 2, poll_interval: 5]
+      }
+
+      assert {:ok, %Config{queues: ^queues}} = Config.new(repo: Durable.TestRepo, queues: queues)
+      assert {:ok, %Config{queues: %{}}} = Config.new(repo: Durable.TestRepo, queues: %{})
+    end
+
+    test "an instance with a queue that can't work doesn't start" do
+      assert {:error, {%NimbleOptions.ValidationError{} = error, _stack}} =
+               start_supervised(
+                 {Durable,
+                  repo: Durable.TestRepo, name: @other, queues: %{mail: [concurrency: 0]}}
+               )
+
+      assert Exception.message(error) =~ "queue :mail"
     end
   end
 end

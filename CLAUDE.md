@@ -120,7 +120,7 @@ children = [
 - `:repo` - Your Ecto repo module (required)
 - `:name` - Instance name for multi-tenancy (default: `Durable`)
 - `:prefix` - PostgreSQL schema name; only `"durable"` is supported for now
-- `:queues` - Queue configs (default: `%{default: [concurrency: 10, poll_interval: 1000]}`)
+- `:queues` - Queue configs (default: `%{default: [concurrency: 10, poll_interval: 1000]}`). Each queue takes `concurrency` and `poll_interval`, positive integers; anything else is refused at boot
 - `:queue_enabled` - Enable queue processing (default: `true`)
 - `:stale_lock_timeout` - Seconds before lock is stale (default: `300`)
 - `:heartbeat_interval` - Worker heartbeat interval in ms (default: `30_000`)
