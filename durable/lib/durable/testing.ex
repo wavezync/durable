@@ -174,7 +174,7 @@ defmodule Durable.Testing do
   @spec steps(WorkflowExecution.t() | map() | String.t(), keyword()) :: [StepExecution.t()]
   def steps(run, opts \\ []) do
     config = config(opts)
-    root = Repo.get(config, WorkflowExecution, run_id(run))
+    root = fetch_run!(config, run)
 
     ids = branch_ids(config, root, [root.id])
 
@@ -210,7 +210,7 @@ defmodule Durable.Testing do
   @spec assert_status(WorkflowExecution.t() | map() | String.t(), atom(), keyword()) ::
           WorkflowExecution.t()
   def assert_status(run, expected, opts \\ []) do
-    run = Repo.get(config(opts), WorkflowExecution, run_id(run))
+    run = fetch_run!(config(opts), run)
 
     if run.status != expected do
       flunk("""
@@ -416,6 +416,14 @@ defmodule Durable.Testing do
     do: "  #{run.id} key: #{inspect(run.key)} input: #{inspect(run.input)}"
 
   defp config(opts), do: Config.get(Keyword.get(opts, :durable, Durable))
+
+  # An id that names no run fails the assertion, in so many words.
+  defp fetch_run!(config, run) do
+    id = run_id(run)
+
+    (Repo.id?(id) && Repo.get(config, WorkflowExecution, id)) ||
+      flunk("There is no workflow run with id #{inspect(id)}")
+  end
 
   defp run_id(%{id: id}), do: id
   defp run_id(id) when is_binary(id), do: id

@@ -321,4 +321,22 @@ defmodule Durable.Audit4ApiInstancesTest do
       assert Exception.message(error) =~ "queue :mail"
     end
   end
+
+  describe "Durable.Testing on an id that names no run" do
+    for id <- [Ecto.UUID.generate(), "not-an-id"] do
+      test "steps, assert_status and assert_step fail the assertion for #{inspect(id)}" do
+        id = unquote(id)
+
+        for check <- [
+              fn -> Durable.Testing.steps(id) end,
+              fn -> Durable.Testing.assert_status(id, :completed) end,
+              fn -> Durable.Testing.assert_step(id, :work) end,
+              fn -> Durable.Testing.assert_status(%{id: id}, :completed) end
+            ] do
+          error = assert_raise ExUnit.AssertionError, check
+          assert error.message =~ "There is no workflow run with id #{inspect(id)}"
+        end
+      end
+    end
+  end
 end
