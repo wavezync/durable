@@ -4,8 +4,8 @@ defmodule Durable.Fuzz.Audit4ApiWaitsTest do
   are cheap.
 
   A run with one of every wait, the last of them inside a parallel block's
-  lane, is sent random answers, kept events, cancels and drains in any order; a
-  model says what each call returns and where the run is afterwards.
+  lane, is sent random answers, kept events, timeouts, cancels and drains in any
+  order; a model says what each call returns and where the run is afterwards.
 
   And whatever a step's data is, the step sees the same data on the pass after
   a wait, a sleep, a retry or a snooze as it saw the first time, less only what
@@ -15,10 +15,12 @@ defmodule Durable.Fuzz.Audit4ApiWaitsTest do
   use ExUnitProperties
 
   import Durable.Testing
+  import Ecto.Query
 
-  alias Durable.Storage.Schemas.WorkflowExecution
+  alias Durable.Storage.Schemas.{PendingEvent, PendingInput, WaitGroup, WorkflowExecution}
   alias Durable.TestRepo
   alias Durable.Wait
+  alias Durable.Wait.TimeoutWorker
   alias Ecto.Adapters.SQL.Sandbox
 
   @moduletag :fuzz
@@ -34,9 +36,15 @@ defmodule Durable.Fuzz.Audit4ApiWaitsTest do
     owner = Sandbox.start_owner!(TestRepo, shared: true)
     start_supervised!({Durable, repo: TestRepo, queue_enabled: false}, id: :audit4_api_durable)
 
+    start_supervised!(
+      {TimeoutWorker, config: Durable.Config.get(Durable), interval: 3_600_000},
+      id: :audit4_api_sweep
+    )
+
     try do
       fun.()
     after
+      stop_supervised!(:audit4_api_sweep)
       stop_supervised!(:audit4_api_durable)
       Sandbox.stop_owner(owner)
     end
@@ -52,9 +60,19 @@ defmodule Durable.Fuzz.Audit4ApiWaitsTest do
 
     alias Durable.Fuzz.Audit4ApiWaitsTest, as: T
 
+    # Each wait says what it returns if it times out, in a shape JSON would
+    # change: an atom, a tuple, a map that looks like the engine's own wrapper,
+    # and for the last nothing, which is `{:timeout, received}`.
     workflow "audit4_api_every_wait" do
-      step(:ask, fn data -> {:ok, Map.put(data, "ask", T.describe(wait_for_input("i1")))} end)
-      step(:event, fn data -> {:ok, Map.put(data, "event", T.describe(wait_for_event("e1")))} end)
+      step(:ask, fn data ->
+        got = wait_for_input("i1", timeout: 3_600_000, timeout_value: :late)
+        {:ok, Map.put(data, "ask", T.describe(got))}
+      end)
+
+      step(:event, fn data ->
+        got = wait_for_event("e1", timeout: 3_600_000, timeout_value: {:late, "e1"})
+        {:ok, Map.put(data, "event", T.describe(got))}
+      end)
 
       step(:nap, fn data ->
         sleep(60_000)
@@ -62,11 +80,13 @@ defmodule Durable.Fuzz.Audit4ApiWaitsTest do
       end)
 
       step(:any, fn data ->
-        {:ok, Map.put(data, "any", T.describe(wait_for_any(["g_a", "g_b"])))}
+        got = wait_for_any(["g_a", "g_b"], timeout: 3_600_000, timeout_value: T.late_map())
+        {:ok, Map.put(data, "any", T.describe(got))}
       end)
 
       step(:all, fn data ->
-        {:ok, Map.put(data, "all", T.describe(wait_for_all(["g_c", "g_d"])))}
+        got = wait_for_all(["g_c", "g_d"], timeout: 3_600_000)
+        {:ok, Map.put(data, "all", T.describe(got))}
       end)
 
       parallel :lanes do
@@ -84,6 +104,8 @@ defmodule Durable.Fuzz.Audit4ApiWaitsTest do
 
   def describe(other), do: inspect(other)
 
+  def late_map, do: %{"__atom__" => "audit4_api_late"}
+
   defp op do
     frequency([
       {6, constant(:drain)},
@@ -94,6 +116,7 @@ defmodule Durable.Fuzz.Audit4ApiWaitsTest do
       {2, constant(:lane_event)},
       {4, tuple({constant(:kept_event), member_of(["e1", "g_a", "g_b", "g_c", "g_d"])})},
       {1, constant({:kept_event, "nobody_waits"})},
+      {3, constant(:time_out)},
       {2, constant(:cancel_wait)},
       {1, constant(:cancel)}
     ])
@@ -178,6 +201,22 @@ defmodule Durable.Fuzz.Audit4ApiWaitsTest do
     do: {:ok, model}
 
   defp expect(model, {:event, _name}, _n), do: {{:error, :not_found}, model}
+
+  # A wait that times out returns its call's own timeout_value, as written. An
+  # answered wait, a sleep and a block have nothing to time out.
+  defp expect(%{status: :waiting, at: 0} = model, :time_out, _n),
+    do: {:swept, answered(model, :late)}
+
+  defp expect(%{status: :waiting, at: 1} = model, :time_out, _n),
+    do: {:swept, answered(model, {:late, "e1"})}
+
+  defp expect(%{any: :open} = model, :time_out, _n),
+    do: {:swept, answered(%{model | any: :closed}, late_map())}
+
+  defp expect(%{all: {:open, got}} = model, :time_out, _n),
+    do: {:swept, answered(%{model | all: :closed}, {:timeout, got})}
+
+  defp expect(model, :time_out, _n), do: {:swept, model}
 
   # The lane's wait is the lane's: its own id answers it.
   defp expect(%{lane: :open} = model, :lane_event, n),
@@ -273,6 +312,24 @@ defmodule Durable.Fuzz.Audit4ApiWaitsTest do
 
   defp apply_op(id, {:kept_event, name}, n),
     do: Durable.send_event(id, name, %{"n" => n}, buffer: true)
+
+  # Every wait of the run that has a timeout is past it, and the sweep has run.
+  defp apply_op(id, :time_out, _n) do
+    past = DateTime.add(DateTime.utc_now(), -1, :second)
+
+    for schema <- [PendingInput, PendingEvent, WaitGroup] do
+      TestRepo.update_all(
+        from(p in schema,
+          where: p.workflow_id == ^id and p.status == :pending and not is_nil(p.timeout_at)
+        ),
+        set: [timeout_at: past]
+      )
+    end
+
+    TimeoutWorker.check_timeouts()
+    :sys.get_state(TimeoutWorker.worker_name(Durable))
+    :swept
+  end
 
   defp apply_op(id, :lane_event, n) do
     case Durable.list_children(id) do
