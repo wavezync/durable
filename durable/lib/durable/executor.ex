@@ -1564,8 +1564,8 @@ defmodule Durable.Executor do
   # for the step a run comes back to, never for the ones it goes on to.
   #
   # Keys the step was given as strings stay strings, and the rest are read as
-  # any stored key is (restore_keys/1). What the step put in the context and
-  # didn't return was never stored, and is gone with the worker.
+  # any stored key is (restore_keys/1). The row also has what the step put in
+  # the context without returning it (`StepRunner.put_in_body/0`).
   #
   # ponytail: a step that jumps (a decision, a `{:goto, _, _}`) and a step in
   # an unnamed branch still run again. Read their rows too if that matters.

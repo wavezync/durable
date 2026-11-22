@@ -272,7 +272,7 @@ defmodule Durable.Integration.AuditRegressionsTest do
     assert Probe.hits(:ask) == 1
   end
 
-  test "a step that ran twice after a lost lock is undone once" do
+  test "a step that finished as its lock was lost runs once, and is undone once" do
     config = start_durable!(%{default: 1}) && Durable.Config.get(Durable)
     handler = "lose-lock-#{inspect(make_ref())}"
 
@@ -297,7 +297,7 @@ defmodule Durable.Integration.AuditRegressionsTest do
     {:ok, id} = Durable.start(UndoesOnce, %{})
     await_status(id, :compensated)
 
-    assert Probe.hits(:a) == 2
+    assert Probe.hits(:a) == 1
     assert Probe.hits(:undo_a) == 1
   end
 

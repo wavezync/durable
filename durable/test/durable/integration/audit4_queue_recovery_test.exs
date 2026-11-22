@@ -64,6 +64,26 @@ defmodule Audit4QueueSeesData do
   end
 end
 
+defmodule Audit4QueuePutsContext do
+  @moduledoc false
+  use Durable
+  use Durable.Context
+  alias Durable.IntegrationProbe, as: Probe
+
+  workflow "audit4_queue_puts_context" do
+    step(:first, fn data ->
+      Probe.note(:first)
+      put_context(:receipt, "r-1")
+      {:ok, data}
+    end)
+
+    step(:second, fn data ->
+      Probe.put(:second_got, {data, get_context(:receipt)})
+      {:ok, data}
+    end)
+  end
+end
+
 defmodule Audit4QueueSlowUndo do
   @moduledoc false
   use Durable
@@ -314,6 +334,18 @@ defmodule Durable.Integration.Audit4QueueRecoveryTest do
 
       assert Probe.hits(:first) == 1
       assert %{"order" => 7, total: 21} = Probe.fetch(:second_got)
+    end
+
+    test "gives the next step what the step put in the context without returning it" do
+      kill_at!([:durable, :step, :stop], :first)
+      start_durable!(%{default: 1})
+
+      {:ok, id} = Durable.start(Audit4QueuePutsContext, %{"order" => 7})
+      run = await_status(id, :completed)
+
+      assert Probe.hits(:first) == 1
+      assert {%{"order" => 7}, "r-1"} = Probe.fetch(:second_got)
+      assert run.context["receipt"] == "r-1"
     end
 
     test "runs the step again for a run retried since: the row is from before the retry" do

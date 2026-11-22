@@ -370,6 +370,7 @@ defmodule Durable.Executor.StepRunner do
     # A retry runs after the run was parked, from a context that already holds
     # the failed attempt's put_context/2 writes.
     Process.put(:durable_context, data)
+    Process.put(:durable_context_before, data)
 
     # The attempt's row, written once the span has begun. Its id names the span.
     step_exec = %StepExecution{
@@ -735,8 +736,19 @@ defmodule Durable.Executor.StepRunner do
   defp reason_text(reason), do: inspect(reason)
 
   defp handle_step_success(config, _step, step_exec, new_data, logs, duration_ms) do
-    {:ok, _} = complete_step_execution(config, step_exec, new_data, logs, duration_ms)
+    output = Map.merge(put_in_body(), new_data)
+    {:ok, _} = complete_step_execution(config, step_exec, output, logs, duration_ms)
     {:ok, new_data}
+  end
+
+  # What the body put in the context without returning it is part of its
+  # result: a run whose worker is lost before it saves takes the result from
+  # this row (`Executor.finished_before_lost/5`), and has nothing else.
+  defp put_in_body do
+    before = Process.get(:durable_context_before, %{})
+
+    Process.get(:durable_context, %{})
+    |> Map.reject(fn {key, value} -> match?(%{^key => ^value}, before) end)
   end
 
   defp get_max_attempts(%Step{opts: opts}) do
