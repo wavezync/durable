@@ -50,12 +50,18 @@ defmodule Mix.Tasks.Durable.List do
 
     case build_filters(opts, durable_name) do
       {:ok, filters} ->
-        executions = Query.list_executions(filters)
-        format = Keyword.get(opts, :format, "table")
-        output(executions, format)
+        list(filters, Keyword.get(opts, :format, "table"))
 
       {:error, message} ->
         Mix.shell().error(message)
+    end
+  end
+
+  # What the command line gave can still be wrong for the query (--limit -1).
+  defp list(filters, format) do
+    case Query.list_executions(filters) do
+      {:ok, executions} -> output(executions, format)
+      {:error, {:invalid_option, key}} -> Mix.shell().error("Invalid #{key} filter")
     end
   end
 

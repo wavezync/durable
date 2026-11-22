@@ -13,6 +13,7 @@ defmodule Durable.Wait.TimeoutWorker do
 
   use GenServer
 
+  alias Durable.EngineState
   alias Durable.Executor
   alias Durable.NodeRegistry
   alias Durable.Repo
@@ -223,10 +224,12 @@ defmodule Durable.Wait.TimeoutWorker do
     # :waiting forever (Bug M-2).
     case atomic_resume_after_timeout(
            config,
-           PendingInput.timeout_changeset(pending_input),
-           pending_input.workflow_id,
+           pending_input,
            input_timeout_data(on_timeout, pending_input)
          ) do
+      {:ok, %{pending: {0, _}}} ->
+        :ok
+
       {:ok, _} ->
         Logger.info(
           "Timeout handled for pending input #{pending_input.input_name} " <>
@@ -242,21 +245,20 @@ defmodule Durable.Wait.TimeoutWorker do
   end
 
   defp input_timeout_data(:resume, pending_input) do
-    %{
-      pending_input.input_name => deserialize_timeout_value(pending_input.timeout_value),
-      :__timeout__ => true
-    }
+    {%{pending_input.input_name => stored_timeout_value(pending_input.timeout_value)},
+     %{"__timeout__" => true}}
   end
 
   # The executor fails the run at the waiting step, so compensations run and a
   # parent run hears about it.
   defp input_timeout_data(:fail, pending_input) do
-    %{
-      "__fail__" => %{
-        "type" => "timeout",
-        "message" => "Timeout waiting for input: #{pending_input.input_name}"
-      }
-    }
+    {%{},
+     %{
+       "__fail__" => %{
+         "type" => "timeout",
+         "message" => "Timeout waiting for input: #{pending_input.input_name}"
+       }
+     }}
   end
 
   defp process_timed_out_events(config, now) do
@@ -280,19 +282,19 @@ defmodule Durable.Wait.TimeoutWorker do
   end
 
   defp handle_event_timeout(config, pending_event) do
-    timeout_value = deserialize_timeout_value(pending_event.timeout_value)
+    ended = %{pending_event.event_name => stored_timeout_value(pending_event.timeout_value)}
 
-    resume_data = %{
-      pending_event.event_name => timeout_value,
-      :__timeout__ => true
-    }
+    # A call_workflow's wait is the engine's own, under the engine's own name.
+    resume_data =
+      case pending_event.event_name do
+        "__child_done:" <> _child_id -> {%{}, Map.put(ended, "__timeout__", true)}
+        _event_name -> {ended, %{"__timeout__" => true}}
+      end
 
-    case atomic_resume_after_timeout(
-           config,
-           PendingEvent.timeout_changeset(pending_event),
-           pending_event.workflow_id,
-           resume_data
-         ) do
+    case atomic_resume_after_timeout(config, pending_event, resume_data) do
+      {:ok, %{pending: {0, _}}} ->
+        :ok
+
       {:ok, _} ->
         Logger.info(
           "Timeout handled for pending event #{pending_event.event_name} " <>
@@ -331,44 +333,72 @@ defmodule Durable.Wait.TimeoutWorker do
   defp maybe_cancel_timed_out_child(_config, _event_name), do: :ok
 
   # Atomically: persist the pending row's :timeout transition AND flip the
-  # owning workflow back to :pending with the timeout payload merged into
-  # context. If either step fails the entire transaction rolls back, so the
-  # workflow can never end up "input/event marked timeout but workflow still
-  # stuck in :waiting".
-  defp atomic_resume_after_timeout(config, pending_changeset, workflow_id, resume_data) do
-    safe_resume = Executor.sanitize_for_json(resume_data)
+  # owning workflow back to :pending with what the wait ended with merged into
+  # its context and the engine's markers into its engine state. If either step
+  # fails the entire transaction rolls back, so the workflow can never end up
+  # "input/event marked timeout but workflow still stuck in :waiting".
+  #
+  # The sweep read the wait before it had the run's lock. Whoever held the lock
+  # may have answered or cancelled it, so it is closed only if still pending,
+  # and the run is left alone if it wasn't.
+  #
+  # `resume_data` is `{answer, engine}`: what the wait ends with, under the
+  # wait's name in the user's data, and the engine's own markers.
+  defp atomic_resume_after_timeout(config, %schema{} = wait, {answer, engine}) do
+    safe_resume =
+      {answer |> Executor.sanitize_for_json() |> EngineState.strip(),
+       Executor.sanitize_for_json(engine)}
+
+    now = DateTime.utc_now()
 
     multi =
       Ecto.Multi.new()
-      |> Executor.lock_run(workflow_id)
-      |> Ecto.Multi.update(:pending, pending_changeset)
-      |> Ecto.Multi.run(:workflow, fn repo, _changes ->
-        case repo.get(WorkflowExecution, workflow_id) do
-          nil ->
-            {:error, :workflow_not_found}
-
-          %WorkflowExecution{status: :waiting} = exec ->
-            new_context = Map.merge(exec.context || %{}, safe_resume)
-
-            exec
-            |> Ecto.Changeset.change(
-              context: new_context,
-              status: :pending,
-              locked_by: nil,
-              locked_at: nil
-            )
-            |> repo.update()
-
-          %WorkflowExecution{status: status} ->
-            # The workflow already moved on (e.g. someone provided input
-            # before the timeout sweep ran). Tolerate this — the pending
-            # row is still marked :timeout via the Multi above, which is
-            # the right outcome.
-            {:ok, %{status: status, no_op: true}}
-        end
+      |> Executor.lock_run(wait.workflow_id)
+      |> Ecto.Multi.update_all(
+        :pending,
+        from(p in schema, where: p.id == ^wait.id and p.status == :pending),
+        set: [status: :timeout, completed_at: now]
+      )
+      |> close_group_events(wait, now)
+      |> Ecto.Multi.run(:workflow, fn repo, %{pending: {closed, _}} ->
+        resume_timed_out(repo, wait.workflow_id, safe_resume, closed)
       end)
 
     Repo.transaction(config, multi)
+  end
+
+  defp close_group_events(multi, %WaitGroup{id: id}, now) do
+    Ecto.Multi.update_all(
+      multi,
+      :pending_events,
+      from(p in PendingEvent, where: p.wait_group_id == ^id and p.status == :pending),
+      set: [status: :timeout, completed_at: now]
+    )
+  end
+
+  defp close_group_events(multi, _wait, _now), do: multi
+
+  defp resume_timed_out(_repo, _workflow_id, _resume, 0), do: {:ok, %{no_op: true}}
+
+  defp resume_timed_out(repo, workflow_id, {user, engine}, _closed) do
+    case EngineState.adopt(repo, repo.get(WorkflowExecution, workflow_id)) do
+      nil ->
+        {:error, :workflow_not_found}
+
+      %WorkflowExecution{status: :waiting} = exec ->
+        exec
+        |> Ecto.Changeset.change(
+          context: Map.merge(exec.context || %{}, user),
+          engine_state: Map.merge(exec.engine_state, engine),
+          status: :pending,
+          locked_by: nil,
+          locked_at: nil
+        )
+        |> repo.update()
+
+      %WorkflowExecution{status: status} ->
+        {:ok, %{status: status, no_op: true}}
+    end
   end
 
   defp process_timed_out_wait_groups(config, now) do
@@ -392,7 +422,10 @@ defmodule Durable.Wait.TimeoutWorker do
   defp handle_wait_group_timeout(config, wait_group) do
     resume_data = build_wait_group_resume_data(wait_group)
 
-    case atomic_resume_after_wait_group_timeout(config, wait_group, resume_data) do
+    case atomic_resume_after_timeout(config, wait_group, resume_data) do
+      {:ok, %{pending: {0, _}}} ->
+        :ok
+
       {:ok, _} ->
         log_wait_group_timeout_success(wait_group)
 
@@ -409,7 +442,6 @@ defmodule Durable.Wait.TimeoutWorker do
   # Bug M-4: include per-event status in the resume payload so user code
   # can distinguish events that were :received from events that :timed_out.
   defp build_wait_group_resume_data(wait_group) do
-    timeout_value = deserialize_timeout_value(wait_group.timeout_value)
     received = wait_group.received_events || %{}
 
     per_event_status =
@@ -426,11 +458,12 @@ defmodule Durable.Wait.TimeoutWorker do
         :all -> {:timeout, received}
       end
 
-    %{
-      :__wait_group_result__ => timeout_value || fallback_result,
-      :__wait_group_status__ => per_event_status,
-      :__timeout__ => true
-    }
+    {%{},
+     %{
+       "__wait_group_result__" => fallback_result,
+       "__wait_group_status__" => per_event_status,
+       "__timeout__" => true
+     }}
   end
 
   defp log_wait_group_timeout_success(wait_group) do
@@ -444,54 +477,10 @@ defmodule Durable.Wait.TimeoutWorker do
     )
   end
 
-  defp atomic_resume_after_wait_group_timeout(config, wait_group, resume_data) do
-    safe_resume = Executor.sanitize_for_json(resume_data)
-    now = DateTime.utc_now()
-
-    multi =
-      Ecto.Multi.new()
-      |> Executor.lock_run(wait_group.workflow_id)
-      |> Ecto.Multi.update(:wait_group, WaitGroup.timeout_changeset(wait_group))
-      |> Ecto.Multi.update_all(
-        :pending_events,
-        from(p in PendingEvent,
-          where: p.wait_group_id == ^wait_group.id and p.status == :pending
-        ),
-        set: [status: :timeout, completed_at: now]
-      )
-      |> Ecto.Multi.run(:workflow, fn repo, _changes ->
-        case repo.get(WorkflowExecution, wait_group.workflow_id) do
-          nil ->
-            {:error, :workflow_not_found}
-
-          %WorkflowExecution{status: :waiting} = exec ->
-            new_context = Map.merge(exec.context || %{}, safe_resume)
-
-            exec
-            |> Ecto.Changeset.change(
-              context: new_context,
-              status: :pending,
-              locked_by: nil,
-              locked_at: nil
-            )
-            |> repo.update()
-
-          %WorkflowExecution{status: status} ->
-            {:ok, %{status: status, no_op: true}}
-        end
-      end)
-
-    Repo.transaction(config, multi)
-  end
-
-  defp deserialize_timeout_value(nil), do: nil
-
-  defp deserialize_timeout_value(%{"__atom__" => atom_string}) do
-    String.to_existing_atom(atom_string)
-  rescue
-    ArgumentError -> String.to_atom(atom_string)
-  end
-
-  defp deserialize_timeout_value(%{"__value__" => value}), do: value
-  defp deserialize_timeout_value(value) when is_map(value), do: value
+  # What the context shows the wait ended with. The wait itself returns the
+  # call's own `:timeout_value`, so this copy is never turned back into a term:
+  # an atom stays the text it was stored as.
+  defp stored_timeout_value(%{"__atom__" => name}), do: name
+  defp stored_timeout_value(%{"__value__" => value}), do: value
+  defp stored_timeout_value(value), do: value
 end

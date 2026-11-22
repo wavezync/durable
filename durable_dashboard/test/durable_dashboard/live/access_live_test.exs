@@ -82,7 +82,7 @@ defmodule DurableDashboard.Live.AccessLiveTest do
       render_click(view, "toggle", %{"queue" => "default"})
 
       assert has_element?(view, "[role=alert]", @refused)
-      assert Durable.paused_queues() == []
+      assert Durable.paused_queues!() == []
     end
 
     test "can't turn schedules on or off or run them", %{conn: conn} do
@@ -139,7 +139,7 @@ defmodule DurableDashboard.Live.AccessLiveTest do
 
       {:ok, view, _html} = live(conn, dash("/queues"))
       view |> element(~s(button[phx-click="toggle"][phx-value-queue="default"])) |> render_click()
-      assert Durable.paused_queues() == ["default"]
+      assert Durable.paused_queues!() == ["default"]
 
       {:ok, view, _html} = live(conn, dash("/inputs"))
       view |> form("#answer-#{input.id}") |> render_submit(%{"decision" => "approve"})

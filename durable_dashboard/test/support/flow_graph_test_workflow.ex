@@ -11,7 +11,7 @@ defmodule DurableDashboard.Components.FlowGraphTestWorkflow do
   use Durable.Helpers
 
   workflow "fg_test" do
-    step(:a, fn data -> {:ok, data} end)
-    step(:b, fn data -> {:ok, data} end)
+    step :a, fn data -> {:ok, data} end
+    step :b, fn data -> {:ok, data} end
   end
 end

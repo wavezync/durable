@@ -55,7 +55,7 @@ defmodule DurableDashboard.Live.OverviewLive do
 
   @impl true
   def handle_params(params, uri, socket) do
-    range = Charts.valid_range(params["range"])
+    range = Charts.valid_range(DurableDashboard.Params.text(params["range"]))
 
     {:noreply,
      socket
@@ -68,8 +68,11 @@ defmodule DurableDashboard.Live.OverviewLive do
   end
 
   @impl true
+  def handle_event(event, _params, socket), do: DurableDashboard.Params.ignore(event, socket)
+
+  @impl true
   def handle_info({:durable_event, kind, payload}, socket) when kind in @workflow_kinds do
-    socket = update(socket, :feed, &Enum.take([feed_item(kind, payload) | &1], @feed_size))
+    socket = update(socket, :feed, &Enum.take(feed_item(kind, payload) ++ &1, @feed_size))
 
     if socket.assigns.refresh_pending? do
       {:noreply, socket}
@@ -95,20 +98,20 @@ defmodule DurableDashboard.Live.OverviewLive do
     since = DateTime.add(now, -span, :second)
     window = [durable: durable, since: since, until: now]
 
-    stats = Durable.Stats.overview(window)
+    stats = Durable.Stats.overview!(window)
 
     previous =
-      Durable.Stats.overview(
+      Durable.Stats.overview!(
         durable: durable,
         since: DateTime.add(since, -span, :second),
         until: since
       )
 
-    timeline = Durable.Stats.timeline(window ++ [bucket_seconds: bucket])
+    timeline = Durable.Stats.timeline!(window ++ [bucket_seconds: bucket])
 
     slowest =
       window
-      |> Durable.Stats.step_performance()
+      |> Durable.Stats.step_performance!()
       |> Enum.reject(&(&1.compensation or is_nil(&1.p95_ms)))
       |> Enum.sort_by(& &1.p95_ms, :desc)
       |> Enum.take(5)
@@ -117,23 +120,29 @@ defmodule DurableDashboard.Live.OverviewLive do
       stats: stats,
       previous: previous,
       timeline: timeline,
-      failing: Durable.Stats.failing_workflows(window),
+      failing: Durable.Stats.failing_workflows!(window),
       slowest: slowest,
-      queues: Durable.Stats.queues(durable: durable),
-      nodes: Durable.list_nodes(durable: durable),
-      workflows: length(Durable.Query.list_workflows(durable: durable))
+      queues: Durable.Stats.queues!(durable: durable),
+      nodes: Durable.list_nodes!(durable: durable),
+      workflows: length(Durable.Query.list_workflows!(durable: durable))
     )
   end
 
-  defp feed_item(kind, payload) do
-    %{
-      at: DateTime.utc_now(),
-      id: payload[:id],
-      workflow: payload[:workflow_name],
-      status: feed_status(kind),
-      text: feed_text(kind, payload)
-    }
+  # The feed line for an event that names its run, in a list. An event that
+  # doesn't adds no line; the page still reloads its numbers.
+  defp feed_item(kind, %{id: id} = payload) when is_binary(id) do
+    [
+      %{
+        at: DateTime.utc_now(),
+        id: id,
+        workflow: Format.text(payload[:workflow_name]),
+        status: feed_status(kind),
+        text: feed_text(kind, payload)
+      }
+    ]
   end
+
+  defp feed_item(_kind, _payload), do: []
 
   defp feed_status(:workflow_completed), do: :completed
   defp feed_status(:workflow_failed), do: :failed
@@ -149,7 +158,8 @@ defmodule DurableDashboard.Live.OverviewLive do
   defp feed_text(:workflow_cancelled, _p), do: "cancelled"
   defp feed_text(:workflow_retried, p), do: "retried from #{step(p)}"
 
-  defp step(p), do: Trace.display_name(p[:current_step] || "start")
+  defp step(%{current_step: step}) when is_binary(step), do: Trace.display_name(step)
+  defp step(_payload), do: "start"
 
   # ============================================================================
   # Render

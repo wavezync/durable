@@ -64,7 +64,7 @@ defmodule Durable.Fuzz.ScriptedTest do
     assert_eventually(fn ->
       Enum.all?(runs, fn %{id: id} ->
         run = get(id)
-        run.status in terminal() and not is_map_key(run.context, "__rollback__")
+        run.status in terminal() and not is_map_key(run.engine_state, "__rollback__")
       end)
     end)
   end

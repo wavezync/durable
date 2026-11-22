@@ -117,15 +117,15 @@ workflow "payment_flow" do
   step :await_confirmation, fn ctx ->
     result = wait_for_event("payment_confirmed",
       timeout: minutes(15),
-      timeout_value: :timeout
+      timeout_value: "timeout"
     )
     {:ok, assign(ctx, :payment_result, result)}
   end
 
   step :process_result, fn ctx ->
     case ctx.payment_result do
-      :timeout -> handle_timeout()
-      %{status: "success"} -> handle_success()
+      "timeout" -> handle_timeout()
+      %{"status" => "success"} -> handle_success()
       _ -> handle_failure()
     end
     {:ok, ctx}
@@ -138,7 +138,21 @@ end
 | Option | Description |
 |--------|-------------|
 | `:timeout` | Max wait time (e.g., `minutes(15)`) |
-| `:timeout_value` | Value returned on timeout |
+| `:timeout_value` | Value returned on timeout (default `nil`) |
+
+The wait returns `:timeout_value` exactly as you wrote it: an atom comes back as
+an atom, a tuple as a tuple. That holds in the step that waits. Once you put the
+value in the context it is stored as JSON like everything else there, so a later
+step sees an atom as a string and a tuple as a list. Match on it in the waiting
+step, or use a string as above.
+
+An event's payload and an input's answer are stored too, so they come back with
+string keys whatever you sent: `%{status: "success"}` is read as
+`%{"status" => "success"}`.
+
+A wait can't be named after one of the keys Durable keeps for itself
+(`__fail__`, `__rollback__` and the like): the wait raises `ArgumentError`, and
+an event or an input sent under such a name finds no wait.
 
 ### `wait_for_any/2` - First Event Wins
 
@@ -149,7 +163,7 @@ workflow "order_status" do
   step :await_result, fn ctx ->
     {event, payload} = wait_for_any(["success", "failure", "cancelled"],
       timeout: hours(24),
-      timeout_value: {:timeout, nil}
+      timeout_value: {"timeout", nil}
     )
     {:ok, ctx
     |> assign(:result_event, event)
@@ -161,6 +175,7 @@ workflow "order_status" do
       "success" -> process_success(ctx.result_data)
       "failure" -> process_failure(ctx.result_data)
       "cancelled" -> process_cancellation()
+      "timeout" -> process_timeout()
     end
     {:ok, ctx}
   end
@@ -176,17 +191,17 @@ workflow "multi_approval" do
   step :await_approvals, fn ctx ->
     results = wait_for_all(["manager_approval", "legal_approval", "finance_approval"],
       timeout: days(7),
-      timeout_value: {:timeout, :partial}
+      timeout_value: "timeout"
     )
     {:ok, assign(ctx, :approvals, results)}
   end
 
   step :process_approvals, fn ctx ->
     case ctx.approvals do
-      {:timeout, :partial} ->
+      "timeout" ->
         handle_incomplete_approvals()
       %{} = all_approvals ->
-        if Enum.all?(all_approvals, fn {_k, v} -> v.approved end) do
+        if Enum.all?(all_approvals, fn {_k, v} -> v["approved"] end) do
           proceed_with_request()
         else
           reject_request()
@@ -210,7 +225,26 @@ Durable.Wait.send_event(
 )
 ```
 
-`send_event` returns `:ok` once the waiting run has the event. If nothing is waiting for it, it returns `{:error, :not_found}` and the event isn't kept, unless you pass `buffer: true`. Any payload counts as an answer, `nil` included. An event for a `wait_for_any` that already has its answer returns `:ok` and does nothing.
+`send_event` returns `:ok` once the waiting run has the event. If nothing is waiting for it, it returns `{:error, :not_found}` and the event isn't kept, unless you pass `buffer: true`: then it is handed over when the run reaches a `wait_for_event`, `wait_for_any` or `wait_for_all` for that name. `wait_for_any` takes the first of its names that has a kept event, and `wait_for_all` every one it has. Any payload counts as an answer, `nil` included.
+
+A wait takes one event. A second `send_event` under the same name, or one that arrives after the wait timed out, returns `{:error, :not_found}`, so two senders can't both be told they delivered it. An event under another name of a `wait_for_any` that already has its answer returns `:ok` and does nothing.
+
+### Cancelling a Wait
+
+To end a wait without an answer, cancel it. The wait returns `{:cancelled, reason}` and the run carries on from there:
+
+```elixir
+:ok = Durable.cancel_wait(workflow_id, reason: "order withdrawn")
+
+# In the step that waits
+case wait_for_event("payment_confirmed", timeout: minutes(15), timeout_value: :timed_out) do
+  {:cancelled, reason} -> {:fail, reason}
+  :timed_out -> {:fail, "no payment"}
+  payment -> {:ok, assign(ctx, :payment, payment)}
+end
+```
+
+A run that waits for the lanes of a `parallel` block, or for a `call_workflow` child, has no wait of its own. For such a run the call goes down: every lane or child under it that is waiting has its wait cancelled, and theirs in turn. The block or the call keeps waiting for them to finish. It returns `{:error, :not_waiting}` for a run that isn't waiting.
 
 ## Human-in-the-Loop
 
@@ -229,16 +263,16 @@ workflow "approval_flow" do
       type: :approval,
       prompt: "Approve this request?",
       timeout: days(3),
-      timeout_value: :auto_rejected
+      timeout_value: "auto_rejected"
     )
     {:ok, assign(ctx, :approval, result)}
   end
 
   step :process_decision, fn ctx ->
     status = case ctx.approval do
-      :auto_rejected -> :rejected_timeout
-      %{approved: true} -> :approved
-      _ -> :rejected
+      "auto_rejected" -> "rejected_timeout"
+      %{"approved" => true} -> "approved"
+      _ -> "rejected"
     end
     {:ok, assign(ctx, :status, status)}
   end
@@ -271,34 +305,48 @@ end
 
 #### `wait_for_approval/2`
 
-Wait for an approval decision. Returns `:approved` or `:rejected`.
+Wait for an approval decision. It returns the answer as it was given. The
+dashboard's Inbox answers with `%{"approved" => true}` or
+`%{"approved" => false}`, plus `"comment"` and `"by"` when given, so answer the
+same way from your own code:
 
 ```elixir
 step :manager_review, fn ctx ->
-  result = wait_for_approval("expense_approval",
+  answer = wait_for_approval("expense_approval",
     prompt: "Approve expense for $500?",
     metadata: %{employee: "John", amount: 500},
     timeout: days(3),
     timeout_value: :auto_approved
   )
-  {:ok, assign(ctx, :approved, result == :approved)}
+
+  approved =
+    case answer do
+      %{"approved" => approved} -> approved
+      :auto_approved -> true
+    end
+
+  {:ok, assign(ctx, :approved, approved)}
 end
+
+# From your code
+Durable.provide_input(workflow_id, "expense_approval", %{"approved" => true})
 ```
 
 #### `wait_for_choice/2`
 
-Wait for a single choice selection.
+Wait for a single choice selection. The answer has been stored, so the chosen
+value comes back as a string:
 
 ```elixir
 step :select_shipping, fn ctx ->
   method = wait_for_choice("shipping_method",
     prompt: "Select shipping method:",
     choices: [
-      %{value: :express, label: "Express ($15)"},
-      %{value: :standard, label: "Standard (Free)"}
+      %{value: "express", label: "Express ($15)"},
+      %{value: "standard", label: "Standard (Free)"}
     ],
     timeout: hours(24),
-    timeout_value: :standard
+    timeout_value: "standard"
   )
   {:ok, assign(ctx, :shipping, method)}
 end
@@ -357,13 +405,13 @@ Find workflows waiting for human input:
 
 ```elixir
 # Get all pending inputs
-pending = Durable.Wait.list_pending_inputs()
+{:ok, pending} = Durable.Wait.list_pending_inputs()
 
 # Filter by status
-pending = Durable.Wait.list_pending_inputs(status: :pending)
+{:ok, pending} = Durable.Wait.list_pending_inputs(status: :pending)
 
-# Filter by timeout
-soon = Durable.Wait.list_pending_inputs(
+# Filter by timeout. The ! form returns the list, and raises on a bad filter
+soon = Durable.Wait.list_pending_inputs!(
   timeout_before: DateTime.add(DateTime.utc_now(), 3600)
 )
 ```
@@ -375,27 +423,29 @@ soon = Durable.Wait.list_pending_inputs(
 ```elixir
 workflow "expense_approval" do
   step :submit, fn ctx ->
-    {:ok, %{expense: ctx, amount: ctx["amount"]}}
+    # The input stays as it is: its keys are strings in every step
+    {:ok, ctx}
   end
 
   step :manager_review, fn ctx ->
-    if ctx.amount > 1000 do
-      result = wait_for_approval("manager_approval",
-        prompt: "Approve expense of $#{ctx.amount}?",
+    if ctx["amount"] > 1000 do
+      answer = wait_for_approval("manager_approval",
+        prompt: "Approve expense of $#{ctx["amount"]}?",
         timeout: days(2)
       )
-      {:ok, assign(ctx, :manager_approved, result == :approved)}
+      # Nobody answering in time returns nil, the default timeout_value
+      {:ok, assign(ctx, :manager_approved, match?(%{"approved" => true}, answer))}
     else
       {:ok, assign(ctx, :manager_approved, true)}
     end
   end
 
   step :finance_review, fn ctx ->
-    if ctx.amount > 5000 and ctx.manager_approved do
-      result = wait_for_approval("finance_approval",
+    if ctx["amount"] > 5000 and ctx.manager_approved do
+      answer = wait_for_approval("finance_approval",
         timeout: days(3)
       )
-      {:ok, assign(ctx, :finance_approved, result == :approved)}
+      {:ok, assign(ctx, :finance_approved, match?(%{"approved" => true}, answer))}
     else
       {:ok, assign(ctx, :finance_approved, true)}
     end
@@ -403,9 +453,9 @@ workflow "expense_approval" do
 
   step :finalize, fn ctx ->
     if ctx.manager_approved and ctx.finance_approved do
-      Expenses.approve(ctx.expense)
+      Expenses.approve(ctx["expense_id"])
     else
-      Expenses.reject(ctx.expense)
+      Expenses.reject(ctx["expense_id"])
     end
     {:ok, ctx}
   end
@@ -418,28 +468,26 @@ end
 workflow "order_fulfillment" do
   step :create_shipment, fn ctx ->
     shipment = Shipping.create(ctx["order_id"])
-    {:ok, %{
-      shipment_id: shipment.id,
-      tracking_number: shipment.tracking,
-      order_id: ctx["order_id"]
-    }}
+    {:ok, ctx
+    |> assign(:shipment_id, shipment.id)
+    |> assign(:tracking_number, shipment.tracking)}
   end
 
   step :await_delivery, fn ctx ->
     # Wait for webhook from shipping provider
     event = wait_for_event("shipment_delivered",
       timeout: days(14),
-      timeout_value: :lost_package
+      timeout_value: "lost_package"
     )
     {:ok, assign(ctx, :delivery_status, event)}
   end
 
   step :handle_delivery, fn ctx ->
     case ctx.delivery_status do
-      :lost_package ->
+      "lost_package" ->
         Support.create_ticket("Lost package", ctx.shipment_id)
-      %{status: "delivered"} ->
-        Orders.mark_complete(ctx.order_id)
+      %{"status" => "delivered"} ->
+        Orders.mark_complete(ctx["order_id"])
       _ ->
         Logger.warning("Unexpected delivery status")
     end
@@ -466,32 +514,35 @@ end
 workflow "subscription_renewal" do
   step :check_expiry, fn ctx ->
     subscription = Subscriptions.get(ctx["subscription_id"])
-    {:ok, %{subscription: subscription, expires_at: subscription.expires_at}}
+    # Keep what later steps need, in a form JSON holds
+    {:ok, ctx
+    |> assign(:user_email, subscription.user_email)
+    |> assign(:expires_at, DateTime.to_iso8601(subscription.expires_at))}
   end
 
   step :wait_for_reminder_time, fn ctx ->
-    reminder_time = DateTime.add(ctx.expires_at, -7, :day)  # 7 days before
-    schedule_at(reminder_time)
+    {:ok, expires_at, _offset} = DateTime.from_iso8601(ctx.expires_at)
+    schedule_at(DateTime.add(expires_at, -7, :day))  # 7 days before
     {:ok, ctx}
   end
 
   step :send_reminder, fn ctx ->
-    Mailer.send_renewal_reminder(ctx.subscription.user_email)
+    Mailer.send_renewal_reminder(ctx.user_email)
     {:ok, ctx}
   end
 
   step :await_renewal, fn ctx ->
     renewal = wait_for_event("subscription_renewed",
       timeout: days(7),
-      timeout_value: :not_renewed
+      timeout_value: "not_renewed"
     )
     {:ok, assign(ctx, :renewal_result, renewal)}
   end
 
   step :handle_result, fn ctx ->
     case ctx.renewal_result do
-      :not_renewed ->
-        Subscriptions.expire(ctx.subscription.id)
+      "not_renewed" ->
+        Subscriptions.expire(ctx["subscription_id"])
       _ ->
         Logger.info("Subscription renewed")
     end
@@ -512,14 +563,14 @@ workflow "contract_approval" do
     # Wait for all three departments to approve
     results = wait_for_all(["legal", "finance", "management"],
       timeout: days(5),
-      timeout_value: {:timeout, :incomplete}
+      timeout_value: "incomplete"
     )
     {:ok, assign(ctx, :approval_results, results)}
   end
 
   step :finalize, fn ctx ->
     status = case ctx.approval_results do
-      {:timeout, :incomplete} -> :timed_out
+      "incomplete" -> :timed_out
       approvals ->
         all_approved = Enum.all?(approvals, fn {_, v} -> v["approved"] end)
         if all_approved, do: :approved, else: :rejected
@@ -537,7 +588,7 @@ workflow "payment_with_timeout" do
     # First event wins
     {event, event_data} = wait_for_any(["payment_received", "user_cancelled", "fraud_detected"],
       timeout: hours(1),
-      timeout_value: {:timeout, nil}
+      timeout_value: {"timeout", nil}
     )
     {:ok, ctx
     |> assign(:result_event, event)
@@ -549,7 +600,7 @@ workflow "payment_with_timeout" do
       "payment_received" -> complete_order()
       "user_cancelled" -> refund_if_needed()
       "fraud_detected" -> flag_for_review()
-      :timeout -> expire_order()
+      "timeout" -> expire_order()
     end
     {:ok, ctx}
   end

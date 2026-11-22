@@ -26,11 +26,11 @@ defmodule Durable.Integration.FailurePathsTest do
     alias Durable.IntegrationProbe, as: Probe
 
     workflow "fp_linked_crash" do
-      step(:work, [retry: [max_attempts: 1]], fn data ->
+      step :work, [retry: [max_attempts: 1]], fn data ->
         Probe.note(:body)
         Task.async(fn -> raise "boom" end) |> Task.await()
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -39,10 +39,10 @@ defmodule Durable.Integration.FailurePathsTest do
     alias Durable.IntegrationProbe, as: Probe
 
     workflow "fp_linked_crash_retried" do
-      step(:work, [retry: [max_attempts: 3, backoff: :constant, base: 1]], fn data ->
+      step :work, [retry: [max_attempts: 3, backoff: :constant, base: 1]], fn data ->
         if Probe.note(:body) < 3, do: Process.exit(self(), :kill)
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -53,7 +53,7 @@ defmodule Durable.Integration.FailurePathsTest do
     workflow "fp_dies_then_waits" do
       step(
         :work,
-        [retry: [max_attempts: 2, backoff: :constant, base: 400, jitter: false]],
+        [retry: [max_attempts: 2, backoff: :constant, base: 400]],
         fn data ->
           if Probe.note(:body) == 1, do: Process.exit(self(), :kill)
           {:ok, data}
@@ -67,17 +67,17 @@ defmodule Durable.Integration.FailurePathsTest do
     alias Durable.IntegrationProbe, as: Probe
 
     workflow "fp_crash_compensated", on_failure: :rollback do
-      step(:book, [compensate: :unbook], fn data -> {:ok, data} end)
+      step :book, [compensate: :unbook], fn data -> {:ok, data} end
 
-      step(:work, fn data ->
+      step :work, fn data ->
         Task.async(fn -> raise "boom" end) |> Task.await()
         {:ok, data}
-      end)
+      end
 
-      compensate(:unbook, fn data ->
+      compensate :unbook, fn data ->
         Probe.note(:undone)
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -86,12 +86,12 @@ defmodule Durable.Integration.FailurePathsTest do
     alias Durable.IntegrationProbe, as: Probe
 
     workflow "fp_held" do
-      step(:work, fn data ->
+      step :work, fn data ->
         Probe.note(:body)
         Probe.wait_for(:release)
         Probe.note(:finished)
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -101,17 +101,17 @@ defmodule Durable.Integration.FailurePathsTest do
     alias Durable.IntegrationProbe, as: Probe
 
     workflow "fp_slow_cancellable" do
-      step(:work, fn data ->
+      step :work, fn data ->
         Probe.note(:body)
         Process.sleep(1_500)
         Probe.note(:finished)
         {:ok, data}
-      end)
+      end
 
-      step(:after, fn data ->
+      step :after, fn data ->
         Probe.note(:after)
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -121,12 +121,12 @@ defmodule Durable.Integration.FailurePathsTest do
     alias Durable.IntegrationProbe, as: Probe
 
     workflow "fp_polls_cancelled" do
-      step(:work, fn data ->
+      step :work, fn data ->
         Probe.note(:body)
         Probe.wait_for(:cancelled)
         Probe.note({:saw_cancelled, cancelled?()})
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -137,7 +137,7 @@ defmodule Durable.Integration.FailurePathsTest do
     workflow "fp_retried_then_done" do
       step(
         :work,
-        [retry: [max_attempts: 2, backoff: :constant, base: 300, jitter: false]],
+        [retry: [max_attempts: 2, backoff: :constant, base: 300]],
         fn data ->
           if Probe.note(:attempt) == 1, do: {:error, "again"}, else: {:ok, data}
         end
@@ -150,11 +150,11 @@ defmodule Durable.Integration.FailurePathsTest do
     alias Durable.IntegrationProbe, as: Probe
 
     workflow "fp_quick" do
-      step(:work, fn data ->
+      step :work, fn data ->
         Process.sleep(30)
         Probe.note(:fresh)
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -163,14 +163,14 @@ defmodule Durable.Integration.FailurePathsTest do
     alias Durable.IntegrationProbe, as: Probe
 
     workflow "fp_killed_compensation", on_failure: :rollback do
-      step(:a, [compensate: :undo_a], fn data -> {:ok, data} end)
-      step(:b, fn _data -> {:fail, "stop here"} end)
+      step :a, [compensate: :undo_a], fn data -> {:ok, data} end
+      step :b, fn _data -> {:fail, "stop here"} end
 
-      compensate(:undo_a, fn data ->
+      compensate :undo_a, fn data ->
         Probe.note(:undo)
         Probe.wait_for(:release_undo)
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -180,11 +180,11 @@ defmodule Durable.Integration.FailurePathsTest do
     alias Durable.IntegrationProbe, as: Probe
 
     workflow "fp_parent_of_killed" do
-      step(:call, fn data ->
+      step :call, fn data ->
         Probe.note(:parent)
         {:error, _} = call_workflow(KilledCompensation, %{})
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -192,7 +192,7 @@ defmodule Durable.Integration.FailurePathsTest do
     use Durable
 
     workflow "fp_keyed" do
-      step(:work, fn data -> {:ok, data} end)
+      step :work, fn data -> {:ok, data} end
     end
   end
 
@@ -202,11 +202,11 @@ defmodule Durable.Integration.FailurePathsTest do
 
     workflow "fp_keyed_parallel" do
       parallel :sides do
-        step(:left, fn data -> {:ok, data} end)
+        step :left, fn data -> {:ok, data} end
 
-        step(:right, fn data ->
+        step :right, fn data ->
           if Probe.set?(:fixed), do: {:ok, data}, else: {:fail, "right is broken"}
-        end)
+        end
       end
     end
   end
@@ -235,14 +235,14 @@ defmodule Durable.Integration.FailurePathsTest do
 
     workflow "fp_parallel_then_reads" do
       parallel :both do
-        step(:a, fn d -> {:ok, Map.put(d, "a", String.duplicate("x", 50))} end)
-        step(:b, fn d -> {:ok, Map.put(d, "b", 1)} end)
+        step :a, fn d -> {:ok, Map.put(d, "a", String.duplicate("x", 50))} end
+        step :b, fn d -> {:ok, Map.put(d, "b", 1)} end
       end
 
-      step(:next, fn d ->
+      step :next, fn d ->
         Probe.put(:next_keys, Map.keys(d))
         {:ok, d}
-      end)
+      end
     end
   end
 
@@ -252,11 +252,11 @@ defmodule Durable.Integration.FailurePathsTest do
     alias Durable.IntegrationProbe, as: Probe
 
     workflow "fp_sleeps_then_reads" do
-      step(:nap, fn d ->
+      step :nap, fn d ->
         Probe.note({:keys, Map.keys(d)})
         sleep(20)
         {:ok, d}
-      end)
+      end
     end
   end
 
@@ -265,14 +265,14 @@ defmodule Durable.Integration.FailurePathsTest do
     require Logger
 
     workflow "fp_logs_everything", log_metadata: fn d -> [account_id: d["account_id"]] end do
-      step(:work, fn d ->
+      step :work, fn d ->
         # credo:disable-for-next-line Credo.Check.Warning.MissedMetadataKeyInLoggerConfig
         Logger.info("plain", order_id: 7)
         # credo:disable-for-next-line Credo.Check.Warning.MissedMetadataKeyInLoggerConfig
         Logger.warning("odd", blob: <<255>>, nul: "a" <> <<0>> <> "b", pair: {1, 2})
         Logger.info("nul in the" <> <<0>> <> "message")
         {:ok, d}
-      end)
+      end
     end
   end
 
@@ -280,10 +280,10 @@ defmodule Durable.Integration.FailurePathsTest do
     use Durable
 
     workflow "fp_prints_and_logs" do
-      step(:work, fn d ->
+      step :work, fn d ->
         IO.puts("printed")
         {:ok, d}
-      end)
+      end
     end
   end
 
@@ -292,10 +292,10 @@ defmodule Durable.Integration.FailurePathsTest do
     alias Durable.IntegrationProbe, as: Probe
 
     workflow "fp_slow_compensation", on_failure: :rollback do
-      step(:book, [compensate: :unbook], fn d -> {:ok, d} end)
-      step(:charge, fn _d -> {:fail, "declined"} end)
+      step :book, [compensate: :unbook], fn d -> {:ok, d} end
+      step :charge, fn _d -> {:fail, "declined"} end
 
-      compensate(:unbook, fn d ->
+      compensate :unbook, fn d ->
         Probe.note(:undo)
         Probe.wait_for(:release)
 
@@ -303,7 +303,7 @@ defmodule Durable.Integration.FailurePathsTest do
           :ok -> {:ok, d}
           :fail -> {:fail, "too late"}
         end
-      end)
+      end
     end
   end
 
@@ -313,7 +313,7 @@ defmodule Durable.Integration.FailurePathsTest do
     require Logger
 
     workflow "fp_logs_from_tasks" do
-      step(:work, fn d ->
+      step :work, fn d ->
         Logger.info("before")
 
         Task.await(
@@ -330,7 +330,7 @@ defmodule Durable.Integration.FailurePathsTest do
         Task.await(Task.async(fn -> Logger.info("unbound") end))
         Logger.info("after")
         {:ok, d}
-      end)
+      end
     end
   end
 
@@ -340,11 +340,11 @@ defmodule Durable.Integration.FailurePathsTest do
     require Logger
 
     workflow "fp_logs_within_time_limit" do
-      step(:work, [timeout: 5_000], fn d ->
+      step :work, [timeout: 5_000], fn d ->
         Logger.info("in the limit")
         Task.await(Task.async(bind(fn -> Logger.info("bound under a limit") end)))
         {:ok, d}
-      end)
+      end
     end
   end
 
@@ -354,10 +354,10 @@ defmodule Durable.Integration.FailurePathsTest do
 
     workflow "fp_logs_in_branch" do
       parallel :logs do
-        step(:branch, fn d ->
+        step :branch, fn d ->
           Logger.info("from a branch")
           {:ok, d}
-        end)
+        end
       end
     end
   end
@@ -366,7 +366,7 @@ defmodule Durable.Integration.FailurePathsTest do
     use Durable
 
     workflow "fp_grand_child" do
-      step(:work, fn d -> {:ok, d} end)
+      step :work, fn d -> {:ok, d} end
     end
   end
 
@@ -375,10 +375,10 @@ defmodule Durable.Integration.FailurePathsTest do
     use Durable.Orchestration
 
     workflow "fp_middle_child" do
-      step(:call, fn d ->
+      step :call, fn d ->
         {:ok, _} = call_workflow(GrandChild, %{}, ref: :child)
         {:ok, d}
-      end)
+      end
     end
   end
 
@@ -387,10 +387,10 @@ defmodule Durable.Integration.FailurePathsTest do
     use Durable.Orchestration
 
     workflow "fp_top_parent" do
-      step(:call, fn d ->
+      step :call, fn d ->
         {:ok, _} = call_workflow(MiddleChild, %{}, ref: :child)
         {:ok, d}
-      end)
+      end
     end
   end
 
@@ -400,7 +400,7 @@ defmodule Durable.Integration.FailurePathsTest do
     alias Durable.LogCapture.Handler
 
     workflow "fp_checks_console" do
-      step(:work, fn d ->
+      step :work, fn d ->
         Probe.put(:saved_line, Handler.console_filter(%{level: :info, meta: %{}}, []))
 
         Probe.put(
@@ -410,7 +410,7 @@ defmodule Durable.Integration.FailurePathsTest do
 
         Probe.put(:uncaptured_level, Handler.console_filter(%{level: :debug, meta: %{}}, []))
         {:ok, d}
-      end)
+      end
     end
   end
 
@@ -427,22 +427,22 @@ defmodule Durable.Integration.FailurePathsTest do
 
     workflow "fp_cancels_many_branches" do
       parallel :waits do
-        step(:stops, fn _data ->
+        step :stops, fn _data ->
           # Long enough for the other branches to be under way.
           Process.sleep(150)
           {:cancel, "stop them all"}
-        end)
+        end
 
-        step(:w1, fn data -> {:ok, Map.put(data, "e", wait_for_event("never"))} end)
-        step(:w2, fn data -> {:ok, Map.put(data, "e", wait_for_event("never"))} end)
-        step(:w3, fn data -> {:ok, Map.put(data, "e", wait_for_event("never"))} end)
-        step(:w4, fn data -> {:ok, Map.put(data, "e", wait_for_event("never"))} end)
-        step(:w5, fn data -> {:ok, Map.put(data, "e", wait_for_event("never"))} end)
-        step(:w6, fn data -> {:ok, Map.put(data, "e", wait_for_event("never"))} end)
-        step(:w7, fn data -> {:ok, Map.put(data, "e", wait_for_event("never"))} end)
-        step(:w8, fn data -> {:ok, Map.put(data, "e", wait_for_event("never"))} end)
-        step(:w9, fn data -> {:ok, Map.put(data, "e", wait_for_event("never"))} end)
-        step(:w10, fn data -> {:ok, Map.put(data, "e", wait_for_event("never"))} end)
+        step :w1, fn data -> {:ok, Map.put(data, "e", wait_for_event("never"))} end
+        step :w2, fn data -> {:ok, Map.put(data, "e", wait_for_event("never"))} end
+        step :w3, fn data -> {:ok, Map.put(data, "e", wait_for_event("never"))} end
+        step :w4, fn data -> {:ok, Map.put(data, "e", wait_for_event("never"))} end
+        step :w5, fn data -> {:ok, Map.put(data, "e", wait_for_event("never"))} end
+        step :w6, fn data -> {:ok, Map.put(data, "e", wait_for_event("never"))} end
+        step :w7, fn data -> {:ok, Map.put(data, "e", wait_for_event("never"))} end
+        step :w8, fn data -> {:ok, Map.put(data, "e", wait_for_event("never"))} end
+        step :w9, fn data -> {:ok, Map.put(data, "e", wait_for_event("never"))} end
+        step :w10, fn data -> {:ok, Map.put(data, "e", wait_for_event("never"))} end
       end
     end
   end
@@ -452,11 +452,11 @@ defmodule Durable.Integration.FailurePathsTest do
     alias Durable.IntegrationProbe, as: Probe
 
     workflow "fp_dies_on_signal" do
-      step(:work, fn _data ->
+      step :work, fn _data ->
         Probe.note(:body)
         Probe.wait_for(:die)
         Process.exit(self(), :kill)
-      end)
+      end
     end
   end
 
@@ -466,10 +466,10 @@ defmodule Durable.Integration.FailurePathsTest do
     alias Durable.IntegrationProbe, as: Probe
 
     workflow "fp_stale_once" do
-      step(:work, fn data ->
+      step :work, fn data ->
         if Probe.note(:body) == 1, do: Probe.wait_for(:release)
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -480,7 +480,7 @@ defmodule Durable.Integration.FailurePathsTest do
     alias Durable.IntegrationProbe, as: Probe
 
     workflow "fp_ends_late" do
-      step(:work, [retry: [max_attempts: 2, backoff: :constant, base: 1]], fn data ->
+      step :work, [retry: [max_attempts: 2, backoff: :constant, base: 1]], fn data ->
         if Probe.note(:body) > 1 do
           {:ok, data}
         else
@@ -492,7 +492,7 @@ defmodule Durable.Integration.FailurePathsTest do
             :sleep -> sleep(20)
           end
         end
-      end)
+      end
     end
   end
 
@@ -500,7 +500,7 @@ defmodule Durable.Integration.FailurePathsTest do
     use Durable
 
     workflow "fp_tick" do
-      step(:work, fn data -> {:ok, data} end)
+      step :work, fn data -> {:ok, data} end
     end
   end
 
@@ -510,7 +510,7 @@ defmodule Durable.Integration.FailurePathsTest do
 
     @schedule cron: "0 9 * * *", name: "declared"
     workflow "fp_declares" do
-      step(:work, fn data -> {:ok, data} end)
+      step :work, fn data -> {:ok, data} end
     end
   end
 
@@ -520,17 +520,17 @@ defmodule Durable.Integration.FailurePathsTest do
     alias Durable.IntegrationProbe, as: Probe
 
     workflow "fp_reads_after_sleep" do
-      step(:first, fn d ->
+      step :first, fn d ->
         id = d["id"]
         Probe.note({:first, id})
         sleep(20)
         {:ok, Map.put(d, "seen", id)}
-      end)
+      end
 
-      step(:second, fn d ->
+      step :second, fn d ->
         Probe.note({:second, d["id"]})
         {:ok, d}
-      end)
+      end
     end
   end
 
@@ -540,16 +540,16 @@ defmodule Durable.Integration.FailurePathsTest do
     alias Durable.IntegrationProbe, as: Probe
 
     workflow "fp_reads_after_event" do
-      step(:first, fn d ->
+      step :first, fn d ->
         Probe.note({:first, d["id"]})
         wait_for_event("go")
         {:ok, d}
-      end)
+      end
 
-      step(:second, fn d ->
+      step :second, fn d ->
         Probe.note({:second, d["id"]})
         {:ok, d}
-      end)
+      end
     end
   end
 
@@ -559,16 +559,16 @@ defmodule Durable.Integration.FailurePathsTest do
     alias Durable.IntegrationProbe, as: Probe
 
     workflow "fp_reads_after_input" do
-      step(:first, fn d ->
+      step :first, fn d ->
         Probe.note({:first, d["id"]})
         wait_for_input("ok")
         {:ok, d}
-      end)
+      end
 
-      step(:second, fn d ->
+      step :second, fn d ->
         Probe.note({:second, d["id"]})
         {:ok, d}
-      end)
+      end
     end
   end
 
@@ -578,16 +578,16 @@ defmodule Durable.Integration.FailurePathsTest do
 
     workflow "fp_reads_in_parallel" do
       parallel :reads do
-        step(:branch, fn d ->
+        step :branch, fn d ->
           Probe.note({:branch, d["id"]})
           {:ok, d}
-        end)
+        end
       end
 
-      step(:second, fn d ->
+      step :second, fn d ->
         Probe.note({:second, d["id"]})
         {:ok, d}
-      end)
+      end
     end
   end
 
@@ -598,18 +598,18 @@ defmodule Durable.Integration.FailurePathsTest do
     alias Durable.IntegrationProbe, as: Probe
 
     workflow "fp_keeps_atom_keys" do
-      step(:first, fn d -> {:ok, assign(d, :total, 7)} end)
+      step :first, fn d -> {:ok, assign(d, :total, 7)} end
 
-      step(:second, fn d ->
+      step :second, fn d ->
         Probe.note({:second, d.total})
         sleep(20)
         {:ok, d}
-      end)
+      end
 
-      step(:third, fn d ->
+      step :third, fn d ->
         Probe.note({:third, d.total, d["id"]})
         {:ok, d}
-      end)
+      end
     end
   end
 
@@ -618,13 +618,13 @@ defmodule Durable.Integration.FailurePathsTest do
     alias Durable.IntegrationProbe, as: Probe
 
     workflow "fp_reads_after_crash", on_failure: :rollback do
-      step(:first, fn d -> {:ok, Map.put(d, "x", 1)} end)
+      step :first, fn d -> {:ok, Map.put(d, "x", 1)} end
 
-      step(:second, [retry: [max_attempts: 2, backoff: :constant, base: 1]], fn d ->
+      step :second, [retry: [max_attempts: 2, backoff: :constant, base: 1]], fn d ->
         attempt = Probe.note({:second, d["x"]})
         if attempt == 1, do: Process.exit(self(), :kill)
         {:ok, d}
-      end)
+      end
     end
   end
 
@@ -864,7 +864,7 @@ defmodule Durable.Integration.FailurePathsTest do
         )
 
       assert_eventually(fn ->
-        Enum.any?(Durable.Activity.list(kinds: ["worker_fenced"]), &(&1.workflow_id == id))
+        Enum.any?(Durable.Activity.list!(kinds: ["worker_fenced"]), &(&1.workflow_id == id))
       end)
 
       assert Durable.DataCase.get_worker_pid(Durable, "default", id) == nil
@@ -1257,7 +1257,7 @@ defmodule Durable.Integration.FailurePathsTest do
       {:ok, id} = Durable.start(ReadsAfterEvent, %{"id" => 42})
       await_status(id, :waiting)
 
-      assert Map.has_key?(get(id).context, "__string_keys__")
+      assert Map.has_key?(get(id).engine_state, "__string_keys__")
       {:ok, execution} = Durable.get_execution(id)
       assert execution.context == %{"id" => 42}
     end
@@ -1270,7 +1270,7 @@ defmodule Durable.Integration.FailurePathsTest do
 
       {1, _} =
         IntegrationRepo.update_all(from(w in WorkflowExecution, where: w.id == ^id),
-          set: [context: %{"total" => 7, "id" => 42}]
+          set: [context: %{"total" => 7, "id" => 42}, engine_state: %{}]
         )
 
       {1, _} =

@@ -9,12 +9,11 @@ This guide covers setup, what each page is for, and how to do the common jobs.
 
 ## Set it up
 
-Add the package, then mount it at the top level of your router, outside any
-`scope` or `pipe_through`:
+Add the package, then mount it in your router:
 
 ```elixir
 # mix.exs
-{:durable_dashboard, "~> 1.3"}
+{:durable_dashboard, "~> 2.0"}
 
 # router.ex
 defmodule MyAppWeb.Router do
@@ -76,8 +75,22 @@ The server checks the level on every action, and each one emits
 `[:durable_dashboard, :action]` with the action, the user and the run ids, so
 you can keep an audit trail.
 
-Two other router options: `:durable` if your instance has its own `name:`, and
-`:live_socket_path` if your endpoint's LiveView socket isn't at `/live`.
+Three other router options: `:durable` if your instance has its own `name:`,
+`:live_socket_path` if your endpoint's LiveView socket isn't at `/live`, and
+`:as` to mount the dashboard more than once. An app with several Durable
+instances mounts one dashboard for each, and every mount after the first needs
+its own `:as`:
+
+```elixir
+import DurableDashboard.Router
+
+scope "/admin" do
+  dashboard_routes "/durable"
+  dashboard_routes "/durable-billing", durable: MyApp.Billing, as: :billing_dashboard
+end
+```
+
+Dashboard 2.0 needs Durable 2.0.
 
 ## Find your way around
 
@@ -163,6 +176,14 @@ Open **Inbox**. Its count in the sidebar is how many inputs are waiting. Each
 task shows the run, the prompt, what happens if nobody answers, and the form its
 input type needs. Answering resumes the run.
 
+An answer goes to the request the form was showing. If that request is no
+longer open when you submit, because someone else answered it or it timed out,
+nothing is answered and the page asks you to review it again.
+Approve and Reject are only for approvals; other input types are answered
+through their own form. An approval resumes the run with
+`%{"approved" => true}` or `%{"approved" => false}`, plus `"comment"` and
+`"by"` when given.
+
 **Waiting for events** lists every event a run is blocked on, with a form to
 send one by hand. That's useful when a webhook never arrived.
 
@@ -216,9 +237,9 @@ attempts, what triggered it, its queue, tags and key.
 |---|---|
 | **Trace** | One row per step on a timeline, with a bar per attempt. The gaps are named: backoff, snoozed, wait. Click a row to inspect it |
 | **Graph** | The workflow's shape with this run's state on it, including branches not taken and steps that never ran |
-| **Logs** | What the steps logged |
-| **Context** | The run's input and data |
-| **Family** | Its parent and child runs, when it has any |
+| **Logs** | What the steps logged, in this run and in every run under it |
+| **Context** | The run's input and data. The engine's own state isn't in it |
+| **Family** | Its parent and child runs at every level, when it has any |
 | **Key** | What happened to its workflow key, when it has one: re-adds, dropped inputs, and every run that used it |
 
 The step inspector has Error, Input, Output, Logs and Attempts. A step that

@@ -10,12 +10,12 @@ defmodule Durable.Scheduler.DSL do
 
         @schedule cron: "0 9 * * *", timezone: "America/New_York"
         workflow "generate_report" do
-          step :fetch_data do
-            # ...
+          step :fetch_data, fn _input ->
+            {:ok, %{sales: Sales.yesterday()}}
           end
 
-          step :generate do
-            # ...
+          step :generate, fn data ->
+            {:ok, Map.put(data, :report, Reports.build(data.sales))}
           end
         end
       end

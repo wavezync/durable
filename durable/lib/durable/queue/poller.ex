@@ -18,6 +18,7 @@ defmodule Durable.Queue.Poller do
   alias Durable.Config
   alias Durable.PubSub, as: DurablePubSub
   alias Durable.Queue.Adapter
+  alias Durable.Queue.Drainer
   alias Durable.Queue.Worker
 
   defstruct [
@@ -116,8 +117,9 @@ defmodule Durable.Queue.Poller do
       poll_interval: Keyword.get(opts, :poll_interval, @default_poll_interval),
       worker_supervisor: worker_supervisor,
       node_id: config.node_id,
-      workers: %{},
-      paused: false,
+      workers: adopt_workers(worker_supervisor),
+      # A poller restarted on a node that is draining doesn't claim either.
+      paused: Drainer.stopping?(config.name),
       timer_ref: nil
     }
 
@@ -248,12 +250,23 @@ defmodule Durable.Queue.Poller do
 
   # Private functions
 
+  # The workers of a poller that died live on under their supervisor. They
+  # still hold the queue's slots, and they report here now, so their runs are
+  # settled as any other's.
+  defp adopt_workers(supervisor) do
+    for {_id, pid, _type, _modules} when is_pid(pid) <-
+          DynamicSupervisor.which_children(supervisor),
+        job = Worker.adopt(pid),
+        into: %{} do
+      {pid, %{ref: Process.monitor(pid), job_id: job.id, token: job[:lock_token]}}
+    end
+  end
+
   defp poll_and_process(state) do
     available_slots = state.concurrency - map_size(state.workers)
 
     if available_slots > 0 do
-      adapter = Adapter.default_adapter()
-      jobs = adapter.fetch_jobs(state.config, state.queue_name, available_slots, state.node_id)
+      jobs = safely_fetch_jobs(state, available_slots)
 
       emit_poll_telemetry(state.queue_name, length(jobs), available_slots)
 
@@ -261,6 +274,21 @@ defmodule Durable.Queue.Poller do
     else
       state
     end
+  end
+
+  # A poll that raises (the repo is away) is a poll that found nothing: the
+  # next one tries again. Crashing here restarts the poller into the same
+  # raise, and a few of those take the manager and every worker down.
+  defp safely_fetch_jobs(state, slots) do
+    Adapter.default_adapter().fetch_jobs(state.config, state.queue_name, slots, state.node_id)
+  rescue
+    error ->
+      Logger.error("[Durable] poll of #{state.queue_name} failed: #{Exception.message(error)}")
+      []
+  catch
+    :exit, reason ->
+      Logger.error("[Durable] poll of #{state.queue_name} failed: #{inspect(reason)}")
+      []
   end
 
   defp start_worker(job, state) do

@@ -97,7 +97,7 @@ defmodule Durable.WorkflowKeysTest do
     })
   end
 
-  defp activity(kind), do: Activity.list(kinds: [kind])
+  defp activity(kind), do: Activity.list!(kinds: [kind])
 
   describe "start/3 with a key" do
     test "the same key twice returns the same run and creates one row" do
@@ -476,11 +476,11 @@ defmodule Durable.WorkflowKeysTest do
     {:ok, id} = Durable.start(Article, %{}, key: "q:1")
     {:ok, _} = Durable.start(Article, %{}, key: "q:2")
 
-    assert [%{id: ^id, key: "q:1", holds_key: true}] = Durable.Query.list_executions(key: "q:1")
-    assert Durable.Query.count_executions(key: "q:1") == 1
+    assert [%{id: ^id, key: "q:1", holds_key: true}] = Durable.Query.list_executions!(key: "q:1")
+    assert Durable.Query.count_executions!(key: "q:1") == 1
   end
 
-  test "Stats.keys/1 and Activity.list/1 count what happened to keys" do
+  test "Stats.keys!/1 and Activity.list!/1 count what happened to keys" do
     {:ok, id} = Durable.start(Article, %{"rev" => 1}, key: "a:1")
     {:ok, ^id} = Durable.start(Article, %{"rev" => 1}, key: "a:1")
     {:ok, ^id} = Durable.start(Article, %{"rev" => 2}, key: "a:1")
@@ -488,7 +488,7 @@ defmodule Durable.WorkflowKeysTest do
     holder!(Again, "b:1", :completed)
     {:ok, _} = Durable.start(Again, %{}, key: "b:1")
 
-    stats = Durable.Stats.keys(workflow: "process_article")
+    stats = Durable.Stats.keys!(workflow: "process_article")
 
     assert %{keyed: true, held: 1, readded: 3, dropped: 1, errors: 1, handed_off: 0} = stats
 
@@ -498,11 +498,11 @@ defmodule Durable.WorkflowKeysTest do
     assert Enum.sum(Enum.map(stats.timeline, & &1.returned)) == 2
     assert Enum.sum(Enum.map(stats.timeline, & &1.errors)) == 1
 
-    assert %{handed_off: 1, readded: 0} = Durable.Stats.keys(workflow: "again")
-    assert %{keyed: false, held: 0} = Durable.Stats.keys(workflow: "once")
+    assert %{handed_off: 1, readded: 0} = Durable.Stats.keys!(workflow: "again")
+    assert %{keyed: false, held: 0} = Durable.Stats.keys!(workflow: "once")
 
-    assert length(Activity.list(workflow_id: id)) == 3
-    assert Activity.list(workflow_id: id, kinds: ["key_handed_off"]) == []
+    assert length(Activity.list!(workflow_id: id)) == 3
+    assert Activity.list!(workflow_id: id, kinds: ["key_handed_off"]) == []
   end
 
   describe "concurrent starts" do

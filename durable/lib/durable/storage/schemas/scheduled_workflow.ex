@@ -40,7 +40,7 @@ defmodule Durable.Storage.Schemas.ScheduledWorkflow do
     field(:workflow_name, :string)
     field(:cron_expression, :string)
     field(:timezone, :string, default: "UTC")
-    field(:input, :map, default: %{})
+    field(:input, Durable.Storage.JsonMap, default: %{})
     field(:queue, :string, default: "default")
     field(:key, :string)
     field(:enabled, :boolean, default: true)

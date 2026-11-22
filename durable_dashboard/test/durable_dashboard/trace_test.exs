@@ -89,7 +89,7 @@ defmodule DurableDashboard.TraceTest do
       do: run(status: :pending, scheduled_at: t(5_000), current_step: step)
 
     defp failed(attrs \\ []) do
-      step("charge", [status: :failed, attempt: 2, error: %{"message" => "timeout"}] ++ attrs)
+      step "charge", [status: :failed, attempt: 2, error: %{"message" => "timeout"}] ++ attrs
     end
 
     test "parked/2 names a retry" do
@@ -98,7 +98,7 @@ defmodule DurableDashboard.TraceTest do
     end
 
     test "parked/2 names a snooze" do
-      snoozed = step("charge", status: :snoozed, error: @snoozed)
+      snoozed = step "charge", status: :snoozed, error: @snoozed
       assert %{status: :snoozed, reason: "busy", at: at} = Trace.parked(parked_run(), snoozed)
       assert at == t(5_000)
     end
@@ -304,7 +304,7 @@ defmodule DurableDashboard.TraceTest do
       {steps, _} =
         Enum.map_reduce(attempts, 0, fn {status, gap, length}, at ->
           from = at + gap
-          s = step("s", status: status, attempt: 1, from: from, to: from + length)
+          s = step "s", status: status, attempt: 1, from: from, to: from + length
           {%{s | id: "s-#{from}-#{status}"}, from + length}
         end)
 

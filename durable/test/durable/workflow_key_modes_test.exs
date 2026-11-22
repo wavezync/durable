@@ -53,7 +53,7 @@ defmodule Durable.WorkflowKeyModesTest do
   defp set!(id, changes), do: id |> reload() |> Ecto.Changeset.change(changes) |> repo().update!()
 
   defp duplicates do
-    for a <- Activity.list(kinds: ["key_duplicate"]), do: stringify(a.details)
+    for a <- Activity.list!(kinds: ["key_duplicate"]), do: stringify(a.details)
   end
 
   defp holder!(module, key, status) do
@@ -83,7 +83,7 @@ defmodule Durable.WorkflowKeyModesTest do
 
       assert [%{"outcome" => "cancel_existing", "input_changed" => true}] = duplicates()
 
-      assert [%{workflow_id: ^new, details: handoff}] = Activity.list(kinds: ["key_handed_off"])
+      assert [%{workflow_id: ^new, details: handoff}] = Activity.list!(kinds: ["key_handed_off"])
 
       assert %{"from" => ^old, "from_status" => "pending", "replaced" => true} =
                stringify(handoff)
@@ -247,7 +247,7 @@ defmodule Durable.WorkflowKeyModesTest do
     end
   end
 
-  test "Stats.keys/1 counts each outcome" do
+  test "Stats.keys!/1 counts each outcome" do
     {:ok, _} = Durable.start(Debounced, %{}, key: "st:1")
     {:ok, _} = Durable.start(Debounced, %{"rev" => 2}, key: "st:1")
     {:ok, _} = Durable.start(Article, %{}, key: "st:2")
@@ -260,11 +260,11 @@ defmodule Durable.WorkflowKeyModesTest do
 
     {:ok, _} = Durable.start(Article, %{"rev" => 3}, key: "st:2", on_duplicate: :cancel_existing)
 
-    assert %{debounced: 1} = Durable.Stats.keys(workflow: "keyed_debounced")
-    assert %{sent: 1, replaced: 1, handed_off: 1} = Durable.Stats.keys(workflow: "keyed_article")
+    assert %{debounced: 1} = Durable.Stats.keys!(workflow: "keyed_debounced")
+    assert %{sent: 1, replaced: 1, handed_off: 1} = Durable.Stats.keys!(workflow: "keyed_article")
   end
 
-  describe "Query.list_keys/1" do
+  describe "Query.list_keys!/1" do
     test "one row per workflow and key, with its holder and re-adds" do
       {:ok, a1} = Durable.start(Article, %{}, key: "k:1")
       {:ok, ^a1} = Durable.start(Article, %{"rev" => 2}, key: "k:1")
@@ -273,9 +273,9 @@ defmodule Durable.WorkflowKeyModesTest do
       completed = holder!(Once, "k:1", :completed)
       {:ok, _} = Durable.start(Article, %{})
 
-      keys = Durable.Query.list_keys()
+      keys = Durable.Query.list_keys!()
       assert length(keys) == 3
-      assert Durable.Query.count_keys() == 3
+      assert Durable.Query.count_keys!() == 3
 
       assert %{runs: 1, holder_id: ^a1, holder_status: :pending, readded: 1, dropped: 1} =
                Enum.find(keys, &(&1.key == "k:1" and &1.workflow_name == "keyed_article"))
@@ -284,12 +284,12 @@ defmodule Durable.WorkflowKeyModesTest do
       assert a2 != a2b
 
       assert [%{workflow_name: "keyed_once", holder_status: :completed}] =
-               Durable.Query.list_keys(holder_status: :completed)
+               Durable.Query.list_keys!(holder_status: :completed)
 
-      assert completed.id == hd(Durable.Query.list_keys(workflow_name: "keyed_once")).holder_id
-      assert [%{key: "k:2"}] = Durable.Query.list_keys(key_prefix: "k:2")
-      assert Durable.Query.count_keys(key_prefix: "k:") == 3
-      assert Durable.Query.count_keys(key_prefix: "k%") == 0
+      assert completed.id == hd(Durable.Query.list_keys!(workflow_name: "keyed_once")).holder_id
+      assert [%{key: "k:2"}] = Durable.Query.list_keys!(key_prefix: "k:2")
+      assert Durable.Query.count_keys!(key_prefix: "k:") == 3
+      assert Durable.Query.count_keys!(key_prefix: "k%") == 0
     end
   end
 

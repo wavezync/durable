@@ -94,7 +94,7 @@ defmodule Durable.OperationsTest do
       node_id = Config.get(Durable).node_id
 
       assert_eventually(fn ->
-        Enum.any?(Durable.list_nodes(), &(&1.id == node_id and &1.status == :alive))
+        Enum.any?(Durable.list_nodes!(), &(&1.id == node_id and &1.status == :alive))
       end)
     end
 
@@ -108,7 +108,7 @@ defmodule Durable.OperationsTest do
         heartbeat_at: stale
       })
 
-      assert %{status: :missing} = Enum.find(Durable.list_nodes(), &(&1.id == "gone-node"))
+      assert %{status: :missing} = Enum.find(Durable.list_nodes!(), &(&1.id == "gone-node"))
     end
 
     test "counts the runs each node holds a lock on" do
@@ -125,12 +125,12 @@ defmodule Durable.OperationsTest do
         })
       end
 
-      assert %{running: 2} = Enum.find(Durable.list_nodes(), &(&1.id == "busy-node"))
+      assert %{running: 2} = Enum.find(Durable.list_nodes!(), &(&1.id == "busy-node"))
     end
 
     test "a cleanly stopped node removes its row" do
       node_id = Config.get(Durable).node_id
-      assert_eventually(fn -> Enum.any?(Durable.list_nodes(), &(&1.id == node_id)) end)
+      assert_eventually(fn -> Enum.any?(Durable.list_nodes!(), &(&1.id == node_id)) end)
 
       stop_supervised!(Durable)
 

@@ -97,15 +97,15 @@ defmodule AttemptAwareWorkflow do
   use Durable.Context
 
   workflow "attempt_aware_wf" do
-    step(:charge, [retry: [max_attempts: 3, backoff: :constant, base: 1]], fn data ->
+    step :charge, [retry: [max_attempts: 3, backoff: :constant, base: 1]], fn data ->
       seen = get_context(:seen, []) ++ [[attempt(), max_attempts(), last_attempt?()]]
       put_context(:seen, seen)
       if last_attempt?(), do: {:ok, assign(data, :seen, seen)}, else: {:error, :again}
-    end)
+    end
 
-    step(:plain, fn data ->
+    step :plain, fn data ->
       {:ok, assign(data, :plain, [attempt(), max_attempts(), last_attempt?()])}
-    end)
+    end
   end
 end
 
@@ -117,7 +117,7 @@ defmodule FlakyOnceWorkflow do
   # Fails the first `fail_times` attempts (tracked per-attempt via the durable
   # step_executions row count), then succeeds — exercises the in-process loop.
   workflow "flaky_once_wf" do
-    step(:flaky, [retry: [max_attempts: 5, backoff: :constant, base: 1]], fn data ->
+    step :flaky, [retry: [max_attempts: 5, backoff: :constant, base: 1]], fn data ->
       fail_times = data["fail_times"] || 0
       attempt = Durable.RetryTestHelper.attempt_for(:flaky)
 
@@ -126,7 +126,7 @@ defmodule FlakyOnceWorkflow do
       else
         {:ok, assign(data, :done, true)}
       end
-    end)
+    end
   end
 end
 
@@ -135,9 +135,9 @@ defmodule AlwaysFailsWorkflow do
   use Durable.Helpers
 
   workflow "always_fails_wf" do
-    step(:always_fails, [retry: [max_attempts: 3, backoff: :constant, base: 1]], fn _data ->
+    step :always_fails, [retry: [max_attempts: 3, backoff: :constant, base: 1]], fn _data ->
       {:error, %{reason: "permanent"}}
-    end)
+    end
   end
 end
 

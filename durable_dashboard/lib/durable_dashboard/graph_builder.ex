@@ -23,6 +23,7 @@ defmodule DurableDashboard.GraphBuilder do
   """
 
   alias Durable.Definition.{Step, Workflow}
+  alias DurableDashboard.Format
   alias DurableDashboard.Trace
 
   # Run statuses after which a step without an execution never ran.
@@ -442,7 +443,11 @@ defmodule DurableDashboard.GraphBuilder do
   defp error_line(%{} = error) do
     type = error["type"] || error[:type]
     message = error["message"] || error[:message]
-    [type, message] |> Enum.reject(&is_nil/1) |> Enum.join(": ") |> truncate(160)
+
+    [type, message]
+    |> Enum.reject(&is_nil/1)
+    |> Enum.map_join(": ", &Format.text/1)
+    |> truncate(160)
   end
 
   defp error_line(_error), do: nil

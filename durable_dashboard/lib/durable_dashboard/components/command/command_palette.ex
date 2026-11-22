@@ -114,7 +114,7 @@ defmodule DurableDashboard.Components.Command.CommandPalette do
      assign(socket, open?: false, query: "", selected_index: 0, results: [], groups: [])}
   end
 
-  def handle_event("palette:search", %{"value" => q}, socket) do
+  def handle_event("palette:search", %{"value" => q}, socket) when is_binary(q) do
     {:noreply, socket |> assign(selected_index: 0) |> assign_results(q)}
   end
 
@@ -123,7 +123,7 @@ defmodule DurableDashboard.Components.Command.CommandPalette do
   end
 
   def handle_event("palette:select", %{"index" => idx}, socket) do
-    {:noreply, assign(socket, selected_index: String.to_integer(idx))}
+    {:noreply, assign(socket, selected_index: max(DurableDashboard.Params.int(idx, 0), 0))}
   end
 
   def handle_event("palette:activate", _, socket) do
@@ -138,6 +138,8 @@ defmodule DurableDashboard.Components.Command.CommandPalette do
          |> push_navigate(to: item.href)}
     end
   end
+
+  def handle_event(event, _params, socket), do: DurableDashboard.Params.ignore(event, socket)
 
   # ============================================================================
   # Render
@@ -345,7 +347,7 @@ defmodule DurableDashboard.Components.Command.CommandPalette do
   defp safe_schedules(nil), do: []
 
   defp safe_schedules(durable) do
-    Durable.list_schedules(durable: durable)
+    Durable.list_schedules!(durable: durable)
   rescue
     _ -> []
   end
@@ -355,7 +357,11 @@ defmodule DurableDashboard.Components.Command.CommandPalette do
   defp runs_by_id(nil, _q), do: []
 
   defp runs_by_id(durable, q) do
-    Durable.Query.list_executions(durable: durable, id_prefix: q, limit: @recent_limit)
+    # What was typed: text the engine refuses finds nothing.
+    case Durable.Query.list_executions(durable: durable, id_prefix: q, limit: @recent_limit) do
+      {:ok, runs} -> runs
+      {:error, _invalid} -> []
+    end
   rescue
     _ -> []
   end
@@ -363,7 +369,7 @@ defmodule DurableDashboard.Components.Command.CommandPalette do
   defp safe_workflows(nil), do: []
 
   defp safe_workflows(durable) do
-    Durable.Query.list_workflows(durable: durable)
+    Durable.Query.list_workflows!(durable: durable)
   rescue
     _ -> []
   end
@@ -372,7 +378,7 @@ defmodule DurableDashboard.Components.Command.CommandPalette do
 
   defp safe_recent(durable) do
     {rows, _total} =
-      Durable.Query.list_executions_with_total(
+      Durable.Query.list_executions_with_total!(
         durable: durable,
         top_level_only: true,
         limit: @recent_limit,
@@ -467,12 +473,20 @@ defmodule DurableDashboard.Components.Command.CommandPalette do
 
   # A query shaped like a workflow key (it contains ":") is looked up by exact
   # key: one row per workflow, the run holding it (or its newest run).
+  # What was typed: text the engine refuses finds nothing.
+  defp runs_with_key(filters) do
+    case Durable.Query.list_executions(filters) do
+      {:ok, runs} -> runs
+      {:error, _invalid} -> []
+    end
+  end
+
   defp key_results(_base, nil, _q), do: []
 
   defp key_results(base, durable, q) do
     if String.contains?(q, ":") do
       [durable: durable, key: q, limit: 20]
-      |> Durable.Query.list_executions()
+      |> runs_with_key()
       |> Enum.group_by(& &1.workflow_name)
       |> Enum.map(fn {_name, runs} -> Enum.find(runs, & &1.holds_key) || hd(runs) end)
       |> Enum.map(fn r ->

@@ -93,7 +93,7 @@ const faq = [
   },
   {
     q: 'Is there a dashboard?',
-    a: 'Yes. durable_dashboard is a Phoenix LiveView dashboard you mount in your router with one line. It shows runs, step timelines, pending inputs, queues and schedules.',
+    a: 'Yes. durable_dashboard is a Phoenix LiveView dashboard you mount in your router with one line, once for each Durable instance. It shows runs, step timelines, pending inputs, queues and schedules.',
   },
 ];
 const faqLd = {
@@ -171,7 +171,7 @@ const faqLd = {
       </p>
       <div class="rise"><DashboardShowcase /></div>
       <div class="dash rise">
-        <p class="sub">Mount it in your Phoenix router with one line. <a href="/docs/dashboard/">Dashboard docs</a></p>
+        <p class="sub">Mount it in your Phoenix router with one line, once for each Durable instance. <a href="/docs/dashboard/">Dashboard docs</a></p>
         <div class="snippet"><Code code={mount} lang="elixir" theme={night} transformers={[macroCalls]} wrap /></div>
       </div>
     </section>
@@ -185,8 +185,9 @@ const faqLd = {
     <section class="wrap block">
       <h2 class="rise">Operate it from code or the terminal</h2>
       <p class="sub rise">
-        Retry a failed run from the step that failed, rerun a finished one, cancel, pause a queue on every node, or prune
-        old runs.
+        Retry a failed run from the step that failed, rerun a finished one, cancel a run or only its wait, pause a queue
+        on every node, or prune old runs. Every function that reads returns <code>&#123;:ok, result&#125;</code> and has
+        a <code>!</code> twin.
       </p>
       <div class="rise"><Ops api={api} mix={mix} /></div>
     </section>
@@ -194,7 +195,8 @@ const faqLd = {
     <section class="wrap block">
       <h2 class="rise">Runs inside your app</h2>
       <p class="sub rise">
-        Durable is a library. Workflows are plain Elixir modules: no YAML, no new language. It starts in your
+        Durable is a library. Workflows are plain Elixir modules: no YAML, no new language, and a definition that
+        can't run doesn't compile. It starts in your
         supervision tree on every node and uses your Ecto repo. Runs are stored through a pluggable queue adapter,
         PostgreSQL by default.
       </p>

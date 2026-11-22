@@ -19,6 +19,7 @@ defmodule DurableDashboard.Live.WorkflowDetailLive do
   alias DurableDashboard.Cron
   alias DurableDashboard.Format
   alias DurableDashboard.Layouts
+  alias DurableDashboard.Params
   alias DurableDashboard.Path, as: DPath
   alias DurableDashboard.Trace
 
@@ -29,6 +30,7 @@ defmodule DurableDashboard.Live.WorkflowDetailLive do
   @impl true
   def mount(%{"name" => name}, session, socket) do
     config = session["config"]
+    name = Params.text(name)
 
     if connected?(socket) do
       if durable_config = Durable.Config.get_safe(config.durable) do
@@ -52,7 +54,7 @@ defmodule DurableDashboard.Live.WorkflowDetailLive do
     {:noreply,
      socket
      |> assign(
-       range: Charts.valid_range(params["range"]),
+       range: Charts.valid_range(Params.text(params["range"])),
        current_path: URI.parse(uri).path,
        breadcrumbs: [
          %{label: "Workflows", href: DPath.workflows(socket.assigns.base_path)},
@@ -61,6 +63,9 @@ defmodule DurableDashboard.Live.WorkflowDetailLive do
      )
      |> load()}
   end
+
+  @impl true
+  def handle_event(event, _params, socket), do: DurableDashboard.Params.ignore(event, socket)
 
   @impl true
   def handle_info(
@@ -97,19 +102,19 @@ defmodule DurableDashboard.Live.WorkflowDetailLive do
       until: now
     ]
 
-    summary = Enum.find(Durable.Stats.workflows(window), &(&1.workflow == name))
+    summary = Enum.find(Durable.Stats.workflows!(window), &(&1.workflow == name))
     definition = definition(summary)
-    steps = Durable.Stats.step_performance(window)
-    stats = Durable.Stats.overview(window)
+    steps = Durable.Stats.step_performance!(window)
+    stats = Durable.Stats.overview!(window)
 
     assign(socket,
       summary: summary,
       stats: stats,
-      timeline: Durable.Stats.timeline(window ++ [bucket_seconds: bucket]),
+      timeline: Durable.Stats.timeline!(window ++ [bucket_seconds: bucket]),
       steps: order_steps(steps, definition),
       structure: definition && Structure.build(definition, steps, stats.started),
-      errors: Durable.Stats.error_groups(window),
-      keys: Durable.Stats.keys(window ++ [bucket_seconds: bucket]),
+      errors: Durable.Stats.error_groups!(window),
+      keys: Durable.Stats.keys!(window ++ [bucket_seconds: bucket]),
       definition: definition,
       schedules: schedules(durable, name)
     )
@@ -130,7 +135,7 @@ defmodule DurableDashboard.Live.WorkflowDetailLive do
 
   defp schedules(durable, name) do
     [durable: durable]
-    |> Durable.list_schedules()
+    |> Durable.list_schedules!()
     |> Enum.filter(&(&1.workflow_name == name))
   rescue
     _ -> []

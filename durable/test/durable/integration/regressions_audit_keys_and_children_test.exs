@@ -12,7 +12,7 @@ defmodule Durable.Integration.AuditKeysAndChildrenRegressionsTest do
     use Durable
 
     workflow "probe_always_fails" do
-      step(:work, fn _data -> {:fail, "nope"} end)
+      step :work, fn _data -> {:fail, "nope"} end
     end
   end
 

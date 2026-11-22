@@ -15,10 +15,10 @@ defmodule Durable.Integration.RunControlTest do
     use Durable
 
     workflow "rc_quick" do
-      step(:a, fn data ->
+      step :a, fn data ->
         Probe.here(:quick)
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -26,9 +26,9 @@ defmodule Durable.Integration.RunControlTest do
     use Durable
 
     workflow "rc_flaky" do
-      step(:call, [retry: [max_attempts: 2, backoff: :constant, base: 1_500]], fn data ->
+      step :call, [retry: [max_attempts: 2, backoff: :constant, base: 1_500]], fn data ->
         if Probe.here(:flaky) == 1, do: {:error, :down}, else: {:ok, data}
-      end)
+      end
     end
   end
 
@@ -37,10 +37,10 @@ defmodule Durable.Integration.RunControlTest do
     use Durable.Context
 
     workflow "rc_attempts" do
-      step(:call, [retry: [max_attempts: 3, backoff: :constant, base: 50]], fn data ->
+      step :call, [retry: [max_attempts: 3, backoff: :constant, base: 50]], fn data ->
         Probe.here({attempt(), max_attempts(), last_attempt?()})
         if last_attempt?(), do: {:ok, data}, else: {:error, :down}
-      end)
+      end
     end
   end
 
@@ -50,12 +50,12 @@ defmodule Durable.Integration.RunControlTest do
     use Durable.Helpers
 
     workflow "rc_keeps_writes" do
-      step(:call, [retry: [max_attempts: 2, backoff: :constant, base: 50]], fn data ->
+      step :call, [retry: [max_attempts: 2, backoff: :constant, base: 50]], fn data ->
         Probe.here({:input, data["x"]})
         tries = (get_context(:tries) || 0) + 1
         put_context(:tries, tries)
         if tries == 1, do: {:error, :down}, else: {:ok, assign(data, :tries, tries)}
-      end)
+      end
     end
   end
 
@@ -63,17 +63,17 @@ defmodule Durable.Integration.RunControlTest do
     use Durable
 
     workflow "rc_runs_out_of_retries", on_failure: :rollback do
-      step(:book, [compensate: :unbook], fn data -> {:ok, data} end)
+      step :book, [compensate: :unbook], fn data -> {:ok, data} end
 
-      step(:call, [retry: [max_attempts: 2, backoff: :constant, base: 50]], fn _data ->
+      step :call, [retry: [max_attempts: 2, backoff: :constant, base: 50]], fn _data ->
         Probe.here(:call)
         {:error, :down}
-      end)
+      end
 
-      compensate(:unbook, fn data ->
+      compensate :unbook, fn data ->
         Probe.here(:unbook)
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -81,9 +81,9 @@ defmodule Durable.Integration.RunControlTest do
     use Durable
 
     workflow "rc_snooze_is_free" do
-      step(:call, [retry: [max_attempts: 1]], fn data ->
+      step :call, [retry: [max_attempts: 1]], fn data ->
         if Probe.here(:snoozer) < 3, do: {:snooze, 20}, else: {:ok, data}
-      end)
+      end
     end
   end
 
@@ -91,10 +91,10 @@ defmodule Durable.Integration.RunControlTest do
     use Durable
 
     workflow "rc_snoozes_too_long", timeout: 300 do
-      step(:call, fn _data ->
+      step :call, fn _data ->
         Probe.here(:too_long)
         {:snooze, :timer.hours(1)}
-      end)
+      end
     end
   end
 
@@ -102,17 +102,17 @@ defmodule Durable.Integration.RunControlTest do
     use Durable
 
     workflow "rc_fails", on_failure: :rollback do
-      step(:book, [compensate: :unbook], fn data -> {:ok, data} end)
+      step :book, [compensate: :unbook], fn data -> {:ok, data} end
 
-      step(:call, [retry: [max_attempts: 5]], fn _data ->
+      step :call, [retry: [max_attempts: 5]], fn _data ->
         Probe.here(:call)
         {:fail, "the file is gone"}
-      end)
+      end
 
-      compensate(:unbook, fn data ->
+      compensate :unbook, fn data ->
         Probe.here(:unbook)
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -120,22 +120,22 @@ defmodule Durable.Integration.RunControlTest do
     use Durable
 
     workflow "rc_cancels", on_failure: :rollback do
-      step(:book, [compensate: :unbook], fn data -> {:ok, data} end)
+      step :book, [compensate: :unbook], fn data -> {:ok, data} end
 
-      step(:call, [retry: [max_attempts: 5]], fn _data ->
+      step :call, [retry: [max_attempts: 5]], fn _data ->
         Probe.here(:call)
         {:cancel, "record deleted"}
-      end)
+      end
 
-      step(:never, fn data ->
+      step :never, fn data ->
         Probe.here(:never)
         {:ok, data}
-      end)
+      end
 
-      compensate(:unbook, fn data ->
+      compensate :unbook, fn data ->
         Probe.here(:unbook)
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -145,12 +145,12 @@ defmodule Durable.Integration.RunControlTest do
 
     workflow "rc_cancels_workflow_from_branch" do
       parallel :fan do
-        step(:stops, fn _data -> {:cancel, "order withdrawn"} end)
+        step :stops, fn _data -> {:cancel, "order withdrawn"} end
 
-        step(:waits, fn data ->
+        step :waits, fn data ->
           wait_for_event("never")
           {:ok, data}
-        end)
+        end
       end
     end
   end
@@ -161,8 +161,8 @@ defmodule Durable.Integration.RunControlTest do
 
     workflow "rc_cancels_one_branch" do
       parallel :sends, on_error: :collect do
-        step(:skipped, fn _data -> {:cancel, "nothing to send", scope: :run} end)
-        step(:sent, fn data -> {:ok, assign(data, :sent, true)} end)
+        step :skipped, fn _data -> {:cancel, "nothing to send", scope: :run} end
+        step :sent, fn data -> {:ok, assign(data, :sent, true)} end
       end
     end
   end
@@ -171,7 +171,7 @@ defmodule Durable.Integration.RunControlTest do
     use Durable
 
     workflow "rc_cancels_root" do
-      step(:work, fn _data -> {:cancel, "account closed", scope: :root} end)
+      step :work, fn _data -> {:cancel, "account closed", scope: :root} end
     end
   end
 
@@ -180,10 +180,10 @@ defmodule Durable.Integration.RunControlTest do
     use Durable.Orchestration
 
     workflow "rc_calls_cancels_root" do
-      step(:call, fn data ->
+      step :call, fn data ->
         call_workflow(CancelsRoot, %{}, ref: :child)
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -192,10 +192,10 @@ defmodule Durable.Integration.RunControlTest do
     use Durable.Wait
 
     workflow "rc_child_waits" do
-      step(:work, fn data ->
+      step :work, fn data ->
         wait_for_event("never")
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -205,12 +205,12 @@ defmodule Durable.Integration.RunControlTest do
     use Durable.Orchestration
 
     workflow "rc_calls_child_waits" do
-      step(:call, fn data ->
+      step :call, fn data ->
         case call_workflow(ChildWaits, %{}, ref: :child) do
           {:ok, _} -> {:ok, data}
           {:error, error} -> {:ok, assign(data, :child_error, error)}
         end
-      end)
+      end
     end
   end
 
@@ -219,10 +219,10 @@ defmodule Durable.Integration.RunControlTest do
     use Durable.Wait
 
     workflow "rc_waits" do
-      step(:a, fn data ->
+      step :a, fn data ->
         wait_for_event("go")
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -231,10 +231,10 @@ defmodule Durable.Integration.RunControlTest do
     use Durable.Wait
 
     workflow "rc_asks" do
-      step(:a, fn data ->
+      step :a, fn data ->
         wait_for_input("approve")
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -244,22 +244,22 @@ defmodule Durable.Integration.RunControlTest do
 
     workflow "rc_sleeping_branch" do
       parallel :fan do
-        step(:sleeper, fn data ->
+        step :sleeper, fn data ->
           sleep(1)
           Probe.here(:branch_done)
           {:ok, data}
-        end)
+        end
 
-        step(:quick, fn data ->
+        step :quick, fn data ->
           Probe.here(:quick)
           {:ok, data}
-        end)
+        end
       end
 
-      step(:after_block, fn data ->
+      step :after_block, fn data ->
         Probe.here(:after_block)
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -268,23 +268,23 @@ defmodule Durable.Integration.RunControlTest do
     use Durable.Wait
 
     workflow "rc_sleeps_before_branch" do
-      step(:first, fn data ->
+      step :first, fn data ->
         sleep(1)
         {:ok, data}
-      end)
+      end
 
       parallel :fan do
-        step(:sleeper, fn data ->
+        step :sleeper, fn data ->
           sleep(1)
           Probe.here(:branch_done)
           {:ok, data}
-        end)
+        end
       end
 
-      step(:after_block, fn data ->
+      step :after_block, fn data ->
         Probe.here(:after_block)
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -294,17 +294,17 @@ defmodule Durable.Integration.RunControlTest do
 
     workflow "rc_waiting_branch" do
       parallel :fan do
-        step(:waiter, fn data ->
+        step :waiter, fn data ->
           wait_for_event("go")
           Probe.here(:branch_done)
           {:ok, data}
-        end)
+        end
       end
 
-      step(:after_block, fn data ->
+      step :after_block, fn data ->
         Probe.here(:after_block)
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -313,10 +313,10 @@ defmodule Durable.Integration.RunControlTest do
     use Durable.Wait
 
     workflow "rc_child_sleeps" do
-      step(:nap, fn data ->
+      step :nap, fn data ->
         sleep(1)
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -326,17 +326,17 @@ defmodule Durable.Integration.RunControlTest do
 
     workflow "rc_branch_calls_sleeper" do
       parallel :fan do
-        step(:caller, fn data ->
+        step :caller, fn data ->
           {:ok, _result} = call_workflow(ChildSleeps, %{}, ref: :nap)
           Probe.here(:branch_done)
           {:ok, data}
-        end)
+        end
       end
 
-      step(:after_block, fn data ->
+      step :after_block, fn data ->
         Probe.here(:after_block)
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -344,16 +344,16 @@ defmodule Durable.Integration.RunControlTest do
     use Durable
 
     workflow "rc_undo_after_branch_fails", on_failure: :rollback do
-      step(:book, [compensate: :unbook], fn data -> {:ok, Map.put(data, "booking", "B1")} end)
+      step :book, [compensate: :unbook], fn data -> {:ok, Map.put(data, "booking", "B1")} end
 
       parallel :fan do
-        step(:charge, fn _data -> {:fail, "declined"} end)
+        step :charge, fn _data -> {:fail, "declined"} end
       end
 
-      compensate(:unbook, fn data ->
+      compensate :unbook, fn data ->
         Probe.put(:undone_with, data["booking"] || data[:booking])
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -362,17 +362,17 @@ defmodule Durable.Integration.RunControlTest do
     use Durable.Wait
 
     workflow "rc_undo_after_input_times_out", on_failure: :rollback do
-      step(:book, [compensate: :unbook], fn data -> {:ok, Map.put(data, "booking", "B1")} end)
+      step :book, [compensate: :unbook], fn data -> {:ok, Map.put(data, "booking", "B1")} end
 
-      step(:approve, fn data ->
+      step :approve, fn data ->
         wait_for_input("approve", timeout: 1, on_timeout: :fail)
         {:ok, data}
-      end)
+      end
 
-      compensate(:unbook, fn data ->
+      compensate :unbook, fn data ->
         Probe.put(:undone_with, data["booking"] || data[:booking])
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -380,13 +380,13 @@ defmodule Durable.Integration.RunControlTest do
     use Durable
 
     workflow "rc_undo_after_deadline", timeout: :timer.hours(1), on_failure: :rollback do
-      step(:book, [compensate: :unbook], fn data -> {:ok, Map.put(data, "booking", "B1")} end)
-      step(:charge, [queue: :nobody], fn data -> {:ok, data} end)
+      step :book, [compensate: :unbook], fn data -> {:ok, Map.put(data, "booking", "B1")} end
+      step :charge, [queue: :nobody], fn data -> {:ok, data} end
 
-      compensate(:unbook, fn data ->
+      compensate :unbook, fn data ->
         Probe.put(:undone_with, data["booking"] || data[:booking])
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -395,10 +395,10 @@ defmodule Durable.Integration.RunControlTest do
     use Durable.Wait
 
     workflow "rc_waits_for_any" do
-      step(:a, fn data ->
+      step :a, fn data ->
         wait_for_any(["yes", "no"])
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -407,10 +407,10 @@ defmodule Durable.Integration.RunControlTest do
     use Durable.Wait
 
     workflow "rc_waits_for_all" do
-      step(:a, fn data ->
+      step :a, fn data ->
         wait_for_all(["one", "two"])
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -418,9 +418,9 @@ defmodule Durable.Integration.RunControlTest do
     use Durable
 
     workflow "rc_fails_until_allowed" do
-      step(:a, fn data ->
+      step :a, fn data ->
         if Probe.set?(:allow), do: {:ok, data}, else: {:error, :down}
-      end)
+      end
     end
   end
 
@@ -430,11 +430,11 @@ defmodule Durable.Integration.RunControlTest do
     use Durable.Orchestration
 
     workflow "rc_calls_quick" do
-      step(:call, fn data ->
+      step :call, fn data ->
         Probe.here({:parent, workflow_id()})
         call_workflow(Quick, %{}, ref: :child)
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -443,8 +443,8 @@ defmodule Durable.Integration.RunControlTest do
 
     workflow "rc_fans_out" do
       parallel :fan do
-        step(:one, fn data -> {:ok, data} end)
-        step(:two, fn data -> {:ok, data} end)
+        step :one, fn data -> {:ok, data} end
+        step :two, fn data -> {:ok, data} end
       end
     end
   end
@@ -454,24 +454,24 @@ defmodule Durable.Integration.RunControlTest do
 
     workflow "rc_wide_fan_out" do
       parallel :fan do
-        step(:b01, fn data -> {:ok, data} end)
-        step(:b02, fn data -> {:ok, data} end)
-        step(:b03, fn data -> {:ok, data} end)
-        step(:b04, fn data -> {:ok, data} end)
-        step(:b05, fn data -> {:ok, data} end)
-        step(:b06, fn data -> {:ok, data} end)
-        step(:b07, fn data -> {:ok, data} end)
-        step(:b08, fn data -> {:ok, data} end)
-        step(:b09, fn data -> {:ok, data} end)
-        step(:b10, fn data -> {:ok, data} end)
-        step(:b11, fn data -> {:ok, data} end)
-        step(:b12, fn data -> {:ok, data} end)
+        step :b01, fn data -> {:ok, data} end
+        step :b02, fn data -> {:ok, data} end
+        step :b03, fn data -> {:ok, data} end
+        step :b04, fn data -> {:ok, data} end
+        step :b05, fn data -> {:ok, data} end
+        step :b06, fn data -> {:ok, data} end
+        step :b07, fn data -> {:ok, data} end
+        step :b08, fn data -> {:ok, data} end
+        step :b09, fn data -> {:ok, data} end
+        step :b10, fn data -> {:ok, data} end
+        step :b11, fn data -> {:ok, data} end
+        step :b12, fn data -> {:ok, data} end
       end
 
-      step(:after_fan, fn data ->
+      step :after_fan, fn data ->
         Probe.here(:after_fan)
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -479,7 +479,7 @@ defmodule Durable.Integration.RunControlTest do
     use Durable
 
     workflow "rc_child_fails" do
-      step(:work, fn _data -> {:fail, "no good"} end)
+      step :work, fn _data -> {:fail, "no good"} end
     end
   end
 
@@ -487,7 +487,7 @@ defmodule Durable.Integration.RunControlTest do
     use Durable
 
     workflow "rc_child_cancels" do
-      step(:work, fn _data -> {:cancel, "not needed"} end)
+      step :work, fn _data -> {:cancel, "not needed"} end
     end
   end
 
@@ -495,9 +495,9 @@ defmodule Durable.Integration.RunControlTest do
     use Durable
 
     workflow "rc_child_compensates", on_failure: :rollback do
-      step(:book, [compensate: :unbook], fn data -> {:ok, data} end)
-      step(:charge, fn _data -> {:fail, "card declined"} end)
-      compensate(:unbook, fn data -> {:ok, data} end)
+      step :book, [compensate: :unbook], fn data -> {:ok, data} end
+      step :charge, fn _data -> {:fail, "card declined"} end
+      compensate :unbook, fn data -> {:ok, data} end
     end
   end
 
@@ -505,9 +505,9 @@ defmodule Durable.Integration.RunControlTest do
     use Durable
 
     workflow "rc_child_compensation_fails", on_failure: :rollback do
-      step(:book, [compensate: :unbook], fn data -> {:ok, data} end)
-      step(:charge, fn _data -> {:fail, "card declined"} end)
-      compensate(:unbook, fn _data -> raise "still booked" end)
+      step :book, [compensate: :unbook], fn data -> {:ok, data} end
+      step :charge, fn _data -> {:fail, "card declined"} end
+      compensate :unbook, fn _data -> raise "still booked" end
     end
   end
 
@@ -515,12 +515,12 @@ defmodule Durable.Integration.RunControlTest do
     use Durable
 
     workflow "rc_child_compensation_errors", on_failure: :rollback do
-      step(:book, [compensate: :unbook], fn data -> {:ok, data} end)
-      step(:charge, fn _data -> {:fail, "card declined"} end)
+      step :book, [compensate: :unbook], fn data -> {:ok, data} end
+      step :charge, fn _data -> {:fail, "card declined"} end
 
-      compensate(:unbook, [retry: [max_attempts: 2, backoff: :constant, base: 1]], fn _data ->
+      compensate :unbook, [retry: [max_attempts: 2, backoff: :constant, base: 1]], fn _data ->
         {:error, {:still_booked, self()}}
-      end)
+      end
     end
   end
 
@@ -557,7 +557,7 @@ defmodule Durable.Integration.RunControlTest do
     use Durable.Orchestration
 
     workflow "rc_parent_held_up" do
-      step(:call, fn data ->
+      step :call, fn data ->
         unless Probe.set?(:parent_released), do: Holds.parent_row(workflow_id())
 
         case call_workflow(String.to_existing_atom(data[:child] || data["child"]), %{},
@@ -566,7 +566,7 @@ defmodule Durable.Integration.RunControlTest do
           {:ok, _} -> {:ok, assign(data, :child_ok, true)}
           {:error, error} -> {:ok, assign(data, :child_error, error)}
         end
-      end)
+      end
     end
   end
 
@@ -576,14 +576,14 @@ defmodule Durable.Integration.RunControlTest do
     use Durable.Orchestration
 
     workflow "rc_calls_child" do
-      step(:call, fn data ->
+      step :call, fn data ->
         case call_workflow(String.to_existing_atom(data[:child] || data["child"]), %{},
                ref: :child
              ) do
           {:ok, _} -> {:ok, assign(data, :child_ok, true)}
           {:error, error} -> {:ok, assign(data, :child_error, error)}
         end
-      end)
+      end
     end
   end
 
@@ -592,10 +592,10 @@ defmodule Durable.Integration.RunControlTest do
     use Durable.Orchestration
 
     workflow "rc_fires_and_forgets" do
-      step(:fire, fn data ->
+      step :fire, fn data ->
         {:ok, _child} = start_workflow(Quick, %{}, ref: :fired)
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -605,17 +605,17 @@ defmodule Durable.Integration.RunControlTest do
 
     workflow "rc_parked_in_branch" do
       parallel :fan do
-        step(:flaky, [retry: [max_attempts: 2, backoff: :constant, base: 100]], fn data ->
+        step :flaky, [retry: [max_attempts: 2, backoff: :constant, base: 100]], fn data ->
           if Probe.here(:branch_flaky) == 1, do: {:error, :down}, else: {:ok, data}
-        end)
+        end
 
-        step(:steady, fn data -> {:ok, data} end)
+        step :steady, fn data -> {:ok, data} end
       end
 
-      step(:after_block, fn data ->
+      step :after_block, fn data ->
         Probe.here(:after_block)
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -623,10 +623,10 @@ defmodule Durable.Integration.RunControlTest do
     use Durable
 
     workflow "rc_long_retry" do
-      step(:call, [retry: [max_attempts: 2, backoff: :constant, base: :timer.hours(1)]], fn _ ->
+      step :call, [retry: [max_attempts: 2, backoff: :constant, base: :timer.hours(1)]], fn _ ->
         Probe.here(:long_retry)
         {:error, :down}
-      end)
+      end
     end
   end
 
@@ -634,11 +634,11 @@ defmodule Durable.Integration.RunControlTest do
     use Durable
 
     workflow "rc_held", on_failure: :rollback do
-      step(:a, fn data ->
+      step :a, fn data ->
         Probe.here(:held)
         Probe.wait_for({:go, Probe.hits(:held)})
         {:ok, data}
-      end)
+      end
     end
   end
 

@@ -13,26 +13,26 @@ defmodule Durable.Context do
         use Durable.Context
 
         workflow "process_order" do
-          step :init do
-            order = input().order
-            put_context(:order_id, order.id)
-            put_context(:items, order.items)
+          step :init, fn order ->
+            put_context(:order_id, order["id"])
+            {:ok, order}
           end
 
-          step :calculate_total do
-            items = get_context(:items)
-            total = Enum.sum(Enum.map(items, & &1.price))
+          step :calculate_total, fn order ->
+            total = order["items"] |> Enum.map(& &1["price"]) |> Enum.sum()
             put_context(:total, total)
+            {:ok, order}
           end
 
-          step :finalize do
-            %{
-              order_id: get_context(:order_id),
-              total: get_context(:total)
-            }
+          step :finalize, fn order ->
+            Orders.close(get_context(:order_id), get_context(:total))
+            {:ok, order}
           end
         end
       end
+
+  A step still returns `{:ok, data}`. What it put in the context is kept
+  beside what it returns.
 
   ## Context Storage
 
@@ -46,6 +46,7 @@ defmodule Durable.Context do
   import Ecto.Query, only: [from: 2]
 
   alias Durable.Config
+  alias Durable.EngineState
   alias Durable.Queue.Drainer
   alias Durable.Repo
   alias Durable.Storage.Schemas.WorkflowExecution
@@ -143,8 +144,13 @@ defmodule Durable.Context do
   """
   @spec put_context(atom() | String.t(), any()) :: :ok
   def put_context(key, value) do
-    context = context()
-    Process.put(@context_key, Map.put(context, stored_key(context, key), value))
+    # The engine's own keys aren't the user's to write: dropped, like any
+    # other of the user's data that uses one.
+    if not EngineState.key?(key) do
+      context = context()
+      Process.put(@context_key, Map.put(context, stored_key(context, key), value))
+    end
+
     :ok
   end
 
@@ -159,7 +165,7 @@ defmodule Durable.Context do
   @spec put_context(map()) :: :ok
   def put_context(map) when is_map(map) do
     context = context()
-    Process.put(@context_key, Map.merge(context, as_stored(context, map)))
+    Process.put(@context_key, Map.merge(context, as_stored(context, EngineState.strip(map))))
     :ok
   end
 
@@ -190,7 +196,7 @@ defmodule Durable.Context do
   @spec merge_context(map()) :: :ok
   def merge_context(map) when is_map(map) do
     context = context()
-    Process.put(@context_key, deep_merge(context, as_stored(context, map)))
+    Process.put(@context_key, deep_merge(context, as_stored(context, EngineState.strip(map))))
     :ok
   end
 
@@ -541,6 +547,7 @@ defmodule Durable.Context do
     Process.delete(@workflow_id_key)
     Process.delete(@step_key)
     Process.delete(@attempt_key)
+    EngineState.clear_current()
     # Log capture keys (cleanup in case of crashes)
     Durable.LogCapture.clear_logs()
     Process.delete(:durable_original_group_leader)

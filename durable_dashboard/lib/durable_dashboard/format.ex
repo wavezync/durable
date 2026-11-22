@@ -1,5 +1,15 @@
 defmodule DurableDashboard.Format do
-  @moduledoc "Number formatting shared by the dashboard's pages."
+  @moduledoc "Number and text formatting shared by the dashboard's pages."
+
+  @doc """
+  Data a workflow stored (an error's message, a cancel reason), as text for
+  the page. Text is shown as it is; anything else, a map or a list a step
+  returned where a message was expected, is inspected, and cut short so a huge
+  term can't fill the page. Never `to_string/1` such data: it raises on a map.
+  """
+  def text(nil), do: nil
+  def text(value) when is_binary(value), do: value
+  def text(value), do: inspect(value, limit: 50, printable_limit: 500)
 
   @doc "`12482` → `12,482`; nil → `—`."
   def int(nil), do: "—"

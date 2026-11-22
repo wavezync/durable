@@ -16,7 +16,7 @@ defmodule PhoenixDemo.Workflows.PaymentWorkflow do
   require Logger
 
   workflow "process_payment", timeout: minutes(5) do
-    step(:validate_amount, fn data ->
+    step :validate_amount, fn data ->
       amount = data["amount"] || 0
 
       if amount <= 0 do
@@ -27,7 +27,7 @@ defmodule PhoenixDemo.Workflows.PaymentWorkflow do
         Logger.info("[Payment] Validating $#{amount}")
         {:ok, assign(data, :amount, amount)}
       end
-    end)
+    end
 
     step(
       :authorize_card,
@@ -55,7 +55,7 @@ defmodule PhoenixDemo.Workflows.PaymentWorkflow do
       end
     )
 
-    step(:capture_payment, fn data ->
+    step :capture_payment, fn data ->
       amount = get_context(:amount)
       Logger.info("[Payment] Capturing $#{amount}")
       Process.sleep(100)
@@ -71,6 +71,6 @@ defmodule PhoenixDemo.Workflows.PaymentWorkflow do
        |> assign("payment_id", payment_id)
        |> assign("amount", amount)
        |> assign("captured_at", captured_at)}
-    end)
+    end
   end
 end

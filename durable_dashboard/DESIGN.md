@@ -858,6 +858,10 @@ Three views: **Needs input**, **Waiting for events**, **Sleeping**.
   text. A disclosure states exactly what the run receives.
 - Every form field is keyed by the input's id, so answering one task never
   leaves values in the next.
+- Every form names the request it was rendered for, and the answer goes to
+  that request or to none: if it was answered or withdrawn meanwhile the
+  page says "That request changed while you were looking at it. Review it
+  again." and shows what's open now.
 - Waiting for events: a table with a "Send event…" composer (JSON payload)
   calling `send_event`. Internal events (`__*`) are hidden.
 - Viewers see the forms disabled with a one-line explanation.
@@ -1067,7 +1071,7 @@ A parallel child's output is stored wrapped (`__output__` / `__context__` /
 
 Child runs are linked from the step's execution: when it belongs to a run
 other than this one, the card becomes a `child_workflow` that opens it.
-`__parallel_children` / `__call_children` in the root's context are a
+`__parallel_children` / `__call_children` in the root's engine state are a
 fallback for children that haven't produced a step yet.
 
 ---

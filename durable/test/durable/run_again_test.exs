@@ -18,12 +18,12 @@ defmodule Durable.RunAgainTest do
     use Durable.Wait
 
     workflow "rebuild_index", on_duplicate: :run_again do
-      step(:work, fn data ->
+      step :work, fn data ->
         case wait_for_event("go") do
           %{"fail" => true} -> {:fail, "broken"}
           _ -> {:ok, data}
         end
-      end)
+      end
     end
   end
 
@@ -32,10 +32,10 @@ defmodule Durable.RunAgainTest do
     use Durable.Wait
 
     workflow "rebuild_after_failure", on_duplicate: :run_again, reuse: :after_failure do
-      step(:work, fn data ->
+      step :work, fn data ->
         wait_for_event("go")
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -135,7 +135,7 @@ defmodule Durable.RunAgainTest do
         use Durable
 
         workflow "never_again", on_duplicate: :run_again, reuse: :never do
-          step(:a, fn data -> {:ok, data} end)
+          step :a, fn data -> {:ok, data} end
         end
       end
     end

@@ -110,6 +110,10 @@ defmodule Durable.Queue.Manager do
 
   @impl true
   def init(%Config{} = config) do
+    # The manager that stopped before this one left the node stopping
+    # (Drainer.terminate/2). A manager that starts is a node that claims.
+    Drainer.reset(config.name)
+
     children =
       [
         # Registry for looking up pollers by name

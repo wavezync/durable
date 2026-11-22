@@ -27,6 +27,7 @@ defmodule DurableDashboard.Live.ExecutionsLive do
   alias DurableDashboard.Components.Core
   alias DurableDashboard.Components.Data.ExecutionFilters
   alias DurableDashboard.Layouts
+  alias DurableDashboard.Params
   alias DurableDashboard.Path, as: DPath
   alias DurableDashboard.RunSearch
   alias DurableDashboard.Trace
@@ -96,7 +97,7 @@ defmodule DurableDashboard.Live.ExecutionsLive do
 
   @impl true
   def handle_params(params, uri, socket) do
-    workflow_name = params["name"]
+    workflow_name = Params.text(params["name"])
     query = parse_query(params)
 
     breadcrumbs =
@@ -154,11 +155,11 @@ defmodule DurableDashboard.Live.ExecutionsLive do
   end
 
   def handle_event("page", %{"page" => page}, socket) do
-    query = %{socket.assigns.query | page: max(parse_int(page, 1), 1)}
+    query = %{socket.assigns.query | page: Params.page(page)}
     {:noreply, push_patch(socket, to: query_path(socket.assigns, query))}
   end
 
-  def handle_event("toggle", %{"id" => id}, socket) do
+  def handle_event("toggle", %{"id" => id}, socket) when is_binary(id) do
     selected = socket.assigns.selected
 
     selected =
@@ -183,7 +184,7 @@ defmodule DurableDashboard.Live.ExecutionsLive do
   def handle_event("show-latest", _params, socket), do: {:noreply, load_rows(socket)}
 
   # A chip on a row adds its tag to the query bar; clicking it twice changes nothing.
-  def handle_event("filter-tag", %{"tag" => tag}, socket) do
+  def handle_event("filter-tag", %{"tag" => tag}, socket) when is_binary(tag) do
     query = socket.assigns.query
     terms = query.q |> RunSearch.tokens() |> Enum.map(& &1.raw)
     term = RunSearch.term("tag", tag)
@@ -226,9 +227,11 @@ defmodule DurableDashboard.Live.ExecutionsLive do
     {:noreply, socket |> assign(selected: MapSet.new(), bulk_result: message) |> load_rows()}
   end
 
+  def handle_event(event, _params, socket), do: Params.ignore(event, socket)
+
   defp run_action(:retry, id, durable, _user), do: Durable.retry(id, durable: durable)
   defp run_action(:rerun, id, durable, _user), do: Durable.rerun(id, durable: durable)
-  defp run_action(:cancel, id, _durable, _user), do: Durable.cancel(id)
+  defp run_action(:cancel, id, durable, _user), do: Durable.cancel(id, nil, durable: durable)
 
   defp run_action(:release, id, durable, user),
     do: Durable.release_key(id, durable: durable, by: user)
@@ -768,8 +771,18 @@ defmodule DurableDashboard.Live.ExecutionsLive do
     filters = filters(durable, name, query)
     offset = (query.page - 1) * @per_page
 
-    {rows, total} =
-      Durable.Query.list_executions_with_total(filters ++ [limit: @per_page, offset: offset])
+    # The filters come from the URL. One the engine refuses (`?parent=` that
+    # isn't a run's id) matches nothing.
+    {rows, total, status_counts} =
+      with {:ok, {rows, total}} <-
+             Durable.Query.list_executions_with_total(
+               filters ++ [limit: @per_page, offset: offset]
+             ),
+           {:ok, status_counts} <- Durable.Query.count_by_status(filters) do
+        {rows, total, status_counts}
+      else
+        {:error, _invalid_filter} -> {[], 0, %{}}
+      end
 
     fresh = rows |> attach_step_stats(durable) |> attach_parked(durable)
     {rows, held} = if mode == :live, do: reconcile(socket.assigns.rows, fresh), else: {fresh, nil}
@@ -779,7 +792,7 @@ defmodule DurableDashboard.Live.ExecutionsLive do
       rows: rows,
       held: held,
       total: total,
-      status_counts: Durable.Query.count_by_status(filters),
+      status_counts: status_counts,
       now: DateTime.utc_now()
     )
     |> schedule_tick()
@@ -918,13 +931,13 @@ defmodule DurableDashboard.Live.ExecutionsLive do
   end
 
   defp fetch_workflows(durable) do
-    Durable.Query.list_workflows(durable: durable)
+    Durable.Query.list_workflows!(durable: durable)
   rescue
     _ -> []
   end
 
   defp fetch_schedules(durable) do
-    [durable: durable] |> Durable.list_schedules() |> Enum.map(& &1.name)
+    [durable: durable] |> Durable.list_schedules!() |> Enum.map(& &1.name)
   rescue
     _ -> []
   end
@@ -935,14 +948,14 @@ defmodule DurableDashboard.Live.ExecutionsLive do
 
   defp parse_query(params) do
     %{
-      page: max(parse_int(params["page"], 1), 1),
-      q: nilify(params["q"]),
-      workflow: nilify(params["workflow"]),
-      statuses: parse_list(params["status"]),
-      range: nilify(params["range"]),
-      from: nilify(params["from"]),
-      to: nilify(params["to"]),
-      parent: nilify(params["parent"])
+      page: Params.page(params["page"]),
+      q: Params.text(params["q"]),
+      workflow: Params.text(params["workflow"]),
+      statuses: Params.list(params["status"]),
+      range: Params.text(params["range"]),
+      from: Params.text(params["from"]),
+      to: Params.text(params["to"]),
+      parent: Params.text(params["parent"])
     }
   end
 
@@ -964,24 +977,6 @@ defmodule DurableDashboard.Live.ExecutionsLive do
 
     if params == [], do: path, else: path <> "?" <> URI.encode_query(params)
   end
-
-  defp parse_list(nil), do: []
-  defp parse_list(s), do: String.split(s, ",", trim: true)
-
-  defp parse_int(nil, default), do: default
-
-  defp parse_int(v, default) when is_binary(v) do
-    case Integer.parse(v) do
-      {n, _} -> n
-      :error -> default
-    end
-  end
-
-  defp parse_int(v, _default) when is_integer(v), do: v
-
-  defp nilify(nil), do: nil
-  defp nilify(""), do: nil
-  defp nilify(v), do: v
 
   # datetime-local ("YYYY-MM-DDTHH:MM"), read as UTC.
   defp parse_local_datetime(nil), do: nil

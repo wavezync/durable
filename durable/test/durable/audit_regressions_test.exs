@@ -15,10 +15,10 @@ defmodule Durable.AuditRegressionsTest do
     use Durable.Wait
 
     workflow "probe_rebuild", on_duplicate: :run_again do
-      step(:work, fn data ->
+      step :work, fn data ->
         wait_for_event("go")
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -26,7 +26,7 @@ defmodule Durable.AuditRegressionsTest do
     use Durable
 
     workflow "probe_debounced", debounce: [period: 50] do
-      step(:work, fn data -> {:ok, data} end)
+      step :work, fn data -> {:ok, data} end
     end
   end
 
@@ -35,10 +35,10 @@ defmodule Durable.AuditRegressionsTest do
     use Durable.Wait
 
     workflow "probe_waiter" do
-      step(:work, fn data ->
+      step :work, fn data ->
         wait_for_event("never")
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -47,17 +47,17 @@ defmodule Durable.AuditRegressionsTest do
     use Durable.Context
 
     workflow "probe_put_map" do
-      step(:one, fn _data ->
+      step :one, fn _data ->
         put_context(%{count: 5})
         {:ok, %{}}
-      end)
+      end
     end
 
     workflow "probe_put_key" do
-      step(:one, fn _data ->
+      step :one, fn _data ->
         put_context(:count, 5)
         {:ok, %{}}
-      end)
+      end
     end
   end
 
@@ -65,11 +65,11 @@ defmodule Durable.AuditRegressionsTest do
     use Durable
 
     workflow "probe_flaky_child" do
-      step(:work, fn data ->
+      step :work, fn data ->
         if :persistent_term.get({__MODULE__, :broken}, false),
           do: {:error, "child broken"},
           else: {:ok, Map.put(data, "child", "ok")}
-      end)
+      end
     end
   end
 
@@ -78,12 +78,12 @@ defmodule Durable.AuditRegressionsTest do
     use Durable.Orchestration
 
     workflow "probe_calls_flaky" do
-      step(:call, fn data ->
+      step :call, fn data ->
         case call_workflow(FlakyChild, %{}) do
           {:ok, result} -> {:ok, Map.put(data, "result", result)}
           {:error, reason} -> {:error, reason}
         end
-      end)
+      end
     end
   end
 
@@ -92,11 +92,11 @@ defmodule Durable.AuditRegressionsTest do
     use Durable.Orchestration
 
     workflow "probe_calls_by_ref" do
-      step(:call, fn data ->
+      step :call, fn data ->
         {:ok, child} = call_workflow(FlakyChild, %{}, ref: data["ref"])
         {:ok, _id} = start_workflow(FlakyChild, %{}, ref: data["ref"])
         {:ok, Map.put(data, "result", child)}
-      end)
+      end
     end
   end
 
@@ -106,23 +106,23 @@ defmodule Durable.AuditRegressionsTest do
 
     workflow "probe_half_broken", on_failure: :rollback do
       parallel :sides do
-        step(:left, fn data -> {:ok, Map.put(data, "left", 1)} end)
+        step :left, fn data -> {:ok, Map.put(data, "left", 1)} end
 
-        step(:right, fn data ->
+        step :right, fn data ->
           if :persistent_term.get({__MODULE__, :broken}, false),
             do: {:error, "right broken"},
             else: {:ok, Map.put(data, "right", 2)}
-        end)
+        end
       end
 
-      step(:after, fn data ->
+      step :after, fn data ->
         {:ok,
          Map.put(
            data,
            "seen",
            data[:sides] |> Map.keys() |> Enum.map(&to_string/1) |> Enum.sort()
          )}
-      end)
+      end
     end
   end
 
@@ -272,7 +272,7 @@ defmodule Durable.AuditRegressionsTest do
           e -> {:raised, e.__struct__, Exception.message(e) |> String.slice(0, 120)}
         end
 
-      assert match?({:returned, _}, result)
+      assert match?({:returned, {tag, _}} when tag in [:ok, :error], result)
     end
   end
 
@@ -309,7 +309,7 @@ defmodule Durable.AuditRegressionsTest do
     parent = run_workflow(CallsFlaky, %{})
     assert parent.status == :failed
 
-    [child] = Durable.list_children(parent.id)
+    [child] = Durable.list_children!(parent.id)
     assert child.status == :failed
 
     :persistent_term.put({FlakyChild, :broken}, false)

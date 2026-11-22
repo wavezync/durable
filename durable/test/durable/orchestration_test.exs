@@ -33,7 +33,7 @@ defmodule Durable.OrchestrationTest do
       assert parent.context["before_call"] == true
 
       # Child should exist with parent_workflow_id set
-      child_id = parent.context["__child:simple_child_workflow"]
+      child_id = parent.engine_state["__child:simple_child_workflow"]
       assert child_id != nil
 
       child = repo.get!(WorkflowExecution, child_id)
@@ -72,7 +72,7 @@ defmodule Durable.OrchestrationTest do
       {:ok, parent} = create_and_execute_workflow(CallWorkflowParent, %{})
       assert parent.status == :waiting
 
-      child_id = parent.context["__child:simple_child_workflow"]
+      child_id = parent.engine_state["__child:simple_child_workflow"]
       assert child_id != nil
 
       # The parent's :call_child step row links directly to the spawned child —
@@ -97,7 +97,7 @@ defmodule Durable.OrchestrationTest do
 
       assert parent.status == :waiting
 
-      child_id = parent.context["__child:failing_child_workflow"]
+      child_id = parent.engine_state["__child:failing_child_workflow"]
       assert child_id != nil
 
       # Execute the failing child
@@ -124,7 +124,7 @@ defmodule Durable.OrchestrationTest do
       {:ok, parent} = create_and_execute_workflow(CallWorkflowParent, %{})
 
       assert parent.status == :waiting
-      child_id = parent.context["__child:simple_child_workflow"]
+      child_id = parent.engine_state["__child:simple_child_workflow"]
 
       # Count children before
       children_before =
@@ -158,7 +158,7 @@ defmodule Durable.OrchestrationTest do
       {:ok, parent} = create_and_execute_workflow(CallWorkflowParent, %{})
 
       assert parent.status == :waiting
-      child_id = parent.context["__child:simple_child_workflow"]
+      child_id = parent.engine_state["__child:simple_child_workflow"]
 
       # Manually set parent back to pending to simulate crash-resume
       # without child completing
@@ -207,7 +207,7 @@ defmodule Durable.OrchestrationTest do
       assert parent.context["before_fire"] == true
       assert parent.context["after_fire"] == true
 
-      child_id = parent.context["__fire_forget:confirmation_email"]
+      child_id = parent.engine_state["__fire_forget:confirmation_email"]
       assert child_id != nil
 
       child = repo.get!(WorkflowExecution, child_id)
@@ -280,7 +280,7 @@ defmodule Durable.OrchestrationTest do
       {:ok, parent} = create_and_execute_workflow(CallWorkflowParent, %{})
 
       assert parent.status == :waiting
-      child_id = parent.context["__child:simple_child_workflow"]
+      child_id = parent.engine_state["__child:simple_child_workflow"]
 
       child = repo.get!(WorkflowExecution, child_id)
       assert child.status == :pending
@@ -301,7 +301,7 @@ defmodule Durable.OrchestrationTest do
       # Use fire-and-forget so parent completes
       {:ok, parent} = create_and_execute_workflow(FireForgetParent, %{})
 
-      child_id = parent.context["__fire_forget:confirmation_email"]
+      child_id = parent.engine_state["__fire_forget:confirmation_email"]
 
       # Complete the child first
       Executor.execute_workflow(child_id, config)
@@ -313,7 +313,7 @@ defmodule Durable.OrchestrationTest do
       # (The fire-forget parent already completed, so let's test with call_workflow)
       {:ok, parent2} = create_and_execute_workflow(CallWorkflowParent, %{})
 
-      child2_id = parent2.context["__child:simple_child_workflow"]
+      child2_id = parent2.engine_state["__child:simple_child_workflow"]
 
       # Complete child2
       Executor.execute_workflow(child2_id, config)
@@ -348,7 +348,7 @@ defmodule Durable.OrchestrationTest do
       assert a.status == :waiting
 
       # B (child of A) should exist
-      b_id = a.context["__child:parent_workflow"]
+      b_id = a.engine_state["__child:parent_workflow"]
       assert b_id != nil
 
       # Execute B — it will call C and wait
@@ -358,7 +358,7 @@ defmodule Durable.OrchestrationTest do
       assert b.status == :waiting
 
       # C (child of B) should exist
-      c_id = b.context["__child:simple_child_workflow"]
+      c_id = b.engine_state["__child:simple_child_workflow"]
       assert c_id != nil
 
       c = repo.get!(WorkflowExecution, c_id)
@@ -405,7 +405,7 @@ defmodule Durable.OrchestrationTest do
       assert parent.status == :completed
 
       # Child exists and can run independently
-      child_id = parent.context["__fire_forget:confirmation_email"]
+      child_id = parent.engine_state["__fire_forget:confirmation_email"]
       assert child_id != nil
 
       Executor.execute_workflow(child_id, config)
@@ -419,17 +419,17 @@ defmodule Durable.OrchestrationTest do
 
       {:ok, parent} = create_and_execute_workflow(FireForgetIdempotentParent, %{})
 
-      children = Durable.list_children(parent.id)
+      children = Durable.list_children!(parent.id)
       assert length(children) == 2
 
       Enum.each(children, fn child ->
         Executor.execute_workflow(child.id, config)
       end)
 
-      completed_children = Durable.list_children(parent.id, status: :completed)
+      completed_children = Durable.list_children!(parent.id, status: :completed)
       assert length(completed_children) == 2
 
-      pending_children = Durable.list_children(parent.id, status: :pending)
+      pending_children = Durable.list_children!(parent.id, status: :pending)
       assert pending_children == []
     end
   end
@@ -480,9 +480,9 @@ defmodule SimpleChildWorkflow do
   use Durable.Helpers
 
   workflow "simple_child" do
-    step(:do_work, fn data ->
+    step :do_work, fn data ->
       {:ok, assign(data, :child_result, "done")}
-    end)
+    end
   end
 end
 
@@ -491,9 +491,9 @@ defmodule FailingChildWorkflow do
   use Durable.Helpers
 
   workflow "failing_child" do
-    step(:fail_step, fn _data ->
+    step :fail_step, fn _data ->
       {:error, %{type: "child_failure", message: "child failed on purpose"}}
-    end)
+    end
   end
 end
 
@@ -503,11 +503,11 @@ defmodule CallWorkflowParent do
   use Durable.Orchestration
 
   workflow "call_parent" do
-    step(:before, fn data ->
+    step :before, fn data ->
       {:ok, assign(data, :before_call, true)}
-    end)
+    end
 
-    step(:call_child, fn data ->
+    step :call_child, fn data ->
       case call_workflow(SimpleChildWorkflow, %{}) do
         {:ok, result} ->
           {:ok, assign(data, :call_result, result)}
@@ -515,11 +515,11 @@ defmodule CallWorkflowParent do
         {:error, reason} ->
           {:ok, assign(data, :call_error, reason)}
       end
-    end)
+    end
 
-    step(:after, fn data ->
+    step :after, fn data ->
       {:ok, assign(data, :after_call, true)}
-    end)
+    end
   end
 end
 
@@ -529,7 +529,7 @@ defmodule CallWorkflowFailingParent do
   use Durable.Orchestration
 
   workflow "call_failing_parent" do
-    step(:call_failing_child, fn data ->
+    step :call_failing_child, fn data ->
       case call_workflow(FailingChildWorkflow, %{}) do
         {:ok, result} ->
           {:ok, assign(data, :call_result, result)}
@@ -537,7 +537,7 @@ defmodule CallWorkflowFailingParent do
         {:error, _reason} ->
           {:ok, assign(data, :got_error, true)}
       end
-    end)
+    end
   end
 end
 
@@ -547,20 +547,20 @@ defmodule FireForgetParent do
   use Durable.Orchestration
 
   workflow "fire_forget_parent" do
-    step(:before, fn data ->
+    step :before, fn data ->
       {:ok, assign(data, :before_fire, true)}
-    end)
+    end
 
-    step(:fire_child, fn data ->
+    step :fire_child, fn data ->
       {:ok, child_id} =
         start_workflow(SimpleChildWorkflow, %{}, ref: :confirmation_email)
 
       {:ok, assign(data, :child_id, child_id)}
-    end)
+    end
 
-    step(:after, fn data ->
+    step :after, fn data ->
       {:ok, assign(data, :after_fire, true)}
-    end)
+    end
   end
 end
 
@@ -570,7 +570,7 @@ defmodule FireForgetIdempotentParent do
   use Durable.Orchestration
 
   workflow "fire_forget_idempotent" do
-    step(:fire_two_children, fn data ->
+    step :fire_two_children, fn data ->
       {:ok, child1_id} =
         start_workflow(SimpleChildWorkflow, %{}, ref: :email1)
 
@@ -581,7 +581,7 @@ defmodule FireForgetIdempotentParent do
       |> assign(:child1_id, child1_id)
       |> assign(:child2_id, child2_id)
       |> then(&{:ok, &1})
-    end)
+    end
   end
 end
 
@@ -592,7 +592,7 @@ defmodule ParentWorkflow do
   use Durable.Orchestration
 
   workflow "parent_wf" do
-    step(:call_simple, fn data ->
+    step :call_simple, fn data ->
       case call_workflow(SimpleChildWorkflow, %{}) do
         {:ok, result} ->
           {:ok, assign(data, :child_result, result)}
@@ -600,7 +600,7 @@ defmodule ParentWorkflow do
         {:error, reason} ->
           {:ok, assign(data, :child_error, reason)}
       end
-    end)
+    end
   end
 end
 
@@ -610,7 +610,7 @@ defmodule GrandparentWorkflow do
   use Durable.Orchestration
 
   workflow "grandparent_wf" do
-    step(:call_parent, fn data ->
+    step :call_parent, fn data ->
       case call_workflow(ParentWorkflow, %{}) do
         {:ok, result} ->
           {:ok, data |> assign(:nested_result, result) |> assign(:chain_complete, true)}
@@ -618,6 +618,6 @@ defmodule GrandparentWorkflow do
         {:error, reason} ->
           {:ok, assign(data, :nested_error, reason)}
       end
-    end)
+    end
   end
 end

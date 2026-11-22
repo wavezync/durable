@@ -298,17 +298,37 @@ defmodule Durable.Queue.Adapters.Postgres do
 
   @impl true
   def release_node_jobs(%Config{} = config, node_id) when is_binary(node_id) do
-    query =
+    running =
       from(w in WorkflowExecution,
         where: w.status == :running and w.locked_by == ^node_id,
         select: w.id
       )
 
+    # A run being rolled back goes back to be rolled back, not to run: with
+    # the marker `Durable.rollback/2` leaves (Executor.roll_back/3), so the
+    # node that claims it undoes what is left and never runs a step.
+    compensating =
+      from(w in WorkflowExecution,
+        where: w.status == :compensating and w.locked_by == ^node_id,
+        select: w.id,
+        update: [
+          set: [
+            engine_state:
+              fragment(
+                "jsonb_set(?, '{__rollback__}', jsonb_build_object('error', coalesce(?, '{}'), 'status', 'failed'))",
+                w.engine_state,
+                w.error
+              )
+          ]
+        ]
+      )
+
     # A deploy isn't the step's fault: :snoozed doesn't use an attempt.
-    release_runs(config, query, :snoozed, %{
-      type: "node_stopped",
-      message: "the node stopped before this attempt finished"
-    })
+    stopped = %{type: "node_stopped", message: "the node stopped before this attempt finished"}
+
+    with {:ok, runs} <- release_runs(config, running, :snoozed, stopped),
+         {:ok, rollbacks} <- release_runs(config, compensating, :snoozed, stopped),
+         do: {:ok, runs + rollbacks}
   rescue
     e -> {:error, Exception.message(e)}
   end
@@ -445,7 +465,7 @@ defmodule Durable.Queue.Adapters.Postgres do
     #   2. Clear the lock (set NULL) so a stale `locked_by` from the
     #      worker that originally suspended them doesn't keep them invisible
     #      to fetch_jobs after the wake.
-    #   3. Merge `__sleep_satisfied__: <current_step>` into context so the
+    #   3. Merge `__sleep_satisfied__: <current_step>` into engine_state so the
     #      step body's next sleep/schedule_at call returns immediately
     #      instead of re-throwing.
     #
@@ -488,8 +508,8 @@ defmodule Durable.Queue.Adapters.Postgres do
         scheduled_at = NULL,
         locked_by = NULL,
         locked_at = NULL,
-        context = jsonb_set(
-          COALESCE(w.context, '{}'::jsonb),
+        engine_state = jsonb_set(
+          w.engine_state,
           '{__sleep_satisfied__}',
           to_jsonb(w.current_step),
           true

@@ -32,11 +32,20 @@ A durable, resumable workflow engine for Elixir. Similar to Temporal/Inngest.
 
 ```elixir
 def deps do
-  [{:durable, "~> 1.5"}]
+  [{:durable, "~> 2.0"}]
 end
 ```
 
 Durable needs PostgreSQL 13 or newer.
+
+### Upgrading from 1.x
+
+2.0 can't share a database with 1.x nodes. Run the new migration, **stop every
+node on 1.x**, and only then start nodes on 2.0. Runs in flight carry on. The
+functions that read (`list_executions/1` and the rest) now return
+`{:ok, result}`, with a `!` twin for the bare result. Read
+[Upgrade Durable](guides/production.md#upgrade-durable) before you deploy: it
+has the steps and everything else that changed.
 
 ## Quick Start
 
@@ -78,18 +87,16 @@ defmodule MyApp.OrderWorkflow do
   use Durable.Helpers
 
   workflow "process_order", timeout: hours(2) do
-    # First step receives workflow input
+    # First step receives workflow input. Its keys are strings, and stay strings.
     step :validate, fn input ->
-      {:ok, %{
-        order_id: input["id"],
-        items: input["items"],
-        customer_id: input["customer_id"]
-      }}
+      if input["items"] == [],
+        do: {:fail, "the order has no items"},
+        else: {:ok, assign(input, :order_id, input["id"])}
     end
 
-    # Each step receives previous step's output as context
+    # Each step receives what the steps before it returned
     step :calculate_total, fn ctx ->
-      total = ctx.items |> Enum.map(& &1["price"]) |> Enum.sum()
+      total = ctx["items"] |> Enum.map(& &1["price"]) |> Enum.sum()
       {:ok, assign(ctx, :total, total)}
     end
 
@@ -109,6 +116,16 @@ end
 {:ok, id} = Durable.start(MyApp.OrderWorkflow, %{"id" => "order_123", "items" => items})
 ```
 
+A run's data is saved as JSON after every step, and a run is loaded again
+after a wait, a retry or a move to another node. So:
+
+- The input's keys are strings: read them as `ctx["id"]` in every step.
+- A key a step adds as an atom (`assign(ctx, :total, total)`) is an atom in
+  later steps: `ctx.total`. Don't add an atom key with the same name as a
+  string key that is already there. Give it a new name.
+- Values come back as JSON holds them: a map inside the data has string keys,
+  an atom is a string, a `DateTime` is ISO 8601 text.
+
 ## Examples
 
 ### Approval Workflow
@@ -123,32 +140,42 @@ defmodule MyApp.ExpenseApproval do
 
   workflow "expense_approval" do
     step :request_approval, fn ctx ->
-      result = wait_for_approval("manager",
+      answer = wait_for_approval("manager",
         prompt: "Approve $#{ctx["amount"]} expense?",
         timeout: days(3),
-        timeout_value: :auto_rejected
+        timeout_value: :no_answer
       )
-      {:ok, assign(ctx, :decision, result)}
+
+      # An answer comes back from storage, so its keys are strings.
+      # The timeout value comes back exactly as written above.
+      decision =
+        case answer do
+          %{"approved" => true} -> "approved"
+          %{"approved" => false} -> "rejected"
+          :no_answer -> "auto_rejected"
+        end
+
+      {:ok, assign(ctx, :decision, decision)}
     end
 
     branch on: fn ctx -> ctx.decision end do
-      :approved ->
+      "approved" ->
         step :process, fn ctx ->
           Expenses.reimburse(ctx["employee_id"], ctx["amount"])
-          {:ok, assign(ctx, :status, :reimbursed)}
+          {:ok, assign(ctx, :status, "reimbursed")}
         end
 
       _ ->
         step :notify_rejection, fn ctx ->
           Mailer.send_rejection(ctx["employee_id"])
-          {:ok, assign(ctx, :status, :rejected)}
+          {:ok, assign(ctx, :status, "rejected")}
         end
     end
   end
 end
 
-# Approve externally
-Durable.provide_input(workflow_id, "manager", :approved)
+# Approve from your code. The dashboard's Inbox sends the same answer.
+Durable.provide_input(workflow_id, "manager", %{"approved" => true})
 ```
 
 ### Parallel Data Fetch
@@ -161,23 +188,26 @@ defmodule MyApp.DashboardBuilder do
   use Durable.Helpers
 
   workflow "build_dashboard" do
+    # Don't fan out for a user that doesn't exist
     step :init, fn input ->
-      {:ok, %{user_id: input["user_id"]}}
+      if Users.exists?(input["user_id"]),
+        do: {:ok, input},
+        else: {:fail, "no such user"}
     end
 
     # Each lookup is a lane of its own; none depends on another
     parallel :lookups do
       step :user, fn ctx ->
-        {:ok, %{profile: Users.get(ctx.user_id)}}
+        {:ok, %{profile: Users.get(ctx["user_id"])}}
       end
 
       step :orders, fn ctx ->
-        {:ok, %{recent: Orders.recent(ctx.user_id)}}
+        {:ok, %{recent: Orders.recent(ctx["user_id"])}}
       end
 
       # The page can be built without these
       step :notifications, [optional: true, default: %{unread: []}], fn ctx ->
-        {:ok, %{unread: Notifications.unread(ctx.user_id)}}
+        {:ok, %{unread: Notifications.unread(ctx["user_id"])}}
       end
     end
 
@@ -202,7 +232,7 @@ defmodule MyApp.BulkEmailer do
   workflow "send_campaign" do
     step :load, fn input ->
       recipients = Subscribers.active(input["campaign_id"])
-      {:ok, %{campaign_id: input["campaign_id"], recipients: recipients}}
+      {:ok, assign(input, :recipients, recipients)}
     end
 
     step :send_emails, fn ctx ->
@@ -210,7 +240,7 @@ defmodule MyApp.BulkEmailer do
         ctx.recipients
         |> Task.async_stream(
           fn recipient ->
-            case Mailer.send_campaign(recipient, ctx.campaign_id) do
+            case Mailer.send_campaign(recipient, ctx["campaign_id"]) do
               :ok -> {:ok, recipient}
               {:error, reason} -> {:error, {recipient, reason}}
             end
@@ -243,16 +273,16 @@ defmodule MyApp.TripBooking do
   workflow "book_trip" do
     step :book_flight, [compensate: :cancel_flight], fn ctx ->
       booking = Flights.book(ctx["flight"])
-      {:ok, assign(ctx, :flight, booking)}
+      {:ok, ctx |> assign(:flight_booking, booking.id) |> assign(:flight_price, booking.price)}
     end
 
     step :book_hotel, [compensate: :cancel_hotel], fn ctx ->
       booking = Hotels.book(ctx["hotel"])
-      {:ok, assign(ctx, :hotel, booking)}
+      {:ok, ctx |> assign(:hotel_booking, booking.id) |> assign(:hotel_price, booking.price)}
     end
 
     step :charge, fn ctx ->
-      total = ctx.flight.price + ctx.hotel.price
+      total = ctx.flight_price + ctx.hotel_price
 
       case Payments.charge(ctx["card"], total) do
         {:ok, _receipt} -> {:ok, assign(ctx, :charged, true)}
@@ -262,12 +292,12 @@ defmodule MyApp.TripBooking do
     end
 
     compensate :cancel_flight, fn ctx ->
-      Flights.cancel(ctx.flight.id)
+      Flights.cancel(ctx.flight_booking)
       {:ok, ctx}
     end
 
     compensate :cancel_hotel, fn ctx ->
-      Hotels.cancel(ctx.hotel.id)
+      Hotels.cancel(ctx.hotel_booking)
       {:ok, ctx}
     end
   end
@@ -322,7 +352,7 @@ defmodule MyApp.TrialReminder do
   workflow "trial_reminder" do
     step :welcome, fn ctx ->
       Mailer.send_welcome(ctx["user_id"])
-      {:ok, %{user_id: ctx["user_id"], trial_started_at: ctx["trial_started_at"]}}
+      {:ok, ctx}
     end
 
     step :wait_3_days, fn ctx ->
@@ -331,21 +361,23 @@ defmodule MyApp.TrialReminder do
     end
 
     step :check_in, fn ctx ->
-      Mailer.send_tips(ctx.user_id)
+      Mailer.send_tips(ctx["user_id"])
       {:ok, ctx}
     end
 
     step :wait_until_trial_ends, fn ctx ->
-      trial_end = DateTime.add(ctx.trial_started_at, 14, :day)
+      # The input is JSON, so the time is ISO 8601 text
+      {:ok, started_at, _offset} = DateTime.from_iso8601(ctx["trial_started_at"])
+      trial_end = DateTime.add(started_at, 14, :day)
       schedule_at(trial_end)
       {:ok, ctx}
     end
 
     step :convert_or_remind, fn ctx ->
-      if Subscriptions.active?(ctx.user_id) do
+      if Subscriptions.active?(ctx["user_id"]) do
         {:ok, assign(ctx, :converted, true)}
       else
-        Mailer.send_upgrade_reminder(ctx.user_id)
+        Mailer.send_upgrade_reminder(ctx["user_id"])
         {:ok, assign(ctx, :converted, false)}
       end
     end
@@ -366,7 +398,7 @@ defmodule MyApp.PaymentFlow do
   workflow "payment_flow" do
     step :create_invoice, fn ctx ->
       invoice = Invoices.create(ctx["order_id"], ctx["amount"])
-      {:ok, %{order_id: ctx["order_id"], invoice_id: invoice.id}}
+      {:ok, assign(ctx, :invoice_id, invoice.id)}
     end
 
     step :await_payment, fn ctx ->
@@ -380,14 +412,14 @@ defmodule MyApp.PaymentFlow do
     branch on: fn ctx -> ctx.result end do
       "payment.success" ->
         step :fulfill, fn ctx ->
-          Orders.fulfill(ctx.order_id)
-          {:ok, assign(ctx, :status, :fulfilled)}
+          Orders.fulfill(ctx["order_id"])
+          {:ok, assign(ctx, :status, "fulfilled")}
         end
 
       _ ->
         step :cancel, fn ctx ->
-          Orders.cancel(ctx.order_id)
-          {:ok, assign(ctx, :status, :cancelled)}
+          Orders.cancel(ctx["order_id"])
+          {:ok, assign(ctx, :status, "cancelled")}
         end
     end
   end
@@ -482,6 +514,23 @@ workflow "process_order", timeout: hours(2), queue: :orders do
 
 Unknown options fail the compile.
 
+A definition that can't run doesn't compile either. Each of these is a
+`CompileError` that names the step or the workflow:
+
+- a `retry:` that isn't a keyword list, or a `max_attempts`, `backoff`, `base`
+  or `max_backoff` in it that can't be used
+- a step `timeout:` that isn't a positive number of milliseconds
+- a step name that isn't an atom
+- a `compensate:` that names no `compensate` in the workflow
+- a workflow name that isn't a non-empty string written in place, or the same
+  name twice in a module
+- a workflow `timeout:` given as a string or a float
+
+What compiles but would be ignored is a warning at its line, so it fails a
+`--warnings-as-errors` build: an option a step, a `retry:` or a `compensate`
+doesn't take (`retries:` gets a did-you-mean), and a workflow `timeout:` of 0,
+a negative number or `:infinity`, which all mean no timeout.
+
 ### Retries
 
 ```elixir
@@ -495,9 +544,16 @@ step :charge, [retry: [max_attempts: 5, backoff: :exponential]], fn ctx ->
 end
 ```
 
-A step without `retry:` gets one attempt. An attempt whose process or node
-dies counts like any other. The count carries over when a run resumes after a
-crash, and starts again after `Durable.retry/2`.
+A step without `retry:` gets one attempt. An attempt whose process dies
+counts like any other. Losing the node or the lock doesn't use one: the step
+runs again, and the run fails after losing its worker three times. The count
+carries over when a run resumes after a crash, and starts again after
+`Durable.retry/2`.
+
+A step that finished isn't run again. If its worker was lost after the step's
+row was written, the run takes the result from the row, `put_context` writes
+included. A worker lost inside the step's body runs the step again, so a step
+with an effect outside your database still has to be safe to repeat.
 
 Between attempts the run is parked: it goes back on its queue until the
 backoff has passed (up to `max_backoff`, 1 hour by default), so a long wait
@@ -623,15 +679,16 @@ Durable.start(Module, input, queue: :priority, scheduled_at: datetime)
 Durable.start(Module, input, key: "article:42")   # at most one run per key
 Durable.start(Module, input, tags: ["account:7"]) # labels, to find runs across workflows
 Durable.start_many([{Module, input, key: "row:1"}, {Module, input2}])  # one transaction, keys checked
-Durable.get_execution(id)
-Durable.list_executions(workflow: Module, status: :running)
-Durable.list_executions(tag: "account:7")
+Durable.get_execution(id)                # {:ok, run} | {:error, :not_found}
+Durable.list_executions(workflow: Module, status: :running)  # {:ok, runs}
+Durable.list_executions!(tag: "account:7")                   # runs, or raises
 Durable.cancel(id, "reason")
 Durable.cancel_all([tag: "account:7"], "account closed")  # every open run that matches
-Durable.send_event(id, "event", payload)
+Durable.send_event(id, "event", payload) # :ok, or {:error, :not_found} if nothing waits for it
 Durable.send_event(id, "event", payload, buffer: true)  # keep it until the run waits
 Durable.provide_input(id, "input_name", data)
-Durable.list_children(parent_id)
+Durable.cancel_wait(id, reason: "no longer needed")  # the wait returns {:cancelled, reason}
+Durable.list_children(parent_id)         # {:ok, runs} | {:error, :not_found}
 
 # Operating
 Durable.retry(id)                        # failed run: resume from the failed step
@@ -639,14 +696,33 @@ Durable.rerun(id, input: new_input)      # finished run: start a fresh copy
 Durable.release_key(id, by: user)        # finished run: let its key start again
 Durable.pause_queue(:default, by: user)  # on every node, until resume_queue/2
 Durable.drain()                          # this node: stop claiming, finish running steps
-Durable.list_nodes()                     # heartbeating instances and what they run
+Durable.list_nodes()                     # {:ok, nodes}: heartbeating instances and what they run
 Durable.prune()                          # apply the :prune retention now
 
 # Observing
-Durable.Stats.overview(since: dt)        # also timeline/1, workflows/1, step_performance/1,
-                                         # queues/1, queue_history/1, error_groups/1
-Durable.Activity.list()                  # recovered runs, fenced workers, queue pauses…
+Durable.Stats.overview(since: dt)        # {:ok, stats}; also timeline/1, workflows/1,
+                                         # step_performance/1, queues/1, queue_history/1,
+                                         # error_groups/1
+Durable.Activity.list()                  # {:ok, events}: recovered runs, fenced workers, queue pauses…
 ```
+
+Every function that reads returns `{:ok, result}` or `{:error, reason}`, and has
+a twin ending in `!` that returns the result or raises `ArgumentError`. A wrong
+option is `{:error, {:invalid_option, key}}` (a negative `:limit`, a status no
+run has, an option the function doesn't know: nothing is clamped or ignored),
+and an id that names nothing is `{:error, :not_found}`. `Durable.Query.Opts`
+has the whole contract.
+
+```elixir
+{:ok, runs} = Durable.list_executions(status: :failed, limit: 20)
+runs = Durable.list_executions!(status: :failed, limit: 20)
+{:error, {:invalid_option, :limit}} = Durable.list_executions(limit: -1)
+```
+
+A run's `context` is your data and nothing else. What the engine keeps for a
+run is in its own column, and the names it keeps for itself (`__fail__`,
+`__rollback__`, `__child:…` and the like) are dropped from a start's input, a
+step's result, `put_context`, an event's payload and an input's answer.
 
 Telemetry events and `Telemetry.Metrics` definitions are documented in
 `Durable.Telemetry`.
@@ -699,20 +775,23 @@ end
 ```
 
 The macro adds the dashboard's pipelines, asset routes, and live routes
-in-place — no `forward`, no extra endpoint. You get:
+in-place — no `forward`, no extra endpoint. It works inside a `scope` and at
+`/`, and `:as` lets one router mount a dashboard per Durable instance.
+Dashboard 2.0 needs Durable 2.0. You get:
 
-- Overview with live status counts and recent executions
-- Workflow catalog + an Executions list with a faceted filter bar (workflow,
-  status, time range, execution id) driven by shareable URL params
-- Execution detail with Summary, ReactFlow graph, Timeline, Logs, I/O, and
-  History trace (plus a Family tab for parent/child runs)
-- Pending inputs queue
-- Schedules list with toggle / trigger actions
-- Settings view
-- ⌘K command palette — jump to any page, workflow, or recent run
+- Overview: health over a time range, what's failing and why, queue pressure
+- Runs: every run, with a query bar, saved views and bulk retry, rerun and
+  cancel. Filters live in the URL, so a search can be shared
+- One run: a trace of every attempt, the workflow graph, logs, context, its
+  parent and child runs, and its workflow key
+- Workflows: runs, failure rate and duration per workflow, with its structure
+- Inbox: answer inputs, send events, see what's sleeping
+- Keys, Queues & nodes, Schedules, Telemetry and Settings
+- ⌘K command palette — jump to any page, workflow, schedule, run or key
 
-See the [durable_dashboard docs](https://hexdocs.pm/durable_dashboard) for the full
-option list and design notes.
+See the [dashboard setup](https://durable.wavezync.com/docs/dashboard/) for the
+options and [Using the dashboard](https://durable.wavezync.com/docs/using-the-dashboard/)
+for what each page is for.
 
 ## Guides
 

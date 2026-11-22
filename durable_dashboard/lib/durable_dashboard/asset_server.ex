@@ -18,5 +18,16 @@ defmodule DurableDashboard.AssetServer do
   def init(_opts), do: @opts
 
   @impl true
-  def call(conn, opts), do: Plug.Static.call(conn, opts)
+  def call(conn, opts) do
+    # `Plug.Static` passes a path it has no file for along untouched, and this
+    # plug sits behind a `forward`: nothing after it answers. An unsent conn is
+    # an error under Bandit and Cowboy, so say 404.
+    case Plug.Static.call(conn, opts) do
+      %Plug.Conn{state: state} = conn when state in [:unset, :set] ->
+        conn |> Plug.Conn.send_resp(404, "") |> Plug.Conn.halt()
+
+      conn ->
+        conn
+    end
+  end
 end

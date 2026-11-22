@@ -43,12 +43,15 @@ defmodule DurableDashboard.Live.WorkflowsLive do
     {:noreply,
      socket
      |> assign(
-       range: Charts.valid_range(params["range"]),
+       range: Charts.valid_range(DurableDashboard.Params.text(params["range"])),
        current_path: URI.parse(uri).path,
        breadcrumbs: [%{label: "Workflows"}]
      )
      |> load()}
   end
+
+  @impl true
+  def handle_event(event, _params, socket), do: DurableDashboard.Params.ignore(event, socket)
 
   @impl true
   def handle_info({:durable_event, kind, _payload}, socket) when kind in @workflow_kinds do
@@ -70,7 +73,7 @@ defmodule DurableDashboard.Live.WorkflowsLive do
     now = DateTime.utc_now()
 
     rows =
-      Durable.Stats.workflows(
+      Durable.Stats.workflows!(
         durable: socket.assigns.durable,
         since: DateTime.add(now, -span, :second),
         until: now

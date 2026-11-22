@@ -8,15 +8,18 @@ defmodule Durable.DSL.Workflow do
         use Durable
 
         workflow "process_order", timeout: hours(2) do
-          step :validate do
-            # ...
+          step :validate, fn order ->
+            {:ok, Map.put(order, :order_id, order["id"])}
           end
 
-          step :charge do
-            # ...
+          step :charge, [retry: [max_attempts: 3]], fn order ->
+            {:ok, Map.put(order, :receipt, Payments.charge(order["total"]))}
           end
         end
       end
+
+  A workflow's name is a non-empty string written in place, and is used once
+  in a module: anything else is a compile error.
 
   ## Options
 
@@ -25,7 +28,9 @@ defmodule Durable.DSL.Workflow do
     `"timeout"` error, like any failure (see `:on_failure`): a step still
     running is stopped (and not retried), and a waiting run is woken to fail.
     Steps in a run with a timeout run in their own process; see the step
-    `:timeout` option.
+    `:timeout` option. `0`, a negative number or `:infinity` means no timeout
+    and compiles with a warning; anything else that isn't a positive integer
+    is a compile error.
   - `:on_failure` - What a run does when it fails for good. `:halt` (default)
     leaves it failed with nothing undone, so `Durable.retry/2` can carry it on
     once the cause is fixed, or `Durable.rollback/2` can undo it. `:rollback`
@@ -57,12 +62,14 @@ defmodule Durable.DSL.Workflow do
 
   """
 
+  alias Durable.DSL.Step
   alias Durable.Scheduler.DSL, as: SchedulerDSL
 
   @doc """
   Defines a workflow with the given name and options.
   """
   defmacro workflow(name, opts \\ [], do: block) do
+    validate_name!(name, __CALLER__)
     validate_workflow_opts!(opts, name)
     # Read by the step macros as they expand, to tell this workflow's steps
     # from another's in the same module.
@@ -74,6 +81,14 @@ defmodule Durable.DSL.Workflow do
     compensations_fn = :"__workflow_compensations_#{name}__"
 
     quote do
+      Durable.DSL.Workflow.__unique_name__(@durable_workflows, unquote(name), __ENV__)
+
+      Durable.DSL.Workflow.__timeout__(
+        Keyword.get(unquote(opts), :timeout),
+        unquote(name),
+        __ENV__
+      )
+
       # Reset current steps accumulator
       Module.delete_attribute(__MODULE__, :durable_current_steps)
       Module.register_attribute(__MODULE__, :durable_current_steps, accumulate: true)
@@ -98,6 +113,13 @@ defmodule Durable.DSL.Workflow do
 
       # Get collected compensations
       @durable_collected_comps_list Module.get_attribute(__MODULE__, :durable_compensations)
+
+      Step.__check__(
+        @durable_collected_steps_list,
+        @durable_collected_comps_list,
+        unquote(name),
+        __ENV__
+      )
 
       # Define a function that returns the steps list
       # The steps contain function references like &Module.func/1 which are valid at runtime
@@ -159,6 +181,54 @@ defmodule Durable.DSL.Workflow do
             "step #{inspect(name)} is defined twice in workflow #{inspect(workflow)}; " <>
               "step names must be unique within a workflow"
     end
+  end
+
+  # The name is part of function names and is stored with every run, so it is
+  # written in place: a variable or an attribute isn't known when this expands.
+  defp validate_name!(name, _caller) when is_binary(name) and name != "", do: :ok
+
+  defp validate_name!(name, caller) do
+    raise CompileError,
+      file: caller.file,
+      line: caller.line,
+      description:
+        "a workflow's name must be a non-empty string written in place, as in " <>
+          "`workflow \"process_order\" do`, got: #{Macro.to_string(name)}"
+  end
+
+  @doc false
+  # The second of two workflows with one name could never be started.
+  def __unique_name__(defined, name, env) do
+    if List.keymember?(defined, name, 0) do
+      raise CompileError,
+        file: env.file,
+        line: env.line,
+        description: "workflow #{inspect(name)} is defined twice in #{inspect(env.module)}"
+    end
+  end
+
+  @doc false
+  # Checked in the workflow module, where `timeout: hours(2)` is a number. A
+  # value that can only be a mistake is refused. One that reads as "no limit"
+  # runs as that, and says so.
+  def __timeout__(nil, _name, _env), do: :ok
+  def __timeout__(ms, _name, _env) when is_integer(ms) and ms > 0, do: :ok
+
+  def __timeout__(timeout, name, env) when is_integer(timeout) or timeout == :infinity do
+    IO.warn(
+      "workflow #{inspect(name)} has timeout: #{inspect(timeout)}, which means no timeout. " <>
+        "Leave timeout: out to say that, or give it milliseconds, as in timeout: hours(2)",
+      env
+    )
+  end
+
+  def __timeout__(timeout, name, env) do
+    raise CompileError,
+      file: env.file,
+      line: env.line,
+      description:
+        "workflow #{inspect(name)} has timeout: #{inspect(timeout)}. " <>
+          "It takes milliseconds, as in timeout: hours(2)"
   end
 
   @workflow_opts [:timeout, :on_failure, :queue, :reuse, :on_duplicate, :debounce, :log_metadata]

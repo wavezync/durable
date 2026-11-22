@@ -239,7 +239,7 @@ defmodule ResumableWorkflow do
   use Durable.Helpers
 
   workflow "resumable" do
-    step(:step1, fn data ->
+    step :step1, fn data ->
       value = data["value"] || 0
 
       data =
@@ -248,11 +248,11 @@ defmodule ResumableWorkflow do
         |> assign(:computed, value * 2)
 
       {:ok, data}
-    end)
+    end
 
-    step(:step2, fn data ->
+    step :step2, fn data ->
       {:ok, assign(data, :step2_done, true)}
-    end)
+    end
   end
 end
 
@@ -261,20 +261,20 @@ defmodule MultiStepResumableWorkflow do
   use Durable.Helpers
 
   workflow "multi_step_resumable" do
-    step(:step1, fn data ->
+    step :step1, fn data ->
       {:ok, assign(data, :step1_value, "a")}
-    end)
+    end
 
-    step(:step2, fn data ->
+    step :step2, fn data ->
       {:ok, assign(data, :step2_value, "b")}
-    end)
+    end
 
-    step(:step3, fn data ->
+    step :step3, fn data ->
       {:ok, assign(data, :step3_value, "c")}
-    end)
+    end
 
-    step(:step4, fn data ->
+    step :step4, fn data ->
       {:ok, assign(data, :step4_value, "d")}
-    end)
+    end
   end
 end

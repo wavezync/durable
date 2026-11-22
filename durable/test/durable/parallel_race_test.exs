@@ -213,16 +213,16 @@ defmodule FiveWayParallelWorkflow do
   use Durable.Helpers
 
   workflow "five_way_parallel" do
-    step(:setup, fn data -> {:ok, assign(data, :initialized, true)} end)
+    step :setup, fn data -> {:ok, assign(data, :initialized, true)} end
 
     parallel :branches do
-      step(:branch_1, fn data -> {:ok, assign(data, :b1, true)} end)
-      step(:branch_2, fn data -> {:ok, assign(data, :b2, true)} end)
-      step(:branch_3, fn data -> {:ok, assign(data, :b3, true)} end)
-      step(:branch_4, fn data -> {:ok, assign(data, :b4, true)} end)
-      step(:branch_5, fn data -> {:ok, assign(data, :b5, true)} end)
+      step :branch_1, fn data -> {:ok, assign(data, :b1, true)} end
+      step :branch_2, fn data -> {:ok, assign(data, :b2, true)} end
+      step :branch_3, fn data -> {:ok, assign(data, :b3, true)} end
+      step :branch_4, fn data -> {:ok, assign(data, :b4, true)} end
+      step :branch_5, fn data -> {:ok, assign(data, :b5, true)} end
     end
 
-    step(:done, fn data -> {:ok, assign(data, :done, true)} end)
+    step :done, fn data -> {:ok, assign(data, :done, true)} end
   end
 end

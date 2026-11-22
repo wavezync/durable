@@ -45,8 +45,8 @@ defmodule Durable.Storage.Schemas.StepExecution do
       default: :pending
     )
 
-    field(:input, :map)
-    field(:output, :map)
+    field(:input, Durable.Storage.JsonMap)
+    field(:output, Durable.Storage.JsonMap)
     field(:error, :map)
     field(:logs, {:array, :map}, default: [])
     field(:started_at, :utc_datetime_usec)

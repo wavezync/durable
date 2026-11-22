@@ -11,6 +11,7 @@ defmodule Durable.Executor.StepRunner do
   alias Durable.Config
   alias Durable.Context
   alias Durable.Definition.Step
+  alias Durable.EngineState
   alias Durable.Executor.Backoff
   alias Durable.PubSub, as: DurablePubSub
   alias Durable.Repo
@@ -34,11 +35,6 @@ defmodule Durable.Executor.StepRunner do
     :wait_for_all,
     :call_workflow
   ]
-
-  # What a resume leaves for the step that waited, to read through the wait
-  # itself. They never appear in a step's data or outlast the step.
-  @wait_markers ~w(__sleep_satisfied__ __timeout__ __cancelled__ __wait_group_result__ __wait_group_status__)
-  @wait_marker_keys @wait_markers ++ Enum.map(@wait_markers, &String.to_atom/1)
 
   # A lost worker isn't the step's doing, so it uses no attempt, but a step
   # that takes its node down has to stop somewhere.
@@ -74,9 +70,8 @@ defmodule Durable.Executor.StepRunner do
   """
   @spec execute(Step.t(), map(), String.t(), Config.t(), DateTime.t() | nil) :: result()
   def execute(%Step{} = step, data, workflow_id, %Config{} = config, deadline \\ nil) do
-    # Which lane a run is belongs to its stored context, not to a step's data.
-    data = Map.drop(data, ["__parallel_step", :__parallel_step])
     max_attempts = get_max_attempts(step)
+    close_left_open(config, workflow_id)
     %{failed: failed, lost: lost} = attempts_used(config, workflow_id, Atom.to_string(step.name))
     attempt = failed + 1
 
@@ -86,6 +81,22 @@ defmodule Durable.Executor.StepRunner do
       {:error, last_error(config, workflow_id, step)}
     else
       execute_with_retry(step, data, workflow_id, attempt, max_attempts, config, deadline)
+    end
+  end
+
+  # A run has one attempt open at a time, so a row still :running as the next
+  # begins was left by one that died: its row was being written as it was
+  # killed, and landed after whoever cleaned up had looked. Like a lost worker
+  # it uses no attempt, since its body may never have begun. Only the
+  # attempt's end is sent: the run's segment is this one now.
+  defp close_left_open(config, workflow_id) do
+    error = %{type: "worker_lost", message: "the worker running this attempt died as it began"}
+
+    closed = close_attempts(config, [workflow_id], :failed, error)
+    runs = if closed == [], do: %{}, else: closed_runs(config, closed)
+
+    for row <- closed, run = runs[row.workflow_id] do
+      report_attempt(config, row, run, :failed, error_summary(error), fn _row -> nil end)
     end
   end
 
@@ -353,9 +364,16 @@ defmodule Durable.Executor.StepRunner do
     # A retry runs after the run was parked, from a context that already holds
     # the failed attempt's put_context/2 writes.
     Process.put(:durable_context, data)
+    Process.put(:durable_context_before, data)
 
-    # Create step execution record
-    {:ok, step_exec} = create_step_execution(config, workflow_id, step, attempt)
+    # The attempt's row, written once the span has begun. Its id names the span.
+    step_exec = %StepExecution{
+      id: Ecto.UUID.generate(),
+      workflow_id: workflow_id,
+      step_name: Atom.to_string(step.name),
+      step_type: Atom.to_string(step.type),
+      attempt: attempt
+    }
 
     # Start log capture for this step
     Durable.LogCapture.start_capture(
@@ -371,12 +389,13 @@ defmodule Durable.Executor.StepRunner do
 
     # The row is written inside the span: its end event belongs to whoever
     # closes the row, and that may turn out not to be this process. It is
-    # marked running in there too, after the start event: only a running row
-    # can be closed by someone else, so an end never comes without a start.
+    # inserted there, running, after the start event: a row that exists can
+    # be closed by someone else, so an end never comes without a start, and a
+    # process killed before this leaves no row behind.
     Durable.Telemetry.span([:durable, :step], span_meta, fn ->
-      {:ok, step_exec} = update_step_execution(config, step_exec, :running)
+      {:ok, step_exec} = start_step_execution(config, step_exec)
 
-      result = run_body(step, without_wait_markers(data), time_limit(step, deadline))
+      result = run_body(step, data, time_limit(step, deadline))
       duration_ms = System.monotonic_time(:millisecond) - start_time
 
       # Stop log capture and get captured logs
@@ -533,7 +552,7 @@ defmodule Durable.Executor.StepRunner do
 
   # Handle step result from pipeline model
   defp handle_result({:ok, new_data}, ctx) when is_run_data(new_data) do
-    new_data = without_wait_markers(new_data)
+    new_data = EngineState.strip(new_data)
 
     %{step: step, step_exec: step_exec, logs: logs, duration_ms: duration_ms, config: config} =
       ctx
@@ -555,7 +574,7 @@ defmodule Durable.Executor.StepRunner do
   # Handle decision with goto
   defp handle_result({:goto, target, new_data}, ctx)
        when is_atom(target) and is_map(new_data) do
-    new_data = without_wait_markers(new_data)
+    new_data = EngineState.strip(new_data)
 
     %{step_exec: step_exec, logs: logs, duration_ms: duration_ms, config: config} = ctx
 
@@ -660,12 +679,6 @@ defmodule Durable.Executor.StepRunner do
     {:error, error}
   end
 
-  @doc false
-  # Carried on in the data, a marker would reach a parallel branch's input and
-  # overwrite that branch's own, so the branch would sleep again on every wake.
-  @spec without_wait_markers(map()) :: map()
-  def without_wait_markers(data), do: Map.drop(data, @wait_marker_keys)
-
   defp give_up(error, ctx) do
     %{step_exec: step_exec, logs: logs, duration_ms: duration_ms, config: config} = ctx
     {:ok, _} = fail_step_execution(config, step_exec, error, logs, duration_ms)
@@ -711,8 +724,19 @@ defmodule Durable.Executor.StepRunner do
   defp reason_text(reason), do: inspect(reason)
 
   defp handle_step_success(config, _step, step_exec, new_data, logs, duration_ms) do
-    {:ok, _} = complete_step_execution(config, step_exec, new_data, logs, duration_ms)
+    output = Map.merge(put_in_body(), new_data)
+    {:ok, _} = complete_step_execution(config, step_exec, output, logs, duration_ms)
     {:ok, new_data}
+  end
+
+  # What the body put in the context without returning it is part of its
+  # result: a run whose worker is lost before it saves takes the result from
+  # this row (`Executor.finished_before_lost/5`), and has nothing else.
+  defp put_in_body do
+    before = Process.get(:durable_context_before, %{})
+
+    Process.get(:durable_context, %{})
+    |> Map.reject(fn {key, value} -> match?(%{^key => ^value}, before) end)
   end
 
   defp get_max_attempts(%Step{opts: opts}) do
@@ -731,24 +755,10 @@ defmodule Durable.Executor.StepRunner do
     end
   end
 
-  defp create_step_execution(config, workflow_id, step, attempt) do
-    attrs = %{
-      workflow_id: workflow_id,
-      step_name: Atom.to_string(step.name),
-      step_type: Atom.to_string(step.type),
-      attempt: attempt,
-      status: :pending
-    }
-
-    %StepExecution{}
-    |> StepExecution.changeset(attrs)
-    |> Repo.insert(config)
-  end
-
-  defp update_step_execution(config, step_exec, :running) do
+  defp start_step_execution(config, step_exec) do
     case step_exec
          |> StepExecution.start_changeset()
-         |> Repo.update(config) do
+         |> Repo.insert(config) do
       {:ok, updated} = ok ->
         DurablePubSub.broadcast_step(config, :step_started, step_event(updated))
         ok

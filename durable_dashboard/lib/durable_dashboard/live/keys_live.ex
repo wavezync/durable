@@ -17,6 +17,7 @@ defmodule DurableDashboard.Live.KeysLive do
   alias DurableDashboard.Components.Workflow.KeyTab
   alias DurableDashboard.Format
   alias DurableDashboard.Layouts
+  alias DurableDashboard.Params
   alias DurableDashboard.Path, as: DPath
 
   @per_page 25
@@ -61,8 +62,8 @@ defmodule DurableDashboard.Live.KeysLive do
   def handle_event("filter", params, socket) do
     query = %{
       socket.assigns.query
-      | q: nilify(params["q"]),
-        workflow: nilify(params["workflow"]),
+      | q: trimmed(params["q"]),
+        workflow: trimmed(params["workflow"]),
         page: 1
     }
 
@@ -86,12 +87,14 @@ defmodule DurableDashboard.Live.KeysLive do
   end
 
   def handle_event("page", %{"page" => page}, socket) do
-    query = %{socket.assigns.query | page: max(parse_int(page), 1)}
+    query = %{socket.assigns.query | page: Params.page(page)}
     {:noreply, push_patch(socket, to: keys_path(socket.assigns.base_path, query))}
   end
 
   def handle_event("clear", _params, socket),
     do: {:noreply, push_patch(socket, to: DPath.keys(socket.assigns.base_path))}
+
+  def handle_event(event, _params, socket), do: Params.ignore(event, socket)
 
   @impl true
   def handle_info({:durable_event, kind, _payload}, socket) when kind in @workflow_kinds do
@@ -119,16 +122,27 @@ defmodule DurableDashboard.Live.KeysLive do
         key_prefix: query.q,
         # The combobox is free text; only a known name filters.
         workflow_name: if(query.workflow in workflows, do: query.workflow),
-        holder_status: if(query.statuses != [], do: query.statuses)
+        # parse_query/1 keeps only the statuses in @statuses.
+        holder_status:
+          if(query.statuses != [], do: Enum.map(query.statuses, &String.to_existing_atom/1))
       ]
       |> Enum.reject(fn {_k, v} -> is_nil(v) end)
 
-    rows =
-      Durable.Query.list_keys(filters ++ [limit: @per_page, offset: (query.page - 1) * @per_page])
+    # The filters come from the URL. One the engine refuses matches nothing.
+    {rows, total} =
+      with {:ok, rows} <-
+             Durable.Query.list_keys(
+               filters ++ [limit: @per_page, offset: (query.page - 1) * @per_page]
+             ),
+           {:ok, total} <- Durable.Query.count_keys(filters) do
+        {rows, total}
+      else
+        {:error, _invalid_filter} -> {[], 0}
+      end
 
     assign(socket,
       rows: rows,
-      total: Durable.Query.count_keys(filters),
+      total: total,
       workflows: workflows,
       reuse: reuse_by_workflow(rows),
       filtered?: filters != [durable: durable],
@@ -379,13 +393,10 @@ defmodule DurableDashboard.Live.KeysLive do
 
   defp parse_query(params) do
     %{
-      page: max(parse_int(params["page"]), 1),
-      q: nilify(params["q"]),
-      workflow: nilify(params["workflow"]),
-      statuses:
-        (params["status"] || "")
-        |> String.split(",", trim: true)
-        |> Enum.filter(&(&1 in @statuses))
+      page: Params.page(params["page"]),
+      q: trimmed(params["q"]),
+      workflow: trimmed(params["workflow"]),
+      statuses: params["status"] |> Params.list() |> Enum.filter(&(&1 in @statuses))
     }
   end
 
@@ -404,15 +415,5 @@ defmodule DurableDashboard.Live.KeysLive do
       else: DPath.keys(base) <> "?" <> URI.encode_query(params)
   end
 
-  defp parse_int(nil), do: 1
-
-  defp parse_int(value) do
-    case Integer.parse(to_string(value)) do
-      {n, _} -> n
-      :error -> 1
-    end
-  end
-
-  defp nilify(nil), do: nil
-  defp nilify(value), do: if(String.trim(value) == "", do: nil, else: String.trim(value))
+  defp trimmed(value), do: Params.text(String.trim(Params.text(value) || ""))
 end

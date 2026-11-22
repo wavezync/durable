@@ -1,13 +1,57 @@
 defmodule Durable.Query do
   @moduledoc """
   Query functions for workflow executions.
+
+  Every function returns `{:ok, result}` or `{:error, reason}`, and has a twin
+  ending in `!` that returns the result or raises `ArgumentError`:
+
+      {:ok, runs} = Durable.Query.list_executions(status: :failed)
+      runs = Durable.Query.list_executions!(status: :failed)
+
+  A wrong option is `{:error, {:invalid_option, key}}` and an id that names
+  nothing is `{:error, :not_found}`. `Durable.Query.Opts` has the whole
+  contract.
   """
 
   import Ecto.Query
 
   alias Durable.Config
+  alias Durable.Query.Opts
   alias Durable.Repo
   alias Durable.Storage.Schemas.{ActivityEvent, StepExecution, WorkflowExecution}
+
+  @run_statuses Ecto.Enum.values(WorkflowExecution, :status)
+
+  # What each filter of the run listings has to be (Durable.Query.Opts).
+  @execution_filters [
+    workflow: :module,
+    workflow_name: :text,
+    status: {:one_or_more_of, @run_statuses},
+    queue: :name,
+    current_step: :text,
+    trigger: {:one_of, Ecto.Enum.values(WorkflowExecution, :trigger)},
+    trigger_ref: :text,
+    error_contains: :text,
+    key: :text,
+    tag: :text,
+    input: :input,
+    id: :uuid,
+    parent_workflow_id: :uuid,
+    id_prefix: :text,
+    from: :datetime,
+    to: :datetime,
+    top_level_only: :boolean,
+    limit: :non_neg_integer,
+    offset: :non_neg_integer
+  ]
+
+  @key_filters [
+    workflow_name: :text,
+    key_prefix: :text,
+    holder_status: {:one_or_more_of, @run_statuses},
+    limit: :non_neg_integer,
+    offset: :non_neg_integer
+  ]
 
   @doc """
   Gets a workflow execution by ID.
@@ -18,9 +62,26 @@ defmodule Durable.Query do
   - `:include_logs` - Include logs in step executions (default: false)
   - `:durable` - The Durable instance name (default: Durable)
 
+  ## Examples
+
+      {:ok, run} = Durable.Query.get_execution(workflow_id, include_steps: true)
+      {:error, :not_found} = Durable.Query.get_execution("no-such-run")
+      run = Durable.Query.get_execution!(workflow_id)
+
   """
-  @spec get_execution(String.t(), keyword()) :: {:ok, map()} | {:error, :not_found}
+  @spec get_execution(String.t(), keyword()) :: {:ok, map()} | {:error, Opts.reason()}
   def get_execution(workflow_id, opts \\ []) do
+    with {:ok, opts} <- Opts.validate(opts, include_steps: :boolean, include_logs: :boolean),
+         :ok <- Opts.id(workflow_id),
+         do: fetch_execution(workflow_id, opts)
+  end
+
+  @doc "Like `get_execution/2`, but returns the run or raises `ArgumentError`."
+  @spec get_execution!(String.t(), keyword()) :: map()
+  def get_execution!(workflow_id, opts \\ []),
+    do: workflow_id |> get_execution(opts) |> Opts.unwrap!(opts, id: workflow_id)
+
+  defp fetch_execution(workflow_id, opts) do
     config = get_config(opts)
     include_steps = Keyword.get(opts, :include_steps, false)
     include_logs = Keyword.get(opts, :include_logs, false)
@@ -34,7 +95,7 @@ defmodule Durable.Query do
         query
       end
 
-    case Repo.id?(workflow_id) && Repo.one(config, query) do
+    case Repo.one(config, query) do
       %WorkflowExecution{} = execution ->
         {:ok, execution_to_map(execution, include_steps, include_logs)}
 
@@ -60,29 +121,43 @@ defmodule Durable.Query do
   - `:tag` - Runs started with this tag (`Durable.start(..., tags: [...])`)
   - `:input` - Map of dotted input paths to exact values, e.g.
     `%{"order_id" => "ORD-1042"}`
+  - `:id`, `:parent_workflow_id` - One run, or the children of one
+  - `:id_prefix` - Runs whose id starts with this text
+  - `:from`, `:to` - Runs started in this window (`DateTime`)
+  - `:top_level_only` - Leave out child runs
   - `:limit` - Maximum results (default: 50)
   - `:offset` - Offset for pagination (default: 0)
   - `:durable` - The Durable instance name (default: Durable)
 
+  A filter of the wrong type is `{:error, {:invalid_option, key}}`: a negative
+  `:limit`, a status no run has, a `:workflow` that isn't a module.
+
+  ## Examples
+
+      {:ok, runs} = Durable.Query.list_executions(status: [:failed, :cancelled], limit: 20)
+      {:error, {:invalid_option, :limit}} = Durable.Query.list_executions(limit: -1)
+      runs = Durable.Query.list_executions!(tag: "account:7")
+
   """
-  @spec list_executions(keyword()) :: [map()]
+  @spec list_executions(keyword()) :: {:ok, [map()]} | {:error, Opts.reason()}
   def list_executions(filters \\ []) do
-    config = get_config(filters)
-    limit = max(Keyword.get(filters, :limit, 50), 0)
-    offset = max(Keyword.get(filters, :offset, 0), 0)
+    with {:ok, filters} <- Opts.validate(filters, @execution_filters) do
+      query =
+        from(w in WorkflowExecution,
+          order_by: [desc: w.inserted_at],
+          limit: ^Keyword.get(filters, :limit, 50),
+          offset: ^Keyword.get(filters, :offset, 0)
+        )
 
-    query =
-      from(w in WorkflowExecution,
-        order_by: [desc: w.inserted_at],
-        limit: ^limit,
-        offset: ^offset
-      )
-
-    query = apply_filters(query, filters)
-
-    Repo.all(config, query)
-    |> Enum.map(&execution_to_map(&1, false, false))
+      rows = filters |> get_config() |> Repo.all(apply_filters(query, filters))
+      {:ok, Enum.map(rows, &execution_to_map(&1, false, false))}
+    end
   end
+
+  @doc "Like `list_executions/1`, but returns the runs or raises `ArgumentError`."
+  @spec list_executions!(keyword()) :: [map()]
+  def list_executions!(filters \\ []),
+    do: filters |> list_executions() |> Opts.unwrap!(filters)
 
   @doc """
   Workflow keys: one row per workflow and key that a run was started with,
@@ -100,9 +175,22 @@ defmodule Durable.Query do
   - `:holder_status` - Status or statuses of the run holding the key
   - `:limit` (default 50), `:offset`
   - `:durable` - The Durable instance name (default: Durable)
+
+  ## Examples
+
+      {:ok, keys} = Durable.Query.list_keys(key_prefix: "article:")
+      keys = Durable.Query.list_keys!(holder_status: :running)
   """
-  @spec list_keys(keyword()) :: [map()]
+  @spec list_keys(keyword()) :: {:ok, [map()]} | {:error, Opts.reason()}
   def list_keys(filters \\ []) do
+    with {:ok, filters} <- Opts.validate(filters, @key_filters), do: {:ok, keys(filters)}
+  end
+
+  @doc "Like `list_keys/1`, but returns the keys or raises `ArgumentError`."
+  @spec list_keys!(keyword()) :: [map()]
+  def list_keys!(filters \\ []), do: filters |> list_keys() |> Opts.unwrap!(filters)
+
+  defp keys(filters) do
     config = get_config(filters)
 
     rows =
@@ -141,16 +229,21 @@ defmodule Durable.Query do
 
   @doc """
   Counts the keys `list_keys/1` would list, ignoring `:limit` and `:offset`.
-  """
-  @spec count_keys(keyword()) :: non_neg_integer()
-  def count_keys(filters \\ []) do
-    config = get_config(filters)
 
-    Repo.one(
-      config,
-      from(k in subquery(from(w in keys_query(filters), select: %{key: w.key})), select: count())
-    )
+      {:ok, 12} = Durable.Query.count_keys(workflow_name: "process_article")
+      12 = Durable.Query.count_keys!(workflow_name: "process_article")
+  """
+  @spec count_keys(keyword()) :: {:ok, non_neg_integer()} | {:error, Opts.reason()}
+  def count_keys(filters \\ []) do
+    with {:ok, filters} <- Opts.validate(filters, @key_filters) do
+      keys = from(w in keys_query(filters), select: %{key: w.key})
+      {:ok, filters |> get_config() |> Repo.one(from(k in subquery(keys), select: count()))}
+    end
   end
+
+  @doc "Like `count_keys/1`, but returns the count or raises `ArgumentError`."
+  @spec count_keys!(keyword()) :: non_neg_integer()
+  def count_keys!(filters \\ []), do: filters |> count_keys() |> Opts.unwrap!(filters)
 
   defp keys_query(filters) do
     query =
@@ -221,69 +314,118 @@ defmodule Durable.Query do
   end
 
   @doc """
-  Counts workflow executions matching filters.
+  Counts workflow executions matching filters, the filters of
+  `list_executions/1`.
+
+      {:ok, 3} = Durable.Query.count_executions(status: :failed)
+      3 = Durable.Query.count_executions!(status: :failed)
   """
-  @spec count_executions(keyword()) :: non_neg_integer()
+  @spec count_executions(keyword()) :: {:ok, non_neg_integer()} | {:error, Opts.reason()}
   def count_executions(filters \\ []) do
-    config = get_config(filters)
-    query = from(w in WorkflowExecution, select: count(w.id))
-    query = apply_filters(query, filters)
-    Repo.one(config, query)
+    with {:ok, filters} <- Opts.validate(filters, @execution_filters) do
+      query = from(w in WorkflowExecution, select: count(w.id))
+      {:ok, filters |> get_config() |> Repo.one(apply_filters(query, filters))}
+    end
   end
+
+  @doc "Like `count_executions/1`, but returns the count or raises `ArgumentError`."
+  @spec count_executions!(keyword()) :: non_neg_integer()
+  def count_executions!(filters \\ []),
+    do: filters |> count_executions() |> Opts.unwrap!(filters)
 
   @doc """
   Counts runs per status, applying every filter except `:status` — what a
   "Failed (12) · Running (3)" view switcher needs in one query.
+
+      {:ok, %{failed: 12, running: 3}} = Durable.Query.count_by_status(queue: :default)
+      %{failed: 12, running: 3} = Durable.Query.count_by_status!(queue: :default)
   """
-  @spec count_by_status(keyword()) :: %{atom() => non_neg_integer()}
+  @spec count_by_status(keyword()) ::
+          {:ok, %{atom() => non_neg_integer()}} | {:error, Opts.reason()}
   def count_by_status(filters \\ []) do
-    config = get_config(filters)
+    with {:ok, filters} <- Opts.validate(filters, @execution_filters) do
+      query =
+        from(w in WorkflowExecution, group_by: w.status, select: {w.status, count(w.id)})
+        |> apply_filters(Keyword.delete(filters, :status))
 
-    query =
-      from(w in WorkflowExecution, group_by: w.status, select: {w.status, count(w.id)})
-      |> apply_filters(Keyword.delete(filters, :status))
-
-    config |> Repo.all(query) |> Map.new()
+      {:ok, filters |> get_config() |> Repo.all(query) |> Map.new()}
+    end
   end
 
+  @doc "Like `count_by_status/1`, but returns the counts or raises `ArgumentError`."
+  @spec count_by_status!(keyword()) :: %{atom() => non_neg_integer()}
+  def count_by_status!(filters \\ []),
+    do: filters |> count_by_status() |> Opts.unwrap!(filters)
+
   @doc """
-  Gets step executions for a workflow.
+  Gets step executions for a workflow, oldest first.
+
+      {:ok, steps} = Durable.Query.get_step_executions(workflow_id)
+      {:error, :not_found} = Durable.Query.get_step_executions("no-such-run")
+      steps = Durable.Query.get_step_executions!(workflow_id)
   """
-  @spec get_step_executions(String.t(), keyword()) :: [map()]
+  @spec get_step_executions(String.t(), keyword()) :: {:ok, [map()]} | {:error, Opts.reason()}
   def get_step_executions(workflow_id, opts \\ []) do
-    query =
-      from(s in StepExecution,
-        where: s.workflow_id == ^workflow_id,
-        order_by: [asc: s.inserted_at]
-      )
+    with {:ok, opts} <- Opts.validate(opts), :ok <- Opts.id(workflow_id) do
+      query =
+        from(s in StepExecution,
+          where: s.workflow_id == ^workflow_id,
+          order_by: [asc: s.inserted_at]
+        )
 
-    if Repo.id?(workflow_id),
-      do: opts |> get_config() |> Repo.all(query) |> Enum.map(&step_to_map/1),
-      else: []
+      config = get_config(opts)
+      config |> Repo.all(query) |> Enum.map(&step_to_map/1) |> of_run(config, workflow_id)
+    end
   end
 
+  @doc "Like `get_step_executions/2`, but returns the steps or raises `ArgumentError`."
+  @spec get_step_executions!(String.t(), keyword()) :: [map()]
+  def get_step_executions!(workflow_id, opts \\ []),
+    do: workflow_id |> get_step_executions(opts) |> Opts.unwrap!(opts, id: workflow_id)
+
+  # Rows that belong to a run. With none, the run itself is looked for: an id
+  # that names no run is not found, rather than a run with nothing to list.
+  defp of_run([], config, workflow_id) do
+    if Repo.one(config, from(w in WorkflowExecution, where: w.id == ^workflow_id, select: true)),
+      do: {:ok, []},
+      else: {:error, :not_found}
+  end
+
+  defp of_run(rows, _config, _workflow_id), do: {:ok, rows}
+
   @doc """
-  Gets logs for a specific step.
+  Gets logs for a specific step, from its latest attempt.
+
+      {:ok, logs} = Durable.Query.get_step_logs(workflow_id, :charge)
+      {:error, :not_found} = Durable.Query.get_step_logs(workflow_id, :no_such_step)
+      logs = Durable.Query.get_step_logs!(workflow_id, :charge)
   """
   @spec get_step_logs(String.t(), atom() | String.t(), keyword()) ::
-          {:ok, [map()]} | {:error, :not_found}
+          {:ok, [map()]} | {:error, Opts.reason()}
   def get_step_logs(workflow_id, step_name, opts \\ []) do
-    config = get_config(opts)
+    with {:ok, opts} <- Opts.validate(opts),
+         :ok <- Opts.id(workflow_id),
+         true <- Opts.valid?(:name, step_name) || {:error, :not_found} do
+      query =
+        from(s in StepExecution,
+          where: s.workflow_id == ^workflow_id and s.step_name == ^to_string(step_name),
+          order_by: [desc: s.attempt],
+          limit: 1
+        )
 
-    step_name_str =
-      if is_atom(step_name), do: Atom.to_string(step_name), else: step_name
-
-    query =
-      from(s in StepExecution,
-        where: s.workflow_id == ^workflow_id and s.step_name == ^step_name_str,
-        order_by: [desc: s.attempt],
-        limit: 1
-      )
-
-    case Repo.id?(workflow_id) && Repo.one(config, query) do
-      %StepExecution{} = step -> {:ok, step.logs || []}
-      _no_such_step -> {:error, :not_found}
+      case opts |> get_config() |> Repo.one(query) do
+        %StepExecution{} = step -> {:ok, step.logs || []}
+        _no_such_step -> {:error, :not_found}
+      end
     end
+  end
+
+  @doc "Like `get_step_logs/3`, but returns the logs or raises `ArgumentError`."
+  @spec get_step_logs!(String.t(), atom() | String.t(), keyword()) :: [map()]
+  def get_step_logs!(workflow_id, step_name, opts \\ []) do
+    workflow_id
+    |> get_step_logs(step_name, opts)
+    |> Opts.unwrap!(opts, id: {workflow_id, step_name})
   end
 
   @doc """
@@ -294,10 +436,28 @@ defmodule Durable.Query do
   - `:status` - Filter by status
   - `:durable` - The Durable instance name (default: Durable)
 
+  ## Examples
+
+      {:ok, children} = Durable.Query.list_child_executions(parent_id, status: :running)
+      {:error, :not_found} = Durable.Query.list_child_executions("no-such-run")
+      children = Durable.Query.list_child_executions!(parent_id)
+
   """
-  @spec list_child_executions(String.t(), keyword()) :: [map()]
+  @spec list_child_executions(String.t(), keyword()) ::
+          {:ok, [map()]} | {:error, Opts.reason()}
   def list_child_executions(parent_workflow_id, opts \\ []) do
-    if Repo.id?(parent_workflow_id), do: children_of(parent_workflow_id, opts), else: []
+    with {:ok, opts} <- Opts.validate(opts, status: {:one_of, @run_statuses}),
+         :ok <- Opts.id(parent_workflow_id) do
+      parent_workflow_id |> children_of(opts) |> of_run(get_config(opts), parent_workflow_id)
+    end
+  end
+
+  @doc "Like `list_child_executions/2`, but returns the runs or raises `ArgumentError`."
+  @spec list_child_executions!(String.t(), keyword()) :: [map()]
+  def list_child_executions!(parent_workflow_id, opts \\ []) do
+    parent_workflow_id
+    |> list_child_executions(opts)
+    |> Opts.unwrap!(opts, id: parent_workflow_id)
   end
 
   defp children_of(parent_workflow_id, opts) do
@@ -327,15 +487,32 @@ defmodule Durable.Query do
   ## Options
 
   - `:durable` - The Durable instance name (default: Durable)
+
+  Anything but a list of run ids is `{:error, {:invalid_option, :parent_ids}}`.
+
+  ## Examples
+
+      {:ok, %{^parent_id => 3}} = Durable.Query.child_counts([parent_id, other_id])
+      %{^parent_id => 3} = Durable.Query.child_counts!([parent_id, other_id])
   """
-  @spec child_counts([String.t()], keyword()) :: %{String.t() => non_neg_integer()}
-  def child_counts(parent_ids, opts \\ [])
-  def child_counts([], _opts), do: %{}
+  @spec child_counts([String.t()], keyword()) ::
+          {:ok, %{String.t() => non_neg_integer()}} | {:error, Opts.reason()}
+  def child_counts(parent_ids, opts \\ []) do
+    with {:ok, opts} <- Opts.validate(opts),
+         true <- Opts.valid?(:uuids, parent_ids) || {:error, {:invalid_option, :parent_ids}} do
+      {:ok, count_children(parent_ids, opts)}
+    end
+  end
 
-  def child_counts(parent_ids, opts) when is_list(parent_ids) do
+  @doc "Like `child_counts/2`, but returns the counts or raises `ArgumentError`."
+  @spec child_counts!([String.t()], keyword()) :: %{String.t() => non_neg_integer()}
+  def child_counts!(parent_ids, opts \\ []),
+    do: parent_ids |> child_counts(opts) |> Opts.unwrap!(opts, parent_ids: parent_ids)
+
+  defp count_children([], _opts), do: %{}
+
+  defp count_children(parent_ids, opts) do
     config = get_config(opts)
-
-    parent_ids = Enum.filter(parent_ids, &Repo.id?/1)
 
     from(w in WorkflowExecution,
       where: w.parent_workflow_id in ^parent_ids,
@@ -355,20 +532,29 @@ defmodule Durable.Query do
 
   - `:durable` - The Durable instance name (default: Durable)
 
+  ## Examples
+
+      {:ok, %{running: 3, completed: 100}} = Durable.Query.dashboard_counts()
+      %{running: 3, completed: 100} = Durable.Query.dashboard_counts!()
+
   """
-  @spec dashboard_counts(keyword()) :: %{atom() => non_neg_integer()}
+  @spec dashboard_counts(keyword()) ::
+          {:ok, %{atom() => non_neg_integer()}} | {:error, Opts.reason()}
   def dashboard_counts(opts \\ []) do
-    config = get_config(opts)
+    with {:ok, opts} <- Opts.validate(opts) do
+      query =
+        from(w in WorkflowExecution,
+          group_by: w.status,
+          select: {w.status, count(w.id)}
+        )
 
-    query =
-      from(w in WorkflowExecution,
-        group_by: w.status,
-        select: {w.status, count(w.id)}
-      )
-
-    Repo.all(config, query)
-    |> Map.new()
+      {:ok, opts |> get_config() |> Repo.all(query) |> Map.new()}
+    end
   end
+
+  @doc "Like `dashboard_counts/1`, but returns the counts or raises `ArgumentError`."
+  @spec dashboard_counts!(keyword()) :: %{atom() => non_neg_integer()}
+  def dashboard_counts!(opts \\ []), do: opts |> dashboard_counts() |> Opts.unwrap!(opts)
 
   @doc """
   Lists distinct workflow definitions, derived from execution history.
@@ -394,9 +580,22 @@ defmodule Durable.Query do
   ## Options
 
   - `:durable` - The Durable instance name (default: Durable)
+
+  ## Examples
+
+      {:ok, workflows} = Durable.Query.list_workflows()
+      workflows = Durable.Query.list_workflows!()
   """
-  @spec list_workflows(keyword()) :: [map()]
+  @spec list_workflows(keyword()) :: {:ok, [map()]} | {:error, Opts.reason()}
   def list_workflows(opts \\ []) do
+    with {:ok, opts} <- Opts.validate(opts), do: {:ok, workflows(opts)}
+  end
+
+  @doc "Like `list_workflows/1`, but returns the workflows or raises `ArgumentError`."
+  @spec list_workflows!(keyword()) :: [map()]
+  def list_workflows!(opts \\ []), do: opts |> list_workflows() |> Opts.unwrap!(opts)
+
+  defp workflows(opts) do
     config = get_config(opts)
 
     # Two queries instead of a window function:
@@ -459,12 +658,26 @@ defmodule Durable.Query do
   @doc """
   Lists workflow executions with total count for pagination.
 
-  Returns `{executions, total_count}`.
+  Returns `{:ok, {executions, total_count}}`.
 
   Accepts the same filters as `list_executions/1`.
+
+      {:ok, {runs, total}} = Durable.Query.list_executions_with_total(limit: 25, offset: 50)
+      {runs, total} = Durable.Query.list_executions_with_total!(limit: 25, offset: 50)
   """
-  @spec list_executions_with_total(keyword()) :: {[map()], non_neg_integer()}
+  @spec list_executions_with_total(keyword()) ::
+          {:ok, {[map()], non_neg_integer()}} | {:error, Opts.reason()}
   def list_executions_with_total(filters \\ []) do
+    with {:ok, filters} <- Opts.validate(filters, @execution_filters),
+         do: {:ok, executions_with_total(filters)}
+  end
+
+  @doc "Like `list_executions_with_total/1`, but returns the pair or raises `ArgumentError`."
+  @spec list_executions_with_total!(keyword()) :: {[map()], non_neg_integer()}
+  def list_executions_with_total!(filters \\ []),
+    do: filters |> list_executions_with_total() |> Opts.unwrap!(filters)
+
+  defp executions_with_total(filters) do
     config = get_config(filters)
     limit = Keyword.get(filters, :limit, 50)
     offset = Keyword.get(filters, :offset, 0)
@@ -638,7 +851,7 @@ defmodule Durable.Query do
       home_queue: execution.home_queue,
       priority: execution.priority,
       input: execution.input,
-      context: Map.drop(execution.context, ["__string_keys__", "__done__"]),
+      context: Durable.EngineState.strip(execution.context),
       current_step: execution.current_step,
       error: execution.error,
       parent_workflow_id: execution.parent_workflow_id,

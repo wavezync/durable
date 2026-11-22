@@ -1,14 +1,14 @@
 # Durable Phoenix Demo
 
-A sample Phoenix LiveView application demonstrating the [Durable](https://github.com/wavezync/durable) workflow engine with human-in-the-loop approval capabilities.
+A sample Phoenix LiveView application for the [Durable](https://github.com/wavezync/durable) workflow engine and its dashboard. It builds against the `durable` and `durable_dashboard` in this repository.
 
 ## Features
 
-- **Document Processing Workflow**: A multi-step workflow that validates, parses, and transforms documents
-- **Human-in-the-Loop**: Workflow pauses and waits for manager approval before proceeding
-- **Real-time Updates**: LiveView pages update in real-time as workflows progress
-- **Dashboard**: Monitor all workflow executions with status tracking
-- **Approval Queue**: Review and approve/reject pending workflow approvals
+- **Eight workflows**, each showing a different part of Durable. Seven start from the home page (see [Workflows](#workflows))
+- **Human input and events**: pages to answer pending inputs and to send the events runs wait for
+- **Schedules**: a cron workflow that fires every minute, with run-now and on/off
+- **Real-time updates**: the pages update as runs progress, over the app's PubSub
+- **Durable Dashboard** mounted at `/dashboard`
 
 ## Getting Started
 
@@ -35,6 +35,7 @@ A sample Phoenix LiveView application demonstrating the [Durable](https://github
 3. **Create and migrate the database**:
    ```bash
    mix ecto.create
+   mix durable.gen.upgrade -r PhoenixDemo.Repo   # only if Durable has newer migrations than the ones checked in
    mix ecto.migrate
    ```
 
@@ -61,91 +62,82 @@ docker-compose down -v
 
 ## Usage
 
-### Creating a Workflow
+### Starting a Workflow
 
-1. Click **"New Workflow"** in the navigation
-2. Enter a filename (e.g., `report.pdf`, `data.csv`)
-3. Click **"Start Workflow"**
+The home page lists the workflows. Each card has a small form for its input and
+a button that calls `Durable.start/2` (or `Durable.trigger_schedule/1` for the
+cron one). The run then shows up under **Executions**, and in the dashboard.
 
-### Workflow Steps
+### Workflows
 
-The document processing workflow goes through these steps:
+| Workflow | Shows |
+|---|---|
+| Order Fulfillment | `call_workflow`, `compensate` and `on_failure: :rollback`. Tick "force failure" to watch the rollback |
+| Payment | Retries with exponential backoff. Also the child of Order Fulfillment |
+| Expense Approval | `wait_for_form`, `wait_for_approval` and `wait_for_all` |
+| Content Moderation | A named `parallel` block with `into:`, `branch on:` and `wait_for_choice` |
+| Payment Reconciliation | `wait_for_event` with a timeout |
+| Drip Email Campaign | `schedule_at` and `sleep` |
+| Article Sync | Workflow keys: `debounce:` and `on_duplicate: {:send_event, name}`. Not on the home page: start it from IEx with `key: "article:42"` |
+| Hourly Metrics (cron) | `@schedule cron: ...`, firing every minute |
 
-1. **Validate Document** - Checks the file extension is valid
-2. **Parse Content** - Extracts simulated content from the document
-3. **Request Approval** - **Pauses** and waits for human approval
-4. **Transform Data** - Processes the approved data
-5. **Generate Report** - Creates the final report
+They live in `lib/phoenix_demo/workflows/`.
 
-### Approving Workflows
+### Answering Inputs and Sending Events
 
-1. Navigate to **"Approvals"** in the navigation
-2. You'll see pending approval requests
-3. Click **"Review"** to see document details
-4. Click **"Approve"** or **"Reject"**
+- **Pending inputs** (`/pending-inputs`) lists the runs waiting for a person,
+  with a form for each input type. Submitting calls
+  `Durable.Wait.provide_input/3` and the run resumes.
+- **Pending events** (`/pending-events`) lists the events runs wait for and
+  sends one with `Durable.send_event/3`, standing in for a webhook.
+- **Schedules** (`/schedules`) lists the cron schedules, runs one now and turns
+  one on or off.
 
-When approved, the workflow resumes and completes. When rejected, it handles the rejection gracefully.
+The dashboard at `/dashboard` does all of this too, from its Inbox and
+Schedules pages.
 
 ## Architecture
 
-### Workflow Definition
+Durable starts in the app's supervision tree, with the app's repo and PubSub:
 
 ```elixir
-defmodule PhoenixDemo.Workflows.DocumentWorkflow do
-  use Durable
-  use Durable.Helpers
-  use Durable.Context
-  use Durable.Wait
+{Durable,
+ repo: PhoenixDemo.Repo,
+ queues: %{default: [concurrency: 5]},
+ pubsub: PhoenixDemo.PubSub,
+ scheduler_interval: 5_000,
+ scheduled_modules: [PhoenixDemo.Workflows.HourlyMetricsCronWorkflow]}
+```
 
-  workflow "process_document", timeout: hours(24) do
-    step :validate_document do
-      # Validate document format
-    end
+The dashboard is one line in the router. The demo's resolver makes everyone an
+admin; a real app maps its own users:
 
-    step :parse_content do
-      # Extract content from document
-    end
-
-    step :request_approval do
-      # Wait for human approval
-      wait_for_approval("document_approval",
-        prompt: "Please review the extracted document data"
-      )
-    end
-
-    decision :check_approval do
-      # Route based on approval response
-    end
-
-    step :transform_data do
-      # Transform approved data
-    end
-
-    step :generate_report do
-      # Generate final report
-    end
-
-    step :handle_rejection do
-      # Handle rejection case
-    end
-  end
-end
+```elixir
+use DurableDashboard.Router,
+  mount: "/dashboard",
+  durable: Durable,
+  resolver: PhoenixDemoWeb.DurableResolver
 ```
 
 ### Key Components
 
-- **WorkflowLive**: Dashboard showing all workflow executions
-- **DocumentLive**: Form to create new document workflows
-- **ApprovalLive**: Queue for pending human approvals
-- **WorkflowDetailLive**: Detailed view of a single workflow
+- **HomeLive**: the workflows, with a form to start each
+- **ExecutionsLive**: every run and its status
+- **WorkflowDetailLive**: one run, its steps and its child runs
+- **PendingInputsLive**, **PendingEventsLive**: answer inputs, send events
+- **SchedulesLive**: cron schedules
 
 ### Database Tables
 
-Durable creates these tables in the `durable` schema:
+Durable keeps its tables in the `durable` schema, among them:
 
-- `durable.workflow_executions` - Workflow instances
-- `durable.step_executions` - Step execution history
-- `durable.pending_inputs` - Human input requests
+- `durable.workflow_executions` - Runs
+- `durable.step_executions` - One row per step attempt
+- `durable.pending_inputs`, `durable.pending_events` - What runs wait for
+- `durable.scheduled_workflows` - Cron schedules
+
+After pulling a Durable change that adds a migration, run
+`mix durable.gen.upgrade -r PhoenixDemo.Repo` and `mix ecto.migrate`.
 
 ## Development
 

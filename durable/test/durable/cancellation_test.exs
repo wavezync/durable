@@ -31,11 +31,11 @@ defmodule Durable.CancellationTest do
     defp knob(data, key), do: Map.get(data, key) || Map.get(data, Atom.to_string(key))
 
     workflow "five_steps" do
-      step(:s1, fn data -> __MODULE__.act(1, data) end)
-      step(:s2, fn data -> __MODULE__.act(2, data) end)
-      step(:s3, fn data -> __MODULE__.act(3, data) end)
-      step(:s4, fn data -> __MODULE__.act(4, data) end)
-      step(:s5, fn data -> __MODULE__.act(5, data) end)
+      step :s1, fn data -> __MODULE__.act(1, data) end
+      step :s2, fn data -> __MODULE__.act(2, data) end
+      step :s3, fn data -> __MODULE__.act(3, data) end
+      step :s4, fn data -> __MODULE__.act(4, data) end
+      step :s5, fn data -> __MODULE__.act(5, data) end
     end
   end
 
@@ -45,12 +45,12 @@ defmodule Durable.CancellationTest do
     use Durable.Wait
 
     workflow "waits_for_go" do
-      step(:ask, fn data ->
+      step :ask, fn data ->
         _ = wait_for_input("go")
         {:ok, data}
-      end)
+      end
 
-      step(:done, fn data -> {:ok, data} end)
+      step :done, fn data -> {:ok, data} end
     end
   end
 

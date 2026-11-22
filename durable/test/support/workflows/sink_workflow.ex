@@ -40,7 +40,7 @@ defmodule Durable.TestWorkflows.SinkWorkflow do
   use Durable.Wait
 
   workflow "sink" do
-    step(:run, fn data ->
+    step :run, fn data ->
       # On the first invocation, `data` is the workflow input (string keys).
       # On resume after a `wait_for_event`/`wait_for_input` timeout, `data` is
       # the atomized merge of the workflow's persisted context with the
@@ -102,7 +102,7 @@ defmodule Durable.TestWorkflows.SinkWorkflow do
           send(pid, {:done, ref})
           {:ok, %{"ran" => "WAIT_INPUT", "response" => response}}
       end
-    end)
+    end
   end
 
   defp build_wait_opts(timeout_ms, timeout_value) do

@@ -11,7 +11,7 @@ defmodule Durable.Scheduler.API do
       Durable.schedule(MyApp.DailyReport, "0 9 * * *", name: "daily_report")
 
       # List schedules
-      Durable.list_schedules(enabled: true)
+      {:ok, schedules} = Durable.list_schedules(enabled: true)
 
       # Update a schedule
       Durable.update_schedule("daily_report", cron: "0 10 * * *")
@@ -28,6 +28,7 @@ defmodule Durable.Scheduler.API do
   alias Crontab.Scheduler
   alias Durable.Config
   alias Durable.Executor
+  alias Durable.Query.Opts
   alias Durable.Repo
   alias Durable.Storage.Schemas.ScheduledWorkflow
 
@@ -126,14 +127,34 @@ defmodule Durable.Scheduler.API do
   - `:offset` - Offset for pagination
   - `:durable` - Durable instance name
 
+  A filter of the wrong type is `{:error, {:invalid_option, key}}`, such as a
+  negative `:limit` or an `:enabled` that isn't a boolean. See
+  `Durable.Query.Opts`.
+
   ## Examples
 
-      schedules = Durable.list_schedules(enabled: true)
-      schedules = Durable.list_schedules(queue: :reports, limit: 10)
+      {:ok, schedules} = Durable.list_schedules(enabled: true)
+      schedules = Durable.list_schedules!(queue: :reports, limit: 10)
 
   """
-  @spec list_schedules(keyword()) :: [ScheduledWorkflow.t()]
+  @spec list_schedules(keyword()) :: {:ok, [ScheduledWorkflow.t()]} | {:error, Opts.reason()}
   def list_schedules(filters \\ []) do
+    schema = [
+      enabled: :boolean,
+      workflow_module: :module,
+      queue: :name,
+      limit: :non_neg_integer,
+      offset: :non_neg_integer
+    ]
+
+    with {:ok, filters} <- Opts.validate(filters, schema), do: {:ok, schedules(filters)}
+  end
+
+  @doc "Like `list_schedules/1`, but returns the schedules or raises `ArgumentError`."
+  @spec list_schedules!(keyword()) :: [ScheduledWorkflow.t()]
+  def list_schedules!(filters \\ []), do: filters |> list_schedules() |> Opts.unwrap!(filters)
+
+  defp schedules(filters) do
     durable_name = Keyword.get(filters, :durable, Durable)
     config = Config.get(durable_name)
     limit = Keyword.get(filters, :limit, 100)
@@ -157,21 +178,27 @@ defmodule Durable.Scheduler.API do
 
       {:ok, schedule} = Durable.get_schedule("daily_report")
       {:error, :not_found} = Durable.get_schedule("nonexistent")
+      schedule = Durable.get_schedule!("daily_report")
 
   """
   @spec get_schedule(String.t(), keyword()) ::
-          {:ok, ScheduledWorkflow.t()} | {:error, :not_found}
+          {:ok, ScheduledWorkflow.t()} | {:error, Opts.reason()}
   def get_schedule(name, opts \\ []) do
-    durable_name = Keyword.get(opts, :durable, Durable)
-    config = Config.get(durable_name)
-
-    with false <- Repo.bad_text?(name),
+    with {:ok, opts} <- Opts.validate(opts),
+         config = Config.get(Keyword.get(opts, :durable, Durable)),
+         true <- Opts.valid?(:text, name),
          %ScheduledWorkflow{} = schedule <- Repo.get_by(config, ScheduledWorkflow, name: name) do
       {:ok, schedule}
     else
+      {:error, _invalid_options} = error -> error
       _not_a_schedule -> {:error, :not_found}
     end
   end
+
+  @doc "Like `get_schedule/2`, but returns the schedule or raises `ArgumentError`."
+  @spec get_schedule!(String.t(), keyword()) :: ScheduledWorkflow.t()
+  def get_schedule!(name, opts \\ []),
+    do: name |> get_schedule(opts) |> Opts.unwrap!(opts, id: name)
 
   @doc """
   Updates a scheduled workflow.
@@ -298,12 +325,8 @@ defmodule Durable.Scheduler.API do
   def trigger_schedule(name, opts \\ []) do
     durable_name = Keyword.get(opts, :durable, Durable)
 
-    with {:ok, schedule} <- get_schedule(name, durable: durable_name) do
-      module =
-        String.to_existing_atom(
-          "Elixir." <> String.trim_leading(schedule.workflow_module, "Elixir.")
-        )
-
+    with {:ok, schedule} <- get_schedule(name, durable: durable_name),
+         {:ok, module} <- parse_module(schedule.workflow_module) do
       input = Keyword.get(opts, :input, schedule.input)
 
       Durable.Executor.start_workflow(module, input,
@@ -314,6 +337,28 @@ defmodule Durable.Scheduler.API do
         trigger: :schedule,
         trigger_ref: schedule.name
       )
+    end
+  end
+
+  @doc false
+  # A schedule's workflow, if this node has its code: in a rolling deploy, or
+  # on a node that runs other queues, it may not.
+  @spec parse_module(String.t()) :: {:ok, module()} | {:error, :module_not_found}
+  def parse_module(module_string) do
+    # Handle both "Elixir.MyModule" and "MyModule" formats
+    module_name =
+      if String.starts_with?(module_string, "Elixir.") do
+        module_string
+      else
+        "Elixir." <> module_string
+      end
+
+    try do
+      module = String.to_existing_atom(module_name)
+      if Code.ensure_loaded?(module), do: {:ok, module}, else: {:error, :module_not_found}
+    rescue
+      ArgumentError ->
+        {:error, :module_not_found}
     end
   end
 
@@ -585,12 +630,36 @@ defmodule Durable.Scheduler.API do
 
   @doc """
   The next `count` times a schedule fires, in UTC, from its cron expression
-  and time zone — whether or not it's enabled.
+  and time zone — whether or not it's enabled. Empty for a cron or a time zone
+  that can't be worked out.
 
-      [~U[2026-10-17 09:00:00.000000Z], ~U[2026-10-18 09:00:00.000000Z], ...]
+      {:ok, [~U[2026-10-17 09:00:00.000000Z], ~U[2026-10-18 09:00:00.000000Z], ...]} =
+        Durable.Scheduler.API.upcoming_runs(schedule)
+
+      [next | _] = Durable.Scheduler.API.upcoming_runs!(schedule, 3)
+
+  A `count` that isn't a whole number from 0 to 1,000 is
+  `{:error, {:invalid_option, :count}}`, and anything but a schedule is
+  `{:error, :not_found}`.
   """
-  @spec upcoming_runs(ScheduledWorkflow.t(), pos_integer()) :: [DateTime.t()]
-  def upcoming_runs(%ScheduledWorkflow{} = schedule, count \\ 5) do
+  @spec upcoming_runs(ScheduledWorkflow.t(), non_neg_integer()) ::
+          {:ok, [DateTime.t()]} | {:error, Opts.reason()}
+  def upcoming_runs(schedule, count \\ 5)
+
+  def upcoming_runs(%ScheduledWorkflow{} = schedule, count) do
+    if is_integer(count) and count in 0..1_000,
+      do: {:ok, next_runs(schedule, count)},
+      else: {:error, {:invalid_option, :count}}
+  end
+
+  def upcoming_runs(_not_a_schedule, _count), do: {:error, :not_found}
+
+  @doc "Like `upcoming_runs/2`, but returns the times or raises `ArgumentError`."
+  @spec upcoming_runs!(ScheduledWorkflow.t(), non_neg_integer()) :: [DateTime.t()]
+  def upcoming_runs!(schedule, count \\ 5),
+    do: schedule |> upcoming_runs(count) |> Opts.unwrap!([], id: schedule, count: count)
+
+  defp next_runs(schedule, count) do
     with {:ok, cron} <- CronParser.parse(schedule.cron_expression),
          {:ok, now} <- get_local_time(schedule.timezone) do
       cron

@@ -31,73 +31,73 @@ defmodule Durable.LaneOptionsTest do
 
     workflow "device_default" do
       parallel :lookups do
-        step(:credit, fn application -> credit(application) end)
+        step :credit, fn application -> credit(application) end
 
-        step(:device, [optional: true, default: %{trust: "unknown"}], fn application ->
+        step :device, [optional: true, default: %{trust: "unknown"}], fn application ->
           if application["device_check"] == "down",
             do: {:fail, "device check is down"},
             else: {:ok, assign(application, :trust, "high")}
-        end)
+        end
       end
 
-      step(:decide, fn %{lookups: lookups} = application -> decide(application, lookups) end)
+      step :decide, fn %{lookups: lookups} = application -> decide(application, lookups) end
 
       # The run stops here and is picked up again from what was stored.
-      step(:sign, fn %{lookups: lookups} = application ->
+      step :sign, fn %{lookups: lookups} = application ->
         wait_for_input("signature")
         Seen.note({:sign, lookups})
         {:ok, application}
-      end)
+      end
     end
 
     workflow "slow_social" do
       parallel :lookups do
-        step(:credit, fn application -> credit(application) end)
+        step :credit, fn application -> credit(application) end
 
         lane :social, optional: true, default: %{profiles: 0}, timeout: 60 do
-          step(:find_profiles, [retry: [max_attempts: 5, base: 1]], fn _application ->
+          step :find_profiles, [retry: [max_attempts: 5, base: 1]], fn _application ->
             Seen.note(:find_profiles)
             Process.sleep(40)
             {:error, "social search is slow"}
-          end)
+          end
 
-          step(:rate, fn application ->
+          step :rate, fn application ->
             Seen.note(:rate)
             {:ok, application}
-          end)
+          end
         end
       end
 
-      step(:decide, fn %{lookups: lookups} = application -> decide(application, lookups) end)
+      step :decide, fn %{lookups: lookups} = application -> decide(application, lookups) end
     end
 
     workflow "needed_lane_times_out" do
       parallel :lookups do
         lane :employer, timeout: 30 do
-          step(:call_employer, fn application ->
+          step :call_employer, fn application ->
             Seen.note(:call_employer)
             unless :employer_answers in Seen.all(), do: Process.sleep(500)
             {:ok, assign(application, :employed, true)}
-          end)
+          end
         end
       end
 
-      step(:decide, fn %{lookups: lookups} = application -> decide(application, lookups) end)
+      step :decide, fn %{lookups: lookups} = application -> decide(application, lookups) end
     end
 
     workflow "lane_waits" do
       parallel :lookups do
-        step(:credit, fn application -> credit(application) end)
+        step :credit, fn application -> credit(application) end
 
         lane :reference, optional: true, timeout: minutes(10) do
-          step(:ask_referee, fn application ->
+          step :ask_referee, fn application ->
             answer = wait_for_input("referee")
             {:ok, assign(application, :referee, answer)}
-          end)
+          end
         end
       end
 
-      step(:decide, fn %{lookups: lookups} = application -> decide(application, lookups) end)
+      step :decide, fn %{lookups: lookups} = application -> decide(application, lookups) end
     end
   end
 
@@ -165,7 +165,9 @@ defmodule Durable.LaneOptionsTest do
       assert :rate not in Seen.all()
       assert {:decide, %{social: %{"profiles" => 0}}} = List.last(Seen.all())
 
-      social = Enum.find(lanes_of(run), &(&1.context["__parallel_step"] == "lookups__social"))
+      social =
+        Enum.find(lanes_of(run), &(&1.engine_state["__parallel_step"] == "lookups__social"))
+
       assert social.status == :failed
       assert social.error["type"] == "timeout"
       assert social.error["message"] =~ "lane social passed its"

@@ -186,6 +186,9 @@ defmodule DurableDashboard.Live.TelemetryLive do
     do: {:noreply, assign(socket, current_path: URI.parse(uri).path)}
 
   @impl true
+  def handle_event(event, _params, socket), do: DurableDashboard.Params.ignore(event, socket)
+
+  @impl true
   def handle_info(:sample, socket) do
     now = sample(socket.assigns.counters, length(socket.assigns.events))
 
@@ -195,6 +198,9 @@ defmodule DurableDashboard.Live.TelemetryLive do
        handlers: handlers()
      )}
   end
+
+  # A host's `on_mount` hook may subscribe the page to anything.
+  def handle_info(_msg, socket), do: {:noreply, socket}
 
   @impl true
   def terminate(_reason, _socket), do: :telemetry.detach(handler_id(self()))

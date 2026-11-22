@@ -37,6 +37,7 @@ defmodule Durable.Orchestration do
 
   alias Durable.Config
   alias Durable.Context
+  alias Durable.EngineState
   alias Durable.Executor
   alias Durable.PubSub, as: DurablePubSub
   alias Durable.Repo
@@ -95,16 +96,18 @@ defmodule Durable.Orchestration do
     child_key = child_context_key(ref)
     result_key = child_result_key(ref)
 
-    context = Process.get(:durable_context, %{})
+    # Which children this run has started, and what they ended with, is the
+    # engine's state: nothing in the step's data can stand in for a child.
+    engine_state = EngineState.current()
 
-    case {fetch(context, result_key), fetch(context, child_key)} do
+    case {Map.fetch(engine_state, result_key), Map.fetch(engine_state, child_key)} do
       {{:ok, %{"status" => "completed"} = result}, _child} ->
         parse_child_result(result)
 
       # A failure the parent was told about may be out of date: the child can
       # have been retried since, so its row has the last word.
       {_result, {:ok, child_id}} ->
-        if timed_out?(context, child_id),
+        if timed_out?(engine_state, child_id),
           do: {:ok, Keyword.get(opts, :timeout_value, :child_timeout)},
           else: handle_existing_child(child_id, opts)
 
@@ -114,14 +117,6 @@ defmodule Durable.Orchestration do
       {:error, :error} ->
         create_and_wait(module, input, parent_id, child_key, opts)
     end
-  end
-
-  # These keys are strings, but a context saved by an older version has them as
-  # atoms where the atom existed. Read as atoms only, a node that had never run
-  # the call (after a restart or a deploy) missed the key and started the
-  # child again, every time the parent resumed.
-  defp fetch(context, key) do
-    with :error <- Map.fetch(context, key), do: Map.fetch(context, Context.known_key(key))
   end
 
   @doc """
@@ -148,9 +143,7 @@ defmodule Durable.Orchestration do
     ref = Keyword.get(opts, :ref, module_to_ref(module))
     fire_key = fire_forget_key(ref)
 
-    context = Process.get(:durable_context, %{})
-
-    case fetch(context, fire_key) do
+    case Map.fetch(EngineState.current(), fire_key) do
       # Idempotent: already created
       {:ok, child_id} ->
         {:ok, child_id}
@@ -158,14 +151,14 @@ defmodule Durable.Orchestration do
       # Create child and continue (no throw)
       :error ->
         {:ok, child_id} = create_child_execution(module, input, parent_id, [wake: true] ++ opts)
-        Context.put_context(fire_key, child_id)
+        EngineState.put_current(fire_key, child_id)
         record_call_child(child_id, :fire, ref)
         {:ok, child_id}
     end
   end
 
-  # Records a step → child mapping in the parent's context so the dashboard
-  # can attach a drill-in chevron to the calling step. Mirrors the
+  # Records a step → child mapping in the parent's engine state so the
+  # dashboard can attach a drill-in chevron to the calling step. Mirrors the
   # `__parallel_children` pattern used by parallel steps in
   # `lib/durable/executor.ex`.
   defp record_call_child(child_id, kind, ref) do
@@ -177,10 +170,8 @@ defmodule Durable.Orchestration do
       "ref" => to_string(ref)
     }
 
-    children = Context.get_context("__call_children", %{}) || %{}
-
-    Context.put_context("__call_children", Map.put(children, child_id, meta))
-    :ok
+    children = EngineState.current()["__call_children"] || %{}
+    EngineState.put_current("__call_children", Map.put(children, child_id, meta))
   end
 
   # ============================================================================
@@ -189,7 +180,7 @@ defmodule Durable.Orchestration do
 
   defp create_and_wait(module, input, parent_id, child_key, opts) do
     {:ok, child_id} = create_child_execution(module, input, parent_id, opts)
-    Context.put_context(child_key, child_id)
+    EngineState.put_current(child_key, child_id)
     record_call_child(child_id, :call, Keyword.get(opts, :ref, module_to_ref(module)))
 
     throw(
@@ -202,9 +193,9 @@ defmodule Durable.Orchestration do
 
   # The worker that timed out the wait cancels the child, so what the child
   # did last says nothing about this call: the timeout has to be noticed first.
-  defp timed_out?(context, child_id) do
-    (Map.get(context, :__timeout__) || Map.get(context, "__timeout__")) == true and
-      Map.has_key?(context, child_event_name(child_id))
+  defp timed_out?(engine_state, child_id) do
+    engine_state["__timeout__"] == true and
+      is_map_key(engine_state, child_event_name(child_id))
   end
 
   defp handle_existing_child(child_id, opts) do
@@ -258,7 +249,8 @@ defmodule Durable.Orchestration do
       context: %{},
       parent_workflow_id: parent_id,
       root_workflow_id: Map.get(Durable.Telemetry.run_meta(), :root_workflow_id, parent_id),
-      trigger: :parent
+      trigger: :parent,
+      deadline_at: Executor.deadline(workflow_def, nil)
     }
 
     {:ok, execution} =
@@ -270,8 +262,12 @@ defmodule Durable.Orchestration do
     if Keyword.get(opts, :wake, false), do: DurablePubSub.wake(config, execution)
 
     # For inline execution (testing), execute the child immediately
+    # It runs in this process, as a run of its own: this step's view of its
+    # own run's state is put back after it.
     if Keyword.get(opts, :inline, false) do
+      engine_state = EngineState.current()
       Executor.execute_workflow(execution.id, config)
+      EngineState.put_current(engine_state)
     end
 
     {:ok, execution.id}

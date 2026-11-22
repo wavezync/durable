@@ -10,25 +10,25 @@ defmodule Durable.IntegrationWorkflows do
     use Durable.Helpers
 
     workflow "it_pipeline", queue: :documents do
-      step(:download, [queue: :downloads], fn data ->
+      step :download, [queue: :downloads], fn data ->
         Probe.here(:download)
         {:ok, assign(data, :file, "#{data["url"]}.pdf")}
-      end)
+      end
 
-      step(:ocr, [queue: :ocr], fn data ->
+      step :ocr, [queue: :ocr], fn data ->
         Probe.here(:ocr)
         {:ok, assign(data, :text, "text of #{data.file}")}
-      end)
+      end
 
-      step(:summarize, [queue: :llm], fn data ->
+      step :summarize, [queue: :llm], fn data ->
         Probe.here(:summarize)
         {:ok, assign(data, :summary, "summary of #{data.text}")}
-      end)
+      end
 
-      step(:save, fn data ->
+      step :save, fn data ->
         Probe.here(:save)
         {:ok, assign(data, :saved, true)}
-      end)
+      end
     end
   end
 
@@ -37,25 +37,25 @@ defmodule Durable.IntegrationWorkflows do
     use Durable
 
     workflow "it_burst", queue: :documents do
-      step(:a, [queue: :downloads], fn data ->
+      step :a, [queue: :downloads], fn data ->
         Probe.work({:a, data["n"]}, :a, 15)
         {:ok, data}
-      end)
+      end
 
-      step(:b, [queue: :ocr], fn data ->
+      step :b, [queue: :ocr], fn data ->
         Probe.work({:b, data["n"]}, :b, 15)
         {:ok, data}
-      end)
+      end
 
-      step(:c, [queue: :llm], fn data ->
+      step :c, [queue: :llm], fn data ->
         Probe.work({:c, data["n"]}, :c, 15)
         {:ok, data}
-      end)
+      end
 
-      step(:d, fn data ->
+      step :d, fn data ->
         Probe.work({:d, data["n"]}, :d, 1)
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -64,10 +64,10 @@ defmodule Durable.IntegrationWorkflows do
     use Durable
 
     workflow "it_quick_on_ocr" do
-      step(:ocr, [queue: :ocr], fn data ->
+      step :ocr, [queue: :ocr], fn data ->
         Probe.here(:quick)
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -76,10 +76,10 @@ defmodule Durable.IntegrationWorkflows do
     use Durable
 
     workflow "it_slow_on_ocr" do
-      step(:ocr, [queue: :ocr], fn data ->
+      step :ocr, [queue: :ocr], fn data ->
         Probe.work({:slow, data["n"]}, :ocr, 200)
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -96,10 +96,10 @@ defmodule Durable.IntegrationWorkflows do
         end
       )
 
-      step(:save, fn data ->
+      step :save, fn data ->
         Probe.here(:save)
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -108,14 +108,14 @@ defmodule Durable.IntegrationWorkflows do
     use Durable
 
     workflow "it_snoozes_on_ocr" do
-      step(:ocr, [queue: :ocr], fn data ->
+      step :ocr, [queue: :ocr], fn data ->
         if Probe.here(:snoozy) == 1, do: {:snooze, 1_500, "not yet"}, else: {:ok, data}
-      end)
+      end
 
-      step(:save, fn data ->
+      step :save, fn data ->
         Probe.here(:save)
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -125,17 +125,17 @@ defmodule Durable.IntegrationWorkflows do
     use Durable.Wait
 
     workflow "it_sleeps_on_ocr" do
-      step(:ocr, [queue: :ocr], fn data ->
+      step :ocr, [queue: :ocr], fn data ->
         Probe.here(:before_sleep)
         sleep(300)
         Probe.here(:after_sleep)
         {:ok, data}
-      end)
+      end
 
-      step(:save, fn data ->
+      step :save, fn data ->
         Probe.here(:save)
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -146,16 +146,16 @@ defmodule Durable.IntegrationWorkflows do
     use Durable.Wait
 
     workflow "it_waits_on_ocr" do
-      step(:ocr, [queue: :ocr], fn data ->
+      step :ocr, [queue: :ocr], fn data ->
         Probe.here(:waiting)
         event = wait_for_event("go")
         {:ok, assign(data, :event, event)}
-      end)
+      end
 
-      step(:save, fn data ->
+      step :save, fn data ->
         Probe.here(:save)
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -166,16 +166,16 @@ defmodule Durable.IntegrationWorkflows do
     use Durable.Wait
 
     workflow "it_asks_on_ocr" do
-      step(:ocr, [queue: :ocr], fn data ->
+      step :ocr, [queue: :ocr], fn data ->
         Probe.here(:asking)
         answer = wait_for_input("approve")
         {:ok, assign(data, :answer, answer)}
-      end)
+      end
 
-      step(:save, fn data ->
+      step :save, fn data ->
         Probe.here(:save)
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -184,20 +184,20 @@ defmodule Durable.IntegrationWorkflows do
     use Durable
 
     workflow "it_saga", on_failure: :rollback do
-      step(:charge, [queue: :ocr, compensate: :refund], fn data ->
+      step :charge, [queue: :ocr, compensate: :refund], fn data ->
         Probe.here(:charge)
         {:ok, data}
-      end)
+      end
 
-      step(:ship, [queue: :llm], fn _data ->
+      step :ship, [queue: :llm], fn _data ->
         Probe.here(:ship)
         {:error, :down}
-      end)
+      end
 
-      compensate(:refund, fn data ->
+      compensate :refund, fn data ->
         Probe.here(:refund)
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -206,15 +206,15 @@ defmodule Durable.IntegrationWorkflows do
     use Durable
 
     workflow "it_fails_until_allowed", queue: :documents do
-      step(:ocr, [queue: :ocr], fn data ->
+      step :ocr, [queue: :ocr], fn data ->
         Probe.here(:ocr)
         if Probe.set?(:allow), do: {:ok, data}, else: {:error, :down}
-      end)
+      end
 
-      step(:save, fn data ->
+      step :save, fn data ->
         Probe.here(:save)
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -223,10 +223,10 @@ defmodule Durable.IntegrationWorkflows do
     use Durable
 
     workflow "it_ends_on_llm", queue: :documents do
-      step(:summarize, [queue: :llm], fn data ->
+      step :summarize, [queue: :llm], fn data ->
         Probe.here(:summarize)
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -235,20 +235,20 @@ defmodule Durable.IntegrationWorkflows do
     use Durable
 
     workflow "it_stuck_saga", timeout: :timer.hours(1), on_failure: :rollback do
-      step(:reserve, [compensate: :release], fn data ->
+      step :reserve, [compensate: :release], fn data ->
         Probe.here(:reserve)
         {:ok, data}
-      end)
+      end
 
-      step(:charge, [queue: :nobody], fn data ->
+      step :charge, [queue: :nobody], fn data ->
         Probe.here(:charge)
         {:ok, data}
-      end)
+      end
 
-      compensate(:release, fn data ->
+      compensate :release, fn data ->
         Probe.here(:release)
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -257,14 +257,14 @@ defmodule Durable.IntegrationWorkflows do
     use Durable
 
     workflow "it_stuck_slow_saga", timeout: :timer.hours(1), on_failure: :rollback do
-      step(:reserve, [compensate: :release], fn data -> {:ok, data} end)
-      step(:charge, [queue: :nobody], fn data -> {:ok, data} end)
+      step :reserve, [compensate: :release], fn data -> {:ok, data} end
+      step :charge, [queue: :nobody], fn data -> {:ok, data} end
 
-      compensate(:release, fn data ->
+      compensate :release, fn data ->
         Probe.here(:slow_release)
         Process.sleep(1_200)
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -273,10 +273,10 @@ defmodule Durable.IntegrationWorkflows do
     use Durable
 
     workflow "it_lost_from_the_start", queue: :nobody, timeout: 300 do
-      step(:a, fn data ->
+      step :a, fn data ->
         Probe.here(:lost)
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -285,10 +285,10 @@ defmodule Durable.IntegrationWorkflows do
     use Durable
 
     workflow "it_times_out_on_ocr", timeout: :timer.hours(1) do
-      step(:ocr, [queue: :ocr], fn data ->
+      step :ocr, [queue: :ocr], fn data ->
         Probe.here(:timed_ocr)
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -297,23 +297,23 @@ defmodule Durable.IntegrationWorkflows do
     use Durable
 
     workflow "it_out_of_time", timeout: 300 do
-      step(:slow, fn data ->
+      step :slow, fn data ->
         Probe.here(:slow)
         Process.sleep(100)
         {:ok, data}
-      end)
+      end
 
-      step(:ocr, [queue: :ocr], fn data ->
+      step :ocr, [queue: :ocr], fn data ->
         # Long enough to outlast the deadline, even with a busy claim.
         Probe.here(:long_ocr)
         Process.sleep(2_000)
         {:ok, data}
-      end)
+      end
 
-      step(:never, [queue: :llm], fn data ->
+      step :never, [queue: :llm], fn data ->
         Probe.here(:never)
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -331,10 +331,10 @@ defmodule Durable.IntegrationWorkflows do
         end
       )
 
-      step(:save, fn data ->
+      step :save, fn data ->
         Probe.here(:save)
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -344,32 +344,32 @@ defmodule Durable.IntegrationWorkflows do
     use Durable.Helpers
 
     workflow "it_parallel", queue: :documents do
-      step(:prepare, [queue: :ocr], fn data ->
+      step :prepare, [queue: :ocr], fn data ->
         Probe.here(:prepare)
         {:ok, assign(data, :prepared, true)}
-      end)
-
-      parallel :fan_out do
-        step(:on_llm, [queue: :llm], fn data ->
-          Probe.here(:on_llm)
-          {:ok, assign(data, :on_llm, true)}
-        end)
-
-        step(:on_downloads, [queue: :downloads], fn data ->
-          Probe.here(:on_downloads)
-          {:ok, assign(data, :on_downloads, true)}
-        end)
-
-        step(:plain, fn data ->
-          Probe.here(:plain)
-          {:ok, assign(data, :plain, true)}
-        end)
       end
 
-      step(:finish, fn data ->
+      parallel :fan_out do
+        step :on_llm, [queue: :llm], fn data ->
+          Probe.here(:on_llm)
+          {:ok, assign(data, :on_llm, true)}
+        end
+
+        step :on_downloads, [queue: :downloads], fn data ->
+          Probe.here(:on_downloads)
+          {:ok, assign(data, :on_downloads, true)}
+        end
+
+        step :plain, fn data ->
+          Probe.here(:plain)
+          {:ok, assign(data, :plain, true)}
+        end
+      end
+
+      step :finish, fn data ->
         Probe.here(:finish)
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -379,10 +379,10 @@ defmodule Durable.IntegrationWorkflows do
     use Durable.Helpers
 
     workflow "it_branch_retry" do
-      step(:start, fn data ->
+      step :start, fn data ->
         Probe.here(:start)
         {:ok, assign(data, :path, "a")}
-      end)
+      end
 
       branch on: fn data -> data[:path] || data["path"] end do
         "a" ->
@@ -394,22 +394,22 @@ defmodule Durable.IntegrationWorkflows do
             end
           )
 
-          step(:a2, fn data ->
+          step :a2, fn data ->
             Probe.here(:a2)
             {:ok, data}
-          end)
+          end
 
         "b" ->
-          step(:b1, fn data ->
+          step :b1, fn data ->
             Probe.here(:b1)
             {:ok, data}
-          end)
+          end
       end
 
-      step(:done, [queue: :llm], fn data ->
+      step :done, [queue: :llm], fn data ->
         Probe.here(:done)
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -418,20 +418,20 @@ defmodule Durable.IntegrationWorkflows do
     use Durable
 
     workflow "it_decides" do
-      decision(:route, [queue: :ocr], fn data ->
+      decision :route, [queue: :ocr], fn data ->
         Probe.here(:route)
         {:goto, :finish, data}
-      end)
+      end
 
-      step(:skipped, [queue: :llm], fn data ->
+      step :skipped, [queue: :llm], fn data ->
         Probe.here(:skipped)
         {:ok, data}
-      end)
+      end
 
-      step(:finish, fn data ->
+      step :finish, fn data ->
         Probe.here(:finish)
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -440,10 +440,10 @@ defmodule Durable.IntegrationWorkflows do
     use Durable
 
     workflow "it_child" do
-      step(:child_work, [queue: :llm], fn data ->
+      step :child_work, [queue: :llm], fn data ->
         Probe.here(:child_work)
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -454,19 +454,19 @@ defmodule Durable.IntegrationWorkflows do
     use Durable.Orchestration
 
     workflow "it_parent", queue: :documents do
-      step(:delegate, [queue: :ocr], fn data ->
+      step :delegate, [queue: :ocr], fn data ->
         Probe.here(:delegate)
 
         case call_workflow(Durable.IntegrationWorkflows.Child, %{"x" => 1}, ref: :child) do
           {:ok, _result} -> {:ok, assign(data, :delegated, true)}
           {:error, reason} -> {:error, reason}
         end
-      end)
+      end
 
-      step(:finish, fn data ->
+      step :finish, fn data ->
         Probe.here(:finish)
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -475,16 +475,16 @@ defmodule Durable.IntegrationWorkflows do
     use Durable
 
     workflow "it_run_again", on_duplicate: :run_again do
-      step(:work, [queue: :ocr], fn data ->
+      step :work, [queue: :ocr], fn data ->
         Probe.here({:work, data["v"]})
         Probe.wait_for({:go, data["v"]})
         {:ok, data}
-      end)
+      end
 
-      step(:save, fn data ->
+      step :save, fn data ->
         Probe.here({:save, data["v"]})
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -493,10 +493,10 @@ defmodule Durable.IntegrationWorkflows do
     use Durable
 
     workflow "it_debounced", debounce: [period: 400] do
-      step(:work, [queue: :ocr], fn data ->
+      step :work, [queue: :ocr], fn data ->
         Probe.here({:debounced, data["v"]})
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -506,16 +506,16 @@ defmodule Durable.IntegrationWorkflows do
 
     workflow "it_held_on_ocr" do
       # Two attempts: dying with its node uses one.
-      step(:ocr, [queue: :ocr, retry: [max_attempts: 2, backoff: :constant, base: 1]], fn data ->
+      step :ocr, [queue: :ocr, retry: [max_attempts: 2, backoff: :constant, base: 1]], fn data ->
         Probe.here(:held)
         Probe.wait_for(:release)
         {:ok, data}
-      end)
+      end
 
-      step(:save, fn data ->
+      step :save, fn data ->
         Probe.here(:save)
         {:ok, data}
-      end)
+      end
     end
   end
 end

@@ -18,7 +18,7 @@ defmodule Durable.Integration.DeploysAndKeysRegressionsTest do
     use Durable
 
     workflow "r_new_on_this_node" do
-      step(:work, [retry: [max_attempts: 3]], fn data -> {:ok, data} end)
+      step :work, [retry: [max_attempts: 3]], fn data -> {:ok, data} end
     end
   end
 
@@ -82,7 +82,7 @@ defmodule Durable.Integration.DeploysAndKeysRegressionsTest do
       require Logger
 
       workflow "r_levels" do
-        step(:w, fn data ->
+        step :w, fn data ->
           Logger.debug("d")
           Logger.info("i")
           Logger.notice("n")
@@ -92,7 +92,7 @@ defmodule Durable.Integration.DeploysAndKeysRegressionsTest do
           Logger.alert("a")
           Logger.emergency("em")
           {:ok, data}
-        end)
+        end
       end
     end
 
@@ -120,11 +120,11 @@ defmodule Durable.Integration.DeploysAndKeysRegressionsTest do
       alias Durable.IntegrationProbe, as: Probe
 
       workflow "r_keyed" do
-        step(:work, fn data ->
+        step :work, fn data ->
           Probe.note(:keyed)
           Probe.wait_for(:never)
           {:ok, data}
-        end)
+        end
       end
     end
 
@@ -180,19 +180,19 @@ defmodule Durable.Integration.DeploysAndKeysRegressionsTest do
       alias Durable.IntegrationProbe, as: Probe
 
       workflow "r_two_comp", on_failure: :rollback do
-        step(:a, [compensate: :undo_a], fn d -> {:ok, d} end)
-        step(:b, [compensate: :undo_b], fn d -> {:ok, d} end)
-        step(:boom, fn _ -> {:fail, "no"} end)
+        step :a, [compensate: :undo_a], fn d -> {:ok, d} end
+        step :b, [compensate: :undo_b], fn d -> {:ok, d} end
+        step :boom, fn _ -> {:fail, "no"} end
 
-        compensate(:undo_a, fn d ->
+        compensate :undo_a, fn d ->
           Probe.note(:undo_a)
           {:ok, d}
-        end)
+        end
 
-        compensate(:undo_b, fn d ->
+        compensate :undo_b, fn d ->
           Probe.note(:undo_b)
           {:ok, d}
-        end)
+        end
       end
     end
 

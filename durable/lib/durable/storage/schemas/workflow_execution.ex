@@ -29,6 +29,7 @@ defmodule Durable.Storage.Schemas.WorkflowExecution do
           priority: integer(),
           input: map(),
           context: map(),
+          engine_state: map(),
           current_step: String.t() | nil,
           error: map() | nil,
           parent_workflow_id: Ecto.UUID.t() | nil,
@@ -76,8 +77,11 @@ defmodule Durable.Storage.Schemas.WorkflowExecution do
 
     field(:queue, :string, default: "default")
     field(:priority, :integer, default: 0)
-    field(:input, :map, default: %{})
-    field(:context, :map, default: %{})
+    field(:input, Durable.Storage.JsonMap, default: %{})
+    field(:context, Durable.Storage.JsonMap, default: %{})
+    # The engine's own state for the run. Never the user's data: see
+    # Durable.EngineState. A run this engine creates has its mark from the start.
+    field(:engine_state, :map, default: %{"v" => 1})
     field(:current_step, :string)
     field(:error, :map)
     field(:parent_workflow_id, :binary_id)
@@ -131,6 +135,7 @@ defmodule Durable.Storage.Schemas.WorkflowExecution do
     :priority,
     :input,
     :context,
+    :engine_state,
     :current_step,
     :error,
     :parent_workflow_id,

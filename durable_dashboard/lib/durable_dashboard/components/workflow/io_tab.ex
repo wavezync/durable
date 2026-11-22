@@ -3,29 +3,21 @@ defmodule DurableDashboard.Components.Workflow.IoTab do
   I/O tab — shows the workflow's input payload and the accumulated context as
   pretty-printed JSON. Side-by-side on wide screens, stacked on narrow.
 
-  Keys starting with `__` are the engine's own bookkeeping (child runs,
-  parallel results); they're folded away under the run's own context.
+  The engine's own bookkeeping (child runs, parallel results) is folded away
+  under the run's own context. It has a column of its own; an engine from
+  before the column kept it in the context, under keys starting with `__`.
   """
 
   use Phoenix.Component
 
   alias DurableDashboard.Components.Core
+  alias DurableDashboard.Components.Workflow.ChildrenTab
 
   attr :workflow, :map, required: true
 
   def io_tab(assigns) do
-    {internal, own} =
-      case assigns.workflow.context do
-        %{} = context -> Enum.split_with(context, fn {k, _v} -> internal_key?(k) end)
-        _ -> {[], []}
-      end
-
-    assigns =
-      assign(assigns,
-        own:
-          if(is_map(assigns.workflow.context), do: Map.new(own), else: assigns.workflow.context),
-        internal: Map.new(internal)
-      )
+    {own, internal} = ChildrenTab.split(assigns.workflow)
+    assigns = assign(assigns, own: own, internal: internal)
 
     ~H"""
     <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
@@ -86,8 +78,6 @@ defmodule DurableDashboard.Components.Workflow.IoTab do
     <% end %>
     """
   end
-
-  defp internal_key?(key), do: key |> to_string() |> String.starts_with?("__")
 
   defp empty?(nil), do: true
   defp empty?(map) when is_map(map) and map_size(map) == 0, do: true

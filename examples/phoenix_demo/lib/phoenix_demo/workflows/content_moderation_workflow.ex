@@ -18,7 +18,7 @@ defmodule PhoenixDemo.Workflows.ContentModerationWorkflow do
   require Logger
 
   workflow "moderate_content", timeout: hours(24) do
-    step(:ingest, fn data ->
+    step :ingest, fn data ->
       content_id = data["content_id"] || "POST-#{:rand.uniform(99_999)}"
       content_type = data["content_type"] || "text"
 
@@ -27,7 +27,7 @@ defmodule PhoenixDemo.Workflows.ContentModerationWorkflow do
       put_context(:content_type, content_type)
 
       {:ok, assign(data, "content_id", content_id)}
-    end)
+    end
 
     parallel :scans,
       into: fn _ctx, results ->
@@ -49,23 +49,23 @@ defmodule PhoenixDemo.Workflows.ContentModerationWorkflow do
 
         {:ok, %{"scores" => scores, "max_score" => max_score}}
       end do
-      step(:toxicity_scan, fn _data ->
+      step :toxicity_scan, fn _data ->
         Process.sleep(:rand.uniform(300))
         score = :rand.uniform(100) / 100
         {:ok, %{score: score, model: "toxicity-v3"}}
-      end)
+      end
 
-      step(:nsfw_scan, fn _data ->
+      step :nsfw_scan, fn _data ->
         Process.sleep(:rand.uniform(300))
         score = :rand.uniform(100) / 100
         {:ok, %{score: score, model: "nsfw-v2"}}
-      end)
+      end
 
-      step(:spam_scan, fn _data ->
+      step :spam_scan, fn _data ->
         Process.sleep(:rand.uniform(300))
         score = :rand.uniform(100) / 100
         {:ok, %{score: score, model: "spam-v4"}}
-      end)
+      end
     end
 
     branch on: fn _data ->
@@ -78,7 +78,7 @@ defmodule PhoenixDemo.Workflows.ContentModerationWorkflow do
              end
            end do
       :high ->
-        step(:auto_remove, fn _data ->
+        step :auto_remove, fn _data ->
           content_id = get_context(:content_id)
           Logger.info("[Mod] Auto-removed #{content_id} (high score)")
 
@@ -88,10 +88,10 @@ defmodule PhoenixDemo.Workflows.ContentModerationWorkflow do
              "action" => "auto_removed",
              "scores" => get_context(:scores)
            }}
-        end)
+        end
 
       :medium ->
-        step(:request_human_review, fn data ->
+        step :request_human_review, fn data ->
           content_id = get_context(:content_id)
 
           verdict =
@@ -113,9 +113,9 @@ defmodule PhoenixDemo.Workflows.ContentModerationWorkflow do
 
           Logger.info("[Mod] Human verdict for #{content_id}: #{verdict}")
           {:ok, assign(data, "verdict", verdict)}
-        end)
+        end
 
-        step(:apply_verdict, fn data ->
+        step :apply_verdict, fn data ->
           content_id = get_context(:content_id)
           verdict = data["verdict"]
 
@@ -125,10 +125,10 @@ defmodule PhoenixDemo.Workflows.ContentModerationWorkflow do
              "action" => verdict,
              "scores" => get_context(:scores)
            }}
-        end)
+        end
 
       :low ->
-        step(:auto_approve, fn _data ->
+        step :auto_approve, fn _data ->
           content_id = get_context(:content_id)
           Logger.info("[Mod] Auto-approved #{content_id} (low score)")
 
@@ -138,7 +138,7 @@ defmodule PhoenixDemo.Workflows.ContentModerationWorkflow do
              "action" => "auto_approved",
              "scores" => get_context(:scores)
            }}
-        end)
+        end
     end
   end
 

@@ -19,11 +19,11 @@ defmodule Durable.Integration.NonUtcDatabaseTest do
     alias Durable.IntegrationProbe, as: Probe
 
     workflow "tz_slow" do
-      step(:work, fn data ->
+      step :work, fn data ->
         Probe.note(:body)
         Probe.wait_for(:release)
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -34,7 +34,7 @@ defmodule Durable.Integration.NonUtcDatabaseTest do
     workflow "tz_retries" do
       step(
         :work,
-        [retry: [max_attempts: 2, backoff: :constant, base: 200, jitter: false]],
+        [retry: [max_attempts: 2, backoff: :constant, base: 200]],
         fn data ->
           if Probe.note(:body) == 1, do: {:error, "again"}, else: {:ok, data}
         end
@@ -47,10 +47,10 @@ defmodule Durable.Integration.NonUtcDatabaseTest do
     use Durable.Wait
 
     workflow "tz_long_sleep" do
-      step(:nap, fn data ->
+      step :nap, fn data ->
         sleep(:timer.hours(1))
         {:ok, data}
-      end)
+      end
     end
   end
 

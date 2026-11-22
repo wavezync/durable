@@ -75,9 +75,6 @@ defmodule Durable.Executor.CompensationRunner do
         attempt
       )
 
-    # Mark as running
-    {:ok, step_exec} = update_step_execution(config, step_exec, :running)
-
     # Start log capture for this compensation
     Durable.LogCapture.start_capture(
       Durable.Telemetry.log_ids(
@@ -169,7 +166,10 @@ defmodule Durable.Executor.CompensationRunner do
       step_name: "compensate_#{compensation.name}",
       step_type: "compensation",
       attempt: attempt,
-      status: :pending,
+      # Written running, in one go: a process killed between two writes would
+      # leave a row nobody closes.
+      status: :running,
+      started_at: DateTime.utc_now(),
       is_compensation: true,
       compensation_for: Atom.to_string(compensating_step)
     }
@@ -177,12 +177,6 @@ defmodule Durable.Executor.CompensationRunner do
     %StepExecution{}
     |> StepExecution.changeset(attrs)
     |> Repo.insert(config)
-  end
-
-  defp update_step_execution(config, step_exec, :running) do
-    step_exec
-    |> StepExecution.start_changeset()
-    |> Repo.update(config)
   end
 
   defp complete_step_execution(config, step_exec, output, logs, duration_ms) do

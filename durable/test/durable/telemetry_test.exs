@@ -25,12 +25,12 @@ defmodule Durable.TelemetryTest do
     defp knob(data, key), do: Map.get(data, key) || Map.get(data, Atom.to_string(key))
 
     workflow "telemetry_steps" do
-      step(:a, [retry: [max_attempts: 2, backoff: :constant, base: 1]], fn data ->
+      step :a, [retry: [max_attempts: 2, backoff: :constant, base: 1]], fn data ->
         __MODULE__.act(1, data)
-      end)
+      end
 
-      step(:b, fn data -> __MODULE__.act(2, data) end)
-      step(:c, fn data -> __MODULE__.act(3, data) end)
+      step :b, fn data -> __MODULE__.act(2, data) end
+      step :c, fn data -> __MODULE__.act(3, data) end
     end
   end
 
@@ -39,9 +39,9 @@ defmodule Durable.TelemetryTest do
     use Durable
 
     workflow "rolls_back", on_failure: :rollback do
-      step(:book, [compensate: :unbook], fn data -> {:ok, data} end)
-      step(:fail, fn _data -> raise "nope" end)
-      compensate(:unbook, fn data -> {:ok, data} end)
+      step :book, [compensate: :unbook], fn data -> {:ok, data} end
+      step :fail, fn _data -> raise "nope" end
+      compensate :unbook, fn data -> {:ok, data} end
     end
   end
 
@@ -144,23 +144,23 @@ defmodule Durable.TelemetryTest do
           if data["bad_metadata"], do: raise("no metadata for you")
           [account_id: data["account_id"]]
         end do
-        step(:a, [retry: [max_attempts: 2, backoff: :constant, base: 1]], fn data ->
+        step :a, [retry: [max_attempts: 2, backoff: :constant, base: 1]], fn data ->
           __MODULE__.report(data, {:a, Durable.Context.attempt()})
           if Durable.Context.attempt() == 1, do: {:error, "again"}, else: {:ok, data}
-        end)
+        end
 
-        step(:b, [timeout: 5_000], fn data ->
+        step :b, [timeout: 5_000], fn data ->
           __MODULE__.report(data, :b)
           {:ok, data}
-        end)
+        end
 
-        step(:boom, [compensate: :undo], fn data -> {:ok, data} end)
-        step(:fails, fn _data -> {:fail, "stop"} end)
+        step :boom, [compensate: :undo], fn data -> {:ok, data} end
+        step :fails, fn _data -> {:fail, "stop"} end
 
-        compensate(:undo, fn data ->
+        compensate :undo, fn data ->
           __MODULE__.report(data, :undo)
           {:ok, data}
-        end)
+        end
       end
     end
 

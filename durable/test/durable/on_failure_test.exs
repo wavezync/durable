@@ -43,49 +43,49 @@ defmodule Durable.OnFailureTest do
     use Durable.Wait
 
     workflow "book_trip" do
-      step(:book_flight, [compensate: :cancel_flight], fn trip -> Steps.book_flight(trip) end)
-      step(:charge_card, fn trip -> Steps.charge_card(trip) end)
-      compensate(:cancel_flight, fn trip -> Steps.cancel_flight(trip) end)
+      step :book_flight, [compensate: :cancel_flight], fn trip -> Steps.book_flight(trip) end
+      step :charge_card, fn trip -> Steps.charge_card(trip) end
+      compensate :cancel_flight, fn trip -> Steps.cancel_flight(trip) end
     end
 
     workflow "book_trip_rolls_back", on_failure: :rollback do
-      step(:book_flight, [compensate: :cancel_flight], fn trip -> Steps.book_flight(trip) end)
-      step(:charge_card, fn trip -> Steps.charge_card(trip) end)
-      compensate(:cancel_flight, fn trip -> Steps.cancel_flight(trip) end)
+      step :book_flight, [compensate: :cancel_flight], fn trip -> Steps.book_flight(trip) end
+      step :charge_card, fn trip -> Steps.charge_card(trip) end
+      compensate :cancel_flight, fn trip -> Steps.cancel_flight(trip) end
     end
 
     # The seat is held for a week; five days is long enough to wait for a fix.
     workflow "book_trip_waits_five_days", on_failure: [rollback_after: days(5)] do
-      step(:book_flight, [compensate: :cancel_flight], fn trip -> Steps.book_flight(trip) end)
-      step(:charge_card, fn trip -> Steps.charge_card(trip) end)
-      compensate(:cancel_flight, fn trip -> Steps.cancel_flight(trip) end)
+      step :book_flight, [compensate: :cancel_flight], fn trip -> Steps.book_flight(trip) end
+      step :charge_card, fn trip -> Steps.charge_card(trip) end
+      compensate :cancel_flight, fn trip -> Steps.cancel_flight(trip) end
     end
 
     # A booking has to be through within the hour.
     workflow "book_trip_within_the_hour", timeout: hours(1) do
-      step(:book_flight, [compensate: :cancel_flight], fn trip -> Steps.book_flight(trip) end)
-      step(:charge_card, fn trip -> Steps.charge_card(trip) end)
-      compensate(:cancel_flight, fn trip -> Steps.cancel_flight(trip) end)
+      step :book_flight, [compensate: :cancel_flight], fn trip -> Steps.book_flight(trip) end
+      step :charge_card, fn trip -> Steps.charge_card(trip) end
+      compensate :cancel_flight, fn trip -> Steps.cancel_flight(trip) end
     end
 
     workflow "quotes_wait_five_days", on_failure: [rollback_after: days(5)] do
       parallel :insurers do
-        step(:north, fn _trip -> {:error, "insurer is down"} end)
+        step :north, fn _trip -> {:error, "insurer is down"} end
       end
     end
 
     # One booking per traveller, ever.
     workflow "book_trip_once", reuse: :never do
-      step(:book_flight, [compensate: :cancel_flight], fn trip -> Steps.book_flight(trip) end)
-      step(:charge_card, fn trip -> Steps.charge_card(trip) end)
-      compensate(:cancel_flight, fn trip -> Steps.cancel_flight(trip) end)
+      step :book_flight, [compensate: :cancel_flight], fn trip -> Steps.book_flight(trip) end
+      step :charge_card, fn trip -> Steps.charge_card(trip) end
+      compensate :cancel_flight, fn trip -> Steps.cancel_flight(trip) end
     end
 
     workflow "rolls_back_and_looks", on_failure: :rollback do
-      step(:book_flight, [compensate: :cancel_flight], fn trip -> Steps.book_flight(trip) end)
-      step(:charge_card, fn trip -> Steps.charge_card(trip) end)
+      step :book_flight, [compensate: :cancel_flight], fn trip -> Steps.book_flight(trip) end
+      step :charge_card, fn trip -> Steps.charge_card(trip) end
 
-      compensate(:cancel_flight, fn trip ->
+      compensate :cancel_flight, fn trip ->
         run =
           Durable.TestRepo.get!(
             Durable.Storage.Schemas.WorkflowExecution,
@@ -94,51 +94,51 @@ defmodule Durable.OnFailureTest do
 
         Seen.note({:holds_key_while_undone, run.holds_key})
         {:ok, trip}
-      end)
+      end
     end
 
     workflow "nothing_to_undo" do
-      step(:charge_card, fn trip -> Steps.charge_card(trip) end)
+      step :charge_card, fn trip -> Steps.charge_card(trip) end
     end
 
     # The seat is held while the traveller confirms.
     workflow "awaits_traveller" do
-      step(:book_flight, [compensate: :cancel_flight], fn trip -> Steps.book_flight(trip) end)
+      step :book_flight, [compensate: :cancel_flight], fn trip -> Steps.book_flight(trip) end
 
-      step(:confirm, fn trip ->
+      step :confirm, fn trip ->
         wait_for_input("confirmation")
         {:ok, trip}
-      end)
+      end
 
-      compensate(:cancel_flight, fn trip -> Steps.cancel_flight(trip) end)
+      compensate :cancel_flight, fn trip -> Steps.cancel_flight(trip) end
     end
 
     workflow "awaits_nothing_booked" do
-      step(:confirm, fn trip ->
+      step :confirm, fn trip ->
         wait_for_input("confirmation")
         {:ok, trip}
-      end)
+      end
     end
 
     workflow "by_fare" do
-      step(:book_flight, [compensate: :cancel_flight], fn trip -> Steps.book_flight(trip) end)
+      step :book_flight, [compensate: :cancel_flight], fn trip -> Steps.book_flight(trip) end
 
       branch :fare, fn _trip -> {:rollback, "the fare is no longer sold"} end do
-        :flexible -> step(:add_changes, fn trip -> {:ok, trip} end)
+        :flexible -> step :add_changes, fn trip -> {:ok, trip} end
       end
 
-      compensate(:cancel_flight, fn trip -> Steps.cancel_flight(trip) end)
+      compensate :cancel_flight, fn trip -> Steps.cancel_flight(trip) end
     end
 
     workflow "quotes" do
-      step(:book_flight, [compensate: :cancel_flight], fn trip -> Steps.book_flight(trip) end)
+      step :book_flight, [compensate: :cancel_flight], fn trip -> Steps.book_flight(trip) end
 
       parallel :insurers do
-        step(:north, fn _trip -> {:rollback, "no insurer will cover this trip"} end)
-        step(:south, fn trip -> {:ok, trip} end)
+        step :north, fn _trip -> {:rollback, "no insurer will cover this trip"} end
+        step :south, fn trip -> {:ok, trip} end
       end
 
-      compensate(:cancel_flight, fn trip -> Steps.cancel_flight(trip) end)
+      compensate :cancel_flight, fn trip -> Steps.cancel_flight(trip) end
     end
   end
 
@@ -198,7 +198,7 @@ defmodule Durable.OnFailureTest do
       assert Enum.count(Seen.all(), &(&1 == :cancel_flight)) == 1
       # It undid; it didn't run the failed step again.
       assert Enum.count(Seen.all(), &(&1 == :charge_card)) == 1
-      refute Map.has_key?(run.context, "__rollback__")
+      refute Map.has_key?(run.engine_state, "__rollback__")
     end
 
     test "a run rolled back can't be retried or rolled back again" do
@@ -217,9 +217,9 @@ defmodule Durable.OnFailureTest do
     end
 
     test "rollback_plan names what it would run, and is empty with nothing to undo" do
-      assert Durable.rollback_plan(book("down").id) == [book_flight: :cancel_flight]
-      assert Durable.rollback_plan(book("down", "nothing_to_undo").id) == []
-      assert Durable.rollback_plan(Ecto.UUID.generate()) == []
+      assert Durable.rollback_plan!(book("down").id) == [book_flight: :cancel_flight]
+      assert Durable.rollback_plan!(book("down", "nothing_to_undo").id) == []
+      assert Durable.rollback_plan(Ecto.UUID.generate()) == {:error, :not_found}
     end
 
     test "a run with nothing to undo stays failed, and can still be retried" do
@@ -339,7 +339,7 @@ defmodule Durable.OnFailureTest do
       assert run.status == :compensated
       assert run.error == %{"type" => "cancelled", "message" => "traveller walked away"}
       assert Enum.count(Seen.all(), &(&1 == :cancel_flight)) == 1
-      refute Map.has_key?(run.context, "__rollback__")
+      refute Map.has_key?(run.engine_state, "__rollback__")
       assert Durable.retry(run.id) == {:error, :rolled_back}
     end
 
@@ -355,8 +355,8 @@ defmodule Durable.OnFailureTest do
         Durable.start(BookTrip, %{"payments" => "up"}, workflow: "book_trip", key: "traveller:7")
 
       assert :ok = Durable.cancel(id, "traveller walked away", rollback: true)
-      assert %{status: :cancelled, context: context} = reload(%{id: id})
-      refute Map.has_key?(context, "__rollback__")
+      assert %{status: :cancelled, engine_state: engine_state} = reload(%{id: id})
+      refute Map.has_key?(engine_state, "__rollback__")
     end
 
     test "with rollback: true on a run that never started, its key is free for the next start" do

@@ -17,7 +17,9 @@ defmodule Durable.Config do
     checks for work, in milliseconds. With a `:pubsub`, a start or resume
     wakes the queue's pollers at once, on every node in the cluster, so a long
     interval only delays runs that come due later: sleeps, retries, snoozes
-    and delayed starts.
+    and delayed starts. Both are positive integers, and a queue takes nothing
+    else: a queue that could never claim, or a misspelt option, is refused
+    when Durable starts, with an error naming the queue.
   * `:pubsub` - Phoenix.PubSub for lifecycle broadcasts and waking pollers:
     a server name, `:start` for Durable's own, or `nil` (default). A start
     inside your own transaction wakes them when it commits. Without a PubSub,
@@ -104,7 +106,7 @@ defmodule Durable.Config do
       doc: "PostgreSQL schema name; only \"durable\" is supported for now"
     ],
     queues: [
-      type: :map,
+      type: {:custom, __MODULE__, :validate_queues, []},
       default: %{default: [concurrency: 10, poll_interval: 1000]},
       doc: "Queue configuration map"
     ],
@@ -184,6 +186,33 @@ defmodule Durable.Config do
           "Statuses left out are kept forever. Off by default."
     ]
   ]
+
+  # What `Queue.Manager` reads for each queue. No defaults here: it has its own.
+  @queue_schema NimbleOptions.new!(
+                  concurrency: [type: :pos_integer],
+                  poll_interval: [type: :pos_integer]
+                )
+
+  @doc false
+  # A queue with `concurrency: 0` would boot and never claim, and options that
+  # aren't a keyword list crashed the queue manager as it started.
+  def validate_queues(queues) when is_map(queues),
+    do: Enum.find_value(queues, {:ok, queues}, &queue_error/1)
+
+  def validate_queues(other), do: {:error, "expected map, got: #{inspect(other)}"}
+
+  defp queue_error({name, _opts}) when not is_atom(name),
+    do: {:error, "a queue's name is an atom, got: #{inspect(name)}"}
+
+  defp queue_error({name, opts}) do
+    with true <- Keyword.keyword?(opts),
+         {:ok, _valid} <- NimbleOptions.validate(opts, @queue_schema) do
+      nil
+    else
+      false -> {:error, "queue #{inspect(name)} takes a keyword list, got: #{inspect(opts)}"}
+      {:error, error} -> {:error, "queue #{inspect(name)}: #{Exception.message(error)}"}
+    end
+  end
 
   # One id per running instance: the Erlang node name when distributed, else
   # the hostname plus a per-boot suffix. Pollers stamp it into `locked_by`,

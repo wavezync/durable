@@ -49,7 +49,11 @@ end
 It takes the same options as `Durable.start/3`, such as `workflow:` to pick
 a workflow in a module that defines several.
 
-Context and input are stored as JSON, so read them with string keys.
+Context and input are stored as JSON, so read them with string keys. The
+context is the workflow's data only: none of the engine's own keys are in it.
+
+Every helper that takes a run also takes its id. An id that names no run fails
+the assertion and says so.
 
 `assert_status/2` checks `:completed`, `:failed`, `:waiting`, `:cancelled`,
 `:compensated` or any other status. When it fails, it prints the run's
@@ -86,14 +90,21 @@ assert_step(run, :send_download_link)
 
 ## Parallel Blocks
 
-`drain/2` runs every branch of a parallel block, then the steps after it.
-Unless the block has an `into:` callback, the branch results are stored under
-`__results__`:
+`drain/2` runs every lane of a parallel block, then the steps after it.
+Unless the block has an `into:` callback, what each lane produced is in the
+run's context under the block's name, by lane, with string keys:
 
 ```elixir
-run = run_workflow(MyApp.OnboardingWorkflow, %{})
+run = run_workflow(MyApp.LoanApplication, %{"applicant" => "a-1"})
 
-assert %{"__results__" => %{"send_email" => ["ok", _]}} = run.context
+assert %{"lookups" => %{"credit" => %{"score" => 712}}} = run.context
+```
+
+In a block with `on_error: :collect` each lane is stored as a two-item list,
+`["ok", output]` or `["error", reason]`:
+
+```elixir
+assert %{"lookups" => %{"credit" => ["ok", _], "fraud" => ["error", _]}} = run.context
 ```
 
 ## Waits
@@ -161,7 +172,11 @@ assert_step(run, :compensate_cancel_flight)
 
 Drain also runs the child workflows that a run starts, with `call_workflow/3`
 or `start_workflow/3`, and resumes the parent once a child is done. Use
-`Durable.list_children/2` to inspect them.
+`Durable.list_children!/2` to inspect them:
+
+```elixir
+assert [%{status: :completed}] = Durable.list_children!(run.id)
+```
 
 ## Started Runs
 

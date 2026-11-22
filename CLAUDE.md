@@ -40,16 +40,18 @@ lib/durable/
 ├── supervisor.ex           # Main supervisor for embedding
 ├── dsl/                    # Workflow DSL macros
 │   ├── workflow.ex         # workflow/2 macro
-│   ├── step.ex             # step/2/3, decision/2, each/3 macros
+│   ├── step.ex             # step, decision, branch, parallel, lane, compensate macros
 │   └── time_helpers.ex     # seconds/1, minutes/1, hours/1, days/1
 ├── definition.ex           # Runtime workflow/step definitions
 ├── executor.ex             # Workflow execution engine
 ├── executor/
 │   ├── step_runner.ex      # Individual step execution
 │   └── backoff.ex          # Retry backoff strategies
-├── context.ex              # Workflow context (input/get_context/put_context)
+├── engine_state.ex         # The engine's own state for a run, and the names it keeps
+├── context.ex              # Workflow context (get_context/put_context)
 ├── wait.ex                 # Sleep/wait_for_event/wait_for_input
 ├── query.ex                # Query API for executions
+├── query/opts.ex           # The read contract: option checks, unwrap!/3 for the ! twins
 ├── queue/                  # Job queue system
 │   ├── adapter.ex          # Queue adapter behaviour
 │   ├── adapters/postgres.ex # PostgreSQL implementation (FOR UPDATE SKIP LOCKED)
@@ -72,23 +74,23 @@ lib/durable/
 ```elixir
 defmodule MyWorkflow do
   use Durable
-  use Durable.Context
+  use Durable.Helpers
 
   workflow "my_workflow", timeout: hours(2) do
-    step :first do
-      # Access input with input()
-      data = input().data
-      # Store in context with put_context/2
-      put_context(:key, data)
+    # The first step gets the run's input; each step gets what the last returned
+    step :first, fn input ->
+      {:ok, %{key: input["data"]}}
     end
 
-    step :second, retry: [max_attempts: 3, backoff: :exponential] do
-      # Retrieve from context with get_context/1
-      get_context(:key)
+    step :second, [retry: [max_attempts: 3, backoff: :exponential]], fn data ->
+      {:ok, assign(data, :seen, data.key)}
     end
   end
 end
 ```
+
+The DSL is written without parentheses (`step :name, fn data -> ... end`), and
+a step returns `{:ok, data}` or one of the other results in `Durable.DSL.Step`.
 
 ### Queue System
 
@@ -120,11 +122,27 @@ children = [
 - `:repo` - Your Ecto repo module (required)
 - `:name` - Instance name for multi-tenancy (default: `Durable`)
 - `:prefix` - PostgreSQL schema name; only `"durable"` is supported for now
-- `:queues` - Queue configs (default: `%{default: [concurrency: 10, poll_interval: 1000]}`)
+- `:queues` - Queue configs (default: `%{default: [concurrency: 10, poll_interval: 1000]}`). Each queue takes `concurrency` and `poll_interval`, positive integers; anything else is refused at boot
 - `:queue_enabled` - Enable queue processing (default: `true`)
 - `:stale_lock_timeout` - Seconds before lock is stale (default: `300`)
 - `:heartbeat_interval` - Worker heartbeat interval in ms (default: `30_000`)
 - `:shutdown_grace_period` - Ms a stopping node waits for running work (default: `15_000`)
+
+### Read functions
+
+Every public function that reads (`Durable.get_execution/2`, `list_executions/1`,
+all of `Durable.Query` and `Durable.Stats`, `Durable.Activity.list/1`, the
+pending listings in `Durable.Wait`, the schedule lookups) returns
+`{:ok, result}` or `{:error, reason}` and has a `!` twin that returns the result
+or raises `ArgumentError`. Options are checked once, in `Durable.Query.Opts`:
+a wrong one is `{:error, {:invalid_option, key}}`, an id that names nothing is
+`{:error, :not_found}`, and nothing is clamped. A new read function goes in
+`test/support/read_functions.ex`.
+
+```elixir
+{:ok, runs} = Durable.list_executions(status: :failed)
+runs = Durable.list_executions!(status: :failed)
+```
 
 ## Testing
 
@@ -140,6 +158,8 @@ use Durable.DataCase, async: false
 ## Database
 
 All tables live in the `durable` PostgreSQL schema: `durable.workflow_executions`, `durable.step_executions`, `durable.pending_inputs`, `durable.scheduled_workflows`
+
+On `workflow_executions`, `context` is the user's data and `engine_state` is the engine's own (markers, key shapes, children). Never read a marker from `context` or write one there: see `Durable.EngineState` and ARCHITECTURE rules 22 to 24.
 
 Uses binary UUIDs as primary keys.
 

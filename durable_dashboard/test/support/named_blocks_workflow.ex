@@ -7,74 +7,74 @@ defmodule DurableDashboard.NamedBlocksWorkflow do
   use Durable
 
   workflow "named_blocks" do
-    step(:first, fn d -> {:ok, d} end)
+    step :first, fn d -> {:ok, d} end
 
     branch :risk, fn d -> {:clear, d} end do
       :clear ->
         pass()
 
       :review ->
-        step(:ask, fn d -> {:ok, d} end)
+        step :ask, fn d -> {:ok, d} end
 
         branch :inner, fn d -> {:x, d} end do
-          :x -> step(:x1, fn d -> {:ok, d} end)
+          :x -> step :x1, fn d -> {:ok, d} end
           :y -> pass()
         end
 
       :blocked ->
-        step(:ask, fn d -> {:ok, d} end)
+        step :ask, fn d -> {:ok, d} end
     end
 
     parallel :fulfil do
       lane :ship do
-        step(:pack, fn d -> {:ok, d} end)
+        step :pack, fn d -> {:ok, d} end
 
         branch :where, fn d -> {:home, d} end do
-          :home -> step(:courier, fn d -> {:ok, d} end)
-          :abroad -> step(:freight, fn d -> {:ok, d} end)
+          :home -> step :courier, fn d -> {:ok, d} end
+          :abroad -> step :freight, fn d -> {:ok, d} end
         end
       end
 
       lane :papers do
         parallel :docs do
-          step(:invoice, fn d -> {:ok, d} end)
-          step(:receipt, fn d -> {:ok, d} end)
+          step :invoice, fn d -> {:ok, d} end
+          step :receipt, fn d -> {:ok, d} end
         end
 
-        step(:file, fn d -> {:ok, d} end)
+        step :file, fn d -> {:ok, d} end
       end
 
-      step(:points, fn d -> {:ok, d} end)
+      step :points, fn d -> {:ok, d} end
     end
 
-    step(:close, fn d -> {:ok, d} end)
+    step :close, fn d -> {:ok, d} end
   end
 
   # A block that collects, with a lane that ends on a block of its own.
   workflow "lookups" do
     parallel :lookups, on_error: :collect do
-      step(:credit, fn d -> {:ok, d} end)
+      step :credit, fn d -> {:ok, d} end
 
       lane :sanctions do
-        step(:query, fn d -> {:ok, d} end)
+        step :query, fn d -> {:ok, d} end
 
         parallel :lists do
-          step(:eu, fn d -> {:ok, d} end)
-          step(:un, fn d -> {:ok, d} end)
+          step :eu, fn d -> {:ok, d} end
+          step :un, fn d -> {:ok, d} end
         end
       end
     end
 
-    step(:decide, fn d -> {:ok, d} end)
+    step :decide, fn d -> {:ok, d} end
   end
 
   # A block that fails fast, with a lane it can do without.
   workflow "enrich" do
     parallel :lookups do
-      step(:credit, fn d -> {:ok, d} end)
-      step(:device, [optional: true], fn d -> {:ok, d} end)
+      step :credit, fn d -> {:ok, d} end
+      step :device, [optional: true], fn d -> {:ok, d} end
     end
 
-    step(:decide, fn d -> {:ok, d} end)
+    step :decide, fn d -> {:ok, d} end
   end
 end

@@ -131,6 +131,9 @@ defmodule Durable.PubSub do
     else
       _ -> {:error, :no_pubsub}
     end
+  rescue
+    # Configured but not running. See broadcast/3.
+    ArgumentError -> {:error, :no_pubsub}
   end
 
   @doc """
@@ -247,6 +250,11 @@ defmodule Durable.PubSub do
     else
       _ -> :ok
     end
+  rescue
+    # The PubSub is configured but not running (the host's is restarting, or
+    # stopped first on the way down). An event or a wake is only a hint: it
+    # mustn't fail the start, or the step, that sent it.
+    ArgumentError -> :ok
   end
 
   defp pubsub_loaded?, do: Code.ensure_loaded?(Phoenix.PubSub)

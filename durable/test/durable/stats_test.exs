@@ -65,7 +65,7 @@ defmodule Durable.StatsTest do
         step_name: "p"
       })
 
-      stats = Stats.overview(opts())
+      stats = Stats.overview!(opts())
 
       # 10 top-level runs inserted inside the window — the child's parent
       # counts, the child itself doesn't, nor does the run from before.
@@ -79,7 +79,7 @@ defmodule Durable.StatsTest do
     end
 
     test "is all zeros and nils on an empty instance" do
-      stats = Stats.overview(opts())
+      stats = Stats.overview!(opts())
       assert %{started: 0, finished: %{}, failure_rate: +0.0, backlog: 0} = stats
       assert stats.duration_ms == %{p50: nil, p95: nil, max: nil}
     end
@@ -91,7 +91,7 @@ defmodule Durable.StatsTest do
     run!(status: :compensated, completed_at: at(75))
     run!(status: :completed, started_at: at(60), completed_at: at(80))
 
-    buckets = Stats.timeline(opts(bucket_seconds: 3_600))
+    buckets = Stats.timeline!(opts(bucket_seconds: 3_600))
 
     assert length(buckets) == 12
     assert hd(buckets).at == @since
@@ -124,7 +124,7 @@ defmodule Durable.StatsTest do
       error: %{"reason" => "card declined"}
     )
 
-    assert [biggest, other] = Stats.error_groups(opts())
+    assert [biggest, other] = Stats.error_groups!(opts())
 
     assert %{
              type: "RuntimeError",
@@ -159,7 +159,7 @@ defmodule Durable.StatsTest do
 
     run!(workflow_name: "quiet", status: :completed, completed_at: at(9))
 
-    assert [orders, emails] = Stats.failing_workflows(opts())
+    assert [orders, emails] = Stats.failing_workflows!(opts())
     assert %{workflow: "orders", failed: 3, finished: 10, failure_rate: 0.3} = orders
     assert %{step: "ship", message: "<n>", count: 3} = orders.top_error
     assert emails.workflow == "emails"
@@ -180,7 +180,7 @@ defmodule Durable.StatsTest do
       step!(run, "ship", 1, :waiting, nil, at(n))
     end
 
-    assert [reserve, ship] = Stats.step_performance(opts(workflow: "flow"))
+    assert [reserve, ship] = Stats.step_performance!(opts(workflow: "flow"))
 
     assert %{
              step: "reserve",
@@ -212,7 +212,7 @@ defmodule Durable.StatsTest do
     step!(gave_up, "ship", 2, :failed, 10, DateTime.add(at(2), 1, :second))
 
     assert [%{step: "ship", runs: 2, failed_attempts: 3, failed_runs: 1}] =
-             Stats.step_performance(opts(workflow: "flow"))
+             Stats.step_performance!(opts(workflow: "flow"))
   end
 
   defp step!(run, name, attempt, status, duration, started) do
@@ -243,7 +243,7 @@ defmodule Durable.StatsTest do
 
     :ok = Durable.pause_queue(:billing)
 
-    queues = Map.new(Stats.queues(), &{&1.queue, &1})
+    queues = Map.new(Stats.queues!(), &{&1.queue, &1})
 
     assert %{running: 1, ready: 1, scheduled: 0, paused: false, oldest_ready_at: %DateTime{}} =
              queues["default"]
@@ -274,7 +274,7 @@ defmodule Durable.StatsTest do
     run!(workflow_name: "orders", status: :running)
     run!(workflow_name: "emails", status: :waiting)
 
-    rows = Map.new(Stats.workflows(opts()), &{&1.workflow, &1})
+    rows = Map.new(Stats.workflows!(opts()), &{&1.workflow, &1})
 
     assert %{
              started: 5,
@@ -305,8 +305,8 @@ defmodule Durable.StatsTest do
       repo().delete_all(WorkflowExecution)
       for {status, minute} <- runs, do: run!(status: status, completed_at: at(minute))
 
-      overview = Stats.overview(opts())
-      timeline = Stats.timeline(opts(bucket_seconds: bucket_minutes * 60))
+      overview = Stats.overview!(opts())
+      timeline = Stats.timeline!(opts(bucket_seconds: bucket_minutes * 60))
 
       assert length(timeline) == div(720, bucket_minutes)
 

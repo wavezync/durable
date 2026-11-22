@@ -13,11 +13,11 @@ defmodule Durable.Integration.ParallelRegressionsTest do
     alias Durable.IntegrationProbe, as: Probe
 
     workflow "r_g_child" do
-      step(:w, fn data ->
+      step :w, fn data ->
         Probe.note(:child)
         Probe.wait_for(:release_child)
         {:ok, Map.put(data, "done", true)}
-      end)
+      end
     end
   end
 
@@ -27,11 +27,11 @@ defmodule Durable.Integration.ParallelRegressionsTest do
     alias Durable.IntegrationProbe, as: Probe
 
     workflow "r_g_parent" do
-      step(:call, fn data ->
+      step :call, fn data ->
         Probe.note(:parent)
         result = call_workflow(Child, %{})
         {:ok, Map.put(data, "result", inspect(result))}
-      end)
+      end
     end
   end
 
@@ -41,14 +41,14 @@ defmodule Durable.Integration.ParallelRegressionsTest do
 
     workflow "r_g_parallel" do
       parallel :block do
-        step(:only, fn data ->
+        step :only, fn data ->
           Probe.note(:child)
           Probe.wait_for(:release_child)
           {:ok, data}
-        end)
+        end
       end
 
-      step(:after, fn data -> {:ok, data} end)
+      step :after, fn data -> {:ok, data} end
     end
   end
 
@@ -58,14 +58,14 @@ defmodule Durable.Integration.ParallelRegressionsTest do
 
     workflow "r_g_fail_fast" do
       parallel :block, on_error: :fail_fast do
-        step(:bad, fn _data -> {:error, "boom"} end)
+        step :bad, fn _data -> {:error, "boom"} end
 
-        step(:slow, fn data ->
+        step :slow, fn data ->
           Probe.note(:slow)
           Probe.wait_for(:release_slow)
           Probe.note(:slow_finished)
           {:ok, data}
-        end)
+        end
       end
     end
   end

@@ -22,7 +22,7 @@ defmodule Durable.NamedBlocksTest do
     use Durable.Helpers
 
     workflow "risk" do
-      step(:score, fn order -> {:ok, assign(order, :seen, ["score"])} end)
+      step :score, fn order -> {:ok, assign(order, :seen, ["score"])} end
 
       branch :risk, [retry: [max_attempts: 3, base: 1]], fn order ->
         cond do
@@ -38,19 +38,19 @@ defmodule Durable.NamedBlocksTest do
           pass()
 
         :review ->
-          step(:ask, fn order -> {:ok, assign(order, :seen, order.seen ++ ["ask"])} end)
+          step :ask, fn order -> {:ok, assign(order, :seen, order.seen ++ ["ask"])} end
 
-          step(:record, [retry: [max_attempts: 2, base: 1]], fn order ->
+          step :record, [retry: [max_attempts: 2, base: 1]], fn order ->
             with {:ok, order} <- Flaky.once(order),
                  do: {:ok, assign(order, :seen, order.seen ++ ["record"])}
-          end)
+          end
 
         :blocked ->
-          step(:ask, fn order -> {:ok, assign(order, :seen, order.seen ++ ["blocked"])} end)
-          step(:stop, fn _order -> {:cancel, "blocked by risk check"} end)
+          step :ask, fn order -> {:ok, assign(order, :seen, order.seen ++ ["blocked"])} end
+          step :stop, fn _order -> {:cancel, "blocked by risk check"} end
       end
 
-      step(:charge, fn order -> {:ok, assign(order, :seen, order.seen ++ ["charge"])} end)
+      step :charge, fn order -> {:ok, assign(order, :seen, order.seen ++ ["charge"])} end
     end
   end
 
@@ -61,28 +61,28 @@ defmodule Durable.NamedBlocksTest do
     workflow "nested" do
       branch :outer, fn data -> {String.to_existing_atom(data["outer"]), data} end do
         :left ->
-          step(:before, fn data -> {:ok, assign(data, :seen, ["before"])} end)
+          step :before, fn data -> {:ok, assign(data, :seen, ["before"])} end
 
           branch :inner, fn data -> {String.to_existing_atom(data["inner"]), data} end do
             :up ->
-              step(:work, [retry: [max_attempts: 2, base: 1]], fn data ->
+              step :work, [retry: [max_attempts: 2, base: 1]], fn data ->
                 with {:ok, data} <- Flaky.once(data),
                      do: {:ok, assign(data, :seen, data.seen ++ ["up"])}
-              end)
+              end
 
-              step(:more, fn data -> {:ok, assign(data, :seen, data.seen ++ ["more"])} end)
+              step :more, fn data -> {:ok, assign(data, :seen, data.seen ++ ["more"])} end
 
             :down ->
-              step(:work, fn data -> {:ok, assign(data, :seen, data.seen ++ ["down"])} end)
+              step :work, fn data -> {:ok, assign(data, :seen, data.seen ++ ["down"])} end
           end
 
-          step(:after, fn data -> {:ok, assign(data, :seen, data.seen ++ ["after"])} end)
+          step :after, fn data -> {:ok, assign(data, :seen, data.seen ++ ["after"])} end
 
         :right ->
-          step(:work, fn data -> {:ok, assign(data, :seen, ["right"])} end)
+          step :work, fn data -> {:ok, assign(data, :seen, ["right"])} end
       end
 
-      step(:last, fn data -> {:ok, assign(data, :seen, data.seen ++ ["last"])} end)
+      step :last, fn data -> {:ok, assign(data, :seen, data.seen ++ ["last"])} end
     end
   end
 
@@ -91,42 +91,42 @@ defmodule Durable.NamedBlocksTest do
     use Durable.Helpers
 
     workflow "fulfil" do
-      step(:charge, fn order -> {:ok, assign(order, :charged, true)} end)
+      step :charge, fn order -> {:ok, assign(order, :charged, true)} end
 
       parallel :fulfil do
         lane :shipment do
-          step(:pack, fn order -> {:ok, assign(order, :packed, true)} end)
+          step :pack, fn order -> {:ok, assign(order, :packed, true)} end
 
-          step(:book, [retry: [max_attempts: 2, base: 1]], fn order ->
+          step :book, [retry: [max_attempts: 2, base: 1]], fn order ->
             with {:ok, order} <- Flaky.once(order), do: {:ok, assign(order, :booked, true)}
-          end)
+          end
 
           branch :destination, fn order ->
             if order["country"] == "LK", do: {:domestic, order}, else: {:abroad, order}
           end do
-            :domestic -> step(:courier, fn order -> {:ok, assign(order, :by, "courier")} end)
-            :abroad -> step(:freight, fn order -> {:ok, assign(order, :by, "freight")} end)
+            :domestic -> step :courier, fn order -> {:ok, assign(order, :by, "courier")} end
+            :abroad -> step :freight, fn order -> {:ok, assign(order, :by, "freight")} end
           end
         end
 
         lane :paperwork do
-          step(:invoice, fn order ->
+          step :invoice, fn order ->
             if order["country"] == "nowhere",
               do: {:error, "no tax rules"},
               else: {:ok, assign(order, :invoice, "INV-1")}
-          end)
+          end
         end
 
-        step(:points, fn order -> {:ok, assign(order, :points, 10)} end)
+        step :points, fn order -> {:ok, assign(order, :points, 10)} end
       end
 
-      step(:close, [retry: [max_attempts: 2, base: 1]], fn order ->
+      step :close, [retry: [max_attempts: 2, base: 1]], fn order ->
         with {:ok, order} <- Flaky.once(order) do
           %{fulfil: %{shipment: shipment, paperwork: paperwork, points: points}} = order
 
           {:ok, assign(order, :summary, [shipment["by"], paperwork["invoice"], points["points"]])}
         end
-      end)
+      end
     end
   end
 
@@ -138,8 +138,8 @@ defmodule Durable.NamedBlocksTest do
       branch :kind, fn data -> {:both, data} end do
         :both ->
           parallel :notify, into: fn data, results -> {:ok, assign(data, :got, results)} end do
-            step(:email, fn data -> {:ok, assign(data, :sent, "email")} end)
-            step(:sms, fn _data -> {:error, "no credit"} end)
+            step :email, fn data -> {:ok, assign(data, :sent, "email")} end
+            step :sms, fn _data -> {:error, "no credit"} end
           end
 
         :none ->
@@ -349,40 +349,40 @@ defmodule Durable.NamedBlocksTest do
     workflow "deep" do
       parallel :outer do
         lane :a do
-          step(:a1, fn data -> {:ok, Plumbing.note(data, "a1")} end)
-          step(:a2, fn data -> {:ok, Plumbing.note(data, "a2")} end)
+          step :a1, fn data -> {:ok, Plumbing.note(data, "a1")} end
+          step :a2, fn data -> {:ok, Plumbing.note(data, "a2")} end
 
           parallel :inner do
             lane :x do
-              step(:x1, fn data -> {:ok, Plumbing.note(data, "x1")} end)
+              step :x1, fn data -> {:ok, Plumbing.note(data, "x1")} end
 
-              step(:x2, fn data ->
+              step :x2, fn data ->
                 with {:ok, data} <- Broken.unless_broken(:deep_x2, data),
                      do: {:ok, data |> Plumbing.note("x2") |> assign(:x2_runs, 1)}
-              end)
+              end
             end
 
-            step(:y, fn data -> {:ok, Plumbing.note(data, "y")} end)
+            step :y, fn data -> {:ok, Plumbing.note(data, "y")} end
           end
 
-          step(:a3, fn %{inner: %{x: x, y: _}} = data ->
+          step :a3, fn %{inner: %{x: x, y: _}} = data ->
             {:ok, data |> Plumbing.note("a3") |> assign(:from_x, x["x2_runs"])}
-          end)
+          end
         end
 
         lane :b do
-          step(:b1, fn data -> {:ok, Plumbing.note(data, "b1")} end)
+          step :b1, fn data -> {:ok, Plumbing.note(data, "b1")} end
 
-          step(:b2, fn data ->
+          step :b2, fn data ->
             with {:ok, data} <- Broken.unless_broken(:deep_b2, data),
                  do: {:ok, Plumbing.note(data, "b2")}
-          end)
+          end
         end
       end
 
-      step(:done, fn %{outer: %{a: a, b: _}} = data ->
+      step :done, fn %{outer: %{a: a, b: _}} = data ->
         {:ok, data |> Plumbing.note("done") |> assign(:from_x, a["from_x"])}
-      end)
+      end
     end
   end
 
@@ -397,14 +397,14 @@ defmodule Durable.NamedBlocksTest do
           {:ok, Map.merge(data, a)}
         end do
         lane :a do
-          step(:a1, fn data -> {:ok, assign(data, :a1, true)} end)
-          step(:a2, fn data -> {:ok, assign(data, :a2, true)} end)
+          step :a1, fn data -> {:ok, assign(data, :a1, true)} end
+          step :a2, fn data -> {:ok, assign(data, :a2, true)} end
         end
 
-        step(:b, fn data -> {:ok, data} end)
+        step :b, fn data -> {:ok, data} end
       end
 
-      step(:after, fn data -> {:ok, assign(data, :after, true)} end)
+      step :after, fn data -> {:ok, assign(data, :after, true)} end
     end
   end
 
@@ -415,15 +415,15 @@ defmodule Durable.NamedBlocksTest do
     workflow "undo_in_arm", on_failure: :rollback do
       branch :kind, fn data -> {:book, data} end do
         :book ->
-          step(:reserve, [compensate: :release], fn data -> {:ok, assign(data, :held, true)} end)
+          step :reserve, [compensate: :release], fn data -> {:ok, assign(data, :held, true)} end
 
         :skip ->
           pass()
       end
 
-      step(:charge, fn _data -> {:fail, "declined"} end)
+      step :charge, fn _data -> {:fail, "declined"} end
 
-      compensate(:release, fn data -> {:ok, assign(data, :released, true)} end)
+      compensate :release, fn data -> {:ok, assign(data, :released, true)} end
     end
   end
 
@@ -551,28 +551,27 @@ defmodule Durable.NamedBlocksTest do
     defp bump(data, key), do: Map.update(data, key, 1, &(&1 + 1))
 
     workflow "counts" do
-      step(:a, fn data -> {:ok, bump(data, "a")} end)
+      step :a, fn data -> {:ok, bump(data, "a")} end
 
       branch :pick, fn data -> {:left, bump(data, "decided")} end do
-        :left -> step(:work, fn data -> {:ok, bump(data, "left")} end)
-        :right -> step(:work, fn data -> {:ok, bump(data, "right")} end)
+        :left -> step :work, fn data -> {:ok, bump(data, "left")} end
+        :right -> step :work, fn data -> {:ok, bump(data, "right")} end
       end
 
       parallel :both do
-        step(:x, fn data -> {:ok, bump(data, "x")} end)
-        step(:y, fn data -> {:ok, bump(data, "y")} end)
+        step :x, fn data -> {:ok, bump(data, "x")} end
+        step :y, fn data -> {:ok, bump(data, "y")} end
       end
 
-      step(:z, fn data -> {:ok, bump(data, "z")} end)
+      step :z, fn data -> {:ok, bump(data, "z")} end
     end
   end
 
   # A run stored as it is when its worker was lost right after `step`'s result
   # was saved: still at that step, with the result as its data.
   defp stopped_after(step, data, done) do
-    context =
-      data
-      |> Map.put("__string_keys__", Map.keys(data))
+    engine_state =
+      %{"v" => 1, "__string_keys__" => Map.keys(data)}
       |> then(&if(done, do: Map.put(&1, "__done__", done), else: &1))
 
     {:ok, run} =
@@ -583,7 +582,8 @@ defmodule Durable.NamedBlocksTest do
         status: :pending,
         queue: "default",
         input: %{},
-        context: context,
+        context: data,
+        engine_state: engine_state,
         current_step: step
       })
       |> Repo.insert()

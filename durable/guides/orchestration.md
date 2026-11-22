@@ -49,6 +49,12 @@ end
 | Cancelled | `{:error, error_info}` |
 | Timeout | `{:ok, timeout_value}` |
 
+`child_context` is the child's own data: every key its steps returned or put
+in the context, with string keys. It holds none of the engine's bookkeeping.
+
+The child is a run like any other, so its workflow's own `timeout:` applies to
+it: a child past it fails, and the parent gets `{:error, error_info}`.
+
 ### How It Works
 
 1. Parent step calls `call_workflow(ChildModule, input)`
@@ -118,17 +124,32 @@ Durable.cancel(parent_workflow_id, "User cancelled order")
 
 Children that already completed are not affected.
 
+A parent that runs out of its `timeout:` cancels its children the same way:
+the ones it was waiting on with `call_workflow`, and the ones it started with
+`start_workflow` and never waited for. They end `cancelled`, with the reason
+`parent_cancelled`. A parent that fails for any other reason leaves its
+`start_workflow` children running.
+
+A run that timed out waiting for its child can be retried. `Durable.retry/2`
+puts the child the timeout cancelled back to work, with its own `timeout:` in
+full again, and the parent waits for it as before.
+
+A cancel passes over a child that is queued to be rolled back: its rollback
+finishes.
+
 ## Querying Children
 
 List child workflows for a parent:
 
 ```elixir
 # All children
-children = Durable.list_children(parent_workflow_id)
+{:ok, children} = Durable.list_children(parent_workflow_id)
 
 # Filter by status
-running = Durable.list_children(parent_workflow_id, status: :running)
-completed = Durable.list_children(parent_workflow_id, status: :completed)
+{:ok, running} = Durable.list_children(parent_workflow_id, status: :running)
+
+# The ! form returns the list, and raises for an id that isn't a run
+completed = Durable.list_children!(parent_workflow_id, status: :completed)
 ```
 
 ## Examples
@@ -140,49 +161,46 @@ A parent workflow that calls payment and notification children:
 ```elixir
 defmodule MyApp.PaymentWorkflow do
   use Durable
-  use Durable.Context
+  use Durable.Helpers
 
-  workflow "charge" do
-    step :process, fn _data ->
-      amount = input()["amount"]
-      put_context(:payment_id, "pay_#{:rand.uniform(10_000)}")
-      put_context(:charged, amount)
+  workflow "charge", timeout: minutes(30) do
+    # The first step gets the child's input
+    step :process, [retry: [max_attempts: 3]], fn %{"amount" => amount} ->
+      {:ok, charge} = Payments.charge(amount)
+      {:ok, %{payment_id: charge.id, charged: amount}}
     end
   end
 end
 
 defmodule MyApp.EmailWorkflow do
   use Durable
-  use Durable.Context
+  use Durable.Helpers
 
   workflow "send_email" do
-    step :deliver, fn _data ->
-      to = input()["to"]
-      template = input()["template"]
+    step :deliver, fn %{"to" => to, "template" => template} = email ->
       Mailer.deliver(to, template)
-      put_context(:delivered, true)
+      {:ok, assign(email, :delivered, true)}
     end
   end
 end
 
 defmodule MyApp.OrderWorkflow do
   use Durable
-  use Durable.Context
   use Durable.Orchestration
   use Durable.Helpers
 
   workflow "process_order" do
-    step :validate, fn _data ->
-      order = input()
-      put_context(:order_id, order["id"])
-      put_context(:total, order["total"])
-      put_context(:email, order["email"])
+    # The input's keys are strings, and stay strings in every step
+    step :validate, fn order ->
+      if order["total"] > 0,
+        do: {:ok, assign(order, :order_id, order["id"])},
+        else: {:fail, "nothing to charge"}
     end
 
     # Synchronous — wait for payment result
     step :charge_payment, fn data ->
       case call_workflow(MyApp.PaymentWorkflow,
-             %{"amount" => data.total}, timeout: hours(1)) do
+             %{"amount" => data["total"]}, timeout: hours(1)) do
         {:ok, result} ->
           {:ok, assign(data, :payment_id, result["payment_id"])}
         {:error, reason} ->
@@ -193,7 +211,7 @@ defmodule MyApp.OrderWorkflow do
     # Fire-and-forget — email sent independently
     step :send_confirmation, fn data ->
       {:ok, email_id} = start_workflow(MyApp.EmailWorkflow,
-        %{"to" => data.email, "template" => "order_confirmed"},
+        %{"to" => data["email"], "template" => "order_confirmed"},
         ref: :confirmation_email
       )
       {:ok, assign(data, :email_workflow_id, email_id)}
@@ -220,18 +238,18 @@ Workflows can call children that call their own children:
 ```elixir
 defmodule MyApp.StepC do
   use Durable
-  use Durable.Context
+  use Durable.Helpers
 
   workflow "step_c" do
-    step :work, fn _data ->
-      put_context(:c_result, "done")
+    step :work, fn data ->
+      {:ok, assign(data, :c_result, "done")}
     end
   end
 end
 
 defmodule MyApp.StepB do
   use Durable
-  use Durable.Context
+  use Durable.Helpers
   use Durable.Orchestration
 
   workflow "step_b" do
@@ -248,7 +266,7 @@ end
 
 defmodule MyApp.StepA do
   use Durable
-  use Durable.Context
+  use Durable.Helpers
   use Durable.Orchestration
 
   workflow "step_a" do
@@ -272,25 +290,25 @@ Handle child failures gracefully with branching:
 workflow "resilient_order" do
   step :try_payment, fn data ->
     result = call_workflow(MyApp.PaymentWorkflow,
-      %{"amount" => data.total}, timeout: minutes(30))
+      %{"amount" => data["total"]}, timeout: minutes(30))
 
     case result do
       {:ok, payment} ->
-        {:ok, data |> assign(:payment, payment) |> assign(:payment_status, :success)}
+        {:ok, data |> assign(:payment, payment) |> assign(:payment_status, "success")}
       {:error, _reason} ->
-        {:ok, assign(data, :payment_status, :failed)}
+        {:ok, assign(data, :payment_status, "failed")}
     end
   end
 
   branch on: fn ctx -> ctx.payment_status end do
-    :success ->
+    "success" ->
       step :fulfill, fn data ->
         {:ok, assign(data, :fulfilled, true)}
       end
 
-    :failed ->
+    "failed" ->
       step :notify_failure, fn data ->
-        Mailer.send_payment_failure(data.email)
+        Mailer.send_payment_failure(data["email"])
         {:ok, assign(data, :fulfilled, false)}
       end
   end
@@ -303,20 +321,17 @@ end
 
 ```elixir
 workflow "enrich_order" do
-  step :init, fn input ->
-    {:ok, %{order_id: input["order_id"]}}
-  end
-
+  # The run's input is %{"order_id" => ...}; every lane starts from it
   parallel :enrich, on_error: :collect do
     step :customer, fn data ->
-      case call_workflow(MyApp.CustomerLookup, %{"id" => data.order_id}, ref: :customer) do
+      case call_workflow(MyApp.CustomerLookup, %{"id" => data["order_id"]}, ref: :customer) do
         {:ok, result} -> {:ok, assign(data, :customer, result)}
         {:error, reason} -> {:error, reason}
       end
     end
 
     step :inventory, fn data ->
-      case call_workflow(MyApp.InventoryCheck, %{"id" => data.order_id}, ref: :inventory) do
+      case call_workflow(MyApp.InventoryCheck, %{"id" => data["order_id"]}, ref: :inventory) do
         {:ok, result} -> {:ok, assign(data, :inventory, result)}
         {:error, reason} -> {:error, reason}
       end

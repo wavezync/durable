@@ -32,6 +32,7 @@ defmodule DurableDashboard.Live.WorkflowLive do
 
   alias DurableDashboard.Components.Workflow.FlowGraph
   alias DurableDashboard.Layouts
+  alias DurableDashboard.Params
   alias DurableDashboard.Path, as: DPath
   alias DurableDashboard.RunSearch
   alias DurableDashboard.Trace
@@ -78,11 +79,7 @@ defmodule DurableDashboard.Live.WorkflowLive do
     config = session["config"]
     durable = config.durable
 
-    id =
-      case params do
-        %{"id" => id} -> id
-        _ -> nil
-      end
+    id = Params.text(params["id"])
 
     if connected?(socket) and id != nil do
       if durable_config = Durable.Config.get_safe(durable) do
@@ -115,9 +112,9 @@ defmodule DurableDashboard.Live.WorkflowLive do
     {:noreply,
      socket
      |> assign(
-       view: Map.get(@views, params["tab"] || "trace", :trace),
-       selected_key: params["step"],
-       pane: params["pane"],
+       view: Map.get(@views, Params.text(params["tab"]) || "trace", :trace),
+       selected_key: Params.text(params["step"]),
+       pane: Params.text(params["pane"]),
        current_path: URI.parse(uri).path,
        breadcrumbs: breadcrumbs(socket.assigns)
      )
@@ -170,10 +167,19 @@ defmodule DurableDashboard.Live.WorkflowLive do
   # Actions
   # ============================================================================
 
+  # The "Run not found" page has no run to act on.
   @impl true
+  def handle_event(event, _params, %{assigns: %{not_found?: true}} = socket),
+    do: Params.ignore(event, socket)
+
   def handle_event("cancel", _params, socket) do
-    id = socket.assigns.workflow_id
-    result = Access.perform(socket, :operator, :cancel, [id], fn -> Durable.cancel(id) end)
+    %{workflow_id: id, durable: durable} = socket.assigns
+
+    result =
+      Access.perform(socket, :operator, :cancel, [id], fn ->
+        Durable.cancel(id, nil, durable: durable)
+      end)
+
     {:noreply, after_action(socket, result)}
   end
 
@@ -250,6 +256,10 @@ defmodule DurableDashboard.Live.WorkflowLive do
   def handle_event("close-editor", _params, socket) do
     {:noreply, assign(socket, rerun_editor: nil, action_error: nil)}
   end
+
+  def handle_event(event, _params, socket), do: Params.ignore(event, socket)
+
+  defp rerun_opts(%{"input" => json}) when not is_binary(json), do: {:error, :invalid_json}
 
   defp rerun_opts(%{"input" => json}) do
     case Jason.decode(json) do
@@ -677,7 +687,8 @@ defmodule DurableDashboard.Live.WorkflowLive do
   end
 
   # Replaced by a start with `on_duplicate: :cancel_existing`: link that run.
-  defp banner(%{workflow: %{status: :cancelled, error: %{"replaced_by" => id}}} = assigns) do
+  defp banner(%{workflow: %{status: :cancelled, error: %{"replaced_by" => id}}} = assigns)
+       when is_binary(id) do
     assigns = assign(assigns, replaced_by: id)
 
     ~H"""
@@ -692,7 +703,8 @@ defmodule DurableDashboard.Live.WorkflowLive do
   end
 
   defp banner(%{workflow: %{status: :cancelled}} = assigns) do
-    assigns = assign(assigns, reason: get_in(assigns.workflow.error || %{}, ["message"]))
+    assigns =
+      assign(assigns, reason: Format.text(get_in(assigns.workflow.error || %{}, ["message"])))
 
     ~H"""
     <div class="mt-4 flex items-center gap-3 rounded-[10px] border border-border bg-secondary px-3.5 py-3">
@@ -1187,7 +1199,7 @@ defmodule DurableDashboard.Live.WorkflowLive do
         id={"flow-" <> @workflow.id}
         kind={:flow}
         workflow={@workflow}
-        steps={@steps}
+        steps={graph_steps(@steps, @workflow, @family)}
         family={@family}
         selected={@picked && @selected}
         base_path={@base_path}
@@ -1764,6 +1776,16 @@ defmodule DurableDashboard.Live.WorkflowLive do
       ]
   end
 
+  # The graph draws one workflow and matches steps to it by name: this run's,
+  # its lanes' (they run as child runs) and, on a lane's own page, its
+  # parent's and the other lanes'. Runs further off in the family belong to
+  # other graphs, and a step of theirs with the same name isn't this one.
+  defp graph_steps(steps, workflow, family) do
+    near = List.wrap(family.parent) ++ family.siblings ++ family.children
+    ids = MapSet.new([workflow.id | Enum.map(near, & &1.id)])
+    Enum.filter(steps, &MapSet.member?(ids, &1.workflow_id))
+  end
+
   defp default_pane(%{latest: %{status: status}}) when status in @not_failures, do: "attempts"
   defp default_pane(%{latest: %{error: error}}) when not is_nil(error), do: "error"
   defp default_pane(_row), do: "output"
@@ -1820,9 +1842,14 @@ defmodule DurableDashboard.Live.WorkflowLive do
     Ecto.Query.CastError -> not_found(socket)
   end
 
+  # A run pruned since it was loaded has nothing to roll back.
   defp rollback_plan(%{status: status, id: id}, durable)
-       when status in [:failed, :pending, :running, :waiting],
-       do: Durable.rollback_plan(id, durable: durable)
+       when status in [:failed, :pending, :running, :waiting] do
+    case Durable.rollback_plan(id, durable: durable) do
+      {:ok, plan} -> plan
+      {:error, _not_found} -> []
+    end
+  end
 
   defp rollback_plan(_execution, _durable), do: []
 
@@ -1831,7 +1858,7 @@ defmodule DurableDashboard.Live.WorkflowLive do
   defp load_family(config, %WorkflowExecution{} = exec) do
     root = walk_to_root(config, exec)
     descendants = fetch_descendants(config, root.id)
-    children = fetch_children(config, exec.id)
+    children = Enum.filter(descendants, &(&1.parent_workflow_id == exec.id))
 
     parent =
       cond do
@@ -1840,8 +1867,8 @@ defmodule DurableDashboard.Live.WorkflowLive do
         true -> Enum.find(descendants, &(&1.id == exec.parent_workflow_id))
       end
 
-    related_ids =
-      [root.id | Enum.map(descendants, & &1.id)] ++ Enum.map(children, & &1.id)
+    # The run itself is in here too: the root, or one of its descendants.
+    related_ids = [root.id | Enum.map(descendants, & &1.id)]
 
     %{
       root: root,
@@ -1849,29 +1876,49 @@ defmodule DurableDashboard.Live.WorkflowLive do
       children: children,
       siblings: collect_siblings(descendants, exec),
       all_descendants: descendants,
-      related_ids: Enum.uniq(related_ids)
+      related_ids: Enum.uniq([exec.id | related_ids])
     }
   end
 
-  defp walk_to_root(_config, %WorkflowExecution{parent_workflow_id: nil} = exec), do: exec
+  # Runs nest a few levels at most. The bound, and stopping at a run already
+  # passed, keep rows that name each other as parent from looping for ever.
+  @max_family_depth 50
 
-  defp walk_to_root(config, %WorkflowExecution{parent_workflow_id: pid} = exec) do
-    case Durable.Repo.get(config, WorkflowExecution, pid) do
-      nil -> exec
-      parent -> walk_to_root(config, parent)
-    end
+  defp walk_to_root(config, exec, seen \\ MapSet.new())
+
+  defp walk_to_root(_config, %WorkflowExecution{parent_workflow_id: nil} = exec, _seen), do: exec
+
+  defp walk_to_root(config, %WorkflowExecution{parent_workflow_id: pid} = exec, seen) do
+    seen = MapSet.put(seen, exec.id)
+
+    parent =
+      if MapSet.size(seen) < @max_family_depth and not MapSet.member?(seen, pid),
+        do: Durable.Repo.get(config, WorkflowExecution, pid)
+
+    if parent, do: walk_to_root(config, parent, seen), else: exec
   end
 
-  defp fetch_descendants(config, root_id), do: fetch_children(config, root_id)
+  # Every run below the root, a level at a time (one query each), bounded
+  # like the walk up.
+  defp fetch_descendants(config, root_id),
+    do: descend(config, [root_id], MapSet.new([root_id]), @max_family_depth)
 
-  defp fetch_children(config, parent_id) do
-    Durable.Repo.all(
-      config,
-      from(w in WorkflowExecution,
-        where: w.parent_workflow_id == ^parent_id,
-        order_by: [asc: w.inserted_at]
+  defp descend(_config, [], _seen, _levels_left), do: []
+  defp descend(_config, _parent_ids, _seen, 0), do: []
+
+  defp descend(config, parent_ids, seen, levels_left) do
+    level =
+      config
+      |> Durable.Repo.all(
+        from(w in WorkflowExecution,
+          where: w.parent_workflow_id in ^parent_ids,
+          order_by: [asc: w.inserted_at]
+        )
       )
-    )
+      |> Enum.reject(&MapSet.member?(seen, &1.id))
+
+    ids = Enum.map(level, & &1.id)
+    level ++ descend(config, ids, MapSet.union(seen, MapSet.new(ids)), levels_left - 1)
   end
 
   defp collect_siblings(_descendants, %WorkflowExecution{parent_workflow_id: nil}), do: []

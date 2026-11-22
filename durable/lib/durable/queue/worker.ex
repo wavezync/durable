@@ -49,7 +49,21 @@ defmodule Durable.Queue.Worker do
     GenServer.start_link(__MODULE__, opts)
   end
 
+  @doc false
+  # A poller that replaced a dead one takes over its workers: this one reports
+  # to the caller from now on. Returns its job, or nil if it has gone.
+  @spec adopt(pid()) :: map() | nil
+  def adopt(worker) do
+    GenServer.call(worker, {:adopt, self()})
+  catch
+    :exit, _gone -> nil
+  end
+
   # GenServer callbacks
+
+  @impl true
+  def handle_call({:adopt, poller}, _from, state),
+    do: {:reply, state.job, %{state | poller_pid: poller}}
 
   @impl true
   def init(opts) do
@@ -154,7 +168,7 @@ defmodule Durable.Queue.Worker do
   # Private functions
 
   defp execute_job(job, config) do
-    case Durable.Executor.execute_workflow(job.id, config) do
+    case Durable.Executor.execute_workflow(job.id, config, job[:lock_token]) do
       {:ok, _execution} ->
         :ok
 

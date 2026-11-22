@@ -53,10 +53,23 @@ defmodule DurableDashboard.Live.QueuesLive do
   @impl true
   def handle_info(:refresh, socket), do: {:noreply, load(socket)}
 
+  # A host's `on_mount` hook may subscribe the page to anything.
+  def handle_info(_msg, socket), do: {:noreply, socket}
+
   @impl true
   def handle_event("toggle", %{"queue" => queue}, socket) do
+    # Pausing writes a row for whatever name it's given, so only a queue this
+    # page lists can be paused from here.
+    case Enum.find(socket.assigns.queues, &(&1.queue == queue)) do
+      nil -> DurableDashboard.Params.ignore("toggle", socket)
+      %{paused: paused?} -> toggle(socket, queue, paused?)
+    end
+  end
+
+  def handle_event(event, _params, socket), do: DurableDashboard.Params.ignore(event, socket)
+
+  defp toggle(socket, queue, paused?) do
     durable = socket.assigns.durable
-    paused? = Enum.any?(socket.assigns.queues, &(&1.queue == queue and &1.paused))
     action = if paused?, do: :resume_queue, else: :pause_queue
 
     result =
@@ -71,15 +84,18 @@ defmodule DurableDashboard.Live.QueuesLive do
   defp load(socket) do
     durable = socket.assigns.durable
     durable_config = Durable.Config.get_safe(durable)
-    nodes = if durable_config, do: Durable.list_nodes(durable: durable), else: []
-    queues = if durable_config, do: Durable.Stats.queues(durable: durable), else: []
+    nodes = if durable_config, do: Durable.list_nodes!(durable: durable), else: []
+    queues = if durable_config, do: Durable.Stats.queues!(durable: durable), else: []
     alive = Enum.filter(nodes, &(&1.status == :alive))
     now = DateTime.utc_now()
 
     history =
       if durable_config,
         do:
-          Durable.Stats.queue_history(durable: durable, since: DateTime.add(now, -3_600, :second)),
+          Durable.Stats.queue_history!(
+            durable: durable,
+            since: DateTime.add(now, -3_600, :second)
+          ),
         else: %{}
 
     assign(socket,
@@ -91,7 +107,7 @@ defmodule DurableDashboard.Live.QueuesLive do
       backlog_labels: minute_labels(now),
       activity:
         if(durable_config,
-          do: Durable.Activity.list(durable: durable, limit: 50, kinds: @operation_kinds),
+          do: Durable.Activity.list!(durable: durable, limit: 50, kinds: @operation_kinds),
           else: []
         ),
       now: now

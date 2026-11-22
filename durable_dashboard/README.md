@@ -46,11 +46,19 @@ Add `durable_dashboard` alongside `durable`:
 ```elixir
 def deps do
   [
-    {:durable, "~> 1.5"},
-    {:durable_dashboard, "~> 1.3"}
+    {:durable, "~> 2.0"},
+    {:durable_dashboard, "~> 2.0"}
   ]
 end
 ```
+
+### Upgrading from 1.x
+
+Dashboard 2.0 needs Durable 2.0, so upgrade the two together. Durable 2.0
+can't share a database with 1.x nodes: run its migration, **stop every node on
+1.x**, then start the new ones. The steps are in
+[Upgrade Durable](https://durable.wavezync.com/docs/production/#upgrade-durable).
+The router line doesn't change.
 
 ## Usage
 
@@ -67,8 +75,8 @@ end
 ```
 
 The macro emits the dashboard's pipelines, asset routes, and live routes
-inline in your router. It must live at the **top level** — not inside a
-`scope` or `pipe_through` block, since it defines its own pipelines.
+inline in your router. Inside a `scope` it mounts under the scope's path and
+its links follow. `mount: "/"` works too.
 
 ### Options
 
@@ -80,6 +88,25 @@ inline in your router. It must live at the **top level** — not inside a
   auth or other concerns (default: `[]`)
 - `:resolver` — a `DurableDashboard.Access` module that decides who can change
   things. Without one the dashboard is read-only
+- `:as` — the name of this mount's `live_session` (default:
+  `:durable_dashboard`). Only needed to mount the dashboard more than once
+
+### One dashboard per Durable instance
+
+If your app runs several Durable instances, mount the dashboard once for each,
+at its own path, and name every mount after the first with `:as`:
+
+```elixir
+import DurableDashboard.Router
+
+scope "/admin" do
+  dashboard_routes "/durable"
+  dashboard_routes "/durable-billing", durable: MyApp.Billing, as: :billing_dashboard
+end
+```
+
+Each mount shows its own instance and links only to its own pages. A second
+mount without its own `:as` doesn't compile, and the error says so.
 
 ### URL surface
 

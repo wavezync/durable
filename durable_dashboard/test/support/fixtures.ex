@@ -31,13 +31,13 @@ defmodule DurableDashboard.Fixtures do
     use Durable
 
     workflow "process_payment" do
-      step(:validate, fn data -> {:ok, data} end)
+      step :validate, fn data -> {:ok, data} end
 
-      step(:authorize, fn data ->
+      step :authorize, fn data ->
         if DurableDashboard.Fixtures.knob(data, "decline"),
           do: raise(ArgumentError, "card declined"),
           else: {:ok, Map.put(data, "auth_code", "AUTH-1")}
-      end)
+      end
     end
   end
 
@@ -46,19 +46,19 @@ defmodule DurableDashboard.Fixtures do
     use Durable
 
     workflow "fulfill_order", on_failure: :rollback do
-      step(:reserve, [compensate: :release], fn data ->
+      step :reserve, [compensate: :release], fn data ->
         {:ok, Map.put(data, "reservation", "RES-1")}
-      end)
+      end
 
-      step(:charge, fn data ->
+      step :charge, fn data ->
         if DurableDashboard.Fixtures.knob(data, "decline"),
           do: {:error, %{reason: "payment_failed"}},
           else: {:ok, data}
-      end)
+      end
 
-      step(:ship, fn data -> {:ok, Map.put(data, "tracking", "TRK-1")} end)
+      step :ship, fn data -> {:ok, Map.put(data, "tracking", "TRK-1")} end
 
-      compensate(:release, fn data -> {:ok, data} end)
+      compensate :release, fn data -> {:ok, data} end
     end
   end
 
@@ -68,13 +68,13 @@ defmodule DurableDashboard.Fixtures do
 
     # No `on_failure:`, so a failed charge leaves the reservation in place.
     workflow "hold_order" do
-      step(:reserve, [compensate: :release], fn data ->
+      step :reserve, [compensate: :release], fn data ->
         {:ok, Map.put(data, "reservation", "RES-1")}
-      end)
+      end
 
-      step(:charge, fn _data -> {:error, %{reason: "payments_down"}} end)
+      step :charge, fn _data -> {:error, %{reason: "payments_down"}} end
 
-      compensate(:release, fn data -> {:ok, data} end)
+      compensate :release, fn data -> {:ok, data} end
     end
   end
 
@@ -84,9 +84,9 @@ defmodule DurableDashboard.Fixtures do
 
     # The reservation lapses, so a failed run isn't left for ever.
     workflow "hold_order_five_days", on_failure: [rollback_after: days(5)] do
-      step(:reserve, [compensate: :release], fn data -> {:ok, data} end)
-      step(:charge, fn _data -> {:error, %{reason: "payments_down"}} end)
-      compensate(:release, fn data -> {:ok, data} end)
+      step :reserve, [compensate: :release], fn data -> {:ok, data} end
+      step :charge, fn _data -> {:error, %{reason: "payments_down"}} end
+      compensate :release, fn data -> {:ok, data} end
     end
   end
 
@@ -96,14 +96,14 @@ defmodule DurableDashboard.Fixtures do
     use Durable.Wait
 
     workflow "hold_order_until_confirmed" do
-      step(:reserve, [compensate: :release], fn data -> {:ok, data} end)
+      step :reserve, [compensate: :release], fn data -> {:ok, data} end
 
-      step(:confirm, fn data ->
+      step :confirm, fn data ->
         wait_for_input("confirmation")
         {:ok, data}
-      end)
+      end
 
-      compensate(:release, fn data -> {:ok, data} end)
+      compensate :release, fn data -> {:ok, data} end
     end
   end
 
@@ -113,12 +113,12 @@ defmodule DurableDashboard.Fixtures do
     use Durable.Wait
 
     workflow "expense_approval" do
-      step(:ask, fn data ->
+      step :ask, fn data ->
         _ = wait_for_approval("manager_approval", prompt: "Approve $80 Meals expense from Bo?")
         {:ok, data}
-      end)
+      end
 
-      step(:pay, fn data -> {:ok, data} end)
+      step :pay, fn data -> {:ok, data} end
     end
   end
 
@@ -128,10 +128,10 @@ defmodule DurableDashboard.Fixtures do
     use Durable.Wait
 
     workflow "await_webhook" do
-      step(:await, fn data ->
+      step :await, fn data ->
         _ = wait_for_event("webhook_received", timeout: hours(1))
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -140,16 +140,16 @@ defmodule DurableDashboard.Fixtures do
     use Durable
 
     workflow "moderate_content" do
-      step(:ingest, fn data -> {:ok, data} end)
+      step :ingest, fn data -> {:ok, data} end
 
       parallel :scans do
-        step(:spam_scan, fn data -> {:ok, Map.put(data, "spam", 0.1)} end)
-        step(:nsfw_scan, fn data -> {:ok, Map.put(data, "nsfw", 0.2)} end)
+        step :spam_scan, fn data -> {:ok, Map.put(data, "spam", 0.1)} end
+        step :nsfw_scan, fn data -> {:ok, Map.put(data, "nsfw", 0.2)} end
       end
 
       branch on: fn _data -> :low end do
-        :high -> step(:remove, fn data -> {:ok, data} end)
-        :low -> step(:approve, fn data -> {:ok, data} end)
+        :high -> step :remove, fn data -> {:ok, data} end
+        :low -> step :approve, fn data -> {:ok, data} end
       end
     end
   end
@@ -159,7 +159,7 @@ defmodule DurableDashboard.Fixtures do
     use Durable
 
     workflow "send_invoice", reuse: :never do
-      step(:send, fn data -> {:ok, data} end)
+      step :send, fn data -> {:ok, data} end
     end
   end
 
@@ -168,7 +168,7 @@ defmodule DurableDashboard.Fixtures do
     use Durable
 
     workflow "send_digest", debounce: [period: 60_000, timeout: 300_000] do
-      step(:send, fn data -> {:ok, data} end)
+      step :send, fn data -> {:ok, data} end
     end
   end
 
@@ -177,7 +177,7 @@ defmodule DurableDashboard.Fixtures do
     use Durable
 
     workflow "skip_deleted" do
-      step(:lookup, fn _data -> {:cancel, "record deleted"} end)
+      step :lookup, fn _data -> {:cancel, "record deleted"} end
     end
   end
 
@@ -199,9 +199,9 @@ defmodule DurableDashboard.Fixtures do
     use Durable
 
     workflow "render_export" do
-      step(:render_pdf, fn _data ->
+      step :render_pdf, fn _data ->
         {:snooze, :timer.hours(1), "another export is running"}
-      end)
+      end
     end
   end
 
@@ -210,8 +210,8 @@ defmodule DurableDashboard.Fixtures do
     use Durable
 
     workflow "import_document" do
-      step(:prepare, fn data -> {:ok, data} end)
-      step(:run_ocr, [queue: :ocr], fn data -> {:ok, data} end)
+      step :prepare, fn data -> {:ok, data} end
+      step :run_ocr, [queue: :ocr], fn data -> {:ok, data} end
     end
   end
 
@@ -221,10 +221,10 @@ defmodule DurableDashboard.Fixtures do
     use Durable.Wait
 
     workflow "rebuild_index", on_duplicate: :run_again do
-      step(:await, fn data ->
+      step :await, fn data ->
         _ = wait_for_event("go", timeout: hours(1))
         {:ok, data}
-      end)
+      end
     end
   end
 

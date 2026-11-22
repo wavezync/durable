@@ -22,7 +22,9 @@ defmodule DurableDashboard.Live.InputsLive do
   alias DurableDashboard.Access
   alias DurableDashboard.Components.Charts
   alias DurableDashboard.Components.Core
+  alias DurableDashboard.Format
   alias DurableDashboard.Layouts
+  alias DurableDashboard.Params
   alias DurableDashboard.Path, as: DPath
 
   @tabs [{"input", "Needs input"}, {"events", "Waiting for events"}, {"sleep", "Sleeping"}]
@@ -57,11 +59,16 @@ defmodule DurableDashboard.Live.InputsLive do
 
   @impl true
   def handle_params(params, uri, socket) do
-    tab = if params["tab"] in Enum.map(@tabs, &elem(&1, 0)), do: params["tab"], else: "input"
+    tab = Params.text(params["tab"])
+    tab = if tab in Enum.map(@tabs, &elem(&1, 0)), do: tab, else: "input"
 
     {:noreply,
      socket
-     |> assign(current_path: URI.parse(uri).path, tab: tab, selected_id: params["id"])
+     |> assign(
+       current_path: URI.parse(uri).path,
+       tab: tab,
+       selected_id: Params.text(params["id"])
+     )
      |> load()}
   end
 
@@ -87,12 +94,27 @@ defmodule DurableDashboard.Live.InputsLive do
   # ============================================================================
 
   @impl true
-  def handle_event("decide", params, socket),
-    do: respond(socket, approval(params["decision"] == "approve", params, socket))
+  def handle_event("decide", params, socket) do
+    case requested(socket, params) do
+      {:ok, %{input_type: :approval} = input} ->
+        respond(socket, input, approval(params["decision"] == "approve", params, socket))
+
+      # Approve and Reject belong to the approval form. Any other request has
+      # its own form, and `answer/2` checks what it sends.
+      {:ok, _input} ->
+        {:noreply, assign(socket, action_error: "Only an approval can be approved or rejected.")}
+
+      :error ->
+        request_changed(socket)
+    end
+  end
 
   def handle_event("answer", params, socket) do
-    case answer(socket.assigns.selected, params) do
-      {:ok, data} -> respond(socket, data)
+    with {:ok, input} <- requested(socket, params),
+         {:ok, data} <- answer(input, params) do
+      respond(socket, input, data)
+    else
+      :error -> request_changed(socket)
       {:error, message} -> {:noreply, assign(socket, action_error: message)}
     end
   end
@@ -112,9 +134,12 @@ defmodule DurableDashboard.Live.InputsLive do
   def handle_event("close-compose", _params, socket),
     do: {:noreply, assign(socket, sending: nil, action_error: nil)}
 
-  def handle_event("send", %{"payload" => json}, socket) do
-    event = socket.assigns.sending
-
+  def handle_event(
+        "send",
+        %{"payload" => json},
+        %{assigns: %{sending: %PendingEvent{} = event}} = socket
+      )
+      when is_binary(json) do
     with {:ok, payload} <- decode_payload(json),
          :ok <-
            Access.perform(socket, :operator, :send_event, [event.workflow_id], fn ->
@@ -131,9 +156,33 @@ defmodule DurableDashboard.Live.InputsLive do
     end
   end
 
-  defp respond(socket, data) do
-    input = socket.assigns.selected
+  def handle_event(event, _params, socket), do: Params.ignore(event, socket)
 
+  # The request a form was rendered for (its hidden `request` field), read
+  # again now. The page re-picks what it shows on every live refresh, so the
+  # answer goes to the request the form names or to none: never to whichever
+  # one is selected when the click lands.
+  defp requested(socket, params) do
+    with config when config != nil <- Durable.Config.get_safe(socket.assigns.durable),
+         {:ok, id} <- Ecto.UUID.cast(params["request"]),
+         %PendingInput{} = input <-
+           Durable.Repo.one(config, where(inputs_query(), [p], p.id == ^id)) do
+      {:ok, input}
+    else
+      _ -> :error
+    end
+  end
+
+  # Refused, and recorded like any other attempt. The page is read again, so
+  # what it shows next is what's open now.
+  defp request_changed(socket) do
+    {:error, reason} =
+      Access.perform(socket, :operator, :provide_input, [], fn -> {:error, :request_changed} end)
+
+    {:noreply, socket |> assign(action_error: describe_error(reason)) |> load()}
+  end
+
+  defp respond(socket, input, data) do
     result =
       Access.perform(socket, :operator, :provide_input, [input.workflow_id], fn ->
         Durable.Wait.provide_input(input.workflow_id, input.input_name, data,
@@ -158,7 +207,7 @@ defmodule DurableDashboard.Live.InputsLive do
 
   defp approval(approved?, params, socket) do
     %{"approved" => approved?}
-    |> put_present("comment", String.trim(params["comment"] || ""))
+    |> put_present("comment", String.trim(Params.text(params["comment"]) || ""))
     |> put_present("by", socket.assigns[:user])
   end
 
@@ -167,14 +216,24 @@ defmodule DurableDashboard.Live.InputsLive do
 
   @doc false
   # Turns the submitted form into the value the run receives, per input type.
-  def answer(%{input_type: :single_choice}, %{"choice" => choice}) when choice != "",
-    do: {:ok, choice}
+  def answer(%{input_type: :single_choice}, %{"choice" => choice})
+      when is_binary(choice) and choice != "",
+      do: {:ok, choice}
 
   def answer(%{input_type: :single_choice}, _params), do: {:error, "Pick one option."}
 
-  def answer(%{input_type: :multi_choice}, params), do: {:ok, Map.get(params, "choices", [])}
+  def answer(%{input_type: :multi_choice}, params) do
+    choices = Map.get(params, "choices", [])
 
-  def answer(%{input_type: :free_text}, %{"text" => text}), do: {:ok, text}
+    if is_list(choices) and Enum.all?(choices, &is_binary/1),
+      do: {:ok, choices},
+      else: {:error, "Pick from the options."}
+  end
+
+  def answer(%{input_type: :free_text}, %{"text" => text}) when is_binary(text), do: {:ok, text}
+
+  def answer(%{input_type: :form}, %{"fields" => values}) when not is_map(values),
+    do: {:error, "Fill in the form's fields."}
 
   def answer(%{input_type: :form, fields: fields}, params) do
     values = Map.get(params, "fields", %{})
@@ -197,6 +256,8 @@ defmodule DurableDashboard.Live.InputsLive do
       do: {:error, "required"},
       else: {:ok, if(field["type"] in ["boolean", "checkbox"], do: false)}
   end
+
+  defp cast_field(_field, value) when not is_binary(value), do: {:error, "not a value"}
 
   defp cast_field(%{"type" => type}, value) when type in ["boolean", "checkbox"],
     do: {:ok, value == "true"}
@@ -227,6 +288,9 @@ defmodule DurableDashboard.Live.InputsLive do
 
   defp describe_error(:not_found),
     do: "It's no longer waiting — someone may have answered it already."
+
+  defp describe_error(:request_changed),
+    do: "That request changed while you were looking at it. Review it again."
 
   defp describe_error(:invalid_json), do: "The payload isn't valid JSON."
   defp describe_error(other), do: "That didn't work: #{inspect(other)}"
@@ -469,6 +533,7 @@ defmodule DurableDashboard.Live.InputsLive do
   defp response_form(%{input: %{input_type: :approval}} = assigns) do
     ~H"""
     <form id={"answer-#{@input.id}"} phx-submit="decide" class="flex flex-col gap-3">
+      <.request_field input={@input} />
       <label class="flex flex-col gap-1.5 text-xs font-medium">
         <span>Comment <span class="font-normal text-muted-foreground">(optional)</span></span>
         <textarea id={"#{@input.id}-comment"} name="comment" rows="2" class={field_class()}></textarea>
@@ -501,23 +566,22 @@ defmodule DurableDashboard.Live.InputsLive do
        when type in [:single_choice, :multi_choice] do
     ~H"""
     <form id={"answer-#{@input.id}"} phx-submit="answer" class="flex flex-col gap-2">
+      <.request_field input={@input} />
       <p class="text-xs font-medium">{if @input.input_type == :single_choice, do: "Pick one", else: "Pick any"}</p>
       <label
-        :for={choice <- @input.fields || []}
+        :for={choice <- options(@input.fields)}
         class="flex cursor-pointer items-center gap-3 rounded-md border border-border px-3 py-2.5 hover:bg-accent has-[:checked]:border-primary has-[:checked]:bg-primary/5"
       >
         <input
-          id={"#{@input.id}-#{choice["value"]}"}
+          id={"#{@input.id}-#{choice.value}"}
           type={if @input.input_type == :single_choice, do: "radio", else: "checkbox"}
           name={if @input.input_type == :single_choice, do: "choice", else: "choices[]"}
-          value={choice["value"]}
+          value={choice.value}
           class="accent-[var(--primary)]"
         />
         <span class="flex flex-col leading-tight">
-          <span class="text-[13px] font-medium">{choice["label"] || choice["value"]}</span>
-          <span :if={choice["hint"] || choice["description"]} class="text-xs text-muted-foreground">
-            {choice["hint"] || choice["description"]}
-          </span>
+          <span class="text-[13px] font-medium">{choice.label}</span>
+          <span :if={choice.hint} class="text-xs text-muted-foreground">{choice.hint}</span>
         </span>
       </label>
       <div class="mt-1 flex justify-end">
@@ -530,6 +594,7 @@ defmodule DurableDashboard.Live.InputsLive do
   defp response_form(%{input: %{input_type: :form}} = assigns) do
     ~H"""
     <form id={"answer-#{@input.id}"} phx-submit="answer" class="grid gap-3 sm:grid-cols-2">
+      <.request_field input={@input} />
       <label :for={field <- @input.fields || []} class={["flex flex-col gap-1.5 text-xs font-medium", field["type"] == "textarea" && "sm:col-span-2"]}>
         <span>
           {field_label(field)}
@@ -547,6 +612,7 @@ defmodule DurableDashboard.Live.InputsLive do
   defp response_form(assigns) do
     ~H"""
     <form id={"answer-#{@input.id}"} phx-submit="answer" class="flex flex-col gap-3">
+      <.request_field input={@input} />
       <label class="flex flex-col gap-1.5 text-xs font-medium">
         Response
         <textarea id={"#{@input.id}-text"} name="text" rows="4" class={field_class()}></textarea>
@@ -558,6 +624,15 @@ defmodule DurableDashboard.Live.InputsLive do
     """
   end
 
+  attr :input, :map, required: true
+
+  # Names the request a form answers; see `requested/2`.
+  defp request_field(assigns) do
+    ~H"""
+    <input type="hidden" name="request" value={@input.id} />
+    """
+  end
+
   attr :field, :map, required: true
   attr :id, :string, required: true
 
@@ -565,7 +640,7 @@ defmodule DurableDashboard.Live.InputsLive do
     ~H"""
     <select id={@id} name={"fields[#{@field["name"]}]"} required={@field["required"]} class={field_class()}>
       <option value="">Choose…</option>
-      <option :for={opt <- @field["options"] || []} value={opt}>{opt}</option>
+      <option :for={opt <- options(@field["options"])} value={opt.value}>{opt.label}</option>
     </select>
     """
   end
@@ -756,7 +831,7 @@ defmodule DurableDashboard.Live.InputsLive do
 
   defp relative(at) do
     seconds = DateTime.diff(at, DateTime.utc_now())
-    if seconds <= 0, do: "now", else: "in " <> DurableDashboard.Format.ms(seconds * 1_000)
+    if seconds <= 0, do: "now", else: "in " <> Format.ms(seconds * 1_000)
   end
 
   # Timeout values are stored wrapped so atoms and scalars survive JSONB.
@@ -786,6 +861,23 @@ defmodule DurableDashboard.Live.InputsLive do
   defp fact_value(v) when is_binary(v), do: v
   defp fact_value(v) when is_number(v) or is_boolean(v), do: to_string(v)
   defp fact_value(v), do: Jason.encode!(v)
+
+  # A choice, or a select field's option, as `%{value, label, hint}`. A
+  # workflow gives either `%{value:, label:}` maps or bare values.
+  defp options(list) when is_list(list), do: Enum.map(list, &option/1)
+  defp options(_none), do: []
+
+  defp option(%{} = option) do
+    value = Format.text(option["value"])
+
+    %{
+      value: value,
+      label: Format.text(option["label"]) || value,
+      hint: Format.text(option["hint"] || option["description"])
+    }
+  end
+
+  defp option(value), do: %{value: Format.text(value), label: Format.text(value), hint: nil}
 
   defp field_label(field), do: field["label"] || to_string(field["name"])
 

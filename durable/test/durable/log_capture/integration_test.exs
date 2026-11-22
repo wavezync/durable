@@ -190,12 +190,12 @@ defmodule LoggingTestWorkflow do
   require Logger
 
   workflow "logging_test" do
-    step(:log_various_levels, fn data ->
+    step :log_various_levels, fn data ->
       Logger.info("Info message from workflow")
       Logger.warning("Warning message from workflow")
 
       {:ok, assign(data, :logged, true)}
-    end)
+    end
   end
 end
 
@@ -204,11 +204,11 @@ defmodule IOLoggingTestWorkflow do
   use Durable.Helpers
 
   workflow "io_logging_test" do
-    step(:io_output, fn data ->
+    step :io_output, fn data ->
       IO.puts("IO.puts output from workflow")
 
       {:ok, assign(data, :io_logged, true)}
-    end)
+    end
   end
 end
 
@@ -219,14 +219,14 @@ defmodule MultiStepLoggingTestWorkflow do
   require Logger
 
   workflow "multi_step_logging" do
-    step(:first_step, fn data ->
+    step :first_step, fn data ->
       Logger.info("First step log")
       {:ok, assign(data, :step1, true)}
-    end)
+    end
 
-    step(:second_step, fn data ->
+    step :second_step, fn data ->
       Logger.info("Second step log")
       {:ok, assign(data, :step2, true)}
-    end)
+    end
   end
 end

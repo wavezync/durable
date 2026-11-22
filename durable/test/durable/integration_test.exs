@@ -411,43 +411,43 @@ defmodule OrderProcessingWorkflow do
 
   workflow "order_processing" do
     # First step receives workflow input as data
-    step(:validate_order, fn data ->
+    step :validate_order, fn data ->
       data =
         data
         |> assign(:order_type, data["type"])
         |> assign(:line_items, data["items"])
 
       {:ok, data}
-    end)
+    end
 
     # Branch based on order type
     branch on: fn data -> data.order_type end do
       "physical" ->
-        step(:process_physical, fn data ->
+        step :process_physical, fn data ->
           data =
             data
             |> assign(:processed_as, "physical")
             |> assign(:shipping_label, "SHIP-123")
 
           {:ok, data}
-        end)
+        end
 
       "digital" ->
-        step(:process_digital, fn data ->
+        step :process_digital, fn data ->
           data =
             data
             |> assign(:processed_as, "digital")
             |> assign(:download_url, "https://example.com/download")
 
           {:ok, data}
-        end)
+        end
     end
 
     # Batch processing using Enum.map (replaces foreach)
-    step(:process_items, fn data ->
+    step :process_items, fn data ->
       items_processed = Enum.map(data.line_items, fn item -> item["name"] end)
       {:ok, assign(data, :items_processed, items_processed)}
-    end)
+    end
 
     # Parallel notification tasks
     # Use into: to merge what each lane added back into the data
@@ -463,18 +463,18 @@ defmodule OrderProcessingWorkflow do
 
         {:ok, merged}
       end do
-      step(:send_confirmation, fn data ->
+      step :send_confirmation, fn data ->
         {:ok, assign(data, :email_sent, true)}
-      end)
+      end
 
-      step(:update_analytics, fn data ->
+      step :update_analytics, fn data ->
         {:ok, assign(data, :analytics_updated, true)}
-      end)
+      end
     end
 
-    step(:complete, fn data ->
+    step :complete, fn data ->
       {:ok, assign(data, :completed, true)}
-    end)
+    end
   end
 end
 
@@ -488,7 +488,7 @@ defmodule DocumentApprovalWorkflow do
 
   workflow "document_approval" do
     # First step receives workflow input as data
-    step(:create_request, fn data ->
+    step :create_request, fn data ->
       data =
         data
         |> assign(:amount, data["amount"])
@@ -497,16 +497,16 @@ defmodule DocumentApprovalWorkflow do
         |> assign(:original_input, data)
 
       {:ok, data}
-    end)
+    end
 
     # Decision - auto-approve low value, otherwise continue
-    decision(:check_auto_approve, fn data ->
+    decision :check_auto_approve, fn data ->
       if data[:amount] < 1000 do
         {:goto, :finalize, data}
       else
         {:ok, data}
       end
-    end)
+    end
 
     # Parallel notification (only runs for high-value)
     # Use into: to merge results back into context
@@ -522,53 +522,53 @@ defmodule DocumentApprovalWorkflow do
 
         {:ok, merged}
       end do
-      step(:notify_approvers, fn data ->
+      step :notify_approvers, fn data ->
         {:ok, assign(data, :notified, true)}
-      end)
+      end
 
-      step(:create_audit_log, fn data ->
+      step :create_audit_log, fn data ->
         {:ok, assign(data, :audit_logged, true)}
-      end)
+      end
     end
 
-    step(:set_approval, fn data ->
+    step :set_approval, fn data ->
       # Access original input saved by first step
       original = data[:original_input] || %{}
       result = original["approval_result"] || "approved"
       {:ok, assign(data, :approval_result, result)}
-    end)
+    end
 
     # Branch based on approval result
     branch on: fn data -> data.approval_result end do
       "approved" ->
-        step(:process_approved, fn data ->
+        step :process_approved, fn data ->
           {:ok, assign(data, :approval_processed, "approved")}
-        end)
+        end
 
       "rejected" ->
-        step(:process_rejected, fn data ->
+        step :process_rejected, fn data ->
           data =
             data
             |> assign(:approval_processed, "rejected")
             |> assign(:rejection_notified, true)
 
           {:ok, data}
-        end)
+        end
     end
 
     # Batch processing to update items (only updates if approved)
-    step(:update_items, fn data ->
+    step :update_items, fn data ->
       if data[:approval_processed] == "approved" do
         items_updated = Enum.map(data.affected_items, fn item -> item end)
         {:ok, assign(data, :items_updated, items_updated)}
       else
         {:ok, data}
       end
-    end)
+    end
 
-    step(:finalize, fn data ->
+    step :finalize, fn data ->
       {:ok, assign(data, :finalized, true)}
-    end)
+    end
   end
 end
 
@@ -582,24 +582,24 @@ defmodule BatchMigrationWorkflow do
 
   workflow "batch_migration" do
     # First step receives workflow input as data
-    step(:initialize, fn data ->
+    step :initialize, fn data ->
       data =
         data
         |> assign(:batches, data["batches"])
         |> assign(:migrated_ids, [])
 
       {:ok, data}
-    end)
+    end
 
     # Batch processing using Enum.map (replaces foreach)
-    step(:process_batches, fn data ->
+    step :process_batches, fn data ->
       migrated_ids = Enum.map(data.batches, fn batch -> batch["id"] end)
       {:ok, assign(data, :migrated_ids, migrated_ids)}
-    end)
+    end
 
     # Decision based on migration results
     # If empty, jump to finalize (skipping parallel and mark_success)
-    decision(:check_results, fn data ->
+    decision :check_results, fn data ->
       ids = data[:migrated_ids] || []
 
       if ids != [] do
@@ -607,7 +607,7 @@ defmodule BatchMigrationWorkflow do
       else
         {:goto, :finalize, data}
       end
-    end)
+    end
 
     # Parallel reporting (only runs if we have batches)
     # Use into: to merge results back into context
@@ -623,26 +623,26 @@ defmodule BatchMigrationWorkflow do
 
         {:ok, merged}
       end do
-      step(:generate_report, fn data ->
+      step :generate_report, fn data ->
         {:ok, assign(data, :report_generated, true)}
-      end)
+      end
 
-      step(:send_notifications, fn data ->
+      step :send_notifications, fn data ->
         {:ok, assign(data, :notifications_sent, true)}
-      end)
+      end
 
-      step(:cleanup_temp, fn data ->
+      step :cleanup_temp, fn data ->
         {:ok, assign(data, :cleanup_done, true)}
-      end)
+      end
     end
 
     # Success path - set status
-    step(:mark_success, fn data ->
+    step :mark_success, fn data ->
       {:ok, assign(data, :migration_status, "success")}
-    end)
+    end
 
     # Final step - both paths end here
-    step(:finalize, fn data ->
+    step :finalize, fn data ->
       # If status not set yet, it means we jumped here (empty path)
       data =
         if Map.has_key?(data, :migration_status) do
@@ -652,6 +652,6 @@ defmodule BatchMigrationWorkflow do
         end
 
       {:ok, assign(data, :completed_at, true)}
-    end)
+    end
   end
 end

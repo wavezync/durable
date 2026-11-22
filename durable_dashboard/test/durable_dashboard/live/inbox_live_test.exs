@@ -12,7 +12,7 @@ defmodule DurableDashboard.Live.InboxLiveTest do
     use Durable.Wait
 
     workflow "expense_form" do
-      step(:collect, fn data ->
+      step :collect, fn data ->
         _ =
           wait_for_form("expense_details",
             prompt: "Submit expense",
@@ -23,7 +23,7 @@ defmodule DurableDashboard.Live.InboxLiveTest do
           )
 
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -33,7 +33,7 @@ defmodule DurableDashboard.Live.InboxLiveTest do
     use Durable.Wait
 
     workflow "pick_shipping" do
-      step(:ask, fn data ->
+      step :ask, fn data ->
         _ =
           wait_for_choice("shipping_method",
             prompt: "Select shipping method",
@@ -44,7 +44,7 @@ defmodule DurableDashboard.Live.InboxLiveTest do
           )
 
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -54,10 +54,10 @@ defmodule DurableDashboard.Live.InboxLiveTest do
     use Durable.Wait
 
     workflow "nap" do
-      step(:doze, fn data ->
+      step :doze, fn data ->
         sleep(hours(1))
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -194,7 +194,7 @@ defmodule DurableDashboard.Live.InboxLiveTest do
       assert has_element?(
                view,
                "[role=alert]",
-               "It's no longer waiting — someone may have answered it already."
+               "That request changed while you were looking at it. Review it again."
              )
 
       assert %{response: %{"approved" => true}} = pending_input(run_id)

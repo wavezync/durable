@@ -1,7 +1,8 @@
 # Durable Dashboard
 
 Hex package providing the web dashboard for the Durable workflow engine.
-Architecture: Plug.Router entry point → Phoenix Router → LiveView pages,
+Architecture: a router macro (`DurableDashboard.Router`) emits the routes in the
+host's Phoenix router → LiveView pages, served for one Durable instance per mount,
 with a single ReactFlow island for the workflow graph view (mounted via a
 `phx-hook`).
 

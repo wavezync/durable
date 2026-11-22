@@ -15,14 +15,14 @@ defmodule Durable.WorkflowTimeoutTest do
     use Durable.Helpers
 
     workflow "slow_saga", timeout: 50, queue: :sagas, on_failure: :rollback do
-      step(:reserve, [compensate: :release], fn data -> {:ok, assign(data, :reserved, true)} end)
+      step :reserve, [compensate: :release], fn data -> {:ok, assign(data, :reserved, true)} end
 
-      step(:charge, fn data ->
+      step :charge, fn data ->
         Process.sleep(1_000)
         {:ok, assign(data, :charged, true)}
-      end)
+      end
 
-      compensate(:release, fn data -> {:ok, assign(data, :released, true)} end)
+      compensate :release, fn data -> {:ok, assign(data, :released, true)} end
     end
   end
 
@@ -32,10 +32,10 @@ defmodule Durable.WorkflowTimeoutTest do
     use Durable.Wait
 
     workflow "timed_approval", timeout: minutes(30) do
-      step(:ask, fn data ->
+      step :ask, fn data ->
         wait_for_approval("manager")
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -47,18 +47,18 @@ defmodule Durable.WorkflowTimeoutTest do
     require Logger
 
     workflow "timed", timeout: minutes(1) do
-      step(:remember, fn data ->
+      step :remember, fn data ->
         put_context(:note, "kept")
         Logger.info("remembering")
         {:ok, data}
-      end)
+      end
 
-      step(:fetch, [timeout: 20, retry: [max_attempts: 2, base: 1]], fn data ->
+      step :fetch, [timeout: 20, retry: [max_attempts: 2, base: 1]], fn data ->
         calls = Process.get(:fetch_calls, 0) + 1
         Process.put(:fetch_calls, calls)
         if calls == 1, do: Process.sleep(1_000)
         {:ok, assign(data, :note, get_context(:note))}
-      end)
+      end
     end
   end
 
@@ -67,10 +67,10 @@ defmodule Durable.WorkflowTimeoutTest do
     use Durable.Wait
 
     workflow "ask" do
-      step(:ask, fn data ->
+      step :ask, fn data ->
         wait_for_input("ok", timeout: hours(1), on_timeout: :fail)
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -79,9 +79,9 @@ defmodule Durable.WorkflowTimeoutTest do
     use Durable.Helpers
 
     workflow "stuck_saga", timeout: hours(1), on_failure: :rollback do
-      step(:reserve, [compensate: :release], fn data -> {:ok, assign(data, :reserved, true)} end)
-      step(:charge, [queue: :nobody], fn data -> {:ok, assign(data, :charged, true)} end)
-      compensate(:release, fn data -> {:ok, assign(data, :released, true)} end)
+      step :reserve, [compensate: :release], fn data -> {:ok, assign(data, :reserved, true)} end
+      step :charge, [queue: :nobody], fn data -> {:ok, assign(data, :charged, true)} end
+      compensate :release, fn data -> {:ok, assign(data, :released, true)} end
     end
   end
 
@@ -89,9 +89,9 @@ defmodule Durable.WorkflowTimeoutTest do
     use Durable
 
     workflow "stuck_raising_saga", timeout: hours(1), on_failure: :rollback do
-      step(:reserve, [compensate: :release], fn data -> {:ok, data} end)
-      step(:charge, [queue: :nobody], fn data -> {:ok, data} end)
-      compensate(:release, fn _data -> raise "boom" end)
+      step :reserve, [compensate: :release], fn data -> {:ok, data} end
+      step :charge, [queue: :nobody], fn data -> {:ok, data} end
+      compensate :release, fn _data -> raise "boom" end
     end
   end
 
@@ -101,7 +101,7 @@ defmodule Durable.WorkflowTimeoutTest do
 
     workflow "stuck_branch", timeout: hours(1) do
       parallel :work do
-        step(:stuck, [queue: :nobody], fn data -> {:ok, assign(data, :stuck, true)} end)
+        step :stuck, [queue: :nobody], fn data -> {:ok, assign(data, :stuck, true)} end
       end
     end
   end
@@ -132,7 +132,7 @@ defmodule Durable.WorkflowTimeoutTest do
       use Durable
 
       workflow "opts", on_failure: :rollback do
-        step(:a, [timeout: seconds(1), retry: [base: seconds(2)]], fn data -> {:ok, data} end)
+        step :a, [timeout: seconds(1), retry: [base: seconds(2)]], fn data -> {:ok, data} end
       end
     end
 

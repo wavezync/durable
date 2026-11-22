@@ -15,7 +15,7 @@ defmodule Durable.WakeTest do
     use Durable
 
     workflow "quick" do
-      step(:a, fn data -> {:ok, data} end)
+      step :a, fn data -> {:ok, data} end
     end
   end
 
@@ -24,10 +24,10 @@ defmodule Durable.WakeTest do
     use Durable.Wait
 
     workflow "waits_for_go" do
-      step(:a, fn data ->
+      step :a, fn data ->
         wait_for_event("go")
         {:ok, data}
-      end)
+      end
     end
   end
 

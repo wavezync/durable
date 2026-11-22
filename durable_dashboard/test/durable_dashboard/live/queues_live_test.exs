@@ -23,7 +23,7 @@ defmodule DurableDashboard.Live.QueuesLiveTest do
 
     html = view |> element(@pause) |> render_click()
 
-    assert Durable.paused_queues() == ["default"]
+    assert Durable.paused_queues!() == ["default"]
     assert has_element?(view, "tbody tr", "Paused")
     assert has_element?(view, @pause, "Resume")
     assert html =~ "on every node"
@@ -31,7 +31,7 @@ defmodule DurableDashboard.Live.QueuesLiveTest do
 
     view |> element(@pause) |> render_click()
 
-    assert Durable.paused_queues() == []
+    assert Durable.paused_queues!() == []
     assert has_element?(view, @pause, "Pause")
     assert has_element?(view, "li", "Resumed")
   end

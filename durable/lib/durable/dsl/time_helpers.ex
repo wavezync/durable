@@ -5,8 +5,9 @@ defmodule Durable.DSL.TimeHelpers do
   ## Examples
 
       workflow "process_order", timeout: hours(2) do
-        step :wait_for_confirmation do
-          sleep_for(minutes(30))
+        step :wait_for_confirmation, fn order ->
+          sleep(minutes(30))
+          {:ok, order}
         end
       end
 

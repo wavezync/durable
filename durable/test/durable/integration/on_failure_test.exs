@@ -12,17 +12,17 @@ defmodule Durable.Integration.OnFailureTest do
     alias Durable.IntegrationProbe, as: Probe
 
     workflow "of_booking" do
-      step(:hold_seat, [compensate: :release_seat], fn trip -> {:ok, trip} end)
+      step :hold_seat, [compensate: :release_seat], fn trip -> {:ok, trip} end
 
-      step(:charge_card, fn _trip ->
+      step :charge_card, fn _trip ->
         Probe.note({:charge, Durable.Context.workflow_id()})
         {:error, "payments timed out"}
-      end)
+      end
 
-      compensate(:release_seat, fn trip ->
+      compensate :release_seat, fn trip ->
         Probe.note({:release, Durable.Context.workflow_id()})
         {:ok, trip}
-      end)
+      end
     end
   end
 
@@ -33,49 +33,49 @@ defmodule Durable.Integration.OnFailureTest do
 
     # Cancelled at any moment: before, during or after the seat is held.
     workflow "of_slow_booking" do
-      step(:hold_seat, [compensate: :release_seat], fn trip ->
+      step :hold_seat, [compensate: :release_seat], fn trip ->
         Process.sleep(20)
         {:ok, trip}
-      end)
+      end
 
-      step(:charge_card, fn trip ->
+      step :charge_card, fn trip ->
         Process.sleep(40)
         {:ok, trip}
-      end)
+      end
 
-      compensate(:release_seat, fn trip ->
+      compensate :release_seat, fn trip ->
         Probe.note({:release, Durable.Context.workflow_id()})
         {:ok, trip}
-      end)
+      end
     end
 
     workflow "of_expiring_hold", on_failure: [rollback_after: days(5)] do
-      step(:hold_seat, [compensate: :release_seat], fn trip -> {:ok, trip} end)
+      step :hold_seat, [compensate: :release_seat], fn trip -> {:ok, trip} end
 
-      step(:charge_card, fn _trip ->
+      step :charge_card, fn _trip ->
         Probe.note({:charge, Durable.Context.workflow_id()})
         {:error, "payments timed out"}
-      end)
+      end
 
-      compensate(:release_seat, fn trip ->
+      compensate :release_seat, fn trip ->
         Probe.note({:release, Durable.Context.workflow_id()})
         {:ok, trip}
-      end)
+      end
     end
 
     workflow "of_referee" do
       parallel :checks do
-        step(:credit, fn application -> {:ok, Map.put(application, :score, 700)} end)
+        step :credit, fn application -> {:ok, Map.put(application, :score, 700)} end
 
         lane :referee, optional: true, timeout: 300 do
-          step(:ask, fn application ->
+          step :ask, fn application ->
             wait_for_input("referee")
             {:ok, application}
-          end)
+          end
         end
       end
 
-      step(:decide, fn application -> {:ok, application} end)
+      step :decide, fn application -> {:ok, application} end
     end
   end
 

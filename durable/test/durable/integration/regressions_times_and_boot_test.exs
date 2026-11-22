@@ -19,11 +19,11 @@ defmodule Durable.Integration.TimesAndBootRegressionsTest do
     alias Durable.IntegrationProbe, as: Probe
 
     workflow "r_sleeps_until" do
-      step(:w, fn data ->
+      step :w, fn data ->
         Probe.note(:body)
         schedule_at(~U[2099-12-25 00:00:00Z])
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -33,13 +33,13 @@ defmodule Durable.Integration.TimesAndBootRegressionsTest do
     require Logger
 
     workflow "r_big_metadata" do
-      step(:w, fn data ->
+      step :w, fn data ->
         big = String.duplicate("x", 1_048_576)
         # credo:disable-for-next-line Credo.Check.Warning.MissedMetadataKeyInLoggerConfig
         for i <- 1..300, do: Logger.info("line #{i}", payload: big)
         Probe.note(:finished_body)
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -49,7 +49,7 @@ defmodule Durable.Integration.TimesAndBootRegressionsTest do
 
     @schedule cron: "0 9 * * *"
     workflow "r_declares" do
-      step(:work, fn data -> {:ok, data} end)
+      step :work, fn data -> {:ok, data} end
     end
   end
 
@@ -101,17 +101,17 @@ defmodule Durable.Integration.TimesAndBootRegressionsTest do
 
       @schedule cron: "0 8 * * *", workflow: "r_early", name: "early_good"
       workflow "r_early" do
-        step(:work, fn data -> {:ok, data} end)
+        step :work, fn data -> {:ok, data} end
       end
 
       @schedule cron: "0 0 31 2 *", workflow: "r_never", name: "never"
       workflow "r_never" do
-        step(:work, fn data -> {:ok, data} end)
+        step :work, fn data -> {:ok, data} end
       end
 
       @schedule cron: "0 9 * * *", workflow: "r_daily", name: "daily_good"
       workflow "r_daily" do
-        step(:work, fn data -> {:ok, data} end)
+        step :work, fn data -> {:ok, data} end
       end
     end
 
@@ -132,7 +132,7 @@ defmodule Durable.Integration.TimesAndBootRegressionsTest do
 
       send(scheduler, :check)
       assert %{registered: true} = :sys.get_state(scheduler)
-      assert [_ | _] = API.list_schedules()
+      assert [_ | _] = API.list_schedules!()
     end
   end
 
@@ -203,7 +203,7 @@ defmodule Durable.Integration.TimesAndBootRegressionsTest do
 
     disabled =
       Enum.filter(
-        Durable.Activity.list(kinds: ["schedule_disabled"]),
+        Durable.Activity.list!(kinds: ["schedule_disabled"]),
         &(&1.details["schedule"] == "ad")
       )
 

@@ -79,7 +79,7 @@ Use `on_failure: :rollback` when no failure is worth retrying by hand. Otherwise
 
 A run that was rolled back can't be retried, because the work its later steps depend on is gone. `Durable.retry/2` returns `{:error, :rolled_back}`; `Durable.rerun/2` starts a fresh run.
 
-`Durable.rollback_plan(id)` returns what a rollback would run, newest first, without running it: `[book_hotel: :cancel_hotel, book_flight: :cancel_flight]`.
+`Durable.rollback_plan(id)` returns what a rollback would run, newest first, without running it: `{:ok, [book_hotel: :cancel_hotel, book_flight: :cancel_flight]}`. `Durable.rollback_plan!(id)` returns the list itself.
 
 ### A failed run that holds something that lapses
 
@@ -99,6 +99,10 @@ The run stops failed like any other, and can be retried or rolled back by hand. 
 ### Cancelling and undoing
 
 `Durable.cancel/2` stops a run and leaves what it did. `Durable.cancel(id, reason, rollback: true)` also undoes it: the run is cancelled, goes back on its queue, and ends `:compensated`, or stays `:cancelled` if there was nothing to undo. If a worker had the run, or a run under it such as a parallel lane, the undo starts one heartbeat later (30 s by default), once that worker has stopped, so a step that finished in that time is undone too. Child workflows are cancelled, not undone.
+
+A run that is on its queue to be rolled back can't be cancelled out of it. `Durable.cancel/2` returns `{:error, :already_completed}`, `Durable.cancel_all/2` and a parent's cancel pass over it, and the rollback finishes.
+
+A rollback that was cut short picks up where it stopped. If the worker died part-way, the run is left `:failed` and `Durable.rollback/2` again runs only the undos that hadn't completed. A node that stops cleanly in the middle hands the run back, and the node that claims it undoes what is left: the undo that was cut short runs again from the top, so keep compensations safe to repeat.
 
 ### Upgrading to 1.6
 

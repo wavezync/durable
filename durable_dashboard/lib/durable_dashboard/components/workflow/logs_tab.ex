@@ -38,15 +38,15 @@ defmodule DurableDashboard.Components.Workflow.LogsTab do
   end
 
   @impl true
-  def handle_event("filter:step", %{"step" => step}, socket) do
+  def handle_event("filter:step", %{"step" => step}, socket) when is_binary(step) do
     {:noreply, assign(socket, step_filter: step, page: 1)}
   end
 
-  def handle_event("filter:level", %{"level" => level}, socket) do
+  def handle_event("filter:level", %{"level" => level}, socket) when is_binary(level) do
     {:noreply, assign(socket, level_filter: level, page: 1)}
   end
 
-  def handle_event("filter:search", %{"value" => search}, socket) do
+  def handle_event("filter:search", %{"value" => search}, socket) when is_binary(search) do
     {:noreply, assign(socket, search: search, page: 1)}
   end
 
@@ -60,8 +60,10 @@ defmodule DurableDashboard.Components.Workflow.LogsTab do
   end
 
   def handle_event("page:set", %{"page" => page}, socket) do
-    {:noreply, assign(socket, page: to_int(page, socket.assigns.page))}
+    {:noreply, assign(socket, page: DurableDashboard.Params.int(page, socket.assigns.page))}
   end
+
+  def handle_event(event, _params, socket), do: DurableDashboard.Params.ignore(event, socket)
 
   @impl true
   def render(assigns) do
@@ -295,16 +297,6 @@ defmodule DurableDashboard.Components.Workflow.LogsTab do
   defp humanize("all"), do: "All"
   defp humanize(s) when is_binary(s), do: s
   defp humanize(s), do: to_string(s)
-
-  defp to_int(v, default) when is_binary(v) do
-    case Integer.parse(v) do
-      {n, _} -> n
-      :error -> default
-    end
-  end
-
-  defp to_int(v, _default) when is_integer(v), do: v
-  defp to_int(_, default), do: default
 
   # ============================================================================
   # Filtering / sorting

@@ -23,9 +23,12 @@ defmodule Durable.Keys do
 
   alias Durable.Activity
   alias Durable.Config
+  alias Durable.EngineState
   alias Durable.Executor
   alias Durable.Repo
   alias Durable.Storage.Schemas.WorkflowExecution
+
+  require EngineState
 
   @holder_target {:unsafe_fragment, "(workflow_module, workflow_name, key) WHERE holds_key"}
   @waiting_target {:unsafe_fragment,
@@ -294,9 +297,26 @@ defmodule Durable.Keys do
 
   defp replace(ctx, holder, rounds, moved) do
     case cancel_holder(ctx, holder) do
-      nil -> claim(ctx, rounds - 1, moved)
-      cancelled -> claim(ctx, rounds - 1, {:replaced, holder, cancelled})
+      nil ->
+        if to_be_rolled_back?(ctx, holder),
+          do: {:taken, holder},
+          else: claim(ctx, rounds - 1, moved)
+
+      cancelled ->
+        claim(ctx, rounds - 1, {:replaced, holder, cancelled})
     end
+  end
+
+  # On its queue to be undone, a holder is `pending` like any other, and
+  # cancelled it would end with nothing undone (`Executor.cancel_run/3`).
+  defp to_be_rolled_back?(ctx, holder) do
+    Repo.one(
+      ctx.config,
+      from(w in WorkflowExecution,
+        where: w.id == ^holder.id and EngineState.marked?(w, ^"__rollback__"),
+        select: true
+      )
+    ) == true
   end
 
   defp debouncing?(%{debounce: nil}, _holder), do: false
@@ -398,7 +418,9 @@ defmodule Durable.Keys do
 
   # `on_duplicate: :cancel_existing`: cancel the open holder and take its key
   # in one UPDATE, under any `reuse:`. Like `Durable.cancel/2`, a step in
-  # flight is stopped at its next heartbeat; compensations don't run.
+  # flight is stopped at its next heartbeat; compensations don't run. A holder
+  # waiting to be rolled back is left to it, and the start is told the key is
+  # taken.
   defp cancel_holder(ctx, holder) do
     now = DateTime.utc_now()
 
@@ -413,6 +435,7 @@ defmodule Durable.Keys do
            ctx.config,
            from(w in WorkflowExecution,
              where: w.id == ^holder.id and w.holds_key and w.status in ^@cancellable,
+             where: not EngineState.marked?(w, ^"__rollback__"),
              select: w
            ),
            set: [

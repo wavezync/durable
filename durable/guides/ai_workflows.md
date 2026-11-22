@@ -10,7 +10,7 @@ Build reliable AI agent workflows with automatic retries, state persistence, and
 # mix.exs
 defp deps do
   [
-    {:durable, "~> 1.5"},
+    {:durable, "~> 2.0"},
     {:req_llm, "~> 1.1"}
   ]
 end
@@ -71,15 +71,16 @@ defmodule MyApp.DocumentProcessor do
 
       doc_type = ReqLLM.generate_text!(
         "anthropic:claude-sonnet-4-20250514",
-        "Classify this document as :invoice, :contract, or :other. Reply with only the atom.\n\n#{content}"
-      ) |> String.trim() |> String.to_atom()
+        "Classify this document as invoice, contract, or other. Reply with only that word.\n\n#{content}"
+      ) |> String.trim()
 
       {:ok, assign(ctx, :doc_type, doc_type)}
     end
 
-    # Conditional branching - only ONE path executes
+    # Conditional branching - only ONE path executes.
+    # The data is stored as JSON, so match on strings, not atoms.
     branch on: fn ctx -> ctx.doc_type end do
-      :invoice ->
+      "invoice" ->
         step :extract_invoice, [retry: [max_attempts: 3]], fn ctx ->
           content = ctx.doc.content
 
@@ -103,7 +104,7 @@ defmodule MyApp.DocumentProcessor do
           {:ok, assign(ctx, :valid, abs(calculated - extracted.total) < 0.01)}
         end
 
-      :contract ->
+      "contract" ->
         step :extract_contract, [retry: [max_attempts: 3]], fn ctx ->
           content = ctx.doc.content
 
@@ -186,9 +187,9 @@ end
 
 ```elixir
 branch on: fn ctx -> ctx.category end do
-  :billing ->
+  "billing" ->
     step :handle_billing, fn ctx -> {:ok, ctx} end
-  :technical ->
+  "technical" ->
     step :handle_technical, fn ctx -> {:ok, ctx} end
   _ ->
     step :handle_default, fn ctx -> {:ok, ctx} end
@@ -201,7 +202,7 @@ end
 # Get execution status
 {:ok, execution} = Durable.get_execution(workflow_id)
 execution.status   # :running, :completed, :failed, :waiting
-execution.context  # All accumulated data
+execution.context  # The workflow's data, with string keys
 
 # With step details
 {:ok, execution} = Durable.get_execution(workflow_id, include_steps: true)
