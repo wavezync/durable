@@ -231,26 +231,26 @@ defmodule Durable.SchedulerTest do
     end
 
     test "lists all schedules" do
-      schedules = Durable.list_schedules()
+      schedules = Durable.list_schedules!()
 
       assert length(schedules) >= 3
     end
 
     test "filters by enabled status" do
-      schedules = Durable.list_schedules(enabled: true)
+      schedules = Durable.list_schedules!(enabled: true)
 
       refute Enum.any?(schedules, &(&1.name == "list_schedule_2"))
     end
 
     test "filters by queue" do
-      schedules = Durable.list_schedules(queue: :reports)
+      schedules = Durable.list_schedules!(queue: :reports)
 
       assert Enum.any?(schedules, &(&1.name == "list_schedule_3"))
       refute Enum.any?(schedules, &(&1.name == "list_schedule_1"))
     end
 
     test "respects limit" do
-      schedules = Durable.list_schedules(limit: 1)
+      schedules = Durable.list_schedules!(limit: 1)
 
       assert length(schedules) == 1
     end
@@ -357,7 +357,7 @@ defmodule Durable.SchedulerTest do
       {:ok, _} = Durable.schedule(SimpleWorkflow, "0 9 * * *", name: "nine")
       {:ok, schedule} = Durable.get_schedule("nine")
 
-      [first, second, third] = API.upcoming_runs(schedule, 3)
+      [first, second, third] = API.upcoming_runs!(schedule, 3)
 
       assert DateTime.compare(first, DateTime.utc_now()) == :gt
       assert {first.hour, first.minute} == {9, 0}

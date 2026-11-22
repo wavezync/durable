@@ -332,7 +332,7 @@ defmodule Durable.Fuzz.Audit4ApiWaitsTest do
   end
 
   defp apply_op(id, :lane_event, n) do
-    case Durable.list_children(id) do
+    case Durable.list_children!(id) do
       [lane] -> Durable.send_event(lane.id, "l1", %{"n" => n})
       [] -> {:error, :not_found}
     end

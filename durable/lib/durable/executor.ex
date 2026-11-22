@@ -17,6 +17,7 @@ defmodule Durable.Executor do
   alias Durable.Executor.StepRunner
   alias Durable.Keys
   alias Durable.PubSub, as: DurablePubSub
+  alias Durable.Query.Opts
   alias Durable.Queue.Drainer
   alias Durable.Repo
   alias Durable.Storage.Schemas.PendingEvent
@@ -389,19 +390,28 @@ defmodule Durable.Executor do
 
   @doc """
   What `rollback_workflow/2` would run: the compensation of every step that
-  completed, newest first, as `{step, compensation}` names. Empty when there
-  is nothing to undo or the run's code isn't on this node.
+  completed, newest first, as `{step, compensation}` names, in `{:ok, plan}`.
+  Empty when there is nothing to undo or the run's code isn't on this node,
+  and `{:error, :not_found}` for an id that isn't a run.
   """
-  @spec rollback_plan(String.t(), keyword()) :: [{atom(), atom()}]
+  @spec rollback_plan(String.t(), keyword()) ::
+          {:ok, [{atom(), atom()}]} | {:error, Opts.reason()}
   def rollback_plan(workflow_id, opts \\ []) do
-    config = Config.get(Keyword.get(opts, :durable, Durable))
+    with {:ok, opts} <- Opts.validate(opts),
+         config = Config.get(Keyword.get(opts, :durable, Durable)),
+         {:ok, execution} <- load_execution(config, workflow_id) do
+      {:ok, compensations_of(execution, config)}
+    end
+  end
 
-    with {:ok, execution} <- load_execution(config, workflow_id),
-         {:ok, workflow_def} <- get_workflow_definition_from_execution(execution) do
-      for {step, compensation} <- build_compensation_stack(execution.id, workflow_def, config),
-          do: {step, compensation.name}
-    else
-      _ -> []
+  defp compensations_of(execution, config) do
+    case get_workflow_definition_from_execution(execution) do
+      {:ok, workflow_def} ->
+        for {step, compensation} <- build_compensation_stack(execution.id, workflow_def, config),
+            do: {step, compensation.name}
+
+      _code_not_here ->
+        []
     end
   end
 
@@ -3594,7 +3604,7 @@ defmodule Durable.Executor do
     since = run.retried_at || run.inserted_at
 
     [workflow_id: run.id, kinds: ["worker_lost"], since: since, durable: config.name]
-    |> Activity.list()
+    |> Activity.list!()
     |> Enum.take_while(&(&1.details["step"] == run.current_step))
     |> length()
   end

@@ -71,7 +71,7 @@ defmodule Durable.Integration.Audit4ExecRollbackTest do
     {:ok, ^id} = Durable.rollback(id)
     assert_eventually(fn -> Probe.hits(:killed) == 1 end)
     await_status(id, :failed)
-    assert Durable.rollback_plan(id) == []
+    assert Durable.rollback_plan!(id) == []
 
     {:ok, ^id} = Durable.rollback(id)
     run = await_status(id, :compensated)

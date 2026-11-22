@@ -64,6 +64,22 @@ defmodule Durable do
 
       {:ok, execution} = Durable.get_execution(workflow_id)
 
+  ## Reading
+
+  Every function that reads (`get_execution/2`, `list_executions/1`,
+  `list_children/2`, `rollback_plan/2`, `list_schedules/1`, `get_schedule/2`,
+  `list_nodes/1`, `paused_queues/1`, and all of `Durable.Query` and
+  `Durable.Stats`) returns `{:ok, result}` or `{:error, reason}`, and has a
+  twin ending in `!` that returns the result or raises `ArgumentError`:
+
+      {:ok, runs} = Durable.list_executions(status: :failed)
+      runs = Durable.list_executions!(status: :failed)
+
+      {:error, {:invalid_option, :limit}} = Durable.list_executions(limit: -1)
+      {:error, :not_found} = Durable.get_execution("no-such-run")
+
+  `Durable.Query.Opts` lists the reasons.
+
   ## Configuration Options
 
   * `:repo` - The Ecto repo module (required)
@@ -94,6 +110,7 @@ defmodule Durable do
   """
 
   alias Durable.Config
+  alias Durable.Query.Opts
   alias Durable.Queue.Control, as: QueueControl
   alias Durable.Queue.Drainer
   alias Durable.Scheduler.API, as: SchedulerAPI
@@ -291,12 +308,18 @@ defmodule Durable do
   ## Examples
 
       {:ok, execution} = Durable.get_execution(workflow_id)
+      {:error, :not_found} = Durable.get_execution("no-such-run")
+      execution = Durable.get_execution!(workflow_id, include_steps: true)
 
   """
-  @spec get_execution(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
+  @spec get_execution(String.t(), keyword()) :: {:ok, map()} | {:error, Opts.reason()}
   def get_execution(workflow_id, opts \\ []) do
     Durable.Query.get_execution(workflow_id, opts)
   end
+
+  @doc "Like `get_execution/2`, but returns the run or raises `ArgumentError`."
+  @spec get_execution!(String.t(), keyword()) :: map()
+  def get_execution!(workflow_id, opts \\ []), do: Durable.Query.get_execution!(workflow_id, opts)
 
   @doc """
   Lists workflow executions with optional filters.
@@ -310,17 +333,24 @@ defmodule Durable do
   - `:tag` - Runs started with this tag, across workflows
   - `:limit` - Maximum number of results (default: `50`)
 
-  `Durable.Query.list_executions/1` lists every filter.
+  `Durable.Query.list_executions/1` lists every filter. One of the wrong type
+  or range is `{:error, {:invalid_option, key}}`: nothing is clamped.
 
   ## Examples
 
-      executions = Durable.list_executions(status: :running, limit: 100)
+      {:ok, executions} = Durable.list_executions(status: :running, limit: 100)
+      {:error, {:invalid_option, :limit}} = Durable.list_executions(limit: -1)
+      executions = Durable.list_executions!(status: :running, limit: 100)
 
   """
-  @spec list_executions(keyword()) :: [map()]
+  @spec list_executions(keyword()) :: {:ok, [map()]} | {:error, Opts.reason()}
   def list_executions(filters \\ []) do
     Durable.Query.list_executions(filters)
   end
+
+  @doc "Like `list_executions/1`, but returns the runs or raises `ArgumentError`."
+  @spec list_executions!(keyword()) :: [map()]
+  def list_executions!(filters \\ []), do: Durable.Query.list_executions!(filters)
 
   @doc """
   Cancels a pending, running or waiting workflow, and its child workflows.
@@ -443,14 +473,24 @@ defmodule Durable do
   completed, newest first.
 
       Durable.rollback_plan(workflow_id)
+      #=> {:ok, [book_hotel: :cancel_hotel, book_flight: :cancel_flight]}
+
+      Durable.rollback_plan!(workflow_id)
       #=> [book_hotel: :cancel_hotel, book_flight: :cancel_flight]
 
-  Empty when there is nothing to undo. Takes `:durable` like `rollback/2`.
+  Empty when there is nothing to undo, and `{:error, :not_found}` for an id
+  that isn't a run. Takes `:durable` like `rollback/2`.
   """
-  @spec rollback_plan(String.t(), keyword()) :: [{atom(), atom()}]
+  @spec rollback_plan(String.t(), keyword()) ::
+          {:ok, [{atom(), atom()}]} | {:error, Opts.reason()}
   def rollback_plan(workflow_id, opts \\ []) do
     Durable.Executor.rollback_plan(workflow_id, opts)
   end
+
+  @doc "Like `rollback_plan/2`, but returns the plan or raises `ArgumentError`."
+  @spec rollback_plan!(String.t(), keyword()) :: [{atom(), atom()}]
+  def rollback_plan!(workflow_id, opts \\ []),
+    do: workflow_id |> rollback_plan(opts) |> Opts.unwrap!(opts, id: workflow_id)
 
   @doc """
   Starts a fresh run of a finished workflow, with its original input or a new
@@ -530,22 +570,38 @@ defmodule Durable do
 
   @doc """
   Returns the names of queues currently paused with `pause_queue/2`.
+
+      {:ok, ["reports"]} = Durable.paused_queues()
+      ["reports"] = Durable.paused_queues!()
   """
-  @spec paused_queues(keyword()) :: [String.t()]
+  @spec paused_queues(keyword()) :: {:ok, [String.t()]} | {:error, Opts.reason()}
   def paused_queues(opts \\ []) do
-    QueueControl.paused(Config.get(Keyword.get(opts, :durable, Durable)))
+    with {:ok, opts} <- Opts.validate(opts),
+         do: {:ok, QueueControl.paused(Config.get(Keyword.get(opts, :durable, Durable)))}
   end
+
+  @doc "Like `paused_queues/1`, but returns the names or raises `ArgumentError`."
+  @spec paused_queues!(keyword()) :: [String.t()]
+  def paused_queues!(opts \\ []), do: opts |> paused_queues() |> Opts.unwrap!(opts)
 
   @doc """
   Lists the Durable nodes that have heartbeated recently, newest first. Each
   has `:id`, `:queues`, `:version`, `:started_at`, `:heartbeat_at`, a
   `:status` of `:alive` or `:missing` (no heartbeat for 30 s), and `:running`,
   the number of runs it is executing.
+
+      {:ok, nodes} = Durable.list_nodes()
+      nodes = Durable.list_nodes!()
   """
-  @spec list_nodes(keyword()) :: [map()]
+  @spec list_nodes(keyword()) :: {:ok, [map()]} | {:error, Opts.reason()}
   def list_nodes(opts \\ []) do
-    Durable.NodeRegistry.list(Config.get(Keyword.get(opts, :durable, Durable)))
+    with {:ok, opts} <- Opts.validate(opts),
+         do: {:ok, Durable.NodeRegistry.list(Config.get(Keyword.get(opts, :durable, Durable)))}
   end
+
+  @doc "Like `list_nodes/1`, but returns the nodes or raises `ArgumentError`."
+  @spec list_nodes!(keyword()) :: [map()]
+  def list_nodes!(opts \\ []), do: opts |> list_nodes() |> Opts.unwrap!(opts)
 
   @doc """
   Stops this node taking new work and waits for what it's running.
@@ -626,14 +682,20 @@ defmodule Durable do
 
   ## Examples
 
-      children = Durable.list_children(parent_workflow_id)
-      running_children = Durable.list_children(parent_workflow_id, status: :running)
+      {:ok, children} = Durable.list_children(parent_workflow_id)
+      {:error, :not_found} = Durable.list_children("no-such-run")
+      running_children = Durable.list_children!(parent_workflow_id, status: :running)
 
   """
-  @spec list_children(String.t(), keyword()) :: [map()]
+  @spec list_children(String.t(), keyword()) :: {:ok, [map()]} | {:error, Opts.reason()}
   def list_children(parent_workflow_id, opts \\ []) do
     Durable.Query.list_child_executions(parent_workflow_id, opts)
   end
+
+  @doc "Like `list_children/2`, but returns the runs or raises `ArgumentError`."
+  @spec list_children!(String.t(), keyword()) :: [map()]
+  def list_children!(parent_workflow_id, opts \\ []),
+    do: Durable.Query.list_child_executions!(parent_workflow_id, opts)
 
   # Scheduling API
 
@@ -687,13 +749,18 @@ defmodule Durable do
 
   ## Examples
 
-      schedules = Durable.list_schedules(enabled: true)
+      {:ok, schedules} = Durable.list_schedules(enabled: true)
+      schedules = Durable.list_schedules!(enabled: true)
 
   """
-  @spec list_schedules(keyword()) :: [term()]
+  @spec list_schedules(keyword()) :: {:ok, [term()]} | {:error, Opts.reason()}
   def list_schedules(filters \\ []) do
     SchedulerAPI.list_schedules(filters)
   end
+
+  @doc "Like `list_schedules/1`, but returns the schedules or raises `ArgumentError`."
+  @spec list_schedules!(keyword()) :: [term()]
+  def list_schedules!(filters \\ []), do: SchedulerAPI.list_schedules!(filters)
 
   @doc """
   Gets a scheduled workflow by name.
@@ -701,12 +768,18 @@ defmodule Durable do
   ## Examples
 
       {:ok, schedule} = Durable.get_schedule("daily_report")
+      {:error, :not_found} = Durable.get_schedule("nonexistent")
+      schedule = Durable.get_schedule!("daily_report")
 
   """
-  @spec get_schedule(String.t(), keyword()) :: {:ok, term()} | {:error, :not_found}
+  @spec get_schedule(String.t(), keyword()) :: {:ok, term()} | {:error, Opts.reason()}
   def get_schedule(name, opts \\ []) do
     SchedulerAPI.get_schedule(name, opts)
   end
+
+  @doc "Like `get_schedule/2`, but returns the schedule or raises `ArgumentError`."
+  @spec get_schedule!(String.t(), keyword()) :: term()
+  def get_schedule!(name, opts \\ []), do: SchedulerAPI.get_schedule!(name, opts)
 
   @doc """
   Updates a scheduled workflow.

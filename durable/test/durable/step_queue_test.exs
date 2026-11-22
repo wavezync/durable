@@ -506,7 +506,7 @@ defmodule Durable.StepQueueTest do
       run = run_workflow(EndsOnLlm, %{})
       assert {run.status, run.queue} == {:completed, "llm"}
 
-      ids = fn queue -> Enum.map(Durable.list_executions(queue: queue), & &1.id) end
+      ids = fn queue -> Enum.map(Durable.list_executions!(queue: queue), & &1.id) end
       assert run.id in ids.(:llm)
       refute run.id in ids.(:documents)
     end

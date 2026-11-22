@@ -490,15 +490,15 @@ defmodule Durable.Audit4ApiWaitsTest do
       assert finished.context["after"] == true
       assert finished.context["lookups"]["credit"]["credit"] == ~s({:cancelled, "stop"})
       assert finished.context["lookups"]["fraud"]["fraud"] == ~s({:cancelled, "stop"})
-      assert Enum.map(Durable.list_children(blocked.id), & &1.status) == [:completed, :completed]
-      assert Wait.list_pending_inputs() == []
+      assert Enum.map(Durable.list_children!(blocked.id), & &1.status) == [:completed, :completed]
+      assert Wait.list_pending_inputs!() == []
       assert [%{status: :completed}] = TestRepo.all(Durable.Storage.Schemas.WaitGroup)
     end
 
     test "on a block leaves a lane that isn't waiting alone" do
       {:ok, id} = Durable.start(Audit4ApiLanes, %{})
       assert execute(id).status == :waiting
-      [credit, fraud] = Enum.sort_by(Durable.list_children(id), & &1.context["__parallel_step"])
+      [credit, fraud] = Enum.sort_by(Durable.list_children!(id), & &1.context["__parallel_step"])
       # Only the credit lane has got to its wait; the other has yet to start.
       assert execute(credit.id).status == :waiting
       assert run(fraud.id).status == :pending
@@ -513,7 +513,7 @@ defmodule Durable.Audit4ApiWaitsTest do
       still_blocked = drain(id)
       assert still_blocked.status == :waiting
       assert run(credit.id).context["credit"] == ~s({:cancelled, "stop"})
-      assert [%{input_name: "fraud_ok", status: :pending}] = Wait.list_pending_inputs()
+      assert [%{input_name: "fraud_ok", status: :pending}] = Wait.list_pending_inputs!()
 
       assert Durable.provide_input(fraud.id, "fraud_ok", %{"n" => 2}) == :ok
       assert drain(id).status == :completed
@@ -526,13 +526,13 @@ defmodule Durable.Audit4ApiWaitsTest do
       assert Wait.cancel_wait(id, reason: "stop") == :ok
 
       assert run(id).status == :waiting
-      assert Enum.map(Durable.list_children(id), & &1.status) == [:pending, :pending]
+      assert Enum.map(Durable.list_children!(id), & &1.status) == [:pending, :pending]
     end
 
     test "on a run waiting for call_workflow cancels the child's wait" do
       calling = run_workflow(Audit4ApiLoan, %{}, workflow: "audit4_api_loan")
       assert calling.status == :waiting
-      [child] = Durable.list_children(calling.id)
+      [child] = Durable.list_children!(calling.id)
       assert_waiting_for_input(child.id, "signature")
 
       assert Wait.cancel_wait(calling.id, reason: "withdrawn") == :ok
@@ -543,7 +543,7 @@ defmodule Durable.Audit4ApiWaitsTest do
       assert finished.status == :completed
       assert finished.context["signature"] == ~s({:cancelled, "withdrawn"})
       assert run(child.id).status == :completed
-      assert Wait.list_pending_inputs() == []
+      assert Wait.list_pending_inputs!() == []
     end
 
     test "reaches a wait under a block, a call and another block" do
@@ -551,7 +551,7 @@ defmodule Durable.Audit4ApiWaitsTest do
       assert top.status == :waiting
 
       assert [%{event_name: "identity_checked"}] =
-               Wait.list_pending_events(event_name: "identity_checked")
+               Wait.list_pending_events!(event_name: "identity_checked")
 
       assert Wait.cancel_wait(top.id, reason: "withdrawn") == :ok
       finished = drain(top)
@@ -559,7 +559,7 @@ defmodule Durable.Audit4ApiWaitsTest do
       assert finished.status == :completed
       assert finished.context["lookups"]["signing"]["identity"] == ~s({:cancelled, "withdrawn"})
       assert finished.context["lookups"]["credit"]["credit"] == ~s({:cancelled, "withdrawn"})
-      assert Wait.list_pending_events(event_name: "identity_checked") == []
+      assert Wait.list_pending_events!(event_name: "identity_checked") == []
     end
   end
 
@@ -640,13 +640,13 @@ defmodule Durable.Audit4ApiWaitsTest do
   describe "waits inside lanes" do
     test "are the lane's: its id answers them, and the block's id finds nothing" do
       blocked = run_workflow(Audit4ApiLanes, %{})
-      lanes = Durable.list_children(blocked.id)
+      lanes = Durable.list_children!(blocked.id)
       assert length(lanes) == 2
 
       assert Durable.send_event(blocked.id, "credit_done", %{}) == {:error, :not_found}
       assert Durable.provide_input(blocked.id, "fraud_ok", %{}) == {:error, :not_found}
 
-      [input] = Wait.list_pending_inputs()
+      [input] = Wait.list_pending_inputs!()
       assert input.input_name == "fraud_ok"
       assert input.workflow_id in Enum.map(lanes, & &1.id)
 
@@ -672,7 +672,7 @@ defmodule Durable.Audit4ApiWaitsTest do
       assert still_blocked.status == :waiting
       assert run(credit.workflow_id).status == :completed
       assert run(credit.workflow_id).context["credit"] == ~s({:cancelled, "skip"})
-      assert [%{input_name: "fraud_ok", status: :pending}] = Wait.list_pending_inputs()
+      assert [%{input_name: "fraud_ok", status: :pending}] = Wait.list_pending_inputs!()
     end
   end
 

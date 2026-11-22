@@ -9,6 +9,7 @@ defmodule Durable.Fuzz.ApiTest do
   import Durable.FuzzTerms
 
   alias Durable.FuzzWorkflows.{Asks, Quick, Waits}
+  alias Durable.ReadFunctions
   alias Durable.Repo
 
   @moduletag :capture_log
@@ -208,6 +209,128 @@ defmodule Durable.Fuzz.ApiTest do
       end
 
       assert Process.alive?(Process.whereis(Durable.Queue.Manager))
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # Every read function, with anything for its options and its arguments: the
+  # tuple form is `{:ok, _}` or `{:error, _}` and never raises, and the `!`
+  # form raises nothing but ArgumentError.
+  # ---------------------------------------------------------------------------
+
+  @option_keys [
+    :limit,
+    :offset,
+    :status,
+    :holder_status,
+    :workflow,
+    :workflow_name,
+    :workflow_module,
+    :queue,
+    :current_step,
+    :trigger,
+    :trigger_ref,
+    :error_contains,
+    :key,
+    :key_prefix,
+    :tag,
+    :input,
+    :id,
+    :id_prefix,
+    :parent_workflow_id,
+    :workflow_id,
+    :from,
+    :to,
+    :since,
+    :until,
+    :timeout_before,
+    :bucket_seconds,
+    :include_children,
+    :include_steps,
+    :include_logs,
+    :top_level_only,
+    :enabled,
+    :event_name,
+    :kinds,
+    :no_such_option
+  ]
+
+  # Values that are right for some option, so a call gets past the checks and
+  # runs its query as often as it is refused.
+  defp likely do
+    one_of([
+      integer(),
+      integer(0..200),
+      boolean(),
+      member_of(@statuses),
+      list_of(member_of(@statuses), max_length: 2),
+      member_of([:api, :schedule, Quick, "quick", "default", :default, "go", ["queue_paused"]]),
+      member_of([~U[2020-01-01 00:00:00Z], ~U[2026-01-01 00:00:00.123456Z], DateTime.utc_now()]),
+      constant(Ecto.UUID.generate()),
+      map_of(string(:ascii, max_length: 4), string(:ascii, max_length: 4), max_length: 2),
+      nasty_string()
+    ])
+  end
+
+  defp option do
+    bind(member_of(@option_keys), fn key ->
+      map(one_of([likely(), likely(), nasty_term()]), &{key, &1})
+    end)
+  end
+
+  defp argument(:opts, _ctx), do: one_of([list_of(option(), max_length: 4), nasty_term()])
+  defp argument(:id, ctx), do: one_of([constant(ctx.finished), nasty_for(:string)])
+  defp argument(:ids, ctx), do: one_of([constant([ctx.finished]), nasty_for(:strings)])
+  defp argument(:step, _ctx), do: one_of([constant(:only), nasty_for(:string)])
+  defp argument(:name, ctx), do: one_of([constant(ctx.schedule.name), nasty_for(:string)])
+  defp argument(:schedule, ctx), do: one_of([constant(ctx.schedule), nasty_term()])
+  defp argument(:count, _ctx), do: nasty_for(:integer)
+
+  defp read_schedule do
+    case Durable.get_schedule("fuzz_reads") do
+      {:ok, schedule} -> schedule
+      {:error, :not_found} -> elem(Durable.schedule(Quick, "0 9 * * *", name: "fuzz_reads"), 1)
+    end
+  end
+
+  defp read!(read, args) do
+    {module, name, _kinds} = read
+
+    result =
+      try do
+        apply(module, name, args)
+      rescue
+        error ->
+          flunk("""
+          #{ReadFunctions.label(read)} raised #{inspect(error.__struct__)} from its tuple form
+          given #{inspect(args, limit: :infinity)}
+          #{Exception.format(:error, error, __STACKTRACE__)}
+          """)
+      end
+
+    assert match?({:ok, _}, result) or match?({:error, _}, result),
+           "#{ReadFunctions.label(read)} returned #{inspect(result)} given #{inspect(args)}"
+
+    banged =
+      try do
+        {:ok, apply(module, ReadFunctions.bang(name), args)}
+      rescue
+        _error in ArgumentError -> :raised
+      end
+
+    assert match?({:ok, _}, result) == match?({:ok, _}, banged),
+           "#{ReadFunctions.label(read)} and its ! twin disagree given #{inspect(args)}"
+  end
+
+  for {_module, _name, kinds} = read <- ReadFunctions.all() do
+    test "#{ReadFunctions.label(read)} is {:ok, _} or {:error, _}, whatever it is given" do
+      read = unquote(Macro.escape(read))
+      ctx = %{finished: finished(), schedule: read_schedule()}
+      arguments = Enum.map(unquote(kinds), &argument(&1, ctx))
+
+      check all(args <- fixed_list(arguments), max_runs: @runs, max_shrinking_steps: 40) do
+        read!(read, args)
+      end
     end
   end
 end

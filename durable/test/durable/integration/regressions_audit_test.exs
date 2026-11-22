@@ -327,7 +327,7 @@ defmodule Durable.Integration.AuditRegressionsTest do
 
     assert Probe.hits(:cancel_flight) == 0
 
-    lost = Durable.Activity.list(workflow_id: id, kinds: ["worker_lost"])
+    lost = Durable.Activity.list!(workflow_id: id, kinds: ["worker_lost"])
     assert length(lost) == 2
   end
 
@@ -520,7 +520,7 @@ defmodule Durable.Integration.AuditRegressionsTest do
       cron = "0 * * * #{rem(Date.day_of_week(day), 7)}"
 
       {:ok, schedule} = API.schedule(Tick, cron, name: "hourly_on_a_day", timezone: "Test/Fold")
-      [preview | _] = API.upcoming_runs(schedule, 1)
+      [preview | _] = API.upcoming_runs!(schedule, 1)
 
       # Midnight at UTC-5, the offset in force on that day.
       midnight = DateTime.new!(day, ~T[05:00:00.000000], "Etc/UTC")

@@ -20,7 +20,7 @@ defmodule Durable.Audit4ApiTimelineTest do
 
   test "ten thousand buckets are returned, and one more is refused" do
     since = DateTime.add(@until, -10_000, :second)
-    buckets = Stats.timeline(since: since, until: @until, bucket_seconds: 1)
+    buckets = Stats.timeline!(since: since, until: @until, bucket_seconds: 1)
 
     assert length(buckets) == 10_000
     assert hd(buckets).at == since
@@ -33,7 +33,7 @@ defmodule Durable.Audit4ApiTimelineTest do
   end
 
   test "the default bucket size never asks for too many, however long the window" do
-    buckets = Stats.timeline(since: ~U[1970-01-01 00:00:00Z], until: @until)
+    buckets = Stats.timeline!(since: ~U[1970-01-01 00:00:00Z], until: @until)
     assert length(buckets) in 48..49
   end
 end

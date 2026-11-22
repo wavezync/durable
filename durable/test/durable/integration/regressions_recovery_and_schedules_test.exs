@@ -557,7 +557,7 @@ defmodule Durable.Integration.RecoveryAndSchedulesRegressionsTest do
 
       disabled =
         Enum.filter(
-          Durable.Activity.list(kinds: ["schedule_disabled"]),
+          Durable.Activity.list!(kinds: ["schedule_disabled"]),
           &(&1.details["schedule"] == "ad")
         )
 

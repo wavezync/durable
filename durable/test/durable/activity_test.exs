@@ -34,7 +34,7 @@ defmodule Durable.ActivityTest do
       try do
         :ok = Activity.record(config(), kind)
         {:ok, :ok} = config().repo.transaction(fn -> Activity.record(config(), kind) end)
-        assert length(Activity.list(kinds: [kind])) == 2
+        assert length(Activity.list!(kinds: [kind])) == 2
       after
         config().repo.delete_all(from(a in ActivityEvent, where: a.kind == ^kind))
       end
@@ -50,7 +50,7 @@ defmodule Durable.ActivityTest do
     Sampler.sample(config())
     Sampler.sample(config())
 
-    history = Stats.queue_history()
+    history = Stats.queue_history!()
     assert [%{ready: 1, scheduled: 1, running: 1, waiting: 0}] = history["default"]
     assert [%{waiting: 1}] = history["emails"]
     assert config().repo.aggregate(QueueSample, :count) == 2
@@ -63,12 +63,12 @@ defmodule Durable.ActivityTest do
     assert [
              %{kind: "queue_resumed", queue: "default", details: %{}},
              %{kind: "queue_paused", queue: "default", details: %{"by" => "ops@example.com"}}
-           ] = Activity.list()
+           ] = Activity.list!()
   end
 
   test "recording never raises, even for details that can't be stored as JSON" do
     assert :ok = Activity.record(config(), "worker_fenced", details: %{pid: self()})
-    assert [%{kind: "worker_fenced", details: %{"pid" => "#PID<" <> _}}] = Activity.list()
+    assert [%{kind: "worker_fenced", details: %{"pid" => "#PID<" <> _}}] = Activity.list!()
   end
 
   test "pruning records how many runs it deleted" do
@@ -77,6 +77,6 @@ defmodule Durable.ActivityTest do
 
     Durable.Pruner.prune(%{config() | prune: [completed: 1_000]})
 
-    assert [%{kind: "pruned", count: 1, details: %{"completed" => 1}}] = Activity.list()
+    assert [%{kind: "pruned", count: 1, details: %{"completed" => 1}}] = Activity.list!()
   end
 end

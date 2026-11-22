@@ -970,7 +970,7 @@ defmodule Durable.WaitTest do
     test "returns pending inputs with default filters" do
       {:ok, execution} = create_and_execute_workflow(InputWaitTestWorkflow, %{})
 
-      inputs = Wait.list_pending_inputs()
+      inputs = Wait.list_pending_inputs!()
 
       assert inputs != []
       assert Enum.any?(inputs, fn i -> i.workflow_id == execution.id end)
@@ -990,11 +990,11 @@ defmodule Durable.WaitTest do
       |> repo.update!()
 
       # Should not appear in pending list
-      inputs = Wait.list_pending_inputs(status: :pending)
+      inputs = Wait.list_pending_inputs!(status: :pending)
       refute Enum.any?(inputs, fn i -> i.workflow_id == execution.id end)
 
       # Should appear in completed list
-      inputs = Wait.list_pending_inputs(status: :completed)
+      inputs = Wait.list_pending_inputs!(status: :completed)
       assert Enum.any?(inputs, fn i -> i.workflow_id == execution.id end)
     end
   end
@@ -1003,7 +1003,7 @@ defmodule Durable.WaitTest do
     test "returns pending events with default filters" do
       {:ok, execution} = create_and_execute_workflow(EventWaitTestWorkflow, %{})
 
-      events = Wait.list_pending_events()
+      events = Wait.list_pending_events!()
 
       assert events != []
       assert Enum.any?(events, fn e -> e.workflow_id == execution.id end)
@@ -1012,10 +1012,10 @@ defmodule Durable.WaitTest do
     test "filters by event_name" do
       {:ok, execution} = create_and_execute_workflow(EventWaitTestWorkflow, %{})
 
-      events = Wait.list_pending_events(event_name: "payment_confirmed")
+      events = Wait.list_pending_events!(event_name: "payment_confirmed")
       assert Enum.any?(events, fn e -> e.workflow_id == execution.id end)
 
-      events = Wait.list_pending_events(event_name: "other_event")
+      events = Wait.list_pending_events!(event_name: "other_event")
       refute Enum.any?(events, fn e -> e.workflow_id == execution.id end)
     end
   end

@@ -211,7 +211,7 @@ defmodule Durable.Integration.ChildrenAndSchedulesRegressionsTest do
     :ok = Durable.cancel(id, "changed my mind")
 
     [input] = IntegrationRepo.all(from(p in PendingInput, where: p.workflow_id == ^id))
-    inbox = Durable.Wait.list_pending_inputs() |> Enum.map(& &1.workflow_id)
+    inbox = Durable.Wait.list_pending_inputs!() |> Enum.map(& &1.workflow_id)
     answer = Durable.provide_input(id, "answer", %{"late" => true})
     [after_answer] = IntegrationRepo.all(from(p in PendingInput, where: p.workflow_id == ^id))
 

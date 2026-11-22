@@ -132,7 +132,7 @@ defmodule Durable.Integration.TimesAndBootRegressionsTest do
 
       send(scheduler, :check)
       assert %{registered: true} = :sys.get_state(scheduler)
-      assert [_ | _] = API.list_schedules()
+      assert [_ | _] = API.list_schedules!()
     end
   end
 
@@ -203,7 +203,7 @@ defmodule Durable.Integration.TimesAndBootRegressionsTest do
 
     disabled =
       Enum.filter(
-        Durable.Activity.list(kinds: ["schedule_disabled"]),
+        Durable.Activity.list!(kinds: ["schedule_disabled"]),
         &(&1.details["schedule"] == "ad")
       )
 

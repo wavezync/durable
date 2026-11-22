@@ -419,17 +419,17 @@ defmodule Durable.OrchestrationTest do
 
       {:ok, parent} = create_and_execute_workflow(FireForgetIdempotentParent, %{})
 
-      children = Durable.list_children(parent.id)
+      children = Durable.list_children!(parent.id)
       assert length(children) == 2
 
       Enum.each(children, fn child ->
         Executor.execute_workflow(child.id, config)
       end)
 
-      completed_children = Durable.list_children(parent.id, status: :completed)
+      completed_children = Durable.list_children!(parent.id, status: :completed)
       assert length(completed_children) == 2
 
-      pending_children = Durable.list_children(parent.id, status: :pending)
+      pending_children = Durable.list_children!(parent.id, status: :pending)
       assert pending_children == []
     end
   end

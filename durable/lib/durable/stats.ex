@@ -18,11 +18,24 @@ defmodule Durable.Stats do
   A run counts as *started* in the window by `inserted_at` and *finished* by
   `completed_at`. "Failed" here means failed, rolled back (compensated) or
   rollback-failed — every run that didn't do what it set out to.
+
+  ## Returns
+
+  Every function returns `{:ok, result}` or `{:error, reason}`, and has a twin
+  ending in `!` that returns the result or raises `ArgumentError`:
+
+      {:ok, stats} = Durable.Stats.overview(workflow: "fulfill_order")
+      stats = Durable.Stats.overview!(workflow: "fulfill_order")
+
+  An option of the wrong type or range is `{:error, {:invalid_option, key}}`:
+  a `:since` that isn't a `DateTime`, a negative `:limit`, `bucket_seconds: 0`.
+  `Durable.Query.Opts` has the whole contract.
   """
 
   import Ecto.Query
 
   alias Durable.Config
+  alias Durable.Query.Opts
   alias Durable.Repo
 
   alias Durable.Storage.Schemas.{
@@ -40,6 +53,19 @@ defmodule Durable.Stats do
   # timeline/1 builds a map for every bucket, empty or not.
   @max_buckets 10_000
 
+  @options [
+    since: :datetime,
+    until: :datetime,
+    workflow: :text,
+    include_children: :boolean,
+    limit: :non_neg_integer,
+    bucket_seconds: :pos_integer
+  ]
+
+  defp read(opts, fun) do
+    with {:ok, opts} <- Opts.validate(opts, @options), do: {:ok, fun.(opts)}
+  end
+
   @doc """
   Headline numbers for the window:
 
@@ -52,9 +78,20 @@ defmodule Durable.Stats do
         backlog: 37,                    # ready to start right now
         waiting: %{input: 9, event: 96, sleeping: 23}       # right now
       }
+
+  Returned as `{:ok, numbers}`; `overview!/1` returns the map itself.
+
+      {:ok, %{failure_rate: rate}} = Durable.Stats.overview(since: hour_ago)
+      %{failure_rate: rate} = Durable.Stats.overview!(since: hour_ago)
   """
-  @spec overview(keyword()) :: map()
-  def overview(opts \\ []) do
+  @spec overview(keyword()) :: {:ok, map()} | {:error, Opts.reason()}
+  def overview(opts \\ []), do: read(opts, &do_overview/1)
+
+  @doc "Like `overview/1`, but returns the numbers or raises `ArgumentError`."
+  @spec overview!(keyword()) :: map()
+  def overview!(opts \\ []), do: opts |> overview() |> Opts.unwrap!(opts)
+
+  defp do_overview(opts) do
     {config, since, until} = window(opts)
     runs = runs(opts)
 
@@ -102,18 +139,33 @@ defmodule Durable.Stats do
 
   Every bucket is returned, empty or not, so a window cut into more than
   10,000 of them returns `{:error, {:too_many_buckets, count}}` instead: ask
-  for a shorter window or a larger `:bucket_seconds`.
+  for a shorter window or a larger `:bucket_seconds`. A `:bucket_seconds` that
+  isn't a whole number above zero is `{:error, {:invalid_option, :bucket_seconds}}`.
+
+      {:ok, buckets} = Durable.Stats.timeline(bucket_seconds: 3_600)
+      buckets = Durable.Stats.timeline!(bucket_seconds: 3_600)
   """
-  @spec timeline(keyword()) :: [map()] | {:error, {:too_many_buckets, pos_integer()}}
+  @spec timeline(keyword()) :: {:ok, [map()]} | {:error, Opts.reason()}
   def timeline(opts \\ []) do
+    with {:ok, opts} <- Opts.validate(opts, @options),
+         {:ok, {span, bucket}} <- buckets(opts),
+         do: {:ok, timeline(opts, span, bucket)}
+  end
+
+  @doc "Like `timeline/1`, but returns the buckets or raises `ArgumentError`."
+  @spec timeline!(keyword()) :: [map()]
+  def timeline!(opts \\ []), do: opts |> timeline() |> Opts.unwrap!(opts)
+
+  # How long the window is and how long each bucket, unless that makes too many.
+  defp buckets(opts) do
     {_config, since, until} = window(opts)
     span = DateTime.diff(until, since, :second)
     bucket = Keyword.get(opts, :bucket_seconds, max(div(span, 48), 60))
-    count = if is_integer(bucket) and bucket > 0, do: div(max(span - 1, 0), bucket) + 1, else: 0
+    count = div(max(span - 1, 0), bucket) + 1
 
     if count > @max_buckets,
       do: {:error, {:too_many_buckets, count}},
-      else: timeline(opts, span, bucket)
+      else: {:ok, {span, bucket}}
   end
 
   defp timeline(opts, span, bucket) do
@@ -217,9 +269,20 @@ defmodule Durable.Stats do
       [%{workflow: "fulfill_order", step: "ship_order", type: "RuntimeError",
          message: "carrier API returned <n>", count: 41,
          first_at: ~U[...], last_at: ~U[...], rolled_back: 41}]
+
+  `:limit` is the most groups returned (default 20).
+
+      {:ok, groups} = Durable.Stats.error_groups(limit: 5)
+      groups = Durable.Stats.error_groups!(limit: 5)
   """
-  @spec error_groups(keyword()) :: [map()]
-  def error_groups(opts \\ []) do
+  @spec error_groups(keyword()) :: {:ok, [map()]} | {:error, Opts.reason()}
+  def error_groups(opts \\ []), do: read(opts, &do_error_groups/1)
+
+  @doc "Like `error_groups/1`, but returns the groups or raises `ArgumentError`."
+  @spec error_groups!(keyword()) :: [map()]
+  def error_groups!(opts \\ []), do: opts |> error_groups() |> Opts.unwrap!(opts)
+
+  defp do_error_groups(opts) do
     {config, since, until} = window(opts)
 
     Repo.all(
@@ -265,9 +328,20 @@ defmodule Durable.Stats do
 
       [%{workflow: "fulfill_order", failed: 41, finished: 660, failure_rate: 0.062,
          last_failed_at: ~U[...], top_error: %{type:, message:, step:, count:}}]
+
+  `:limit` is the most workflows returned (default 5).
+
+      {:ok, failing} = Durable.Stats.failing_workflows()
+      failing = Durable.Stats.failing_workflows!()
   """
-  @spec failing_workflows(keyword()) :: [map()]
-  def failing_workflows(opts \\ []) do
+  @spec failing_workflows(keyword()) :: {:ok, [map()]} | {:error, Opts.reason()}
+  def failing_workflows(opts \\ []), do: read(opts, &do_failing_workflows/1)
+
+  @doc "Like `failing_workflows/1`, but returns the workflows or raises `ArgumentError`."
+  @spec failing_workflows!(keyword()) :: [map()]
+  def failing_workflows!(opts \\ []), do: opts |> failing_workflows() |> Opts.unwrap!(opts)
+
+  defp do_failing_workflows(opts) do
     {config, since, until} = window(opts)
 
     rows =
@@ -291,7 +365,7 @@ defmodule Durable.Stats do
     tops =
       opts
       |> Keyword.put(:limit, 200)
-      |> error_groups()
+      |> do_error_groups()
       |> Enum.group_by(& &1.workflow)
 
     Enum.map(rows, fn row ->
@@ -315,9 +389,18 @@ defmodule Durable.Stats do
 
   `retried` counts runs where some step needed a second attempt. `running`,
   `waiting` and `last_run_at` are as of now, not limited to the window.
+
+      {:ok, workflows} = Durable.Stats.workflows(since: day_ago)
+      workflows = Durable.Stats.workflows!(since: day_ago)
   """
-  @spec workflows(keyword()) :: [map()]
-  def workflows(opts \\ []) do
+  @spec workflows(keyword()) :: {:ok, [map()]} | {:error, Opts.reason()}
+  def workflows(opts \\ []), do: read(opts, &do_workflows/1)
+
+  @doc "Like `workflows/1`, but returns the workflows or raises `ArgumentError`."
+  @spec workflows!(keyword()) :: [map()]
+  def workflows!(opts \\ []), do: opts |> workflows() |> Opts.unwrap!(opts)
+
+  defp do_workflows(opts) do
     {config, since, until} = window(opts)
 
     config
@@ -400,9 +483,18 @@ defmodule Durable.Stats do
       [%{workflow: "fulfill_order", step: "ship_order", compensation: false,
          runs: 660, attempts: 771, failed_attempts: 117, failed_runs: 41,
          retried_runs: 121, p50_ms: 640, p95_ms: 2_140, max_ms: 6_040}]
+
+      {:ok, steps} = Durable.Stats.step_performance(workflow: "fulfill_order")
+      steps = Durable.Stats.step_performance!(workflow: "fulfill_order")
   """
-  @spec step_performance(keyword()) :: [map()]
-  def step_performance(opts \\ []) do
+  @spec step_performance(keyword()) :: {:ok, [map()]} | {:error, Opts.reason()}
+  def step_performance(opts \\ []), do: read(opts, &do_step_performance/1)
+
+  @doc "Like `step_performance/1`, but returns the steps or raises `ArgumentError`."
+  @spec step_performance!(keyword()) :: [map()]
+  def step_performance!(opts \\ []), do: opts |> step_performance() |> Opts.unwrap!(opts)
+
+  defp do_step_performance(opts) do
     {config, since, until} = window(opts)
 
     query =
@@ -461,9 +553,18 @@ defmodule Durable.Stats do
          oldest_ready_at: ~U[...], done_last_5m: 910, wait_p95_ms: 1_300}]
 
   `wait_p95_ms` is scheduled → started over the last hour.
+
+      {:ok, queues} = Durable.Stats.queues()
+      queues = Durable.Stats.queues!()
   """
-  @spec queues(keyword()) :: [map()]
-  def queues(opts \\ []) do
+  @spec queues(keyword()) :: {:ok, [map()]} | {:error, Opts.reason()}
+  def queues(opts \\ []), do: read(opts, &do_queues/1)
+
+  @doc "Like `queues/1`, but returns the queues or raises `ArgumentError`."
+  @spec queues!(keyword()) :: [map()]
+  def queues!(opts \\ []), do: opts |> queues() |> Opts.unwrap!(opts)
+
+  defp do_queues(opts) do
     config = Config.get(Keyword.get(opts, :durable, Durable))
     now = DateTime.utc_now()
     hour_ago = DateTime.add(now, -3_600, :second)
@@ -556,9 +657,18 @@ defmodule Durable.Stats do
 
       %{"default" => [%{at: ~U[2026-10-16 09:00:00Z], ready: 31, scheduled: 4,
                         running: 8, waiting: 120}, ...]}
+
+      {:ok, history} = Durable.Stats.queue_history(since: hour_ago)
+      history = Durable.Stats.queue_history!(since: hour_ago)
   """
-  @spec queue_history(keyword()) :: %{String.t() => [map()]}
-  def queue_history(opts \\ []) do
+  @spec queue_history(keyword()) :: {:ok, %{String.t() => [map()]}} | {:error, Opts.reason()}
+  def queue_history(opts \\ []), do: read(opts, &do_queue_history/1)
+
+  @doc "Like `queue_history/1`, but returns the history or raises `ArgumentError`."
+  @spec queue_history!(keyword()) :: %{String.t() => [map()]}
+  def queue_history!(opts \\ []), do: opts |> queue_history() |> Opts.unwrap!(opts)
+
+  defp do_queue_history(opts) do
     {config, since, until} = window(opts)
 
     config
@@ -600,10 +710,24 @@ defmodule Durable.Stats do
 
   The counts come from `Durable.Activity`, which keeps a week, so they cover
   at most the last 7 days. `:bucket_seconds` and `:limit` (top keys, default
-  10) are optional.
+  10) are optional. Its timeline has every bucket, so like `timeline/1` a
+  window cut into more than 10,000 is `{:error, {:too_many_buckets, count}}`.
+
+      {:ok, %{held: held}} = Durable.Stats.keys(workflow: "process_article")
+      %{held: held} = Durable.Stats.keys!(workflow: "process_article")
   """
-  @spec keys(keyword()) :: map()
+  @spec keys(keyword()) :: {:ok, map()} | {:error, Opts.reason()}
   def keys(opts \\ []) do
+    with {:ok, opts} <- Opts.validate(opts, @options),
+         {:ok, _buckets} <- buckets(opts),
+         do: {:ok, do_keys(opts)}
+  end
+
+  @doc "Like `keys/1`, but returns the numbers or raises `ArgumentError`."
+  @spec keys!(keyword()) :: map()
+  def keys!(opts \\ []), do: opts |> keys() |> Opts.unwrap!(opts)
+
+  defp do_keys(opts) do
     {config, since, until} = window(opts)
     runs = runs(opts)
 

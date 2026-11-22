@@ -164,19 +164,20 @@ defmodule Durable.HostileValuesTest do
         assert Durable.send_event(id, "go", %{}) == {:error, :not_found}
         assert Durable.send_event(id, "go", %{}, buffer: true) == {:error, :not_found}
         assert Durable.provide_input(id, "go", %{}) == {:error, :not_found}
-        assert Durable.list_children(id) == []
+        assert Durable.list_children(id) == {:error, :not_found}
+        assert_raise ArgumentError, fn -> Durable.list_children!(id) end
       end
     end
   end
 
   describe "text Postgres can't hold" do
-    test "matches nothing when it's a filter or a name" do
+    test "is an invalid filter, and names nothing" do
       {:ok, id} = Durable.start(Returns, %{})
 
       for bad <- ["a\0b", <<0xFF>>, ["a\0b"], [["a\0b"]], [0]] do
-        assert Durable.list_executions(queue: bad) == []
-        assert Durable.list_executions(key: bad) == []
-        assert Durable.list_executions(tag: bad) == []
+        assert Durable.list_executions(queue: bad) == {:error, {:invalid_option, :queue}}
+        assert Durable.list_executions(key: bad) == {:error, {:invalid_option, :key}}
+        assert Durable.list_executions(tag: bad) == {:error, {:invalid_option, :tag}}
         assert Durable.cancel_all([tag: bad], "x") == {:ok, 0}
         assert Durable.send_event(id, bad, %{}) == {:error, :not_found}
         assert Durable.send_event(id, bad, %{}, buffer: true) == {:error, :not_found}
@@ -225,9 +226,10 @@ defmodule Durable.HostileValuesTest do
              TestRepo.get!(WorkflowExecution, id)
   end
 
-  test "a negative limit or offset lists nothing rather than raising" do
-    assert Durable.list_executions(limit: -1) == []
-    assert is_list(Durable.list_executions(offset: -1))
+  test "a negative limit or offset is an error, not clamped" do
+    assert Durable.list_executions(limit: -1) == {:error, {:invalid_option, :limit}}
+    assert Durable.list_executions(offset: -1) == {:error, {:invalid_option, :offset}}
+    assert_raise ArgumentError, ~r/:limit: -1/, fn -> Durable.list_executions!(limit: -1) end
   end
 
   test "a prefix the schemas aren't bound to is refused at boot, not left to hang" do
@@ -311,16 +313,23 @@ defmodule Durable.HostileValuesTest do
       assert Durable.Wait.cancel_wait("not-a-uuid") == {:error, :not_found}
     end
 
-    test "a filter Postgres can't hold matches nothing" do
-      assert Durable.Query.list_keys(key_prefix: "a\0") == []
-      assert Durable.Query.list_keys(workflow_name: "a\0") == []
-      assert Durable.Wait.list_pending_events(event_name: "a\0") == []
+    test "a filter Postgres can't hold is an invalid option" do
+      assert Durable.Query.list_keys(key_prefix: "a\0") ==
+               {:error, {:invalid_option, :key_prefix}}
+
+      assert Durable.Query.list_keys(workflow_name: "a\0") ==
+               {:error, {:invalid_option, :workflow_name}}
+
+      assert Durable.Wait.list_pending_events(event_name: "a\0") ==
+               {:error, {:invalid_option, :event_name}}
     end
 
     for fields <- [%{"a" => "b\0"}, %{"a\0" => "b"}, %{"a" => <<0::1>>}, %{"a" => {1, 2}}] do
-      test "list_executions(input: #{inspect(fields)}) matches nothing" do
+      test "list_executions(input: #{inspect(fields)}) is an invalid option" do
         {:ok, _id} = Durable.start(Returns, %{"a" => "b"})
-        assert Durable.list_executions(input: unquote(Macro.escape(fields))) == []
+
+        assert Durable.list_executions(input: unquote(Macro.escape(fields))) ==
+                 {:error, {:invalid_option, :input}}
       end
     end
   end

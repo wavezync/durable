@@ -90,7 +90,7 @@ defmodule Mix.Tasks.Durable.Status do
     rows =
       @statuses
       |> Enum.map(fn status ->
-        count = Query.count_executions(status: status, durable: durable_name)
+        count = Query.count_executions!(status: status, durable: durable_name)
         {status, count}
       end)
       |> Enum.filter(fn {_, count} -> count > 0 end)

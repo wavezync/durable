@@ -43,6 +43,7 @@ defmodule Durable.Wait do
   alias Durable.Config
   alias Durable.Context
   alias Durable.PubSub, as: DurablePubSub
+  alias Durable.Query.Opts
   alias Durable.Repo
   alias Durable.Storage.Schemas.{PendingEvent, PendingInput, WaitGroup, WorkflowExecution}
 
@@ -1169,9 +1170,34 @@ defmodule Durable.Wait do
   - `:limit` - Maximum number of results (default: 50)
   - `:durable` - The Durable instance name (default: Durable)
 
+  Returns `{:ok, inputs}`, or `{:error, {:invalid_option, key}}` for a filter
+  of the wrong type, such as a negative `:limit` or a status no input has.
+  `list_pending_inputs!/1` returns the inputs or raises `ArgumentError`. See
+  `Durable.Query.Opts`.
+
+      {:ok, inputs} = Durable.Wait.list_pending_inputs(limit: 20)
+      inputs = Durable.Wait.list_pending_inputs!(limit: 20)
+
   """
-  @spec list_pending_inputs(keyword()) :: [map()]
+  @spec list_pending_inputs(keyword()) ::
+          {:ok, [map()]} | {:error, Opts.reason()}
   def list_pending_inputs(filters \\ []) do
+    schema = [
+      status: {:one_of, Ecto.Enum.values(PendingInput, :status)},
+      timeout_before: :datetime,
+      limit: :non_neg_integer
+    ]
+
+    with {:ok, filters} <- Opts.validate(filters, schema),
+         do: {:ok, pending_inputs(filters)}
+  end
+
+  @doc "Like `list_pending_inputs/1`, but returns the inputs or raises `ArgumentError`."
+  @spec list_pending_inputs!(keyword()) :: [map()]
+  def list_pending_inputs!(filters \\ []),
+    do: filters |> list_pending_inputs() |> Opts.unwrap!(filters)
+
+  defp pending_inputs(filters) do
     config = get_config(filters)
     status = Keyword.get(filters, :status, :pending)
     limit = Keyword.get(filters, :limit, 50)
@@ -1204,9 +1230,34 @@ defmodule Durable.Wait do
   - `:limit` - Maximum number of results (default: 50)
   - `:durable` - The Durable instance name (default: Durable)
 
+  Returns `{:ok, events}`, or `{:error, {:invalid_option, key}}` for a filter
+  of the wrong type, such as a negative `:limit`, a status no event has, or an
+  `:event_name` Postgres can't hold. `list_pending_events!/1` returns the
+  events or raises `ArgumentError`. See `Durable.Query.Opts`.
+
+      {:ok, events} = Durable.Wait.list_pending_events(event_name: "payment_confirmed")
+      events = Durable.Wait.list_pending_events!(event_name: "payment_confirmed")
+
   """
-  @spec list_pending_events(keyword()) :: [map()]
+  @spec list_pending_events(keyword()) ::
+          {:ok, [map()]} | {:error, Opts.reason()}
   def list_pending_events(filters \\ []) do
+    schema = [
+      event_name: :text,
+      status: {:one_of, Ecto.Enum.values(PendingEvent, :status)},
+      limit: :non_neg_integer
+    ]
+
+    with {:ok, filters} <- Opts.validate(filters, schema),
+         do: {:ok, pending_events(filters)}
+  end
+
+  @doc "Like `list_pending_events/1`, but returns the events or raises `ArgumentError`."
+  @spec list_pending_events!(keyword()) :: [map()]
+  def list_pending_events!(filters \\ []),
+    do: filters |> list_pending_events() |> Opts.unwrap!(filters)
+
+  defp pending_events(filters) do
     config = get_config(filters)
     status = Keyword.get(filters, :status, :pending)
     limit = Keyword.get(filters, :limit, 50)

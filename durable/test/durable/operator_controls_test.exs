@@ -219,11 +219,11 @@ defmodule Durable.OperatorControlsTest do
       {:ok, id} = Durable.start(Flaky, %{}, queue: "billing")
 
       :ok = Durable.pause_queue(:billing)
-      assert Durable.paused_queues() == ["billing"]
+      assert Durable.paused_queues!() == ["billing"]
       assert Postgres.fetch_jobs(config, "billing", 10, "node-a") == []
 
       :ok = Durable.resume_queue("billing")
-      assert Durable.paused_queues() == []
+      assert Durable.paused_queues!() == []
       assert [%{id: ^id}] = Postgres.fetch_jobs(config, "billing", 10, "node-a")
     end
 

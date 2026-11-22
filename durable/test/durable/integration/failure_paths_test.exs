@@ -864,7 +864,7 @@ defmodule Durable.Integration.FailurePathsTest do
         )
 
       assert_eventually(fn ->
-        Enum.any?(Durable.Activity.list(kinds: ["worker_fenced"]), &(&1.workflow_id == id))
+        Enum.any?(Durable.Activity.list!(kinds: ["worker_fenced"]), &(&1.workflow_id == id))
       end)
 
       assert Durable.DataCase.get_worker_pid(Durable, "default", id) == nil

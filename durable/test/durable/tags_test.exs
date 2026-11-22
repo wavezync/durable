@@ -30,9 +30,9 @@ defmodule Durable.TagsTest do
     {:ok, export} = Durable.start(Export, %{}, tags: ["account:7"])
     {:ok, _other} = Durable.start(Export, %{}, tags: ["account:8"])
 
-    ids = for run <- Durable.list_executions(tag: "account:7"), do: run.id
+    ids = for run <- Durable.list_executions!(tag: "account:7"), do: run.id
     assert Enum.sort(ids) == Enum.sort([order, export])
-    assert [%{id: ^order, tags: ["account:7", "rush"]}] = Durable.list_executions(tag: "rush")
+    assert [%{id: ^order, tags: ["account:7", "rush"]}] = Durable.list_executions!(tag: "rush")
   end
 
   test "cancel_all cancels the open runs that match, and counts them" do

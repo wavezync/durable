@@ -272,7 +272,7 @@ defmodule Durable.AuditRegressionsTest do
           e -> {:raised, e.__struct__, Exception.message(e) |> String.slice(0, 120)}
         end
 
-      assert match?({:returned, _}, result)
+      assert match?({:returned, {tag, _}} when tag in [:ok, :error], result)
     end
   end
 
@@ -309,7 +309,7 @@ defmodule Durable.AuditRegressionsTest do
     parent = run_workflow(CallsFlaky, %{})
     assert parent.status == :failed
 
-    [child] = Durable.list_children(parent.id)
+    [child] = Durable.list_children!(parent.id)
     assert child.status == :failed
 
     :persistent_term.put({FlakyChild, :broken}, false)

@@ -162,7 +162,10 @@ defmodule Durable.Queue.WorkerTest do
       assert_receive {:event, :stale_recovered, %{count: c}, _meta} when c >= 1, 500
 
       # ...and it's on the operations record.
-      assert Enum.any?(Durable.Activity.list(), &(&1.kind == "stale_recovered" and &1.count >= 1))
+      assert Enum.any?(
+               Durable.Activity.list!(),
+               &(&1.kind == "stale_recovered" and &1.count >= 1)
+             )
 
       # Row back to :pending, lock cleared. Use a generous backoff window —
       # if the previous recover_now didn't reach our row (e.g. a prior test

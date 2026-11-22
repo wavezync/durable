@@ -41,8 +41,16 @@ defmodule Durable.Activity do
   require Logger
 
   alias Durable.Config
+  alias Durable.Query.Opts
   alias Durable.Repo
   alias Durable.Storage.Schemas.ActivityEvent
+
+  @list_options [
+    since: :datetime,
+    limit: :non_neg_integer,
+    workflow_id: :uuid,
+    kinds: :texts
+  ]
 
   @doc false
   @spec record(Config.t(), String.t(), keyword()) :: :ok
@@ -79,9 +87,25 @@ defmodule Durable.Activity do
   - `:workflow_id` - only events about this run
   - `:kinds` - only these kinds (strings)
   - `:durable` - the Durable instance (default: `Durable`)
+
+  Returns `{:ok, events}`, or `{:error, {:invalid_option, key}}` for an option
+  of the wrong type (a negative `:limit`, a `:workflow_id` that isn't a UUID).
+  `list!/1` returns the events or raises `ArgumentError`. See
+  `Durable.Query.Opts`.
+
+      {:ok, events} = Durable.Activity.list(kinds: ["queue_paused"], limit: 20)
+      events = Durable.Activity.list!(kinds: ["queue_paused"], limit: 20)
   """
-  @spec list(keyword()) :: [ActivityEvent.t()]
+  @spec list(keyword()) :: {:ok, [ActivityEvent.t()]} | {:error, Opts.reason()}
   def list(opts \\ []) do
+    with {:ok, opts} <- Opts.validate(opts, @list_options), do: {:ok, events(opts)}
+  end
+
+  @doc "Like `list/1`, but returns the events or raises `ArgumentError`."
+  @spec list!(keyword()) :: [ActivityEvent.t()]
+  def list!(opts \\ []), do: opts |> list() |> Opts.unwrap!(opts)
+
+  defp events(opts) do
     config = Config.get(Keyword.get(opts, :durable, Durable))
     since = Keyword.get(opts, :since, DateTime.add(DateTime.utc_now(), -86_400, :second))
 
