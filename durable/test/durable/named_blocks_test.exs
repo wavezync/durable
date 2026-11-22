@@ -570,9 +570,8 @@ defmodule Durable.NamedBlocksTest do
   # A run stored as it is when its worker was lost right after `step`'s result
   # was saved: still at that step, with the result as its data.
   defp stopped_after(step, data, done) do
-    context =
-      data
-      |> Map.put("__string_keys__", Map.keys(data))
+    engine_state =
+      %{"v" => 1, "__string_keys__" => Map.keys(data)}
       |> then(&if(done, do: Map.put(&1, "__done__", done), else: &1))
 
     {:ok, run} =
@@ -583,7 +582,8 @@ defmodule Durable.NamedBlocksTest do
         status: :pending,
         queue: "default",
         input: %{},
-        context: context,
+        context: data,
+        engine_state: engine_state,
         current_step: step
       })
       |> Repo.insert()

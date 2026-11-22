@@ -29,10 +29,13 @@ defmodule Durable.Executor do
 
   import Ecto.Query
 
+  require EngineState
   require Logger
 
-  # Context key every save records the run's top-level string keys under, so
-  # that the data comes back the shape it left in (see restore_keys/1).
+  # The names below are keys of a run's `engine_state`, never of its context.
+  #
+  # Every save records the run's top-level string keys under this one, so
+  # that the data comes back the shape it left in (see restore_keys/2).
   @string_keys "__string_keys__"
   # Stored with a step's result: the step it is the result of, and for a
   # branch the arm it chose. A run that comes back to that step (it was
@@ -230,7 +233,7 @@ defmodule Durable.Executor do
     cancellable =
       from(w in WorkflowExecution,
         where: w.id == ^workflow_id and w.status in [:pending, :running, :waiting],
-        where: is_nil(w.context[^@rollback]),
+        where: not EngineState.marked?(w, ^@rollback),
         select: w
       )
 
@@ -263,9 +266,9 @@ defmodule Durable.Executor do
   defp status_now(config, workflow_id) do
     run = from(w in WorkflowExecution, where: w.id == ^workflow_id)
 
-    case Repo.one(config, from(w in run, select: {w.status, is_nil(w.context[^@rollback])})) do
-      {status, true} -> status
-      {_queued, false} -> :compensating
+    case Repo.one(config, from(w in run, select: {w.status, EngineState.marked?(w, ^@rollback)})) do
+      {status, false} -> status
+      {_queued, true} -> :compensating
       nil -> nil
     end
   end
@@ -422,8 +425,8 @@ defmodule Durable.Executor do
     execution
     |> Ecto.Changeset.change(
       status: :pending,
-      context:
-        Map.put(execution.context || %{}, @rollback, %{
+      engine_state:
+        Map.put(execution.engine_state, @rollback, %{
           "error" => execution.error || %{},
           "status" => Atom.to_string(execution.status)
         }),
@@ -474,7 +477,7 @@ defmodule Durable.Executor do
     ]
 
     cond do
-      parallel_children(execution.context) ->
+      parallel_children(execution.engine_state) ->
         retry_parallel_block(config, execution, retry_attrs)
 
       execution.key && not execution.holds_key ->
@@ -567,8 +570,7 @@ defmodule Durable.Executor do
     end
   end
 
-  defp parallel_children(context),
-    do: Map.get(context, "__parallel_children") || Map.get(context, :__parallel_children)
+  defp parallel_children(engine_state), do: Map.get(engine_state, "__parallel_children")
 
   # A run that failed inside a parallel block is waiting on a WaitGroup of
   # child runs. Re-queue only the children that failed, re-open their
@@ -601,8 +603,8 @@ defmodule Durable.Executor do
     # Every child had finished and the block failed after them (its `into:`,
     # say): nothing is left to wait for, so the run reads their results again.
     status =
-      if stopped_block?(config, parent.context) do
-        reopen_children(config, parent.context, retry_attrs)
+      if stopped_block?(config, parent.engine_state) do
+        reopen_children(config, parent.engine_state, retry_attrs)
         :waiting
       else
         :pending
@@ -625,33 +627,30 @@ defmodule Durable.Executor do
   # events and the group the block waits on. A lane can hold a block of its
   # own: if that one stopped too, the lane waits on it again and its children
   # are put back the same way, or the lane would wake to the old failure.
-  defp reopen_children(config, context, retry_attrs) do
-    child_ids = Map.keys(parallel_children(context))
-
-    group_id =
-      Map.get(context, "__parallel_wait_group_id") || Map.get(context, :__parallel_wait_group_id)
-
+  defp reopen_children(config, engine_state, retry_attrs) do
+    child_ids = Map.keys(parallel_children(engine_state))
+    group_id = engine_state["__parallel_wait_group_id"]
     now = DateTime.utc_now()
 
     children =
-      Repo.all(
-        config,
-        from(c in WorkflowExecution,
-          where: c.id in ^child_ids and c.status != :completed,
-          select: {c.id, c.status, c.context}
-        )
+      config
+      |> Repo.all(
+        from(c in WorkflowExecution, where: c.id in ^child_ids and c.status != :completed)
       )
+      |> Enum.map(&EngineState.adopt(config, &1))
 
-    if Enum.any?(children, fn {_, s, _} -> s in [:compensated, :compensation_failed] end),
+    if Enum.any?(children, &(&1.status in [:compensated, :compensation_failed])),
       do: config.repo.rollback(:rolled_back)
 
     stopped =
-      for {id, s, child_context} <- children, s in [:failed, :cancelled], do: {id, child_context}
+      for child <- children,
+          child.status in [:failed, :cancelled],
+          do: {child.id, child.engine_state}
 
     # A lane with a `timeout:` gets all of it again, and what is put back under
     # the lane has until then too.
-    for {id, _ctx} = lane <- stopped do
-      ms = parallel_children(context)[id]["timeout"]
+    for {id, _state} = lane <- stopped do
+      ms = parallel_children(engine_state)[id]["timeout"]
       put_back(config, [lane], Keyword.update!(retry_attrs, :deadline_at, &lane_deadline(&1, ms)))
     end
 
@@ -659,8 +658,7 @@ defmodule Durable.Executor do
       stopped: Enum.map(stopped, fn {id, _} -> "__parallel_done:#{id}" end),
       # A child can finish after its block stopped, when nobody was counting
       # any more. The group is told now, or it would wait for it for ever.
-      finished:
-        for(id <- child_ids -- Enum.map(children, &elem(&1, 0)), do: "__parallel_done:#{id}"),
+      finished: for(id <- child_ids -- Enum.map(children, & &1.id), do: "__parallel_done:#{id}"),
       now: now
     })
   end
@@ -672,7 +670,8 @@ defmodule Durable.Executor do
   defp put_back(_config, [], _retry_attrs), do: :ok
 
   defp put_back(config, stopped, retry_attrs) do
-    {blocks, steps} = Enum.split_with(stopped, fn {_id, ctx} -> stopped_block?(config, ctx) end)
+    {blocks, steps} =
+      Enum.split_with(stopped, fn {_id, state} -> stopped_block?(config, state) end)
 
     for {runs, status} <- [{steps, :pending}, {blocks, :waiting}] do
       Repo.update_all(
@@ -682,7 +681,7 @@ defmodule Durable.Executor do
       )
     end
 
-    for {_id, context} <- blocks, do: reopen_children(config, context, retry_attrs)
+    for {_id, state} <- blocks, do: reopen_children(config, state, retry_attrs)
 
     put_back_called(config, Enum.map(steps, &elem(&1, 0)), retry_attrs)
   end
@@ -700,7 +699,7 @@ defmodule Durable.Executor do
 
     for child <- called do
       attrs = Keyword.put(retry_attrs, :deadline_at, retried_deadline(child))
-      put_back(config, [{child.id, child.context}], attrs)
+      put_back(config, [{child.id, EngineState.adopt(config, child).engine_state}], attrs)
     end
   end
 
@@ -729,8 +728,8 @@ defmodule Durable.Executor do
   end
 
   # Whether a run stopped while a block of its own still had children to finish.
-  defp stopped_block?(config, context) do
-    case parallel_children(context) do
+  defp stopped_block?(config, engine_state) do
+    case parallel_children(engine_state) do
       nil ->
         false
 
@@ -885,7 +884,7 @@ defmodule Durable.Executor do
 
   # Back on its queue to be undone, not to run: its deadline, long past by
   # now, says nothing, and timing it out would drop the undo and its error.
-  defp to_roll_back?(execution), do: is_map_key(execution.context || %{}, @rollback)
+  defp to_roll_back?(execution), do: is_map_key(execution.engine_state, @rollback)
 
   defp leave_for_its_code(config, execution, reason) do
     Logger.warning(
@@ -943,19 +942,16 @@ defmodule Durable.Executor do
 
   defp run_execution(execution, workflow_def, config) do
     # Check if this is a single-step parallel child execution
-    parallel_step_flag =
-      Map.get(execution.context, "__parallel_step") ||
-        Map.get(execution.context, :__parallel_step)
+    parallel_step_flag = execution.engine_state["__parallel_step"]
 
     lane_steps = parallel_step_flag && lane_steps(workflow_def, parallel_step_flag)
     # Whose deadline a timeout names: the lane's own, if it has one.
     Process.put(:durable_lane_timeout, lane_timeout(execution, workflow_def))
-    {done, context} = Map.pop(execution.context, @done)
-    execution = %{execution | context: context}
+    done = execution.engine_state[@done]
 
     result =
       cond do
-        is_map_key(context, @rollback) ->
+        to_roll_back?(execution) ->
           roll_back(execution, workflow_def, config)
 
         lane_steps ->
@@ -972,8 +968,8 @@ defmodule Durable.Executor do
         true ->
           # Pipeline model: start with workflow input or restored context
           initial_data =
-            if execution.context != %{},
-              do: execution.context |> restore_keys() |> restore_lane_keys(workflow_def),
+            if saved?(execution),
+              do: execution |> data_of() |> restore_lane_keys(workflow_def),
               else: execution.input
 
           execute_steps(workflow_def.steps, execution, config, initial_data, done)
@@ -997,7 +993,7 @@ defmodule Durable.Executor do
 
   # The lane a run was started for and its `timeout:`, if it has one.
   defp lane_timeout(execution, workflow_def) do
-    lane_id = execution.context["__parallel_step"]
+    lane_id = execution.engine_state["__parallel_step"]
 
     Enum.find_value(workflow_def.steps, fn
       %{type: :parallel, opts: %{lanes: lanes} = opts} ->
@@ -1011,15 +1007,11 @@ defmodule Durable.Executor do
   end
 
   # A lane is a run of its own steps: it resumes, retries and waits like any
-  # run, and finishing tells the block. The marker is kept in the stored
-  # context (save_data_as_context/4) and out of the steps' data. A lane that
-  # hasn't started has its own id for a current step.
+  # run, and finishing tells the block. What says it is a lane is in its
+  # engine state, for as long as the run is kept. A lane that hasn't started
+  # has its own id for a current step.
   defp run_lane(execution, steps, {lane_id, done}, workflow_def, config) do
-    data =
-      execution.context
-      |> Map.drop(["__parallel_step", :__parallel_step])
-      |> restore_keys()
-      |> restore_lane_keys(workflow_def)
+    data = execution |> data_of() |> restore_lane_keys(workflow_def)
 
     # A step on its own in the block is a lane with that step's name.
     started? = execution.current_step != lane_id or (done && done["step"] == lane_id)
@@ -1070,20 +1062,29 @@ defmodule Durable.Executor do
   # input["id"]). What the record doesn't list becomes an atom if the code knows
   # it, which covers what was merged in after the save, such as a wait's answer.
   # A run saved before the record existed has every key treated that way.
-  defp restore_keys(%{@string_keys => strings} = context) when is_list(strings) do
-    {kept, others} = context |> Map.delete(@string_keys) |> Map.split(strings)
+  defp restore_keys(context, %{@string_keys => strings}) when is_list(strings) do
+    {kept, others} = Map.split(context, strings)
     others |> atomize_keys() |> Map.merge(kept)
   end
 
-  defp restore_keys(%{@atom_keys => atom_keys} = context) when is_list(atom_keys) do
-    context
-    |> Map.delete(@atom_keys)
-    |> Map.new(fn {key, value} ->
+  defp restore_keys(context, %{@atom_keys => atom_keys}) when is_list(atom_keys) do
+    Map.new(context, fn {key, value} ->
       if key in atom_keys, do: {Context.known_key(key), value}, else: {key, value}
     end)
   end
 
-  defp restore_keys(context), do: atomize_keys(context)
+  defp restore_keys(context, _engine_state), do: atomize_keys(context)
+
+  # A run's stored context as a step sees it. The context is the user's data
+  # and nothing in it is the engine's, whatever it is called.
+  defp data_of(execution),
+    do: execution.context |> EngineState.strip() |> restore_keys(execution.engine_state)
+
+  # Whether the run has saved a context: before that, its data is its input.
+  defp saved?(%{context: context, engine_state: engine_state}) do
+    context != %{} or is_map_key(engine_state, @string_keys) or
+      is_map_key(engine_state, @atom_keys)
+  end
 
   # Atomize top-level keys in map (for context restored from DB)
   defp atomize_keys(map) when is_map(map) do
@@ -1112,15 +1113,12 @@ defmodule Durable.Executor do
     config = Config.get(durable_name)
     # Sanitize at the API boundary — callers (provide_input, send_event,
     # timeout workers) supply maps that can carry arbitrary user terms.
-    safe_additional =
-      additional_context
-      |> sanitize_for_json()
-      |> EngineState.strip()
-      |> Map.merge(sanitize_for_json(Keyword.get(opts, :engine, %{})))
+    safe_additional = additional_context |> sanitize_for_json() |> EngineState.strip()
+    engine = sanitize_for_json(Keyword.get(opts, :engine, %{}))
 
     with {:ok, execution} <- load_execution(config, workflow_id),
          true <- execution.status == :waiting || {:error, :not_waiting},
-         {:ok, resumed} <- mark_resumed(config, execution, safe_additional) do
+         {:ok, resumed} <- mark_resumed(config, execution, safe_additional, engine) do
       DurablePubSub.wake(config, resumed)
 
       # For inline/synchronous execution (useful for testing)
@@ -1135,10 +1133,11 @@ defmodule Durable.Executor do
 
   # Compare-and-set from :waiting, so a cancel that lands between the status
   # check above and this write isn't silently undone.
-  defp mark_resumed(config, execution, additional_context) do
+  defp mark_resumed(config, execution, additional_context, engine) do
     execution
     |> Ecto.Changeset.change(
       context: Map.merge(execution.context || %{}, additional_context),
+      engine_state: Map.merge(execution.engine_state, engine),
       status: :pending,
       scheduled_at: nil,
       locked_by: nil,
@@ -1210,7 +1209,7 @@ defmodule Durable.Executor do
 
   defp load_execution(config, workflow_id) do
     case Repo.id?(workflow_id) && Repo.get(config, WorkflowExecution, workflow_id) do
-      %WorkflowExecution{} = execution -> {:ok, execution}
+      %WorkflowExecution{} = execution -> {:ok, EngineState.adopt(config, execution)}
       _not_a_run -> {:error, :not_found}
     end
   end
@@ -1319,7 +1318,7 @@ defmodule Durable.Executor do
   # The TimeoutWorker resumes a run whose `on_timeout: :fail` wait timed out
   # with the error under `__fail__`, so the run fails here, in the executor,
   # rather than being written off from outside.
-  defp resume_failure(%{context: %{"__fail__" => error}}), do: error
+  defp resume_failure(%{engine_state: %{"__fail__" => error}}), do: error
   defp resume_failure(_execution), do: nil
 
   # Fail the run at `step` the way a failed step would — so its compensations
@@ -1332,7 +1331,7 @@ defmodule Durable.Executor do
       |> Ecto.Changeset.change(
         current_step: Atom.to_string(step.name),
         # A retried run must not fail again on the same marker.
-        context: Map.delete(execution.context || %{}, "__fail__")
+        engine_state: Map.delete(execution.engine_state, "__fail__")
       )
       |> cas_update!(config)
 
@@ -1545,13 +1544,17 @@ defmodule Durable.Executor do
     # Update current step
     {:ok, exec} = update_current_step(config, execution, step.name)
 
-    case finished_before_lost(config, execution, step, data, workflow_def) ||
-           StepRunner.execute(step, data, exec.id, config, exec.deadline_at) do
+    {result, exec} =
+      case finished_before_lost(config, execution, step, data, workflow_def) do
+        nil -> run_step(step, data, exec, config)
+        finished -> {finished, exec}
+      end
+
+    case result do
       {:ok, new_data} ->
         # Save data as context and continue to next step
-        # save_data_as_context merges orchestration keys from process dict
         {:ok, exec} = save_data_as_context(config, exec, new_data, :drop, step.name)
-        # Pass the DB-persisted context forward (includes orchestration keys)
+        # Pass the saved context forward: what the step returned and what it put
         execute_steps_recursive(
           remaining_steps,
           exec,
@@ -1578,6 +1581,17 @@ defmodule Durable.Executor do
     end
   end
 
+  # A step's body reads the run's engine state through its process (what its
+  # wait was answered with) and writes to it (the children it started). It is
+  # put there as the step starts and taken back as it ends, and is never in
+  # the step's data.
+  defp run_step(step, data, exec, config) do
+    EngineState.put_current(exec.engine_state)
+    result = StepRunner.execute(step, data, exec.id, config, exec.deadline_at)
+    # Merged: a body only ever adds to it.
+    {result, %{exec | engine_state: Map.merge(exec.engine_state, EngineState.current())}}
+  end
+
   # A run back at the step it was at may have finished it already: its worker
   # was lost after the step's row was written and before the run saved the
   # result. The row has the result, so the body doesn't run again. Read only
@@ -1589,6 +1603,11 @@ defmodule Durable.Executor do
   #
   # ponytail: a step that jumps (a decision, a `{:goto, _, _}`) and a step in
   # an unnamed branch still run again. Read their rows too if that matters.
+  #
+  # ponytail: the row has the step's data, not what its body added to the
+  # engine's state. A `start_workflow` in a step lost this way isn't started
+  # again, but the run no longer knows its child by its `ref:`. Keep the body's
+  # additions on the step's row if a later step calls the same ref.
   defp finished_before_lost(config, %{current_step: current} = run, step, data, workflow_def) do
     with true <- current == Atom.to_string(step.name) and step.type != :decision,
          %{} = output <- output_of_lost_attempt(config, run) do
@@ -1596,8 +1615,8 @@ defmodule Durable.Executor do
 
       {:ok,
        output
-       |> Map.put(@string_keys, string_key_names(data))
-       |> restore_keys()
+       |> EngineState.strip()
+       |> restore_keys(%{@string_keys => string_key_names(data)})
        |> restore_lane_keys(workflow_def)}
     else
       _not_finished -> nil
@@ -1792,7 +1811,7 @@ defmodule Durable.Executor do
 
     case child do
       %{status: :completed} ->
-        notify_orchestration_parent(config, child, :completed, child.context)
+        notify_orchestration_parent(config, child, :completed, EngineState.strip(child.context))
 
       %{status: :cancelled} ->
         notify_orchestration_parent(config, child, :cancelled, child.error)
@@ -1831,8 +1850,9 @@ defmodule Durable.Executor do
          data
        ) do
     {:ok, exec} = update_current_step(config, execution, branch.name)
+    {result, exec} = run_step(branch, data, exec, config)
 
-    case StepRunner.execute(branch, data, exec.id, config, exec.deadline_at) do
+    case result do
       {:decision, arm, new_data} ->
         {:ok, exec} = save_data_as_context(config, exec, new_data, :drop, {branch.name, arm})
 
@@ -1985,8 +2005,9 @@ defmodule Durable.Executor do
 
   defp run_branch_step([step | rest], execution, step_index, workflow_def, config, data) do
     {:ok, exec} = update_current_step(config, execution, step.name)
+    {result, exec} = run_step(step, data, exec, config)
 
-    case StepRunner.execute(step, data, exec.id, config, exec.deadline_at) do
+    case result do
       {:ok, new_data} ->
         {:ok, exec} = save_data_as_context(config, exec, new_data, :drop, step.name)
 
@@ -2056,13 +2077,7 @@ defmodule Durable.Executor do
     {:ok, exec} = save_data_as_context(config, exec, data)
 
     # Check if we're resuming after fan-in (all children completed)
-    # Context may have atom or string keys depending on whether it came from
-    # a changeset (atom) or from DB deserialization (string)
-    has_children =
-      Map.get(exec.context, "__parallel_children") ||
-        Map.get(exec.context, :__parallel_children)
-
-    if has_children do
+    if parallel_children(exec.engine_state) do
       collect_parallel_results(exec, data, into_fn, error_strategy, %{
         remaining_steps: remaining_steps,
         all_parallel_steps: all_parallel_steps,
@@ -2158,20 +2173,18 @@ defmodule Durable.Executor do
         |> Repo.insert(config)
     end)
 
-    # Store parallel metadata in parent context for resume
-    parallel_context = %{
+    # What the block's run resumes with, once its lanes have finished
+    block = %{
       "__parallel_children" => children_map,
       "__parallel_wait_group_id" => wait_group.id,
-      "__parallel_error_strategy" => Atom.to_string(error_strategy)
+      "__parallel_error_strategy" => Atom.to_string(error_strategy),
+      @string_keys => string_key_names(exec.context || %{})
     }
 
     {:ok, exec} =
       exec
       |> Ecto.Changeset.change(
-        context:
-          (exec.context || %{})
-          |> Map.merge(parallel_context)
-          |> Map.put(@string_keys, string_key_names(exec.context || %{})),
+        engine_state: Map.merge(exec.engine_state, block),
         status: :waiting,
         scheduled_at: nil
       )
@@ -2203,8 +2216,11 @@ defmodule Durable.Executor do
       queue: to_string(queue),
       priority: parent_exec.priority,
       input: data,
-      context:
-        parent_context
+      context: parent_context,
+      # Which lane the run is, for as long as the run is kept.
+      engine_state:
+        EngineState.new()
+        |> Map.merge(EngineState.inherited(parent_exec.engine_state))
         |> Map.put("__parallel_step", Atom.to_string(step.name))
         |> Map.put(@string_keys, string_key_names(parent_context)),
       parent_workflow_id: parent_exec.id,
@@ -2231,14 +2247,8 @@ defmodule Durable.Executor do
       parallel_step_name: parallel_step_name
     } = opts
 
-    children_map =
-      Map.get(exec.context, "__parallel_children") ||
-        Map.get(exec.context, :__parallel_children)
-
-    error_strategy_str =
-      Map.get(exec.context, "__parallel_error_strategy") ||
-        Map.get(exec.context, :__parallel_error_strategy) ||
-        "fail_fast"
+    children_map = parallel_children(exec.engine_state)
+    error_strategy_str = exec.engine_state["__parallel_error_strategy"] || "fail_fast"
 
     error_strategy = String.to_existing_atom(error_strategy_str)
     # When into_fn is provided, always collect all results
@@ -2247,22 +2257,20 @@ defmodule Durable.Executor do
     # Load all child executions and build results
     results = build_results_from_children(children_map, config)
 
-    # Clean parallel metadata from context before continuing
-    # Drop both string and atom keys since context may have either
-    clean_ctx =
-      exec.context
-      |> Map.drop([
-        "__parallel_children",
-        "__parallel_wait_group_id",
-        "__parallel_error_strategy",
-        :__parallel_children,
-        :__parallel_wait_group_id,
-        :__parallel_error_strategy,
-        # A block inside a lane: `into:` and the next step get the lane's data,
-        # not the marker that says which lane it is. Saving puts it back.
-        "__parallel_step",
-        :__parallel_step
-      ])
+    # The block is over once its results are saved: the run that goes on from
+    # it carries no record of its lanes. One that fails here keeps it, for a
+    # retry to find.
+    finished = %{
+      exec
+      | engine_state:
+          Map.drop(exec.engine_state, [
+            "__parallel_children",
+            "__parallel_wait_group_id",
+            "__parallel_error_strategy"
+          ])
+    }
+
+    clean_ctx = exec.context
 
     # Check for fail_fast. A lane the block can do without doesn't fail it.
     optional = for {_id, %{"optional" => true, "returns_key" => key}} <- children_map, do: key
@@ -2284,7 +2292,7 @@ defmodule Durable.Executor do
       handle_parallel_completion(results, clean_ctx, into_fn, %{
         remaining_steps: remaining_steps,
         all_parallel_steps: all_parallel_steps,
-        exec: exec,
+        exec: finished,
         step_index: step_index,
         workflow_def: workflow_def,
         config: config,
@@ -2303,7 +2311,7 @@ defmodule Durable.Executor do
 
       case Repo.get(config, WorkflowExecution, child_id) do
         %{status: :completed, context: ctx} ->
-          {returns_key, {:ok, ctx}}
+          {returns_key, {:ok, EngineState.strip(ctx)}}
 
         %{status: status, error: error}
         when status in [:failed, :cancelled, :compensation_failed] ->
@@ -2416,8 +2424,8 @@ defmodule Durable.Executor do
 
     lanes =
       Map.new(results, fn
-        {lane, {:ok, data}} when collect? -> {lane, {:ok, Map.delete(data, @string_keys)}}
-        {lane, {:ok, data}} -> {lane, Map.delete(data, @string_keys)}
+        {lane, {:ok, data}} when collect? -> {lane, {:ok, data}}
+        {lane, {:ok, data}} -> {lane, data}
         {lane, {:error, reason}} when collect? -> {lane, {:error, reason}}
         # Only an optional lane gets here failed: the block did without it,
         # and hands on its `default:`, put as a lane's stored data would be.
@@ -2434,12 +2442,20 @@ defmodule Durable.Executor do
     # Any tuples that leak into the callback's return are sanitized at the
     # save boundary (save_data_as_context -> sanitize_for_json), so storage
     # can't crash regardless of what shape the user returns.
+    # What `into:` returns is the user's data, like a step's result.
     case into_fn.(base_ctx, results) do
-      {:ok, data} = ok when is_map(data) -> ok
-      {:goto, step, data} = goto when is_atom(step) and is_map(data) -> goto
-      {:error, _reason} = error -> error
+      {:ok, data} when is_map(data) ->
+        {:ok, EngineState.strip(data)}
+
+      {:goto, step, data} when is_atom(step) and is_map(data) ->
+        {:goto, step, EngineState.strip(data)}
+
+      {:error, _reason} = error ->
+        error
+
       # Unmatched, it would crash the worker like the throw below.
-      other -> {:error, invalid_into_return(other, opts)}
+      other ->
+        {:error, invalid_into_return(other, opts)}
     end
   catch
     # A throw or an exit too: uncaught, it would fail the run from the worker,
@@ -2604,9 +2620,10 @@ defmodule Durable.Executor do
     end
   end
 
-  # Saves data as the workflow context in DB (for persistence/resume)
-  # Also merges orchestration keys from process dict to ensure child workflow
-  # references are persisted through DB round-trips
+  # Saves data as the workflow context in DB (for persistence/resume), and
+  # with it, in the same write, the engine's state: the record of the data's
+  # key shapes, the step this is the result of, and what the step's body left
+  # there (the children it started).
   defp save_data_as_context(config, execution, data, markers \\ :drop, done \\ nil) do
     # Persist the step's cumulative context — everything the user wrote via
     # put_context/2 during the step body PLUS everything they returned from
@@ -2624,23 +2641,24 @@ defmodule Durable.Executor do
     # on top of string-keyed DB-round-tripped input) and atomize_keys/1
     # deduplicates non-deterministically via Map.new, which corrupted
     # values in the branch DSL path.
-    # A lane's steps return data without the marker that says which lane the
-    # run is; without it, a lane that wakes up would run the whole workflow.
-    merged =
-      process_ctx
-      |> Map.merge(data)
-      |> Map.merge(Map.take(execution.context || %{}, ["__parallel_step"]))
-      |> sanitize_for_json()
+    merged = process_ctx |> Map.merge(data) |> sanitize_for_json() |> EngineState.strip()
+
+    engine_state =
+      execution.engine_state
       |> finish_wait_markers(markers)
+      |> Map.put(@string_keys, string_key_names(merged))
 
-    # The record of its key shapes is stored, but the next step mustn't see it.
-    stored = Map.put(merged, @string_keys, string_key_names(merged))
-    stored = if done, do: Map.put(stored, @done, done_record(done)), else: stored
+    engine_state =
+      if done,
+        do: Map.put(engine_state, @done, done_record(done)),
+        else: Map.delete(engine_state, @done)
 
-    with {:ok, saved} <-
-           execution |> Ecto.Changeset.change(context: stored) |> cas_update!(config) do
-      {:ok, %{saved | context: merged}}
-    end
+    # Forced: what the row holds is what this save worked out, whatever the
+    # struct in hand had.
+    execution
+    |> Ecto.Changeset.change(context: merged)
+    |> Ecto.Changeset.force_change(:engine_state, engine_state)
+    |> cas_update!(config)
   end
 
   defp done_record({step, arm}),
@@ -2650,17 +2668,20 @@ defmodule Durable.Executor do
 
   # A step that's suspending again still needs them when it re-runs. Kept once
   # it's finished, a marker would stand in for a later wait's own.
-  defp finish_wait_markers(context, :keep), do: context
-  defp finish_wait_markers(context, :drop), do: StepRunner.without_wait_markers(context)
+  defp finish_wait_markers(engine_state, :keep), do: engine_state
+
+  defp finish_wait_markers(engine_state, :drop),
+    do: EngineState.without_wait_markers(engine_state)
 
   defp mark_completed(config, execution, final_data) do
     # Sanitize before persisting — the final step may return data containing
     # raw tuples (e.g., child executions in a parallel block complete with
     # {:ok, value} that gets unwrapped but sometimes leaks through).
-    # Without a lane's marker: its result is handed to the block's run, where
-    # the marker would make that run a lane.
-    safe_final =
-      final_data |> Map.drop(["__parallel_step", :__parallel_step]) |> sanitize_for_json()
+    safe_final = final_data |> sanitize_for_json() |> EngineState.strip()
+
+    # A finished run's context is its result, and is no step's data any more:
+    # the records that went with the last save go, in the same write.
+    engine_state = Map.drop(execution.engine_state, [@done, @string_keys])
 
     {:ok, execution} =
       execution
@@ -2669,10 +2690,8 @@ defmodule Durable.Executor do
         completed_at: DateTime.utc_now(),
         current_step: nil
       })
-      # Forced: the in-memory context lacks the stored record of key shapes
-      # (save_data_as_context/3), so it can look unchanged when the row isn't.
-      |> Ecto.Changeset.force_change(:context, safe_final)
       |> Ecto.Changeset.change(locked_by: nil, locked_at: nil, scheduled_at: nil)
+      |> Ecto.Changeset.force_change(:engine_state, engine_state)
       |> cas_update!(config)
 
     DurablePubSub.broadcast_workflow(config, :workflow_completed, workflow_event(execution))
@@ -2921,12 +2940,13 @@ defmodule Durable.Executor do
   # the block carries on.
   defp stop_block_on_failure(repo, branch, status, %{just_completed: false, wait_group: group})
        when status in [:failed, :cancelled] and group.status == :pending do
-    parent = repo.get(WorkflowExecution, branch.parent_workflow_id)
+    parent = EngineState.adopt(repo, repo.get(WorkflowExecution, branch.parent_workflow_id))
+    block = (parent && parent.engine_state) || %{}
 
     # A lane the block can do without doesn't end it.
-    optional? = parent && get_in(parent.context, ["__parallel_children", branch.id, "optional"])
+    optional? = get_in(block, ["__parallel_children", branch.id, "optional"])
 
-    if parent && parent.context["__parallel_error_strategy"] == "fail_fast" && !optional? do
+    if block["__parallel_error_strategy"] == "fail_fast" && !optional? do
       {:ok, _} =
         group
         |> Ecto.Changeset.change(status: :completed, completed_at: DateTime.utc_now())
@@ -2937,7 +2957,7 @@ defmodule Durable.Executor do
         set: [status: :cancelled, completed_at: DateTime.utc_now()]
       )
 
-      {:ok, cancel_siblings(repo, branch, Map.keys(parent.context["__parallel_children"]))}
+      {:ok, cancel_siblings(repo, branch, Map.keys(block["__parallel_children"]))}
     else
       {:ok, nil}
     end
@@ -2976,7 +2996,7 @@ defmodule Durable.Executor do
   def resume_parent_in_multi(repo, workflow_id, additional_context) do
     safe_context = additional_context |> sanitize_for_json() |> EngineState.strip()
 
-    case repo.get(WorkflowExecution, workflow_id) do
+    case EngineState.adopt(repo, repo.get(WorkflowExecution, workflow_id)) do
       nil ->
         {:error, :workflow_not_found}
 
@@ -3036,8 +3056,9 @@ defmodule Durable.Executor do
         # between the two updates left the event :received but the parent
         # stuck in :waiting (Bug M-3).
         parent = Repo.get(config, WorkflowExecution, execution.parent_workflow_id)
-        result_context = build_parent_result_context(parent, execution.id, payload)
-        atomic_fulfill_event_and_resume_parent(config, pending_event, parent, result_context)
+        parent = EngineState.adopt(config, parent)
+        result = build_parent_result(parent, execution.id, payload)
+        atomic_fulfill_event_and_resume_parent(config, pending_event, parent, result)
     end
   end
 
@@ -3058,8 +3079,9 @@ defmodule Durable.Executor do
     end)
   end
 
-  defp atomic_fulfill_event_and_resume_parent(config, pending_event, parent, result_context) do
-    safe_context = sanitize_for_json(result_context)
+  # `result` is the engine's own: the child's result, under the child's names.
+  defp atomic_fulfill_event_and_resume_parent(config, pending_event, parent, result) do
+    safe_result = sanitize_for_json(result)
 
     multi =
       Ecto.Multi.new()
@@ -3076,11 +3098,9 @@ defmodule Durable.Executor do
             {:error, :parent_not_found}
 
           %WorkflowExecution{status: :waiting} = exec ->
-            new_context = Map.merge(exec.context || %{}, safe_context)
-
             exec
             |> Ecto.Changeset.change(
-              context: new_context,
+              engine_state: Map.merge(exec.engine_state, safe_result),
               status: :pending,
               scheduled_at: nil,
               locked_by: nil,
@@ -3109,13 +3129,12 @@ defmodule Durable.Executor do
     end
   end
 
-  # Build context update for parent with child result stored under the right key
-  defp build_parent_result_context(parent, child_id, payload) do
-    parent_context = parent.context || %{}
-
+  # What the parent's engine state gets: the child's result under the ref the
+  # parent called it by
+  defp build_parent_result(parent, child_id, payload) do
     # Find which ref this child belongs to by looking for __child:ref = child_id
     ref =
-      Enum.find_value(parent_context, fn
+      Enum.find_value(parent.engine_state, fn
         {"__child:" <> ref_str, ^child_id} -> ref_str
         _ -> nil
       end)
@@ -3192,12 +3211,11 @@ defmodule Durable.Executor do
   defp climbs?(:root, _execution), do: true
 
   defp parent_run(_config, %{parent_workflow_id: nil}), do: nil
-  defp parent_run(config, %{parent_workflow_id: id}), do: Repo.get(config, WorkflowExecution, id)
 
-  defp parallel_branch?(execution),
-    do:
-      Map.has_key?(execution.context, "__parallel_step") or
-        Map.has_key?(execution.context, :__parallel_step)
+  defp parent_run(config, %{parent_workflow_id: id}),
+    do: EngineState.adopt(config, Repo.get(config, WorkflowExecution, id))
+
+  defp parallel_branch?(execution), do: is_map_key(execution.engine_state, "__parallel_step")
 
   defp cancel_child_workflows(config, parent_id) do
     query =
@@ -3279,9 +3297,9 @@ defmodule Durable.Executor do
   end
 
   # Back on its queue to be undone at `at`, as `queue_rollback/3` leaves a run
-  # that failed. The context is read back: this process may hold less of it.
+  # that failed. The state is read back: this process may hold less of it.
   defp undo_later(config, execution, error, at) do
-    context = stored_context(config, execution.id)
+    engine_state = stored(config, execution.id).engine_state
 
     {:ok, _} =
       execution
@@ -3293,8 +3311,8 @@ defmodule Durable.Executor do
         lock_token: nil
       )
       |> Ecto.Changeset.force_change(
-        :context,
-        Map.put(context || %{}, @rollback, %{"error" => error, "status" => "failed"})
+        :engine_state,
+        Map.put(engine_state, @rollback, %{"error" => error, "status" => "failed"})
       )
       |> without_key(execution)
       |> cas_update!(config)
@@ -3302,18 +3320,13 @@ defmodule Durable.Executor do
     {:error, error}
   end
 
-  # The context as it was last saved, with the record of its key shapes, which
-  # a run's struct is without once this process has saved it.
-  defp stored_context(config, workflow_id) do
-    Repo.one(
-      config,
-      from(w in WorkflowExecution, where: w.id == ^workflow_id, select: w.context)
-    )
-  end
+  # The run as it was last saved.
+  defp stored(config, workflow_id), do: Repo.get(config, WorkflowExecution, workflow_id)
 
   # `rollback_workflow/2` asked: undo the run, keeping the error it failed with.
   defp roll_back(execution, workflow_def, config) do
-    {%{"error" => error, "status" => was}, context} = Map.pop(execution.context, @rollback)
+    {%{"error" => error, "status" => was}, engine_state} =
+      Map.pop(execution.engine_state, @rollback)
 
     # The marker goes in the write that takes the run out of :running. A
     # worker lost after it then leaves a run that failed while compensating,
@@ -3321,7 +3334,7 @@ defmodule Durable.Executor do
     {:ok, execution} =
       execution
       |> WorkflowExecution.compensating_changeset()
-      |> Ecto.Changeset.change(context: context)
+      |> Ecto.Changeset.change(engine_state: engine_state)
       |> cas_update!(config)
 
     case build_compensation_stack(execution.id, workflow_def, config) do
@@ -3429,8 +3442,7 @@ defmodule Durable.Executor do
     # timed-out input) hasn't run a step in this process, so its data isn't here.
     # It is read as stored, for the keys to come back the shape a step saw them.
     if Context.context() == %{} do
-      stored = config |> stored_context(exec.id) |> Map.delete(@done)
-      Process.put(:durable_context, restore_keys(stored))
+      Process.put(:durable_context, config |> stored(exec.id) |> data_of())
     end
 
     # Run each compensation, collecting results
@@ -3519,7 +3531,9 @@ defmodule Durable.Executor do
       Logger.error("[Durable] redelivering lost notices failed: #{Exception.message(error)}")
   end
 
-  defp notice_for(%{status: :completed} = child), do: {:completed, child.context}
+  defp notice_for(%{status: :completed} = child),
+    do: {:completed, EngineState.strip(child.context)}
+
   defp notice_for(%{status: :cancelled} = child), do: {:cancelled, child.error}
   defp notice_for(child), do: {:failed, child.error}
 
@@ -3693,15 +3707,22 @@ defmodule Durable.Executor do
       execution.context
       |> string_keys()
       |> Map.merge(string_keys(data))
-      |> Map.delete(@atom_keys)
+      |> sanitize_for_json()
+      |> EngineState.strip()
+
+    # Without the record of a step's result: the run moves on to another
+    # step, or runs this one again.
+    engine_state =
+      execution.engine_state
+      |> Map.drop([@atom_keys, @done])
       |> Map.put(@string_keys, string_key_names(data))
 
     {:ok, execution} =
       execution
       |> Ecto.Changeset.change(
-        [context: sanitize_for_json(context), status: :pending, locked_by: nil, locked_at: nil] ++
-          attrs
+        [context: context, status: :pending, locked_by: nil, locked_at: nil] ++ attrs
       )
+      |> Ecto.Changeset.force_change(:engine_state, engine_state)
       |> cas_update!(config)
 
     DurablePubSub.broadcast_workflow(config, :workflow_parked, workflow_event(execution))

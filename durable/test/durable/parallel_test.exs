@@ -61,13 +61,13 @@ defmodule Durable.ParallelTest do
 
       # Each child should have __parallel_step in context
       Enum.each(children, fn child ->
-        assert child.context["__parallel_step"] != nil
+        assert child.engine_state["__parallel_step"] != nil
         assert child.parent_workflow_id == parent.id
       end)
 
       # Parent should have parallel metadata
-      assert parent.context["__parallel_children"] != nil
-      assert parent.context["__parallel_wait_group_id"] != nil
+      assert parent.engine_state["__parallel_children"] != nil
+      assert parent.engine_state["__parallel_wait_group_id"] != nil
     end
 
     test "executing children and resuming parent produces completed workflow" do
@@ -241,7 +241,7 @@ defmodule Durable.ParallelTest do
 
         assert child.context["shared_count"] == 42
         # Internal marker is still there for the executor's use
-        assert child.context["__parallel_step"] != nil
+        assert child.engine_state["__parallel_step"] != nil
       end)
 
       # Execute children — they use get_context to read the inherited values
@@ -357,7 +357,7 @@ defmodule Durable.ParallelTest do
       moved =
         for child <- children,
             now = repo.get!(WorkflowExecution, child.id),
-            do: {child.context["__parallel_step"], now.status, now.queue}
+            do: {child.engine_state["__parallel_step"], now.status, now.queue}
 
       assert Enum.sort(moved) == [
                {"tasks__default_task", :completed, "default"},

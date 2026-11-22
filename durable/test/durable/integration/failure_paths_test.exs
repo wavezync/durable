@@ -1257,7 +1257,7 @@ defmodule Durable.Integration.FailurePathsTest do
       {:ok, id} = Durable.start(ReadsAfterEvent, %{"id" => 42})
       await_status(id, :waiting)
 
-      assert Map.has_key?(get(id).context, "__string_keys__")
+      assert Map.has_key?(get(id).engine_state, "__string_keys__")
       {:ok, execution} = Durable.get_execution(id)
       assert execution.context == %{"id" => 42}
     end
@@ -1270,7 +1270,7 @@ defmodule Durable.Integration.FailurePathsTest do
 
       {1, _} =
         IntegrationRepo.update_all(from(w in WorkflowExecution, where: w.id == ^id),
-          set: [context: %{"total" => 7, "id" => 42}]
+          set: [context: %{"total" => 7, "id" => 42}, engine_state: %{}]
         )
 
       {1, _} =

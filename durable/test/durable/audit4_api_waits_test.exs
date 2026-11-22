@@ -450,7 +450,7 @@ defmodule Durable.Audit4ApiWaitsTest do
       assert asking.status == :waiting
       assert asking.current_step == "ask"
       assert asking.context["napped"] == true
-      refute Map.has_key?(asking.context, "__cancelled__")
+      refute Map.has_key?(asking.engine_state, "__cancelled__")
       assert_waiting_for_input(asking, "ok")
     end
 
@@ -482,7 +482,7 @@ defmodule Durable.Audit4ApiWaitsTest do
       assert Wait.cancel_wait(blocked.id, reason: "stop") == :ok
       # The block's own wait is left alone: it still waits for its lanes.
       assert run(blocked.id).status == :waiting
-      refute Map.has_key?(run(blocked.id).context, "__cancelled__")
+      refute Map.has_key?(run(blocked.id).engine_state, "__cancelled__")
 
       finished = drain(blocked)
 
@@ -498,16 +498,19 @@ defmodule Durable.Audit4ApiWaitsTest do
     test "on a block leaves a lane that isn't waiting alone" do
       {:ok, id} = Durable.start(Audit4ApiLanes, %{})
       assert execute(id).status == :waiting
-      [credit, fraud] = Enum.sort_by(Durable.list_children!(id), & &1.context["__parallel_step"])
+
+      [credit, fraud] =
+        Enum.sort_by(Durable.list_children!(id), &run(&1.id).engine_state["__parallel_step"])
+
       # Only the credit lane has got to its wait; the other has yet to start.
       assert execute(credit.id).status == :waiting
       assert run(fraud.id).status == :pending
 
       assert Wait.cancel_wait(id, reason: "stop") == :ok
 
-      assert run(credit.id).context["__cancelled__"] == "stop"
+      assert run(credit.id).engine_state["__cancelled__"] == "stop"
       assert run(fraud.id).status == :pending
-      refute Map.has_key?(run(fraud.id).context, "__cancelled__")
+      refute Map.has_key?(run(fraud.id).engine_state, "__cancelled__")
 
       # The untouched lane reaches its own wait, and the block waits for it.
       still_blocked = drain(id)

@@ -198,7 +198,7 @@ defmodule Durable.OnFailureTest do
       assert Enum.count(Seen.all(), &(&1 == :cancel_flight)) == 1
       # It undid; it didn't run the failed step again.
       assert Enum.count(Seen.all(), &(&1 == :charge_card)) == 1
-      refute Map.has_key?(run.context, "__rollback__")
+      refute Map.has_key?(run.engine_state, "__rollback__")
     end
 
     test "a run rolled back can't be retried or rolled back again" do
@@ -339,7 +339,7 @@ defmodule Durable.OnFailureTest do
       assert run.status == :compensated
       assert run.error == %{"type" => "cancelled", "message" => "traveller walked away"}
       assert Enum.count(Seen.all(), &(&1 == :cancel_flight)) == 1
-      refute Map.has_key?(run.context, "__rollback__")
+      refute Map.has_key?(run.engine_state, "__rollback__")
       assert Durable.retry(run.id) == {:error, :rolled_back}
     end
 
@@ -355,8 +355,8 @@ defmodule Durable.OnFailureTest do
         Durable.start(BookTrip, %{"payments" => "up"}, workflow: "book_trip", key: "traveller:7")
 
       assert :ok = Durable.cancel(id, "traveller walked away", rollback: true)
-      assert %{status: :cancelled, context: context} = reload(%{id: id})
-      refute Map.has_key?(context, "__rollback__")
+      assert %{status: :cancelled, engine_state: engine_state} = reload(%{id: id})
+      refute Map.has_key?(engine_state, "__rollback__")
     end
 
     test "with rollback: true on a run that never started, its key is free for the next start" do

@@ -206,7 +206,7 @@ defmodule Durable.NamedBlocksEdgesTest do
 
       step(:approve, fn loan ->
         row = Repo.get(WorkflowExecution, Durable.Context.workflow_id())
-        Seen.put(:record, row.context["__done__"])
+        Seen.put(:record, row.engine_state["__done__"])
         {:ok, assign(loan, :approved, true)}
       end)
     end
@@ -405,8 +405,9 @@ defmodule Durable.NamedBlocksEdgesTest do
           status: :pending,
           queue: "default",
           input: %{},
-          context: %{
-            "joined" => 1,
+          context: %{"joined" => 1},
+          engine_state: %{
+            "v" => 1,
             "__string_keys__" => ["joined"],
             "__done__" => Seen.get(:record)
           },

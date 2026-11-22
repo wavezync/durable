@@ -91,7 +91,7 @@ defmodule Durable.Integration.NamedBlocksTest do
   end
 
   defp lane(id, name) do
-    Enum.find(lanes(id), &(&1.context["__parallel_step"] == name))
+    Enum.find(lanes(id), &(&1.engine_state["__parallel_step"] == name))
   end
 
   defp waiting_lanes(id) do

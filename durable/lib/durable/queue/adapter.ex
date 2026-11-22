@@ -138,7 +138,7 @@ defmodule Durable.Queue.Adapter do
 
   Atomically transitions rows where `status = :waiting AND scheduled_at <= NOW()`
   back to `:pending`, clears the lock, and merges a `__sleep_satisfied__`
-  marker into context so the step body's next `sleep`/`schedule_at` call
+  marker into engine_state so the step body's next `sleep`/`schedule_at` call
   returns immediately instead of re-throwing.
 
   Returns the count of workflows woken. Optional so older adapters keep

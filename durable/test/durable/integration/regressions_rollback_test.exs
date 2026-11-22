@@ -198,7 +198,7 @@ defmodule Durable.Integration.RegressionsRollbackTest do
     assert Durable.provide_input(id, "confirmation", %{}) != :ok
     run = get(id)
     assert run.status == :failed
-    refute Map.has_key?(run.context, "__rollback__")
+    refute Map.has_key?(run.engine_state, "__rollback__")
 
     # What it held can still be released.
     assert {:ok, ^id} = Durable.rollback(id)

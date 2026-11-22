@@ -146,14 +146,11 @@ defmodule Durable.Context do
   def put_context(key, value) do
     # The engine's own keys aren't the user's to write: dropped, like any
     # other of the user's data that uses one.
-    if EngineState.key?(key), do: :ok, else: put_engine(key, value)
-  end
+    if not EngineState.key?(key) do
+      context = context()
+      Process.put(@context_key, Map.put(context, stored_key(context, key), value))
+    end
 
-  @doc false
-  # The engine's own writes to the context of the step that is running.
-  def put_engine(key, value) do
-    context = context()
-    Process.put(@context_key, Map.put(context, stored_key(context, key), value))
     :ok
   end
 
@@ -550,6 +547,7 @@ defmodule Durable.Context do
     Process.delete(@workflow_id_key)
     Process.delete(@step_key)
     Process.delete(@attempt_key)
+    EngineState.clear_current()
     # Log capture keys (cleanup in case of crashes)
     Durable.LogCapture.clear_logs()
     Process.delete(:durable_original_group_leader)

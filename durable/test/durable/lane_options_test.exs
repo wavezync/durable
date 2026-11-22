@@ -165,7 +165,9 @@ defmodule Durable.LaneOptionsTest do
       assert :rate not in Seen.all()
       assert {:decide, %{social: %{"profiles" => 0}}} = List.last(Seen.all())
 
-      social = Enum.find(lanes_of(run), &(&1.context["__parallel_step"] == "lookups__social"))
+      social =
+        Enum.find(lanes_of(run), &(&1.engine_state["__parallel_step"] == "lookups__social"))
+
       assert social.status == :failed
       assert social.error["type"] == "timeout"
       assert social.error["message"] =~ "lane social passed its"

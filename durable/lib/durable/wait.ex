@@ -109,9 +109,9 @@ defmodule Durable.Wait do
   ## Resumption semantics
 
   Like `wait_for_event/2`, `sleep/1` is a resumption barrier: when the
-  step re-runs after the wake fires, the SleepWaker has merged a
-  `:__sleep_satisfied__` marker into context that this call recognises
-  and returns `nil` for instead of re-throwing. Any side effects
+  step re-runs after the wake fires, the SleepWaker has left a marker for
+  the step that this call recognises and returns `nil` for instead of
+  re-throwing. Any side effects
   *before* `sleep/1` therefore run twice (once on suspend, again on
   resume) — keep them idempotent or move them into a prior step.
 
@@ -150,7 +150,7 @@ defmodule Durable.Wait do
   end
 
   # On resume after a sleep wake, the SleepWaker writes
-  # `:__sleep_satisfied__ => "<step_name>"` into the workflow's context.
+  # `"__sleep_satisfied__" => "<step_name>"` into the run's engine state.
   # When the step body re-runs, this guard makes `sleep`/`schedule_at`
   # return `nil` instead of throwing again — so the rest of the step
   # body runs, the step completes, and the workflow advances.
@@ -159,19 +159,10 @@ defmodule Durable.Wait do
   # exactly until the user step finishes. Subsequent sleep steps get
   # their own marker written by the next wake.
   defp sleep_satisfied? do
-    context = Process.get(:durable_context, %{})
     step = Process.get(:durable_current_step)
 
-    cond do
-      cancelled(context) != :none ->
-        true
-
-      step != nil and Map.get(context, :__sleep_satisfied__) == Atom.to_string(step) ->
-        true
-
-      true ->
-        false
-    end
+    cancelled() != :none or
+      (step != nil and EngineState.current()["__sleep_satisfied__"] == Atom.to_string(step))
   end
 
   # A wait under one of the engine's own names could never be answered: the
@@ -210,8 +201,10 @@ defmodule Durable.Wait do
     with :error <- Map.fetch(context, Context.known_key(name)), do: Map.fetch(context, name)
   end
 
-  defp cancelled(context) do
-    case fetch_key(context, "__cancelled__") do
+  # Whether the wait was cancelled is the engine's to say: its state for the
+  # run, never a key of the step's data.
+  defp cancelled do
+    case Map.fetch(EngineState.current(), "__cancelled__") do
       {:ok, reason} -> {:cancelled, reason}
       :error -> :none
     end
@@ -249,9 +242,9 @@ defmodule Durable.Wait do
 
   # A group wait that timed out has no answer to return, only the code's own
   # `:timeout_value`, or which events did arrive.
-  defp group_wait_over(context, opts, wait) do
-    with :none <- cancelled(context),
-         :error <- fetch_key(context, "__wait_group_result__") do
+  defp group_wait_over(opts, wait) do
+    with :none <- cancelled(),
+         :error <- Map.fetch(EngineState.current(), "__wait_group_result__") do
       throw(wait)
     else
       {:cancelled, _reason} = cancelled -> cancelled
@@ -330,7 +323,7 @@ defmodule Durable.Wait do
     # Check if we're resuming with event data already in context
     context = Process.get(:durable_context, %{})
 
-    with :none <- cancelled(context),
+    with :none <- cancelled(),
          :error <- answer(context, event_name, PendingEvent) do
       throw({:wait_for_event, Keyword.put(opts, :event_name, event_name)})
     else
@@ -376,7 +369,7 @@ defmodule Durable.Wait do
     case Enum.find(event_names, &(answer(context, &1, PendingEvent) != :error)) do
       nil ->
         wait = {:wait_for_any, Keyword.merge(opts, event_names: event_names, wait_type: :any)}
-        group_wait_over(context, opts, wait)
+        group_wait_over(opts, wait)
 
       event_name ->
         {:ok, data} = fetch_key(context, event_name)
@@ -420,7 +413,7 @@ defmodule Durable.Wait do
     # Check if all events are in context
     if :error in answers do
       wait = {:wait_for_all, Keyword.merge(opts, event_names: event_names, wait_type: :all)}
-      group_wait_over(context, opts, wait)
+      group_wait_over(opts, wait)
     else
       event_names
       |> Enum.zip(answers)
@@ -471,7 +464,7 @@ defmodule Durable.Wait do
     # Check if we're resuming with input data already in context
     context = Process.get(:durable_context, %{})
 
-    with :none <- cancelled(context),
+    with :none <- cancelled(),
          :error <- answer(context, input_name, PendingInput) do
       throw({:wait_for_input, Keyword.put(opts, :input_name, input_name)})
     else
@@ -758,8 +751,9 @@ defmodule Durable.Wait do
     config = get_config(opts)
     # Sanitize at the API boundary so any tuples / PIDs / functions that
     # leak in from controllers, LiveViews, or external callers can't crash
-    # JSONB persistence in PendingInput.response or workflow.context.
-    safe_data = Durable.Executor.sanitize_for_json(data)
+    # JSONB persistence in PendingInput.response or workflow.context. An answer
+    # is the user's data, so the engine's own keys are dropped from it.
+    safe_data = data |> Durable.Executor.sanitize_for_json() |> EngineState.strip()
 
     with :ok <- answerable(workflow_id, input_name),
          {:ok, completed} <- answer_and_resume(config, workflow_id, input_name, safe_data, opts) do
@@ -813,7 +807,7 @@ defmodule Durable.Wait do
   def send_event(workflow_id, event_name, payload, opts \\ []) do
     config = get_config(opts)
     # Sanitize at the API boundary — same rationale as provide_input/4.
-    safe_payload = Durable.Executor.sanitize_for_json(payload)
+    safe_payload = payload |> Durable.Executor.sanitize_for_json() |> EngineState.strip()
 
     with :ok <- answerable(workflow_id, event_name) do
       if Keyword.get(opts, :buffer, false),

@@ -333,10 +333,10 @@ defmodule Durable.Wait.TimeoutWorker do
   defp maybe_cancel_timed_out_child(_config, _event_name), do: :ok
 
   # Atomically: persist the pending row's :timeout transition AND flip the
-  # owning workflow back to :pending with the timeout payload merged into
-  # context. If either step fails the entire transaction rolls back, so the
-  # workflow can never end up "input/event marked timeout but workflow still
-  # stuck in :waiting".
+  # owning workflow back to :pending with what the wait ended with merged into
+  # its context and the engine's markers into its engine state. If either step
+  # fails the entire transaction rolls back, so the workflow can never end up
+  # "input/event marked timeout but workflow still stuck in :waiting".
   #
   # The sweep read the wait before it had the run's lock. Whoever held the lock
   # may have answered or cancelled it, so it is closed only if still pending,
@@ -381,16 +381,15 @@ defmodule Durable.Wait.TimeoutWorker do
   defp resume_timed_out(_repo, _workflow_id, _resume, 0), do: {:ok, %{no_op: true}}
 
   defp resume_timed_out(repo, workflow_id, {user, engine}, _closed) do
-    case repo.get(WorkflowExecution, workflow_id) do
+    case EngineState.adopt(repo, repo.get(WorkflowExecution, workflow_id)) do
       nil ->
         {:error, :workflow_not_found}
 
       %WorkflowExecution{status: :waiting} = exec ->
-        new_context = exec.context |> Kernel.||(%{}) |> Map.merge(user) |> Map.merge(engine)
-
         exec
         |> Ecto.Changeset.change(
-          context: new_context,
+          context: Map.merge(exec.context || %{}, user),
+          engine_state: Map.merge(exec.engine_state, engine),
           status: :pending,
           locked_by: nil,
           locked_at: nil

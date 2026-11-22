@@ -47,7 +47,7 @@ defmodule Durable.Audit4ExecBugsTest do
     use Durable.Wait
     use Durable.Orchestration
 
-    def stored_now, do: Repo.get!(WorkflowExecution, Durable.Context.workflow_id()).context
+    def stored_now, do: Repo.get!(WorkflowExecution, Durable.Context.workflow_id())
 
     # A clause's step is named after its branch, which has no name of its own.
     def step_named(workflow, suffix) do
@@ -381,7 +381,8 @@ defmodule Durable.Audit4ExecBugsTest do
         status: :pending,
         queue: "default",
         input: %{},
-        context: stored,
+        context: stored.context,
+        engine_state: stored.engine_state,
         current_step: step
       })
       |> Repo.insert()
@@ -545,7 +546,7 @@ defmodule Durable.Audit4ExecBugsTest do
     test "when an operator cancels its run" do
       run = order(%{}, "audit4_pick")
       assert run.status == :waiting
-      north = Enum.find(children(run), &(&1.context["__parallel_step"] == "pickers__north"))
+      north = Enum.find(children(run), &(&1.engine_state["__parallel_step"] == "pickers__north"))
 
       :ok = Durable.cancel(north.id, "off sick")
       run = drain(run)
@@ -556,7 +557,7 @@ defmodule Durable.Audit4ExecBugsTest do
 
     test "but not when the block can do without the lane" do
       run = order(%{}, "audit4_pick_spare")
-      spare = Enum.find(children(run), &(&1.context["__parallel_step"] == "pickers__spare"))
+      spare = Enum.find(children(run), &(&1.engine_state["__parallel_step"] == "pickers__spare"))
 
       :ok = Durable.cancel(spare.id, "off sick")
       run = drain(run)
@@ -572,7 +573,7 @@ defmodule Durable.Audit4ExecBugsTest do
     test "doesn't run a decision that jumped again" do
       assert order(%{}, "audit4_refund").context["routed"] == 1
       stored = Audit4ExecBugSeen.get(:stored_after_route)
-      assert stored["routed"] == 1
+      assert stored.context["routed"] == 1
 
       run = lost_after("audit4_refund", "route", stored)
 
@@ -584,7 +585,7 @@ defmodule Durable.Audit4ExecBugsTest do
     test "doesn't run a step of a `branch on:` clause again" do
       assert order(%{"size" => "large"}, "audit4_parcel").context["weighed"] == 1
       stored = Audit4ExecBugSeen.get(:stored_after_weigh)
-      assert stored["weighed"] == 1
+      assert stored.context["weighed"] == 1
 
       run = lost_after("audit4_parcel", clause_step("audit4_parcel", "__weigh"), stored)
 
@@ -595,7 +596,7 @@ defmodule Durable.Audit4ExecBugsTest do
     test "doesn't run a step of a `branch on:` clause that jumped again" do
       assert order(%{"size" => "small"}, "audit4_parcel").context["franked"] == 1
       stored = Audit4ExecBugSeen.get(:stored_after_frank)
-      assert stored["franked"] == 1
+      assert stored.context["franked"] == 1
 
       run = lost_after("audit4_parcel", clause_step("audit4_parcel", "__frank"), stored)
 
@@ -716,10 +717,10 @@ defmodule Durable.Audit4ExecBugsTest do
     end
 
     defp undone(run) do
-      assert %{status: :pending, context: %{"__rollback__" => _}} = reload(run)
+      assert %{status: :pending, engine_state: %{"__rollback__" => _}} = reload(run)
       assert drain(run).status == :compensated
       assert Audit4ExecBugSeen.get(:cancelled_flight) == "FL-123"
-      refute is_map_key(reload(run).context, "__rollback__")
+      refute is_map_key(reload(run).engine_state, "__rollback__")
     end
 
     test "when it is cancelled", %{run: run} do

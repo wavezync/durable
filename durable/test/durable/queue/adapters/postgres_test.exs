@@ -770,7 +770,7 @@ defmodule Durable.Queue.Adapters.PostgresTest do
       assert reloaded.status == :pending
       assert reloaded.locked_by == nil
       assert reloaded.locked_at == nil
-      assert reloaded.context["__sleep_satisfied__"] == "wait_step"
+      assert reloaded.engine_state["__sleep_satisfied__"] == "wait_step"
     end
 
     test "leaves :waiting rows whose scheduled_at is still in the future" do
@@ -827,7 +827,7 @@ defmodule Durable.Queue.Adapters.PostgresTest do
 
       reloaded = repo().get!(WorkflowExecution, sleeper.id)
       assert reloaded.context["customer_email"] == "alice@example.com"
-      assert reloaded.context["__sleep_satisfied__"] == "wait_step"
+      assert reloaded.engine_state["__sleep_satisfied__"] == "wait_step"
     end
 
     test "respects batch_size cap" do

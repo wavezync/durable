@@ -138,13 +138,14 @@ defmodule DurableDashboard.Components.Workflow.FlowGraph do
   defp mark_selected(graph, _selected), do: graph
 
   # Map step_name → child_workflow_id, sourced from the family root's
-  # context. Merges parallel children (`__parallel_children`, written by
+  # engine state. Merges parallel children (`__parallel_children`, written by
   # the executor) with sub-workflow children (`__call_children`, written
   # by `Durable.Orchestration` for `call_workflow` / `start_workflow`).
   # Empty if the family is flat.
-  defp parallel_children_lookup(%{root: %{context: ctx}}) when is_map(ctx) do
-    parallel = extract_step_to_child(ctx, "__parallel_children")
-    call = extract_step_to_child(ctx, "__call_children")
+  defp parallel_children_lookup(%{root: %{} = root}) do
+    {_context, state} = DurableDashboard.Components.Workflow.ChildrenTab.split(root)
+    parallel = extract_step_to_child(state, "__parallel_children")
+    call = extract_step_to_child(state, "__call_children")
     Map.merge(parallel, call)
   end
 

@@ -33,7 +33,7 @@ defmodule Durable.OrchestrationTest do
       assert parent.context["before_call"] == true
 
       # Child should exist with parent_workflow_id set
-      child_id = parent.context["__child:simple_child_workflow"]
+      child_id = parent.engine_state["__child:simple_child_workflow"]
       assert child_id != nil
 
       child = repo.get!(WorkflowExecution, child_id)
@@ -72,7 +72,7 @@ defmodule Durable.OrchestrationTest do
       {:ok, parent} = create_and_execute_workflow(CallWorkflowParent, %{})
       assert parent.status == :waiting
 
-      child_id = parent.context["__child:simple_child_workflow"]
+      child_id = parent.engine_state["__child:simple_child_workflow"]
       assert child_id != nil
 
       # The parent's :call_child step row links directly to the spawned child —
@@ -97,7 +97,7 @@ defmodule Durable.OrchestrationTest do
 
       assert parent.status == :waiting
 
-      child_id = parent.context["__child:failing_child_workflow"]
+      child_id = parent.engine_state["__child:failing_child_workflow"]
       assert child_id != nil
 
       # Execute the failing child
@@ -124,7 +124,7 @@ defmodule Durable.OrchestrationTest do
       {:ok, parent} = create_and_execute_workflow(CallWorkflowParent, %{})
 
       assert parent.status == :waiting
-      child_id = parent.context["__child:simple_child_workflow"]
+      child_id = parent.engine_state["__child:simple_child_workflow"]
 
       # Count children before
       children_before =
@@ -158,7 +158,7 @@ defmodule Durable.OrchestrationTest do
       {:ok, parent} = create_and_execute_workflow(CallWorkflowParent, %{})
 
       assert parent.status == :waiting
-      child_id = parent.context["__child:simple_child_workflow"]
+      child_id = parent.engine_state["__child:simple_child_workflow"]
 
       # Manually set parent back to pending to simulate crash-resume
       # without child completing
@@ -207,7 +207,7 @@ defmodule Durable.OrchestrationTest do
       assert parent.context["before_fire"] == true
       assert parent.context["after_fire"] == true
 
-      child_id = parent.context["__fire_forget:confirmation_email"]
+      child_id = parent.engine_state["__fire_forget:confirmation_email"]
       assert child_id != nil
 
       child = repo.get!(WorkflowExecution, child_id)
@@ -280,7 +280,7 @@ defmodule Durable.OrchestrationTest do
       {:ok, parent} = create_and_execute_workflow(CallWorkflowParent, %{})
 
       assert parent.status == :waiting
-      child_id = parent.context["__child:simple_child_workflow"]
+      child_id = parent.engine_state["__child:simple_child_workflow"]
 
       child = repo.get!(WorkflowExecution, child_id)
       assert child.status == :pending
@@ -301,7 +301,7 @@ defmodule Durable.OrchestrationTest do
       # Use fire-and-forget so parent completes
       {:ok, parent} = create_and_execute_workflow(FireForgetParent, %{})
 
-      child_id = parent.context["__fire_forget:confirmation_email"]
+      child_id = parent.engine_state["__fire_forget:confirmation_email"]
 
       # Complete the child first
       Executor.execute_workflow(child_id, config)
@@ -313,7 +313,7 @@ defmodule Durable.OrchestrationTest do
       # (The fire-forget parent already completed, so let's test with call_workflow)
       {:ok, parent2} = create_and_execute_workflow(CallWorkflowParent, %{})
 
-      child2_id = parent2.context["__child:simple_child_workflow"]
+      child2_id = parent2.engine_state["__child:simple_child_workflow"]
 
       # Complete child2
       Executor.execute_workflow(child2_id, config)
@@ -348,7 +348,7 @@ defmodule Durable.OrchestrationTest do
       assert a.status == :waiting
 
       # B (child of A) should exist
-      b_id = a.context["__child:parent_workflow"]
+      b_id = a.engine_state["__child:parent_workflow"]
       assert b_id != nil
 
       # Execute B — it will call C and wait
@@ -358,7 +358,7 @@ defmodule Durable.OrchestrationTest do
       assert b.status == :waiting
 
       # C (child of B) should exist
-      c_id = b.context["__child:simple_child_workflow"]
+      c_id = b.engine_state["__child:simple_child_workflow"]
       assert c_id != nil
 
       c = repo.get!(WorkflowExecution, c_id)
@@ -405,7 +405,7 @@ defmodule Durable.OrchestrationTest do
       assert parent.status == :completed
 
       # Child exists and can run independently
-      child_id = parent.context["__fire_forget:confirmation_email"]
+      child_id = parent.engine_state["__fire_forget:confirmation_email"]
       assert child_id != nil
 
       Executor.execute_workflow(child_id, config)

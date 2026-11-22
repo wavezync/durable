@@ -313,10 +313,10 @@ defmodule Durable.Queue.Adapters.Postgres do
         select: w.id,
         update: [
           set: [
-            context:
+            engine_state:
               fragment(
-                "jsonb_set(coalesce(?, '{}'), '{__rollback__}', jsonb_build_object('error', coalesce(?, '{}'), 'status', 'failed'))",
-                w.context,
+                "jsonb_set(?, '{__rollback__}', jsonb_build_object('error', coalesce(?, '{}'), 'status', 'failed'))",
+                w.engine_state,
                 w.error
               )
           ]
@@ -465,7 +465,7 @@ defmodule Durable.Queue.Adapters.Postgres do
     #   2. Clear the lock (set NULL) so a stale `locked_by` from the
     #      worker that originally suspended them doesn't keep them invisible
     #      to fetch_jobs after the wake.
-    #   3. Merge `__sleep_satisfied__: <current_step>` into context so the
+    #   3. Merge `__sleep_satisfied__: <current_step>` into engine_state so the
     #      step body's next sleep/schedule_at call returns immediately
     #      instead of re-throwing.
     #
@@ -508,8 +508,8 @@ defmodule Durable.Queue.Adapters.Postgres do
         scheduled_at = NULL,
         locked_by = NULL,
         locked_at = NULL,
-        context = jsonb_set(
-          COALESCE(w.context, '{}'::jsonb),
+        engine_state = jsonb_set(
+          w.engine_state,
           '{__sleep_satisfied__}',
           to_jsonb(w.current_step),
           true

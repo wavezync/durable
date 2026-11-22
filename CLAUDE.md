@@ -158,6 +158,8 @@ use Durable.DataCase, async: false
 
 All tables live in the `durable` PostgreSQL schema: `durable.workflow_executions`, `durable.step_executions`, `durable.pending_inputs`, `durable.scheduled_workflows`
 
+On `workflow_executions`, `context` is the user's data and `engine_state` is the engine's own (markers, key shapes, children). Never read a marker from `context` or write one there: see `Durable.EngineState` and ARCHITECTURE rules 21 to 23.
+
 Uses binary UUIDs as primary keys.
 
 ## Code Style (Credo Strict Mode)

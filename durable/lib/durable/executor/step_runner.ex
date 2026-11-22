@@ -36,11 +36,6 @@ defmodule Durable.Executor.StepRunner do
     :call_workflow
   ]
 
-  # What a resume leaves for the step that waited, to read through the wait
-  # itself. They never appear in a step's data or outlast the step.
-  @wait_markers ~w(__sleep_satisfied__ __timeout__ __cancelled__ __wait_group_result__ __wait_group_status__)
-  @wait_marker_keys @wait_markers ++ Enum.map(@wait_markers, &String.to_atom/1)
-
   # A lost worker isn't the step's doing, so it uses no attempt, but a step
   # that takes its node down has to stop somewhere.
   # ponytail: fixed at 3, make it an option if anyone needs another number
@@ -75,8 +70,6 @@ defmodule Durable.Executor.StepRunner do
   """
   @spec execute(Step.t(), map(), String.t(), Config.t(), DateTime.t() | nil) :: result()
   def execute(%Step{} = step, data, workflow_id, %Config{} = config, deadline \\ nil) do
-    # Which lane a run is belongs to its stored context, not to a step's data.
-    data = Map.drop(data, ["__parallel_step", :__parallel_step])
     max_attempts = get_max_attempts(step)
     close_left_open(config, workflow_id)
     %{failed: failed, lost: lost} = attempts_used(config, workflow_id, Atom.to_string(step.name))
@@ -402,7 +395,7 @@ defmodule Durable.Executor.StepRunner do
     Durable.Telemetry.span([:durable, :step], span_meta, fn ->
       {:ok, step_exec} = start_step_execution(config, step_exec)
 
-      result = run_body(step, without_wait_markers(data), time_limit(step, deadline))
+      result = run_body(step, data, time_limit(step, deadline))
       duration_ms = System.monotonic_time(:millisecond) - start_time
 
       # Stop log capture and get captured logs
@@ -559,7 +552,7 @@ defmodule Durable.Executor.StepRunner do
 
   # Handle step result from pipeline model
   defp handle_result({:ok, new_data}, ctx) when is_run_data(new_data) do
-    new_data = returned(new_data)
+    new_data = EngineState.strip(new_data)
 
     %{step: step, step_exec: step_exec, logs: logs, duration_ms: duration_ms, config: config} =
       ctx
@@ -581,7 +574,7 @@ defmodule Durable.Executor.StepRunner do
   # Handle decision with goto
   defp handle_result({:goto, target, new_data}, ctx)
        when is_atom(target) and is_map(new_data) do
-    new_data = returned(new_data)
+    new_data = EngineState.strip(new_data)
 
     %{step_exec: step_exec, logs: logs, duration_ms: duration_ms, config: config} = ctx
 
@@ -685,16 +678,6 @@ defmodule Durable.Executor.StepRunner do
     {:ok, _} = fail_step_execution(config, step_exec, error, logs, duration_ms)
     {:error, error}
   end
-
-  # What a step returns is the user's data: none of the engine's keys in it
-  # is the engine's. Its own are in the process context, and saved from there.
-  defp returned(data), do: data |> without_wait_markers() |> EngineState.strip()
-
-  @doc false
-  # Carried on in the data, a marker would reach a parallel branch's input and
-  # overwrite that branch's own, so the branch would sleep again on every wake.
-  @spec without_wait_markers(map()) :: map()
-  def without_wait_markers(data), do: Map.drop(data, @wait_marker_keys)
 
   defp give_up(error, ctx) do
     %{step_exec: step_exec, logs: logs, duration_ms: duration_ms, config: config} = ctx

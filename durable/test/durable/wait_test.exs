@@ -124,7 +124,7 @@ defmodule Durable.WaitTest do
       assert execution.status == :pending
       assert execution.locked_by == nil
       assert execution.locked_at == nil
-      assert execution.context["__sleep_satisfied__"] == "sleep_step"
+      assert execution.engine_state["__sleep_satisfied__"] == "sleep_step"
     end
 
     test "resuming after wake completes the workflow past the sleep" do
@@ -179,7 +179,7 @@ defmodule Durable.WaitTest do
       # linger into the second suspension.
       assert execution.status == :waiting
       assert execution.context["first_done"] == true
-      assert execution.context["__sleep_satisfied__"] == nil
+      assert execution.engine_state["__sleep_satisfied__"] == nil
 
       force_sleep_elapsed!(repo, execution.id)
       Adapter.default_adapter().wake_sleeping_workflows(config, 100)
@@ -192,7 +192,7 @@ defmodule Durable.WaitTest do
       # removed, so the finished workflow carries no `__sleep_satisfied__`.
       # (A lingering marker would make a loop/`each` re-entry of the same
       # sleep step skip its sleep.)
-      assert execution.context["__sleep_satisfied__"] == nil
+      assert execution.engine_state["__sleep_satisfied__"] == nil
     end
 
     test "the sweep is a no-op when no rows are eligible" do

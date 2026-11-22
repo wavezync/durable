@@ -333,7 +333,7 @@ defmodule Durable.StepQueueTest do
     assert run.status == :completed
     assert run.context["text"] == "u.pdf from u"
     assert run.context["saved"] == true
-    refute Map.has_key?(run.context, "__atom_keys__")
+    refute Map.has_key?(run.engine_state, "__atom_keys__")
   end
 
   test "it goes back to the queue the start named, not the workflow's" do

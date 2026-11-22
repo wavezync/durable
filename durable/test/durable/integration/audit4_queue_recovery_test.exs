@@ -652,7 +652,7 @@ defmodule Durable.Integration.Audit4QueueRecoveryTest do
       assert {Probe.hits(:refund), Probe.hits(:ship)} == {1, 1}
       assert %{"message" => "declined"} = run.error
       assert run.locked_by == nil
-      refute is_map_key(run.context, "__rollback__")
+      refute is_map_key(run.engine_state, "__rollback__")
     end
   end
 end

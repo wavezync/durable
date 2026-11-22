@@ -415,7 +415,7 @@ defmodule Durable.Fuzz.Audit4ExecOpsTest do
     assert handed.status not in @reusable[state.reuse] or behind?(handed),
            "a start was handed a #{handed.status} run it could have replaced: #{label(state)}"
 
-    refute is_map_key(handed.context, "__rollback__") and state.reuse != "never",
+    refute is_map_key(handed.engine_state, "__rollback__") and state.reuse != "never",
            "a start was handed a run that is being rolled back: #{label(state)}"
   end
 
@@ -460,7 +460,7 @@ defmodule Durable.Fuzz.Audit4ExecOpsTest do
     assert was in [nil, :pending, :waiting, :failed] or run.status == was,
            "a #{was} run became #{where}"
 
-    refute is_map_key(run.context, "__rollback__"), "still to be rolled back: #{where}"
+    refute is_map_key(run.engine_state, "__rollback__"), "still to be rolled back: #{where}"
 
     cond do
       run.status in @ended -> check_ended(run, under, where)

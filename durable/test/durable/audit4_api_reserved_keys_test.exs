@@ -129,6 +129,49 @@ defmodule Durable.Audit4ApiReservedKeysTest do
     assert_waiting_for_input(run, "ok")
   end
 
+  defmodule Audit4ApiWaitsUnderEngineName do
+    use Durable
+    use Durable.Wait
+
+    workflow "audit4_api_waits_under_engine_name" do
+      step(:ask, fn data -> {:ok, Map.put(data, "got", wait_for_event(data["name"]))} end)
+    end
+  end
+
+  # Its answer would be dropped as one of the engine's keys, so it could never
+  # be answered: the step fails and says why.
+  test "a wait under one of the engine's own names fails the step" do
+    for name <- ["__fail__", "__child_done:charge", "__parallel_done:x"] do
+      run = run_workflow(Audit4ApiWaitsUnderEngineName, %{"name" => name})
+
+      assert run.status == :failed
+      assert run.error["message"] =~ "keeps for itself"
+    end
+  end
+
+  test "an event or an input sent under one of the engine's own names finds no wait" do
+    run = run_workflow(Audit4ApiAsksFirst, %{})
+
+    for name <- ["__cancelled__", "__parallel_done:#{run.id}", "__child_done:#{run.id}"] do
+      assert Durable.send_event(run.id, name, %{}) == {:error, :not_found}
+      assert Durable.send_event(run.id, name, %{}, buffer: true) == {:error, :not_found}
+      assert Durable.provide_input(run.id, name, %{}) == {:error, :not_found}
+    end
+  end
+
+  test "what put_context is given under one of the engine's names is dropped" do
+    Process.put(:durable_context, %{})
+    Durable.Context.put_context("__rollback__", %{"status" => "failed"})
+    Durable.Context.put_context(%{:__fail__ => 1, "kept" => 1})
+    Durable.Context.merge_context(%{"__child_done:charge" => %{}, "also" => 2})
+
+    stored = Map.new(Durable.Context.context(), fn {key, value} -> {to_string(key), value} end)
+    assert stored == %{"kept" => 1, "also" => 2}
+    assert Durable.Context.get_context("__rollback__") == nil
+  after
+    Process.delete(:durable_context)
+  end
+
   describe "markers that are already kept out" do
     test "__parallel_step in the input doesn't turn the run into a lane" do
       run = run_workflow(Audit4ApiPassThenSleep, %{"__parallel_step" => "second"})

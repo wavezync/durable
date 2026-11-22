@@ -312,6 +312,8 @@ builds. The latest one took under a second on a table of a million runs. `mix du
 database is behind, so you can put it in a deploy gate. The dashboard's Settings
 page shows the same thing.
 
+The migration that adds `workflow_executions.engine_state` (`20261122000000`) is the one exception to deploying as usual. Migrate first, as always: nodes on the old code carry on. Then stop every node on the old code before the first node on the new code starts. Old and new nodes must not work the same database together, because the old code can't read a run the new code has written, and would run a parallel lane as a whole workflow or start a child workflow twice. Runs in flight carry on after the upgrade. The names Durable keeps for itself (`__fail__`, `__child:…` and the rest, listed in `Durable.EngineState`) are dropped from a start's input, a step's result, `put_context`, an event's payload and an input's answer, and a run's context no longer holds them.
+
 #### From 1.x to 2.0: the functions that read
 
 Every function that reads now returns `{:ok, result}` or `{:error, reason}`,

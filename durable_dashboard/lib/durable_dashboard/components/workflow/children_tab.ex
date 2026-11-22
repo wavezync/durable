@@ -197,8 +197,8 @@ defmodule DurableDashboard.Components.Workflow.ChildrenTab do
 
   @doc """
   Which step each child ran, by child run id: the parent step that started
-  it (from the root's context) or, since a finished parallel block drops its
-  key, the first step the child executed itself. Also feeds the header's
+  it (from the root's engine state) or, since a finished parallel block drops
+  its key, the first step the child executed itself. Also feeds the header's
   children menu.
   """
   def step_lookup(family, steps) do
@@ -215,12 +215,37 @@ defmodule DurableDashboard.Components.Workflow.ChildrenTab do
 
   defp parent_step_lookup(%{root: root}) when is_map(root) do
     for key <- ["__parallel_children", "__call_children"],
-        {child_id, meta} <- Map.get(root.context || %{}, key) || %{},
+        {child_id, meta} <- Map.get(elem(split(root), 1), key) || %{},
         into: %{},
         do: {child_id, meta["step_name"] || meta[:step_name]}
   end
 
   defp parent_step_lookup(_), do: %{}
+
+  # An engine from before the column doesn't have the module.
+  @compile {:no_warn_undefined, Durable.EngineState}
+
+  @doc """
+  A run's data and the engine's own state for it (the children it started, the
+  lanes of its block), as `{context, engine_state}`. The state has a column of
+  its own, and the engine says what a row from before the column holds. An
+  engine that has no such column kept its state in the context, under keys
+  starting with `__`.
+  """
+  def split(%{engine_state: _} = run) do
+    run = Durable.EngineState.adopted(run)
+    # Without the mark every row gets: it says which layout the row is in.
+    {run.context, Map.delete(run.engine_state, "v")}
+  end
+
+  def split(%{context: %{} = context}) do
+    {state, own} =
+      Enum.split_with(context, fn {key, _} -> String.starts_with?(to_string(key), "__") end)
+
+    {Map.new(own), Map.new(state)}
+  end
+
+  def split(run), do: {Map.get(run, :context), %{}}
 
   defp family_members(_workflow, %{all_descendants: descendants}) when is_list(descendants),
     do: descendants
