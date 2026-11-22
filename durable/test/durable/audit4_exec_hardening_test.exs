@@ -286,6 +286,19 @@ defmodule Durable.Audit4ExecHardeningTest do
     end
   end
 
+  test "a start that would replace the holder leaves one that is waiting to be rolled back" do
+    key = "applicant-#{System.unique_integer([:positive])}"
+    old = ended(:failed, key, :never)
+    id = old.id
+    {:ok, _} = Durable.rollback(id)
+    assert %{status: :pending, holds_key: true} = reload(old)
+
+    assert {:error, {:key_taken, ^id}} =
+             apply_for(key, %{}, :never, on_duplicate: :cancel_existing)
+
+    assert drain(old).status == :compensated
+  end
+
   test "a released key is free under reuse: :never, and its old run can take it back by a retry" do
     key = "applicant-#{System.unique_integer([:positive])}"
     old = ended(:failed, key, :never)
