@@ -1864,13 +1864,22 @@ defmodule DurableDashboard.Live.WorkflowLive do
     }
   end
 
-  defp walk_to_root(_config, %WorkflowExecution{parent_workflow_id: nil} = exec), do: exec
+  # Runs nest a few levels at most. The bound, and stopping at a run already
+  # passed, keep rows that name each other as parent from looping for ever.
+  @max_family_depth 50
 
-  defp walk_to_root(config, %WorkflowExecution{parent_workflow_id: pid} = exec) do
-    case Durable.Repo.get(config, WorkflowExecution, pid) do
-      nil -> exec
-      parent -> walk_to_root(config, parent)
-    end
+  defp walk_to_root(config, exec, seen \\ MapSet.new())
+
+  defp walk_to_root(_config, %WorkflowExecution{parent_workflow_id: nil} = exec, _seen), do: exec
+
+  defp walk_to_root(config, %WorkflowExecution{parent_workflow_id: pid} = exec, seen) do
+    seen = MapSet.put(seen, exec.id)
+
+    parent =
+      if MapSet.size(seen) < @max_family_depth and not MapSet.member?(seen, pid),
+        do: Durable.Repo.get(config, WorkflowExecution, pid)
+
+    if parent, do: walk_to_root(config, parent, seen), else: exec
   end
 
   defp fetch_descendants(config, root_id), do: fetch_children(config, root_id)

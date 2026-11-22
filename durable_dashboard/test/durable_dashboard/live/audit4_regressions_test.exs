@@ -842,4 +842,36 @@ defmodule DurableDashboard.Live.Audit4RegressionsTest do
                :billing_dashboard
     end
   end
+
+  describe "a run's family" do
+    defp adopt(child, parent) do
+      repo().update_all(from(w in WorkflowExecution, where: w.id == ^child),
+        set: [parent_workflow_id: parent]
+      )
+    end
+
+    # `walk_to_root` followed `parent_workflow_id` with no bound: two runs
+    # that name each other as parent (no workflow can write that; a bad
+    # import or a hand-edited row can) hung the page for ever.
+    # (Before the bound this test ran until its timeout.)
+    @tag timeout: 20_000
+    test "runs that are each other's parent don't hang the run page", %{conn: conn} do
+      [a, b, c] = for _ <- 1..3, do: Fixtures.run!(Fixtures.Payments)
+      adopt(a, b)
+      adopt(b, c)
+      adopt(c, a)
+
+      pages = for run <- [a, b, c], view <- ["", "/graph", "/family"], do: "#{run}#{view}"
+
+      assert crashes(
+               for page <- pages do
+                 {page, fn -> {:ok, _view, _html} = live(conn, dash("/executions/#{page}")) end}
+               end
+             ) == []
+
+      # A run that is its own parent.
+      adopt(a, a)
+      assert crash(fn -> {:ok, _view, _html} = live(conn, dash("/executions/#{a}")) end) == nil
+    end
+  end
 end
