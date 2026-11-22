@@ -245,7 +245,7 @@ defmodule Durable.Wait.TimeoutWorker do
 
   defp input_timeout_data(:resume, pending_input) do
     %{
-      pending_input.input_name => deserialize_timeout_value(pending_input.timeout_value),
+      pending_input.input_name => stored_timeout_value(pending_input.timeout_value),
       :__timeout__ => true
     }
   end
@@ -282,10 +282,8 @@ defmodule Durable.Wait.TimeoutWorker do
   end
 
   defp handle_event_timeout(config, pending_event) do
-    timeout_value = deserialize_timeout_value(pending_event.timeout_value)
-
     resume_data = %{
-      pending_event.event_name => timeout_value,
+      pending_event.event_name => stored_timeout_value(pending_event.timeout_value),
       :__timeout__ => true
     }
 
@@ -435,7 +433,6 @@ defmodule Durable.Wait.TimeoutWorker do
   # Bug M-4: include per-event status in the resume payload so user code
   # can distinguish events that were :received from events that :timed_out.
   defp build_wait_group_resume_data(wait_group) do
-    timeout_value = deserialize_timeout_value(wait_group.timeout_value)
     received = wait_group.received_events || %{}
 
     per_event_status =
@@ -453,7 +450,7 @@ defmodule Durable.Wait.TimeoutWorker do
       end
 
     %{
-      :__wait_group_result__ => timeout_value || fallback_result,
+      :__wait_group_result__ => fallback_result,
       :__wait_group_status__ => per_event_status,
       :__timeout__ => true
     }
@@ -470,14 +467,10 @@ defmodule Durable.Wait.TimeoutWorker do
     )
   end
 
-  defp deserialize_timeout_value(nil), do: nil
-
-  defp deserialize_timeout_value(%{"__atom__" => atom_string}) do
-    String.to_existing_atom(atom_string)
-  rescue
-    ArgumentError -> String.to_atom(atom_string)
-  end
-
-  defp deserialize_timeout_value(%{"__value__" => value}), do: value
-  defp deserialize_timeout_value(value) when is_map(value), do: value
+  # What the context shows the wait ended with. The wait itself returns the
+  # call's own `:timeout_value`, so this copy is never turned back into a term:
+  # an atom stays the text it was stored as.
+  defp stored_timeout_value(%{"__atom__" => name}), do: name
+  defp stored_timeout_value(%{"__value__" => value}), do: value
+  defp stored_timeout_value(value), do: value
 end

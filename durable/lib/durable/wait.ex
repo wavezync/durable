@@ -172,17 +172,24 @@ defmodule Durable.Wait do
     end
   end
 
-  # What a wait got, if it has been answered. A nil payload is still an answer.
-  # The name can also just be a key in the run's own data, so it only counts
-  # once the wait has its row: before that, this is the wait's first pass.
+  # What a wait got, if it has been answered, and how its row ended. A nil
+  # payload is still an answer. The name can also just be a key in the run's own
+  # data, so it only counts once the wait has its row: before that, this is the
+  # wait's first pass.
   defp answer(context, name, wait_table) do
-    with {:ok, _value} = found <- fetch_key(context, name),
-         true <- wait_row?(wait_table, name) do
-      found
+    with {:ok, value} <- fetch_key(context, name),
+         status when status != nil <- wait_status(wait_table, name) do
+      {:ok, value, status}
     else
       _not_answered -> :error
     end
   end
+
+  # A wait that timed out returns the call's own `:timeout_value`, exactly as
+  # written. The stored copy went through JSON, so an atom or a tuple wouldn't
+  # come back as one.
+  defp answered({:ok, _stored, :timeout}, opts), do: Keyword.get(opts, :timeout_value)
+  defp answered({:ok, value, _status}, _opts), do: value
 
   # A key is in the context as an atom or a string, depending on whether the
   # atom existed when the run came back.
@@ -197,25 +204,33 @@ defmodule Durable.Wait do
     end
   end
 
-  defp wait_row?(PendingEvent, name) do
-    wait_row?(from(p in PendingEvent, where: p.event_name == ^name and p.status != :buffered))
+  defp wait_status(PendingEvent, name) do
+    wait_status(from(p in PendingEvent, where: p.event_name == ^name and p.status != :buffered))
   end
 
-  defp wait_row?(PendingInput, name) do
-    wait_row?(from(p in PendingInput, where: p.input_name == ^name))
+  defp wait_status(PendingInput, name) do
+    wait_status(from(p in PendingInput, where: p.input_name == ^name))
   end
 
+  # The status of the run's newest wait of that name, or nil if it has none.
   # Outside a run (a unit test, say) there's no row to look for.
-  defp wait_row?(query) do
+  defp wait_status(query) do
     case Context.workflow_id() do
       nil ->
-        true
+        :no_run
 
       id ->
         config = Config.get(Process.get(:durable_instance, Durable))
 
-        Repo.one(config, from(p in query, where: p.workflow_id == ^id, select: 1, limit: 1)) !=
-          nil
+        Repo.one(
+          config,
+          from(p in query,
+            where: p.workflow_id == ^id,
+            order_by: [desc: p.inserted_at],
+            limit: 1,
+            select: p.status
+          )
+        )
     end
   end
 
@@ -227,7 +242,16 @@ defmodule Durable.Wait do
       throw(wait)
     else
       {:cancelled, _reason} = cancelled -> cancelled
-      {:ok, result} -> Keyword.get(opts, :timeout_value) || timed_out_group(result)
+      {:ok, result} -> group_timeout_value(opts, result)
+    end
+  end
+
+  # `timeout_value: nil` or `false` is a value like any other; only a call
+  # without the option gets `{:timeout, received}`.
+  defp group_timeout_value(opts, result) do
+    case Keyword.fetch(opts, :timeout_value) do
+      {:ok, value} -> value
+      :error -> timed_out_group(result)
     end
   end
 
@@ -247,7 +271,10 @@ defmodule Durable.Wait do
   ## Options
 
   - `:timeout` - Timeout in milliseconds (optional)
-  - `:timeout_value` - Value to return on timeout (optional)
+  - `:timeout_value` - Value to return on timeout (default: `nil`). It comes
+    back exactly as written, atom, tuple or map: the wait returns the call's
+    own option, not a stored copy. Put in the context, it is stored as JSON
+    like the rest of it
 
   ## Resumption semantics
 
@@ -293,7 +320,7 @@ defmodule Durable.Wait do
          :error <- answer(context, event_name, PendingEvent) do
       throw({:wait_for_event, Keyword.put(opts, :event_name, event_name)})
     else
-      {:ok, data} -> data
+      {:ok, _value, _status} = answer -> answered(answer, opts)
       {:cancelled, _reason} = cancelled -> cancelled
     end
   end
@@ -306,7 +333,9 @@ defmodule Durable.Wait do
   ## Options
 
   - `:timeout` - Timeout in milliseconds (optional)
-  - `:timeout_value` - Value to return on timeout (optional)
+  - `:timeout_value` - Value to return on timeout, exactly as written, `nil`
+    and `false` included. Without the option a timeout returns
+    `{:timeout, nil}`
 
   ## Examples
 
@@ -345,7 +374,9 @@ defmodule Durable.Wait do
   ## Options
 
   - `:timeout` - Timeout in milliseconds (optional)
-  - `:timeout_value` - Value to return on timeout (optional)
+  - `:timeout_value` - Value to return on timeout, exactly as written, `nil`
+    and `false` included. Without the option a timeout returns
+    `{:timeout, received}`, with the events that did arrive
 
   ## Examples
 
@@ -372,7 +403,7 @@ defmodule Durable.Wait do
     else
       event_names
       |> Enum.zip(answers)
-      |> Map.new(fn {name, {:ok, data}} -> {Context.known_key(name), data} end)
+      |> Map.new(fn {name, {:ok, data, _status}} -> {Context.known_key(name), data} end)
     end
   end
 
@@ -393,7 +424,8 @@ defmodule Durable.Wait do
   - `:fields` - Field definitions for form input
   - `:choices` - Choice options for choice input
   - `:timeout` - Timeout in milliseconds
-  - `:timeout_value` - Value to return on timeout
+  - `:timeout_value` - Value to return on timeout, exactly as written
+    (default: `nil`)
   - `:on_timeout` - `:resume` (default) returns `:timeout_value`; `:fail`
     fails the run with a `"timeout"` error, running its compensations
 
@@ -421,7 +453,7 @@ defmodule Durable.Wait do
          :error <- answer(context, input_name, PendingInput) do
       throw({:wait_for_input, Keyword.put(opts, :input_name, input_name)})
     else
-      {:ok, data} -> data
+      {:ok, _value, _status} = answer -> answered(answer, opts)
       {:cancelled, _reason} = cancelled -> cancelled
     end
   end

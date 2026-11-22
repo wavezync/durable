@@ -76,7 +76,7 @@ defmodule Durable.Audit4ApiWaitsTest do
 
     workflow "audit4_api_times_out" do
       step(:wait, fn data ->
-        opts = [timeout: 0, timeout_value: T.timeout_value(data["value"])]
+        opts = [timeout: 0] ++ T.timeout_opts(data["value"])
 
         got =
           case data["wait"] do
@@ -139,11 +139,15 @@ defmodule Durable.Audit4ApiWaitsTest do
     end
   end
 
+  def timeout_opts("none"), do: []
+  def timeout_opts(value), do: [timeout_value: timeout_value(value)]
+
   def timeout_value("atom"), do: :auto_rejected
   def timeout_value("tuple"), do: {:error, :payment_timeout}
   def timeout_value("atom_map"), do: %{"__atom__" => "audit4_api_never_an_atom_before"}
   def timeout_value("value_map"), do: %{"__value__" => 1, "other" => 2}
   def timeout_value("false"), do: false
+  def timeout_value("nil"), do: nil
   def timeout_value("zero"), do: 0
   def timeout_value("text"), do: "No reason provided"
   def timeout_value("map"), do: %{"approved" => false, "n" => 1.5}
@@ -176,46 +180,45 @@ defmodule Durable.Audit4ApiWaitsTest do
       :ok
     end
 
-    for wait <- ["event", "input"], value <- ["false", "zero", "text", "map"] do
+    for wait <- ["event", "input"], value <- ["false", "nil", "zero", "text", "map"] do
       test "wait_for_#{wait} returns a #{value} timeout_value as it was given" do
         assert timed_out(unquote(wait), unquote(value)) ==
                  describe(timeout_value(unquote(value)))
       end
     end
 
-    for wait <- ["any", "all"], value <- ["atom", "tuple", "zero", "text", "map", "atom_map"] do
+    for wait <- ["any", "all"],
+        value <- ["atom", "tuple", "zero", "text", "map", "atom_map", "false", "nil"] do
       test "wait_for_#{wait} returns a #{value} timeout_value as it was given" do
         assert timed_out(unquote(wait), unquote(value)) ==
                  describe(timeout_value(unquote(value)))
       end
     end
 
-    # The docs' own examples (`timeout_value: :auto_rejected`, `{:error,
-    # :payment_timeout}`) come back as "auto_rejected" and ["error",
-    # "payment_timeout"]: the sweep merges the value into the context as JSON
-    # (timeout_worker.ex:244, :283) and the wait returns what it finds there
-    # (wait.ex:296, :424). wait_for_any/all return their own opts (wait.ex:230).
+    # The wait returns the call's own option, not the copy stored as JSON.
     for wait <- ["event", "input"], value <- ["atom", "tuple"] do
-      @tag :skip
       test "wait_for_#{wait} returns #{value} timeout_value as it was given" do
         assert timed_out(unquote(wait), unquote(value)) ==
                  describe(timeout_value(unquote(value)))
       end
     end
 
-    # A map that happens to have an "__atom__" or "__value__" key is taken for
-    # the engine's own wrapping and unwrapped (timeout_worker.ex:489, :495), and
-    # the first makes an atom out of stored text, which ARCHITECTURE.md rule 7
-    # forbids. serialize_timeout_value/1 (executor.ex:3661) stores maps unwrapped.
+    test "without a timeout_value, each wait returns its own default" do
+      assert timed_out("event", "none") == "nil"
+      assert timed_out("input", "none") == "nil"
+      assert timed_out("any", "none") == "{:timeout, nil}"
+      assert timed_out("all", "none") == "{:timeout, %{}}"
+    end
+
+    # A map that happens to have an "__atom__" or "__value__" key isn't taken
+    # for the engine's own wrapping of the stored copy.
     for wait <- ["event", "input"], value <- ["atom_map", "value_map"] do
-      @tag :skip
       test "wait_for_#{wait} returns a map with an #{value} key as it was given" do
         assert timed_out(unquote(wait), unquote(value)) ==
                  describe(timeout_value(unquote(value)))
       end
     end
 
-    @tag :skip
     test "a timeout_value map makes no atom from its text" do
       name = "audit4_api_atom_#{System.unique_integer([:positive])}"
       Process.put(:audit4_api_atom_name, name)

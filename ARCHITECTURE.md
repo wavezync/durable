@@ -79,7 +79,7 @@ All tables live in the `durable` schema.
 
 **Steps** return `{:ok, data}`, `{:goto, step, data}`, `{:error, reason}`, `{:fail, reason}`, `{:snooze, ms}` or `{:cancel, reason}`. Waits are thrown as control flow. `{:error, _}`, a raise, an exit or a throw uses the step's retries. `{:fail, _}` skips them.
 
-**Waits.** The wait's rows and the `waiting` status commit in one transaction, so whoever answers finds a run it can resume or finds no wait at all. The answer is merged into the context, and when the step runs again the wait finds it there and returns it.
+**Waits.** The wait's rows and the `waiting` status commit in one transaction, so whoever answers finds a run it can resume or finds no wait at all. The answer is merged into the context, and when the step runs again the wait finds it there and returns it. A wait that timed out returns its call's own `timeout_value` instead; the copy on the wait's row is only there to be shown.
 
 **Sleep** is `waiting` with a `scheduled_at`. `SleepWaker` flips due runs to `pending` and stamps a marker so the step's `sleep` returns instead of sleeping again.
 

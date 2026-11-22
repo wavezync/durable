@@ -3818,15 +3818,11 @@ defmodule Durable.Executor do
     end
   end
 
-  # Serialize a user-supplied timeout_value for JSONB storage in PendingInput /
-  # PendingEvent / WaitGroup rows. Users naturally pass idiomatic Elixir shapes
-  # like `{:error, :timeout}` or `%{nested: {:tuple}}`; sanitize_for_json/1
-  # normalizes tuples to lists and exotic terms (PIDs, functions, refs) to
-  # their inspect/1 form so Postgrex never crashes on encode.
+  # A copy of the wait's `:timeout_value` for the wait's row, to show what it
+  # will resume with. The wait returns the call's own value, never this copy.
+  # Every value is wrapped, so a map of the user's with an "__atom__" key isn't
+  # taken for the wrapper.
   defp serialize_timeout_value(nil), do: nil
-
-  defp serialize_timeout_value(value) when is_map(value) and not is_struct(value),
-    do: sanitize_for_json(value)
 
   defp serialize_timeout_value(value) when is_atom(value),
     do: %{"__atom__" => Atom.to_string(value)}

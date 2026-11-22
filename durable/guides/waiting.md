@@ -117,14 +117,14 @@ workflow "payment_flow" do
   step :await_confirmation, fn ctx ->
     result = wait_for_event("payment_confirmed",
       timeout: minutes(15),
-      timeout_value: :timeout
+      timeout_value: "timeout"
     )
     {:ok, assign(ctx, :payment_result, result)}
   end
 
   step :process_result, fn ctx ->
     case ctx.payment_result do
-      :timeout -> handle_timeout()
+      "timeout" -> handle_timeout()
       %{status: "success"} -> handle_success()
       _ -> handle_failure()
     end
@@ -138,7 +138,13 @@ end
 | Option | Description |
 |--------|-------------|
 | `:timeout` | Max wait time (e.g., `minutes(15)`) |
-| `:timeout_value` | Value returned on timeout |
+| `:timeout_value` | Value returned on timeout (default `nil`) |
+
+The wait returns `:timeout_value` exactly as you wrote it: an atom comes back as
+an atom, a tuple as a tuple. That holds in the step that waits. Once you put the
+value in the context it is stored as JSON like everything else there, so a later
+step sees an atom as a string and a tuple as a list. Match on it in the waiting
+step, or use a string as above.
 
 ### `wait_for_any/2` - First Event Wins
 
@@ -176,14 +182,14 @@ workflow "multi_approval" do
   step :await_approvals, fn ctx ->
     results = wait_for_all(["manager_approval", "legal_approval", "finance_approval"],
       timeout: days(7),
-      timeout_value: {:timeout, :partial}
+      timeout_value: "timeout"
     )
     {:ok, assign(ctx, :approvals, results)}
   end
 
   step :process_approvals, fn ctx ->
     case ctx.approvals do
-      {:timeout, :partial} ->
+      "timeout" ->
         handle_incomplete_approvals()
       %{} = all_approvals ->
         if Enum.all?(all_approvals, fn {_k, v} -> v.approved end) do
@@ -229,14 +235,14 @@ workflow "approval_flow" do
       type: :approval,
       prompt: "Approve this request?",
       timeout: days(3),
-      timeout_value: :auto_rejected
+      timeout_value: "auto_rejected"
     )
     {:ok, assign(ctx, :approval, result)}
   end
 
   step :process_decision, fn ctx ->
     status = case ctx.approval do
-      :auto_rejected -> :rejected_timeout
+      "auto_rejected" -> :rejected_timeout
       %{approved: true} -> :approved
       _ -> :rejected
     end
@@ -429,14 +435,14 @@ workflow "order_fulfillment" do
     # Wait for webhook from shipping provider
     event = wait_for_event("shipment_delivered",
       timeout: days(14),
-      timeout_value: :lost_package
+      timeout_value: "lost_package"
     )
     {:ok, assign(ctx, :delivery_status, event)}
   end
 
   step :handle_delivery, fn ctx ->
     case ctx.delivery_status do
-      :lost_package ->
+      "lost_package" ->
         Support.create_ticket("Lost package", ctx.shipment_id)
       %{status: "delivered"} ->
         Orders.mark_complete(ctx.order_id)
@@ -483,14 +489,14 @@ workflow "subscription_renewal" do
   step :await_renewal, fn ctx ->
     renewal = wait_for_event("subscription_renewed",
       timeout: days(7),
-      timeout_value: :not_renewed
+      timeout_value: "not_renewed"
     )
     {:ok, assign(ctx, :renewal_result, renewal)}
   end
 
   step :handle_result, fn ctx ->
     case ctx.renewal_result do
-      :not_renewed ->
+      "not_renewed" ->
         Subscriptions.expire(ctx.subscription.id)
       _ ->
         Logger.info("Subscription renewed")
@@ -512,14 +518,14 @@ workflow "contract_approval" do
     # Wait for all three departments to approve
     results = wait_for_all(["legal", "finance", "management"],
       timeout: days(5),
-      timeout_value: {:timeout, :incomplete}
+      timeout_value: "incomplete"
     )
     {:ok, assign(ctx, :approval_results, results)}
   end
 
   step :finalize, fn ctx ->
     status = case ctx.approval_results do
-      {:timeout, :incomplete} -> :timed_out
+      "incomplete" -> :timed_out
       approvals ->
         all_approved = Enum.all?(approvals, fn {_, v} -> v["approved"] end)
         if all_approved, do: :approved, else: :rejected

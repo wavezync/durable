@@ -362,7 +362,7 @@ defmodule Durable.WaitTest do
       timeout_value = pending.timeout_value
       assert is_map(timeout_value)
       # Nested tuple flattened to a list inside the map
-      assert get_in(timeout_value, ["nested", "tag"]) == ["err", "boom"]
+      assert get_in(timeout_value, ["__value__", "nested", "tag"]) == ["err", "boom"]
     end
   end
 
