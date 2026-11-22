@@ -144,12 +144,8 @@ defmodule Durable.Integration.Audit4QueueRecoveryTest do
   end
 
   describe "a task killed as its attempt begins" do
-    # BUG: the attempt's row stays :pending for good, on a run that finished
-    # (:running, if the kill lands while the write that marks it running is in
-    # flight, which the kill fuzz hits). The row is inserted, then marked
-    # running (step_runner.ex:358 and :377), and whoever cleans up after the
-    # dead task only closes rows that are :running then (step_runner.ex:108).
-    @tag :skip
+    # The attempt's row is written once, running, after its start event, so a
+    # task killed before that leaves none.
     test "leaves no step row open" do
       kill_at!([:durable, :step, :start], :second)
       start_durable!(%{default: 1})
@@ -162,6 +158,44 @@ defmodule Durable.Integration.Audit4QueueRecoveryTest do
 
       assert Enum.sort(for row <- step_rows(id), do: {row.step_name, row.status}) ==
                [{"first", :completed}, {"second", :completed}]
+    end
+
+    def forward_stop(_event, _measurements, meta, pid),
+      do: send(pid, {:attempt_ended, meta.step_execution_id, meta.result})
+
+    # The write of its row can land after whoever cleaned up had looked. That
+    # can't be raced on purpose, so the row is put there as the write would.
+    test "whose row lands after the clean-up has it closed, once, by the next attempt" do
+      config = start_idle!()
+      handler = "audit4-queue-stop-#{System.unique_integer([:positive])}"
+      :telemetry.attach(handler, [:durable, :step, :stop], &__MODULE__.forward_stop/4, self())
+      on_exit(fn -> :telemetry.detach(handler) end)
+
+      {:ok, id} = Durable.start(Audit4QueueTwoSteps, %{})
+
+      late =
+        IntegrationRepo.insert!(%StepExecution{
+          workflow_id: id,
+          step_name: "first",
+          step_type: "step",
+          attempt: 1,
+          status: :running,
+          started_at: DateTime.utc_now()
+        })
+
+      assert {:ok, %{status: :completed}} = Durable.Executor.execute_workflow(id, config)
+
+      late_id = late.id
+      assert_received {:attempt_ended, ^late_id, :error}
+      refute_received {:attempt_ended, ^late_id, _result}
+
+      assert %{status: :failed, error: %{"type" => "worker_lost"}} =
+               IntegrationRepo.get!(StepExecution, late_id)
+
+      assert Enum.sort(for row <- step_rows(id), do: {row.step_name, row.status, row.attempt}) ==
+               [{"first", :completed, 1}, {"first", :failed, 1}, {"second", :completed, 1}]
+
+      assert {Probe.hits(:first), Probe.hits(:second)} == {1, 1}
     end
 
     test "runs the step once the run is claimed again, without using an attempt" do

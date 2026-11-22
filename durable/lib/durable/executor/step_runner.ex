@@ -77,6 +77,7 @@ defmodule Durable.Executor.StepRunner do
     # Which lane a run is belongs to its stored context, not to a step's data.
     data = Map.drop(data, ["__parallel_step", :__parallel_step])
     max_attempts = get_max_attempts(step)
+    close_left_open(config, workflow_id)
     %{failed: failed, lost: lost} = attempts_used(config, workflow_id, Atom.to_string(step.name))
     attempt = failed + 1
 
@@ -86,6 +87,22 @@ defmodule Durable.Executor.StepRunner do
       {:error, last_error(config, workflow_id, step)}
     else
       execute_with_retry(step, data, workflow_id, attempt, max_attempts, config, deadline)
+    end
+  end
+
+  # A run has one attempt open at a time, so a row still :running as the next
+  # begins was left by one that died: its row was being written as it was
+  # killed, and landed after whoever cleaned up had looked. Like a lost worker
+  # it uses no attempt, since its body may never have begun. Only the
+  # attempt's end is sent: the run's segment is this one now.
+  defp close_left_open(config, workflow_id) do
+    error = %{type: "worker_lost", message: "the worker running this attempt died as it began"}
+
+    closed = close_attempts(config, [workflow_id], :failed, error)
+    runs = if closed == [], do: %{}, else: closed_runs(config, closed)
+
+    for row <- closed, run = runs[row.workflow_id] do
+      report_attempt(config, row, run, :failed, error_summary(error), fn _row -> nil end)
     end
   end
 
@@ -354,8 +371,14 @@ defmodule Durable.Executor.StepRunner do
     # the failed attempt's put_context/2 writes.
     Process.put(:durable_context, data)
 
-    # Create step execution record
-    {:ok, step_exec} = create_step_execution(config, workflow_id, step, attempt)
+    # The attempt's row, written once the span has begun. Its id names the span.
+    step_exec = %StepExecution{
+      id: Ecto.UUID.generate(),
+      workflow_id: workflow_id,
+      step_name: Atom.to_string(step.name),
+      step_type: Atom.to_string(step.type),
+      attempt: attempt
+    }
 
     # Start log capture for this step
     Durable.LogCapture.start_capture(
@@ -371,10 +394,11 @@ defmodule Durable.Executor.StepRunner do
 
     # The row is written inside the span: its end event belongs to whoever
     # closes the row, and that may turn out not to be this process. It is
-    # marked running in there too, after the start event: only a running row
-    # can be closed by someone else, so an end never comes without a start.
+    # inserted there, running, after the start event: a row that exists can
+    # be closed by someone else, so an end never comes without a start, and a
+    # process killed before this leaves no row behind.
     Durable.Telemetry.span([:durable, :step], span_meta, fn ->
-      {:ok, step_exec} = update_step_execution(config, step_exec, :running)
+      {:ok, step_exec} = start_step_execution(config, step_exec)
 
       result = run_body(step, without_wait_markers(data), time_limit(step, deadline))
       duration_ms = System.monotonic_time(:millisecond) - start_time
@@ -731,24 +755,10 @@ defmodule Durable.Executor.StepRunner do
     end
   end
 
-  defp create_step_execution(config, workflow_id, step, attempt) do
-    attrs = %{
-      workflow_id: workflow_id,
-      step_name: Atom.to_string(step.name),
-      step_type: Atom.to_string(step.type),
-      attempt: attempt,
-      status: :pending
-    }
-
-    %StepExecution{}
-    |> StepExecution.changeset(attrs)
-    |> Repo.insert(config)
-  end
-
-  defp update_step_execution(config, step_exec, :running) do
+  defp start_step_execution(config, step_exec) do
     case step_exec
          |> StepExecution.start_changeset()
-         |> Repo.update(config) do
+         |> Repo.insert(config) do
       {:ok, updated} = ok ->
         DurablePubSub.broadcast_step(config, :step_started, step_event(updated))
         ok
