@@ -249,7 +249,17 @@ defmodule Durable.ReadContractTest do
             do: key
 
       given = @bad_options |> Enum.flat_map(&Keyword.keys/1) |> Enum.uniq()
-      assert Enum.reject(given, &(&1 in refused)) == [:no_such_option]
+      assert Enum.reject(given, &(&1 in refused)) == []
+    end
+
+    test "is refused by every function when it is one the function doesn't take", ctx do
+      for {module, name, kinds} <- ReadFunctions.all(), :opts in kinds do
+        positional = kinds |> List.delete(:opts) |> Enum.map(&good(&1, ctx))
+
+        assert apply(module, name, positional ++ [[no_such_option: 1]]) ==
+                 {:error, {:invalid_option, :no_such_option}},
+               "#{inspect(module)}.#{name} took an option it doesn't know"
+      end
     end
   end
 end

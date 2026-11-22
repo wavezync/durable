@@ -63,11 +63,14 @@ defmodule Durable.Query.Opts do
 
   @doc """
   Checks `opts` against `schema`, a keyword list of option to type. Returns the
-  options that were set (the `nil`s and the ones not in `schema` dropped, bar
-  `:durable`), or the first that is wrong.
+  options that were set (the `nil`s dropped), or the first that is wrong. An
+  option that isn't in `schema` is wrong, bar `:durable`: a misspelt filter
+  would otherwise match everything.
 
       iex> Durable.Query.Opts.validate([limit: 5, tag: nil], limit: :non_neg_integer)
       {:ok, [limit: 5]}
+      iex> Durable.Query.Opts.validate([limt: 5], limit: :non_neg_integer)
+      {:error, {:invalid_option, :limt}}
       iex> Durable.Query.Opts.validate([limit: -1], limit: :non_neg_integer)
       {:error, {:invalid_option, :limit}}
   """
@@ -80,14 +83,15 @@ defmodule Durable.Query.Opts do
   end
 
   defp check(opts, schema) do
-    opts =
-      Enum.filter(opts, fn {key, _value} -> key == :durable or Keyword.has_key?(schema, key) end)
-
-    case Enum.find(opts, fn {key, value} -> not valid?(schema[key], value) end) do
+    case Enum.find(opts, fn {key, value} ->
+           not known?(schema, key) or not valid?(schema[key], value)
+         end) do
       nil -> {:ok, opts}
       {key, _value} -> {:error, {:invalid_option, key}}
     end
   end
+
+  defp known?(schema, key), do: key == :durable or Keyword.has_key?(schema, key)
 
   @doc """
   Whether `value` is of `type`.
