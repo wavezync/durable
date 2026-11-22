@@ -926,4 +926,27 @@ defmodule DurableDashboard.Live.Audit4RegressionsTest do
       assert status.(child, "authorize") == "completed"
     end
   end
+
+  # `error["replaced_by"]` went to the run link as it was; anything but a
+  # string there (a hand-written row, an older shape) raised in `short/1`.
+  test "a cancelled run whose replaced_by isn't a run id still renders", %{conn: conn} do
+    run = Fixtures.run!(Fixtures.Approvals)
+    :ok = Durable.cancel(run)
+
+    for replaced_by <- [5, %{"id" => "x"}, ["a"], nil, true] do
+      repo().update_all(from(w in WorkflowExecution, where: w.id == ^run),
+        set: [error: %{"replaced_by" => replaced_by, "message" => "replaced"}]
+      )
+
+      assert crashes(
+               for view <- ["", "/key", "/graph"] do
+                 {{replaced_by, view},
+                  fn -> {:ok, _view, _html} = live(conn, dash("/executions/#{run}#{view}")) end}
+               end
+             ) == []
+    end
+
+    {:ok, _view, html} = live(conn, dash("/executions/#{run}"))
+    assert html =~ "Cancelled"
+  end
 end

@@ -687,7 +687,8 @@ defmodule DurableDashboard.Live.WorkflowLive do
   end
 
   # Replaced by a start with `on_duplicate: :cancel_existing`: link that run.
-  defp banner(%{workflow: %{status: :cancelled, error: %{"replaced_by" => id}}} = assigns) do
+  defp banner(%{workflow: %{status: :cancelled, error: %{"replaced_by" => id}}} = assigns)
+       when is_binary(id) do
     assigns = assign(assigns, replaced_by: id)
 
     ~H"""
