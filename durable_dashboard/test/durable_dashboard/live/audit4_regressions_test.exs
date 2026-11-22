@@ -873,5 +873,57 @@ defmodule DurableDashboard.Live.Audit4RegressionsTest do
       adopt(a, a)
       assert crash(fn -> {:ok, _view, _html} = live(conn, dash("/executions/#{a}")) end) == nil
     end
+
+    # Only the root's direct children were loaded as "descendants", so from
+    # the third level down a run's own steps weren't loaded for its own page,
+    # and the family view missed everything below the root's children.
+    test "a three-level family shows every level, from any member's page", %{conn: conn} do
+      root = Fixtures.run!(Fixtures.Orders)
+      child = Fixtures.run!(Fixtures.Payments)
+      grandchild = Fixtures.run!(Fixtures.Holds)
+      adopt(child, root)
+      adopt(grandchild, child)
+      short = &String.slice(&1, 0, 8)
+
+      # The grandchild's own page has its own steps.
+      {:ok, _view, html} = live(conn, dash("/executions/#{grandchild}"))
+      assert html =~ "hold_order"
+      assert html =~ "reserve"
+      assert html =~ "charge"
+
+      # The family view lists every run below the root, and a run's parent.
+      # (From the third level down the root itself isn't on it: the view has
+      # a card for the parent only.)
+      for {run, others} <- [
+            {root, [child, grandchild]},
+            {child, [root, grandchild]},
+            {grandchild, [child]}
+          ] do
+        {:ok, _view, html} = live(conn, dash("/executions/#{run}/family"))
+        for other <- others, do: assert(html =~ short.(other), "#{short.(run)} misses a relative")
+      end
+
+      # Each run's graph has its own steps' outcomes. The grandchild's failed
+      # `charge` is on its own graph and not on the root's step of that name.
+      status = fn run, step ->
+        {:ok, view, _html} = live(conn, dash("/executions/#{run}/graph"))
+
+        view
+        |> element("[phx-hook=FlowGraph]")
+        |> render()
+        |> LazyHTML.from_fragment()
+        |> LazyHTML.attribute("data-graph")
+        |> hd()
+        |> Jason.decode!()
+        |> Map.fetch!("nodes")
+        |> Enum.find(&(&1["data"]["label"] == step))
+        |> get_in(["data", "status"])
+      end
+
+      assert status.(grandchild, "reserve") == "completed"
+      assert status.(grandchild, "charge") == "failed"
+      assert status.(root, "charge") == "completed"
+      assert status.(child, "authorize") == "completed"
+    end
   end
 end
