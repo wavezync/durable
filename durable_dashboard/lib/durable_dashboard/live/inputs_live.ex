@@ -24,6 +24,7 @@ defmodule DurableDashboard.Live.InputsLive do
   alias DurableDashboard.Components.Core
   alias DurableDashboard.Format
   alias DurableDashboard.Layouts
+  alias DurableDashboard.Params
   alias DurableDashboard.Path, as: DPath
 
   @tabs [{"input", "Needs input"}, {"events", "Waiting for events"}, {"sleep", "Sleeping"}]
@@ -58,11 +59,16 @@ defmodule DurableDashboard.Live.InputsLive do
 
   @impl true
   def handle_params(params, uri, socket) do
-    tab = if params["tab"] in Enum.map(@tabs, &elem(&1, 0)), do: params["tab"], else: "input"
+    tab = Params.text(params["tab"])
+    tab = if tab in Enum.map(@tabs, &elem(&1, 0)), do: tab, else: "input"
 
     {:noreply,
      socket
-     |> assign(current_path: URI.parse(uri).path, tab: tab, selected_id: params["id"])
+     |> assign(
+       current_path: URI.parse(uri).path,
+       tab: tab,
+       selected_id: Params.text(params["id"])
+     )
      |> load()}
   end
 

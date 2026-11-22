@@ -27,6 +27,7 @@ defmodule DurableDashboard.Live.ExecutionsLive do
   alias DurableDashboard.Components.Core
   alias DurableDashboard.Components.Data.ExecutionFilters
   alias DurableDashboard.Layouts
+  alias DurableDashboard.Params
   alias DurableDashboard.Path, as: DPath
   alias DurableDashboard.RunSearch
   alias DurableDashboard.Trace
@@ -96,7 +97,7 @@ defmodule DurableDashboard.Live.ExecutionsLive do
 
   @impl true
   def handle_params(params, uri, socket) do
-    workflow_name = params["name"]
+    workflow_name = Params.text(params["name"])
     query = parse_query(params)
 
     breadcrumbs =
@@ -154,7 +155,7 @@ defmodule DurableDashboard.Live.ExecutionsLive do
   end
 
   def handle_event("page", %{"page" => page}, socket) do
-    query = %{socket.assigns.query | page: max(parse_int(page, 1), 1)}
+    query = %{socket.assigns.query | page: Params.page(page)}
     {:noreply, push_patch(socket, to: query_path(socket.assigns, query))}
   end
 
@@ -935,14 +936,14 @@ defmodule DurableDashboard.Live.ExecutionsLive do
 
   defp parse_query(params) do
     %{
-      page: max(parse_int(params["page"], 1), 1),
-      q: nilify(params["q"]),
-      workflow: nilify(params["workflow"]),
-      statuses: parse_list(params["status"]),
-      range: nilify(params["range"]),
-      from: nilify(params["from"]),
-      to: nilify(params["to"]),
-      parent: nilify(params["parent"])
+      page: Params.page(params["page"]),
+      q: Params.text(params["q"]),
+      workflow: Params.text(params["workflow"]),
+      statuses: Params.list(params["status"]),
+      range: Params.text(params["range"]),
+      from: Params.text(params["from"]),
+      to: Params.text(params["to"]),
+      parent: Params.text(params["parent"])
     }
   end
 
@@ -964,24 +965,6 @@ defmodule DurableDashboard.Live.ExecutionsLive do
 
     if params == [], do: path, else: path <> "?" <> URI.encode_query(params)
   end
-
-  defp parse_list(nil), do: []
-  defp parse_list(s), do: String.split(s, ",", trim: true)
-
-  defp parse_int(nil, default), do: default
-
-  defp parse_int(v, default) when is_binary(v) do
-    case Integer.parse(v) do
-      {n, _} -> n
-      :error -> default
-    end
-  end
-
-  defp parse_int(v, _default) when is_integer(v), do: v
-
-  defp nilify(nil), do: nil
-  defp nilify(""), do: nil
-  defp nilify(v), do: v
 
   # datetime-local ("YYYY-MM-DDTHH:MM"), read as UTC.
   defp parse_local_datetime(nil), do: nil

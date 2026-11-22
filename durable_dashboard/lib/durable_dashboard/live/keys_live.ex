@@ -17,6 +17,7 @@ defmodule DurableDashboard.Live.KeysLive do
   alias DurableDashboard.Components.Workflow.KeyTab
   alias DurableDashboard.Format
   alias DurableDashboard.Layouts
+  alias DurableDashboard.Params
   alias DurableDashboard.Path, as: DPath
 
   @per_page 25
@@ -61,8 +62,8 @@ defmodule DurableDashboard.Live.KeysLive do
   def handle_event("filter", params, socket) do
     query = %{
       socket.assigns.query
-      | q: nilify(params["q"]),
-        workflow: nilify(params["workflow"]),
+      | q: trimmed(params["q"]),
+        workflow: trimmed(params["workflow"]),
         page: 1
     }
 
@@ -86,7 +87,7 @@ defmodule DurableDashboard.Live.KeysLive do
   end
 
   def handle_event("page", %{"page" => page}, socket) do
-    query = %{socket.assigns.query | page: max(parse_int(page), 1)}
+    query = %{socket.assigns.query | page: Params.page(page)}
     {:noreply, push_patch(socket, to: keys_path(socket.assigns.base_path, query))}
   end
 
@@ -379,13 +380,10 @@ defmodule DurableDashboard.Live.KeysLive do
 
   defp parse_query(params) do
     %{
-      page: max(parse_int(params["page"]), 1),
-      q: nilify(params["q"]),
-      workflow: nilify(params["workflow"]),
-      statuses:
-        (params["status"] || "")
-        |> String.split(",", trim: true)
-        |> Enum.filter(&(&1 in @statuses))
+      page: Params.page(params["page"]),
+      q: trimmed(params["q"]),
+      workflow: trimmed(params["workflow"]),
+      statuses: params["status"] |> Params.list() |> Enum.filter(&(&1 in @statuses))
     }
   end
 
@@ -404,15 +402,5 @@ defmodule DurableDashboard.Live.KeysLive do
       else: DPath.keys(base) <> "?" <> URI.encode_query(params)
   end
 
-  defp parse_int(nil), do: 1
-
-  defp parse_int(value) do
-    case Integer.parse(to_string(value)) do
-      {n, _} -> n
-      :error -> 1
-    end
-  end
-
-  defp nilify(nil), do: nil
-  defp nilify(value), do: if(String.trim(value) == "", do: nil, else: String.trim(value))
+  defp trimmed(value), do: Params.text(String.trim(Params.text(value) || ""))
 end

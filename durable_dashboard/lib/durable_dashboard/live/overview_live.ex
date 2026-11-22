@@ -55,7 +55,7 @@ defmodule DurableDashboard.Live.OverviewLive do
 
   @impl true
   def handle_params(params, uri, socket) do
-    range = Charts.valid_range(params["range"])
+    range = Charts.valid_range(DurableDashboard.Params.text(params["range"]))
 
     {:noreply,
      socket

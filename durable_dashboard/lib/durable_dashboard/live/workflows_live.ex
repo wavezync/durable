@@ -43,7 +43,7 @@ defmodule DurableDashboard.Live.WorkflowsLive do
     {:noreply,
      socket
      |> assign(
-       range: Charts.valid_range(params["range"]),
+       range: Charts.valid_range(DurableDashboard.Params.text(params["range"])),
        current_path: URI.parse(uri).path,
        breadcrumbs: [%{label: "Workflows"}]
      )

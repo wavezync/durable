@@ -38,29 +38,6 @@ defmodule DurableDashboard.Live.Audit4KnownBugsTest do
 
   defp crashes(cases), do: for({label, fun} <- cases, reason = crash(fun), do: {label, reason})
 
-  # Query params are read as strings without a check: a list or map
-  # (`?q[]=a`) reaches String functions and raises FunctionClauseError
-  # (executions_live.ex:936 parse_query, keys_live.ex:387); a page number past
-  # int8 reaches OFFSET and Postgrex refuses it (executions_live.ex:769,
-  # `KeysLive.load/1` rescues the same); a workflow name with a NUL or
-  # a non-UTF-8 byte goes into SQL (workflow_detail_live.ex:100). All are 500s
-  # where the page's own fallback, or a 400, would do.
-  test "malformed query params fall back instead of raising", %{conn: conn} do
-    Fixtures.run!(Fixtures.Payments)
-
-    paths =
-      ~w(/executions?page=99999999999999999999999999 /executions?q[]=a /executions?q[a]=b
-         /executions?page[]=1 /executions?status[]=x /executions?from[]=a
-         /executions?parent[]=a /executions?workflow[]=a /keys?q[]=a /keys?status[]=a
-         /keys?workflow[]=a /workflows/%00 /workflows/%ff)
-
-    assert crashes(
-             for path <- paths do
-               {path, fn -> {:ok, _view, _html} = live(conn, dash(path)) end}
-             end
-           ) == []
-  end
-
   # Events pushed with no run loaded, nothing selected, or a param missing
   # crash the LiveView instead of being ignored: `rollback` and `edit-input`
   # read `socket.assigns.workflow.status`/`.input` on the "Run not found" page

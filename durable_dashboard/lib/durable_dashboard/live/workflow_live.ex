@@ -32,6 +32,7 @@ defmodule DurableDashboard.Live.WorkflowLive do
 
   alias DurableDashboard.Components.Workflow.FlowGraph
   alias DurableDashboard.Layouts
+  alias DurableDashboard.Params
   alias DurableDashboard.Path, as: DPath
   alias DurableDashboard.RunSearch
   alias DurableDashboard.Trace
@@ -78,11 +79,7 @@ defmodule DurableDashboard.Live.WorkflowLive do
     config = session["config"]
     durable = config.durable
 
-    id =
-      case params do
-        %{"id" => id} -> id
-        _ -> nil
-      end
+    id = Params.text(params["id"])
 
     if connected?(socket) and id != nil do
       if durable_config = Durable.Config.get_safe(durable) do
@@ -115,9 +112,9 @@ defmodule DurableDashboard.Live.WorkflowLive do
     {:noreply,
      socket
      |> assign(
-       view: Map.get(@views, params["tab"] || "trace", :trace),
-       selected_key: params["step"],
-       pane: params["pane"],
+       view: Map.get(@views, Params.text(params["tab"]) || "trace", :trace),
+       selected_key: Params.text(params["step"]),
+       pane: Params.text(params["pane"]),
        current_path: URI.parse(uri).path,
        breadcrumbs: breadcrumbs(socket.assigns)
      )

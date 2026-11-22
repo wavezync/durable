@@ -385,4 +385,56 @@ defmodule DurableDashboard.Live.Audit4RegressionsTest do
     assert conn.status == 404
     assert get(conn, dash("/__assets__/app.js")).status == 200
   end
+
+  # Query params were read as strings without a check: a list or a map
+  # (`?q[]=a`) reached String functions and raised; a page number past int8
+  # reached OFFSET and Postgres refused it; a workflow name with a NUL or a
+  # byte that isn't UTF-8 went into SQL. All were 500s. Every page now reads
+  # its params through `DurableDashboard.Params`.
+  test "malformed query params fall back instead of raising", %{conn: conn} do
+    run = Fixtures.run!(Fixtures.Payments)
+    Fixtures.schedule!("card_sweep")
+
+    paths =
+      ~w(/executions?page=99999999999999999999999999 /executions?q[]=a /executions?q[a]=b
+         /executions?page[]=1 /executions?status[]=x /executions?from[]=a /executions?to[]=a
+         /executions?range[]=a /executions?parent[]=a /executions?workflow[]=a
+         /keys?q[]=a /keys?status[]=a /keys?workflow[]=a /keys?page[]=1
+         /keys?page=99999999999999999999999999 /workflows/%00 /workflows/%ff
+         /workflows/%00/runs /workflows/%ff/runs /workflows/process_payment?range[]=a
+         /workflows?range[]=a /?range[]=a /inputs?tab[]=a /inputs?id[]=a /schedules/%ff
+         /executions/#{run}?step[]=a /executions/#{run}?pane[]=a&step[a]=b /executions/%ff)
+
+    assert crashes(
+             for path <- paths do
+               {path, fn -> {:ok, _view, _html} = live(conn, dash(path)) end}
+             end
+           ) == []
+  end
+
+  test "a name that can't be stored is a workflow nobody has, not every run", %{conn: conn} do
+    Fixtures.run!(Fixtures.Payments)
+
+    {:ok, _view, html} = live(conn, dash("/workflows/%00/runs"))
+    assert html =~ "0 matching"
+
+    {:ok, _view, html} = live(conn, dash("/executions?page=99999999999999999999999999"))
+    assert html =~ "1 matching"
+  end
+
+  test "Params reads text, pages and lists from whatever was sent" do
+    alias DurableDashboard.Params
+
+    assert Params.text("a b") == "a b"
+    assert Enum.map([nil, "", ["a"], %{"a" => "b"}, 1], &Params.text/1) == List.duplicate(nil, 5)
+    assert Params.text("a\0b") == "\uFFFD"
+    assert Params.text(<<255>>) == "\uFFFD"
+
+    assert Enum.map(["3", "3abc", 7, "-1", "0", "abc", nil, ["1"], %{}], &Params.page/1) ==
+             [3, 3, 7, 1, 1, 1, 1, 1, 1]
+
+    assert Params.page("99999999999999999999999999") == 1_000_000
+    assert Params.list("failed,,cancelled") == ["failed", "cancelled"]
+    assert Enum.map([nil, ["a"], %{}], &Params.list/1) == [[], [], []]
+  end
 end

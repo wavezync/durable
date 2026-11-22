@@ -19,6 +19,7 @@ defmodule DurableDashboard.Live.WorkflowDetailLive do
   alias DurableDashboard.Cron
   alias DurableDashboard.Format
   alias DurableDashboard.Layouts
+  alias DurableDashboard.Params
   alias DurableDashboard.Path, as: DPath
   alias DurableDashboard.Trace
 
@@ -29,6 +30,7 @@ defmodule DurableDashboard.Live.WorkflowDetailLive do
   @impl true
   def mount(%{"name" => name}, session, socket) do
     config = session["config"]
+    name = Params.text(name)
 
     if connected?(socket) do
       if durable_config = Durable.Config.get_safe(config.durable) do
@@ -52,7 +54,7 @@ defmodule DurableDashboard.Live.WorkflowDetailLive do
     {:noreply,
      socket
      |> assign(
-       range: Charts.valid_range(params["range"]),
+       range: Charts.valid_range(Params.text(params["range"])),
        current_path: URI.parse(uri).path,
        breadcrumbs: [
          %{label: "Workflows", href: DPath.workflows(socket.assigns.base_path)},

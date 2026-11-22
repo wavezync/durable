@@ -55,7 +55,11 @@ defmodule DurableDashboard.Live.SchedulesLive do
   def handle_params(params, uri, socket) do
     {:noreply,
      socket
-     |> assign(current_path: URI.parse(uri).path, name: params["name"], action_error: nil)
+     |> assign(
+       current_path: URI.parse(uri).path,
+       name: DurableDashboard.Params.text(params["name"]),
+       action_error: nil
+     )
      |> load()}
   end
 
