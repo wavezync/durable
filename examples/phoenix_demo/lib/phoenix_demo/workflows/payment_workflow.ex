@@ -29,31 +29,29 @@ defmodule PhoenixDemo.Workflows.PaymentWorkflow do
       end
     end
 
-    step(
-      :authorize_card,
-      [retry: [max_attempts: 3, backoff: :exponential, base: 2, max_backoff: 5_000]],
-      fn data ->
-        force_failure = get_context(:force_failure)
-        amount = get_context(:amount)
+    step :authorize_card,
+         [retry: [max_attempts: 3, backoff: :exponential, base: 2, max_backoff: 5_000]],
+         fn data ->
+           force_failure = get_context(:force_failure)
+           amount = get_context(:amount)
 
-        Logger.info("[Payment] Authorizing $#{amount} (force_failure=#{force_failure})")
-        Process.sleep(150)
+           Logger.info("[Payment] Authorizing $#{amount} (force_failure=#{force_failure})")
+           Process.sleep(150)
 
-        cond do
-          force_failure ->
-            {:error, %{reason: "issuer_decline", amount: amount}}
+           cond do
+             force_failure ->
+               {:error, %{reason: "issuer_decline", amount: amount}}
 
-          :rand.uniform(3) > 1 ->
-            {:error, %{reason: "transient_network_glitch", amount: amount}}
+             :rand.uniform(3) > 1 ->
+               {:error, %{reason: "transient_network_glitch", amount: amount}}
 
-          true ->
-            auth_code = "AUTH-#{:rand.uniform(99_999)}"
-            put_context(:auth_code, auth_code)
-            Logger.info("[Payment] Authorized — auth_code=#{auth_code}")
-            {:ok, assign(data, :auth_code, auth_code)}
-        end
-      end
-    )
+             true ->
+               auth_code = "AUTH-#{:rand.uniform(99_999)}"
+               put_context(:auth_code, auth_code)
+               Logger.info("[Payment] Authorized — auth_code=#{auth_code}")
+               {:ok, assign(data, :auth_code, auth_code)}
+           end
+         end
 
     step :capture_payment, fn data ->
       amount = get_context(:amount)
