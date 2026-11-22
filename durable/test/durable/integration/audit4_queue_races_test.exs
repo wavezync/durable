@@ -225,10 +225,11 @@ defmodule Durable.Integration.Audit4QueueRacesTest do
     test "with the PubSub down a poller still starts, and a run's steps still end" do
       start_pubsub!()
       start_durable!(%{default: 1}, pubsub: Audit4QueuePubSub)
-      stop_supervised!(:pubsub)
-
       poller = Process.whereis(Durable.Queue.Poller.Default)
-      Process.exit(poller, :kill)
+
+      # A PubSub that stops takes its subscribers with it: the poller restarts,
+      # with nothing to subscribe to.
+      stop_supervised!(:pubsub)
 
       assert_eventually(fn ->
         Process.whereis(Durable.Queue.Poller.Default) not in [nil, poller]
