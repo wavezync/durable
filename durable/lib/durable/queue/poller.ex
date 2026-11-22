@@ -18,6 +18,7 @@ defmodule Durable.Queue.Poller do
   alias Durable.Config
   alias Durable.PubSub, as: DurablePubSub
   alias Durable.Queue.Adapter
+  alias Durable.Queue.Drainer
   alias Durable.Queue.Worker
 
   defstruct [
@@ -117,7 +118,8 @@ defmodule Durable.Queue.Poller do
       worker_supervisor: worker_supervisor,
       node_id: config.node_id,
       workers: %{},
-      paused: false,
+      # A poller restarted on a node that is draining doesn't claim either.
+      paused: Drainer.stopping?(config.name),
       timer_ref: nil
     }
 

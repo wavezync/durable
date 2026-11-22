@@ -337,12 +337,8 @@ defmodule Durable.Integration.Audit4QueueRecoveryTest do
   end
 
   describe "the queue manager restarting" do
-    # BUG: no run on this node ever runs a step again. Stopping, the old
-    # manager's Drainer sets its `stopping?` flag (drainer.ex:55), and only
-    # Durable.Supervisor.init/1 clears it (supervisor.ex:106), which a restart
-    # of the manager alone doesn't reach. Every claim is then handed straight
-    # back by Executor.queue_move/3 (executor.ex:3450), on every poll.
-    @tag :skip
+    # The old manager's Drainer sets `stopping?` as it stops; the new manager
+    # clears it.
     test "doesn't leave the node believing it is stopping" do
       start_durable!(%{default: 1}, shutdown_grace_period: 200)
       refute Drainer.stopping?(Durable)
@@ -366,6 +362,25 @@ defmodule Durable.Integration.Audit4QueueRecoveryTest do
 
       assert Probe.fetch(:stopping_seen) == false
       refute Drainer.stopping?(Durable)
+    end
+  end
+
+  describe "a poller restarted after Durable.drain/1" do
+    test "doesn't claim: the node is still stopping" do
+      start_durable!(%{default: 1})
+      :ok = Durable.drain()
+
+      poller = Process.whereis(@poller)
+      Process.exit(poller, :kill)
+      restarted!(@poller, poller)
+
+      {:ok, id} = Durable.start(Audit4QueueOnce, %{})
+      # Long enough for many polls.
+      Process.sleep(300)
+
+      assert :sys.get_state(@poller).paused
+      assert %{status: :pending, locked_by: nil, current_step: nil} = get(id)
+      assert Probe.hits(:once) == 0
     end
   end
 
