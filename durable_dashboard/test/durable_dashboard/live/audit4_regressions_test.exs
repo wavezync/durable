@@ -949,4 +949,44 @@ defmodule DurableDashboard.Live.Audit4RegressionsTest do
     {:ok, _view, html} = live(conn, dash("/executions/#{run}"))
     assert html =~ "Cancelled"
   end
+
+  # The Overview's live feed read `payload[:id]` from any workflow event; a
+  # payload that isn't a map raised.
+  test "the Overview survives a workflow event whose payload isn't a map", %{conn: conn} do
+    Fixtures.run!(Fixtures.Payments)
+
+    assert crashes(
+             for payload <- [
+                   "text",
+                   :atom,
+                   nil,
+                   7,
+                   [1, 2],
+                   {:a, :b},
+                   [id: 5],
+                   %{id: %{}},
+                   %{},
+                   %{id: "x", workflow_name: %{"a" => 1}, current_step: %{"b" => 2}}
+                 ] do
+               {payload,
+                fn ->
+                  {:ok, view, _html} = live(conn, dash("/"))
+                  send(view.pid, {:durable_event, :workflow_failed, payload})
+                  render(view)
+                end}
+             end
+           ) == []
+
+    # A real event still makes its line.
+    {:ok, view, _html} = live(conn, dash("/"))
+
+    event = %{
+      id: Ecto.UUID.generate(),
+      workflow_name: "process_payment",
+      current_step: "authorize"
+    }
+
+    send(view.pid, {:durable_event, :workflow_failed, event})
+    assert render(view) =~ "failed at authorize"
+  end
 end

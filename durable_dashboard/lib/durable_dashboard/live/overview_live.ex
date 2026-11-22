@@ -72,7 +72,7 @@ defmodule DurableDashboard.Live.OverviewLive do
 
   @impl true
   def handle_info({:durable_event, kind, payload}, socket) when kind in @workflow_kinds do
-    socket = update(socket, :feed, &Enum.take([feed_item(kind, payload) | &1], @feed_size))
+    socket = update(socket, :feed, &Enum.take(feed_item(kind, payload) ++ &1, @feed_size))
 
     if socket.assigns.refresh_pending? do
       {:noreply, socket}
@@ -128,15 +128,21 @@ defmodule DurableDashboard.Live.OverviewLive do
     )
   end
 
-  defp feed_item(kind, payload) do
-    %{
-      at: DateTime.utc_now(),
-      id: payload[:id],
-      workflow: payload[:workflow_name],
-      status: feed_status(kind),
-      text: feed_text(kind, payload)
-    }
+  # The feed line for an event that names its run, in a list. An event that
+  # doesn't adds no line; the page still reloads its numbers.
+  defp feed_item(kind, %{id: id} = payload) when is_binary(id) do
+    [
+      %{
+        at: DateTime.utc_now(),
+        id: id,
+        workflow: Format.text(payload[:workflow_name]),
+        status: feed_status(kind),
+        text: feed_text(kind, payload)
+      }
+    ]
   end
+
+  defp feed_item(_kind, _payload), do: []
 
   defp feed_status(:workflow_completed), do: :completed
   defp feed_status(:workflow_failed), do: :failed
@@ -152,7 +158,8 @@ defmodule DurableDashboard.Live.OverviewLive do
   defp feed_text(:workflow_cancelled, _p), do: "cancelled"
   defp feed_text(:workflow_retried, p), do: "retried from #{step(p)}"
 
-  defp step(p), do: Trace.display_name(p[:current_step] || "start")
+  defp step(%{current_step: step}) when is_binary(step), do: Trace.display_name(step)
+  defp step(_payload), do: "start"
 
   # ============================================================================
   # Render
