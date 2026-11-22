@@ -23,7 +23,7 @@ defmodule Durable.Audit4ApiInstancesTest do
     use Durable.Wait
 
     workflow "audit4_api_instance_waits" do
-      step(:wait, fn data ->
+      step :wait, fn data ->
         got =
           case data["wait"] do
             "input" -> wait_for_input("x")
@@ -35,7 +35,7 @@ defmodule Durable.Audit4ApiInstancesTest do
           end
 
         {:ok, Map.put(data, "got", inspect(got))}
-      end)
+      end
     end
   end
 

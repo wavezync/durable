@@ -23,12 +23,12 @@ defmodule Durable.SchedulerTest do
     use Durable.Helpers
 
     workflow "simple" do
-      step(:do_work, fn data ->
+      step :do_work, fn data ->
         {:ok,
          data
          |> assign(:executed, true)
          |> assign(:executed_at, DateTime.utc_now())}
-      end)
+      end
     end
   end
 
@@ -37,7 +37,7 @@ defmodule Durable.SchedulerTest do
     use Durable.Helpers
 
     workflow "refuses_duplicates", on_duplicate: :error do
-      step(:do_work, fn data -> {:ok, data} end)
+      step :do_work, fn data -> {:ok, data} end
     end
   end
 
@@ -48,7 +48,7 @@ defmodule Durable.SchedulerTest do
 
     @schedule cron: "*/5 * * * *", key: "cleanup"
     workflow "keyed_cleanup" do
-      step(:do_work, fn data -> {:ok, data} end)
+      step :do_work, fn data -> {:ok, data} end
     end
   end
 
@@ -57,15 +57,15 @@ defmodule Durable.SchedulerTest do
     use Durable.Helpers
 
     workflow "workflow_a" do
-      step(:a, fn data ->
+      step :a, fn data ->
         {:ok, assign(data, :workflow, "a")}
-      end)
+      end
     end
 
     workflow "workflow_b" do
-      step(:b, fn data ->
+      step :b, fn data ->
         {:ok, assign(data, :workflow, "b")}
-      end)
+      end
     end
   end
 
@@ -76,22 +76,22 @@ defmodule Durable.SchedulerTest do
 
     @schedule cron: "0 9 * * *", timezone: "UTC"
     workflow "daily_report" do
-      step(:generate, fn data ->
+      step :generate, fn data ->
         {:ok, assign(data, :generated, true)}
-      end)
+      end
     end
 
     @schedule cron: "0 */6 * * *", queue: :reports
     workflow "periodic_report" do
-      step(:generate_periodic, fn data ->
+      step :generate_periodic, fn data ->
         {:ok, assign(data, :type, "periodic")}
-      end)
+      end
     end
 
     workflow "unscheduled" do
-      step(:work, fn data ->
+      step :work, fn data ->
         {:ok, assign(data, :unscheduled, true)}
-      end)
+      end
     end
   end
 

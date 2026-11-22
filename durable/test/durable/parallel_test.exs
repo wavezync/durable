@@ -534,23 +534,23 @@ defmodule SimpleParallelTestWorkflow do
   use Durable.Helpers
 
   workflow "simple_parallel" do
-    step(:setup, fn data ->
+    step :setup, fn data ->
       {:ok, assign(data, :initialized, true)}
-    end)
-
-    parallel :tasks do
-      step(:task_a, fn data ->
-        {:ok, assign(data, :from_task_a, true)}
-      end)
-
-      step(:task_b, fn data ->
-        {:ok, assign(data, :from_task_b, true)}
-      end)
     end
 
-    step(:final, fn data ->
+    parallel :tasks do
+      step :task_a, fn data ->
+        {:ok, assign(data, :from_task_a, true)}
+      end
+
+      step :task_b, fn data ->
+        {:ok, assign(data, :from_task_b, true)}
+      end
+    end
+
+    step :final, fn data ->
       {:ok, assign(data, :completed, true)}
-    end)
+    end
   end
 end
 
@@ -560,21 +560,21 @@ defmodule ResultsAccessWorkflow do
   use Durable.Context
 
   workflow "results_access" do
-    step(:setup, fn data ->
+    step :setup, fn data ->
       {:ok, assign(data, :initialized, true)}
-    end)
-
-    parallel :tasks do
-      step(:task_a, fn data ->
-        {:ok, assign(data, :value_a, 42)}
-      end)
-
-      step(:task_b, fn data ->
-        {:ok, assign(data, :value_b, 99)}
-      end)
     end
 
-    step(:process_results, fn data ->
+    parallel :tasks do
+      step :task_a, fn data ->
+        {:ok, assign(data, :value_a, 42)}
+      end
+
+      step :task_b, fn data ->
+        {:ok, assign(data, :value_b, 99)}
+      end
+    end
+
+    step :process_results, fn data ->
       # What a lane added has been stored, so its own keys are strings
       data =
         case data.tasks.task_a do
@@ -589,7 +589,7 @@ defmodule ResultsAccessWorkflow do
         end
 
       {:ok, data}
-    end)
+    end
   end
 end
 
@@ -598,23 +598,23 @@ defmodule ErrorPreservingParallelWorkflow do
   use Durable.Helpers
 
   workflow "error_preserving_parallel" do
-    step(:setup, fn data ->
+    step :setup, fn data ->
       {:ok, data}
-    end)
-
-    parallel :checks, on_error: :collect do
-      step(:good_task, fn data ->
-        {:ok, assign(data, :good, true)}
-      end)
-
-      step(:bad_task, fn _data ->
-        {:error, %{type: "test_error", message: "intentional failure"}}
-      end)
     end
 
-    step(:final, fn data ->
+    parallel :checks, on_error: :collect do
+      step :good_task, fn data ->
+        {:ok, assign(data, :good, true)}
+      end
+
+      step :bad_task, fn _data ->
+        {:error, %{type: "test_error", message: "intentional failure"}}
+      end
+    end
+
+    step :final, fn data ->
       {:ok, data}
-    end)
+    end
   end
 end
 
@@ -623,9 +623,9 @@ defmodule IntoOkWorkflow do
   use Durable.Helpers
 
   workflow "into_ok" do
-    step(:setup, fn data ->
+    step :setup, fn data ->
       {:ok, assign(data, :initialized, true)}
-    end)
+    end
 
     parallel :charge,
       into: fn ctx, results ->
@@ -642,18 +642,18 @@ defmodule IntoOkWorkflow do
             {:error, "Unexpected result combination"}
         end
       end do
-      step(:payment, fn _data ->
+      step :payment, fn _data ->
         {:ok, %{id: 123, status: "paid"}}
-      end)
+      end
 
-      step(:delivery, fn _data ->
+      step :delivery, fn _data ->
         {:ok, %{id: 456, status: "confirmed"}}
-      end)
+      end
     end
 
-    step(:final, fn data ->
+    step :final, fn data ->
       {:ok, assign(data, :completed, true)}
-    end)
+    end
   end
 end
 
@@ -662,9 +662,9 @@ defmodule IntoErrorWorkflow do
   use Durable.Helpers
 
   workflow "into_error" do
-    step(:setup, fn data ->
+    step :setup, fn data ->
       {:ok, assign(data, :initialized, true)}
-    end)
+    end
 
     parallel :charge,
       into: fn _ctx, results ->
@@ -676,18 +676,18 @@ defmodule IntoErrorWorkflow do
             {:error, "Payment and delivery both failed"}
         end
       end do
-      step(:payment, fn _data ->
+      step :payment, fn _data ->
         {:error, "Payment failed"}
-      end)
+      end
 
-      step(:delivery, fn _data ->
+      step :delivery, fn _data ->
         {:error, "Delivery failed"}
-      end)
+      end
     end
 
-    step(:final, fn data ->
+    step :final, fn data ->
       {:ok, assign(data, :completed, true)}
-    end)
+    end
   end
 end
 
@@ -696,9 +696,9 @@ defmodule IntoGotoWorkflow do
   use Durable.Helpers
 
   workflow "into_goto" do
-    step(:setup, fn data ->
+    step :setup, fn data ->
       {:ok, assign(data, :initialized, true)}
-    end)
+    end
 
     parallel :charge,
       into: fn ctx, results ->
@@ -710,26 +710,26 @@ defmodule IntoGotoWorkflow do
             {:ok, ctx}
         end
       end do
-      step(:payment, fn _data ->
+      step :payment, fn _data ->
         {:ok, %{id: 123}}
-      end)
+      end
 
-      step(:delivery, fn _data ->
+      step :delivery, fn _data ->
         {:error, :not_found}
-      end)
+      end
     end
 
-    step(:normal_flow, fn data ->
+    step :normal_flow, fn data ->
       {:ok, assign(data, :normal_flow_executed, true)}
-    end)
+    end
 
-    step(:handle_backorder, fn data ->
+    step :handle_backorder, fn data ->
       {:ok, assign(data, :backorder_handled, true)}
-    end)
+    end
 
-    step(:final, fn data ->
+    step :final, fn data ->
       {:ok, assign(data, :completed, true)}
-    end)
+    end
   end
 end
 
@@ -738,23 +738,23 @@ defmodule FailFastParallelWorkflow do
   use Durable.Helpers
 
   workflow "fail_fast_parallel" do
-    step(:setup, fn data ->
+    step :setup, fn data ->
       {:ok, data}
-    end)
-
-    parallel :checks, on_error: :fail_fast do
-      step(:good_task, fn data ->
-        {:ok, assign(data, :good, true)}
-      end)
-
-      step(:bad_task, fn _data ->
-        {:error, %{type: "test_error", message: "intentional failure"}}
-      end)
     end
 
-    step(:never_reached, fn data ->
+    parallel :checks, on_error: :fail_fast do
+      step :good_task, fn data ->
+        {:ok, assign(data, :good, true)}
+      end
+
+      step :bad_task, fn _data ->
+        {:error, %{type: "test_error", message: "intentional failure"}}
+      end
+    end
+
+    step :never_reached, fn data ->
       {:ok, assign(data, :reached, true)}
-    end)
+    end
   end
 end
 
@@ -763,19 +763,19 @@ defmodule SingleStepParallelWorkflow do
   use Durable.Helpers
 
   workflow "single_step_parallel" do
-    step(:setup, fn data ->
+    step :setup, fn data ->
       {:ok, assign(data, :initialized, true)}
-    end)
-
-    parallel :solo do
-      step(:only_task, fn data ->
-        {:ok, assign(data, :from_only_task, true)}
-      end)
     end
 
-    step(:final, fn data ->
+    parallel :solo do
+      step :only_task, fn data ->
+        {:ok, assign(data, :from_only_task, true)}
+      end
+    end
+
+    step :final, fn data ->
       {:ok, assign(data, :completed, true)}
-    end)
+    end
   end
 end
 
@@ -784,31 +784,31 @@ defmodule ManyParallelStepsWorkflow do
   use Durable.Helpers
 
   workflow "many_parallel_steps" do
-    step(:setup, fn data ->
+    step :setup, fn data ->
       {:ok, assign(data, :initialized, true)}
-    end)
-
-    parallel :batch do
-      step(:step_1, fn data -> {:ok, assign(data, :step_1, true)} end)
-      step(:step_2, fn data -> {:ok, assign(data, :step_2, true)} end)
-      step(:step_3, fn data -> {:ok, assign(data, :step_3, true)} end)
-      step(:step_4, fn data -> {:ok, assign(data, :step_4, true)} end)
-      step(:step_5, fn data -> {:ok, assign(data, :step_5, true)} end)
-      step(:step_6, fn data -> {:ok, assign(data, :step_6, true)} end)
-      step(:step_7, fn data -> {:ok, assign(data, :step_7, true)} end)
-      step(:step_8, fn data -> {:ok, assign(data, :step_8, true)} end)
-      step(:step_9, fn data -> {:ok, assign(data, :step_9, true)} end)
-      step(:step_10, fn data -> {:ok, assign(data, :step_10, true)} end)
-      step(:step_11, fn data -> {:ok, assign(data, :step_11, true)} end)
-      step(:step_12, fn data -> {:ok, assign(data, :step_12, true)} end)
-      step(:step_13, fn data -> {:ok, assign(data, :step_13, true)} end)
-      step(:step_14, fn data -> {:ok, assign(data, :step_14, true)} end)
-      step(:step_15, fn data -> {:ok, assign(data, :step_15, true)} end)
     end
 
-    step(:final, fn data ->
+    parallel :batch do
+      step :step_1, fn data -> {:ok, assign(data, :step_1, true)} end
+      step :step_2, fn data -> {:ok, assign(data, :step_2, true)} end
+      step :step_3, fn data -> {:ok, assign(data, :step_3, true)} end
+      step :step_4, fn data -> {:ok, assign(data, :step_4, true)} end
+      step :step_5, fn data -> {:ok, assign(data, :step_5, true)} end
+      step :step_6, fn data -> {:ok, assign(data, :step_6, true)} end
+      step :step_7, fn data -> {:ok, assign(data, :step_7, true)} end
+      step :step_8, fn data -> {:ok, assign(data, :step_8, true)} end
+      step :step_9, fn data -> {:ok, assign(data, :step_9, true)} end
+      step :step_10, fn data -> {:ok, assign(data, :step_10, true)} end
+      step :step_11, fn data -> {:ok, assign(data, :step_11, true)} end
+      step :step_12, fn data -> {:ok, assign(data, :step_12, true)} end
+      step :step_13, fn data -> {:ok, assign(data, :step_13, true)} end
+      step :step_14, fn data -> {:ok, assign(data, :step_14, true)} end
+      step :step_15, fn data -> {:ok, assign(data, :step_15, true)} end
+    end
+
+    step :final, fn data ->
       {:ok, assign(data, :completed, true)}
-    end)
+    end
   end
 end
 
@@ -817,23 +817,23 @@ defmodule QueueRoutingWorkflow do
   use Durable.Helpers
 
   workflow "queue_routing" do
-    step(:setup, fn data ->
+    step :setup, fn data ->
       {:ok, assign(data, :initialized, true)}
-    end)
-
-    parallel :tasks do
-      step(:gpu_task, [queue: "gpu"], fn data ->
-        {:ok, assign(data, :gpu_done, true)}
-      end)
-
-      step(:default_task, fn data ->
-        {:ok, assign(data, :default_done, true)}
-      end)
     end
 
-    step(:final, fn data ->
+    parallel :tasks do
+      step :gpu_task, [queue: "gpu"], fn data ->
+        {:ok, assign(data, :gpu_done, true)}
+      end
+
+      step :default_task, fn data ->
+        {:ok, assign(data, :default_done, true)}
+      end
+    end
+
+    step :final, fn data ->
       {:ok, assign(data, :completed, true)}
-    end)
+    end
   end
 end
 
@@ -847,22 +847,22 @@ defmodule ParallelContextInheritWorkflow do
   use Durable.Context
 
   workflow "parallel_context_inherit" do
-    step(:seed, fn _data ->
+    step :seed, fn _data ->
       # Context values flow to downstream steps via the step's return map.
       # This is the standard Durable pipeline pattern.
       {:ok, %{shared_key: "hello", shared_count: 42, seeded: true}}
-    end)
+    end
 
     parallel :readers, into: fn _ctx, results -> {:ok, %{read: results}} end do
-      step(:reader_a, fn _data ->
+      step :reader_a, fn _data ->
         # Before the fix, these would return nil because parallel children
         # did not inherit the parent's accumulated context.
         {:ok, %{saw: get_context(:shared_key), count: get_context(:shared_count)}}
-      end)
+      end
 
-      step(:reader_b, fn _data ->
+      step :reader_b, fn _data ->
         {:ok, %{saw: get_context(:shared_key, "missing")}}
-      end)
+      end
     end
   end
 end
@@ -873,23 +873,23 @@ defmodule ParallelIsolationWorkflow do
   use Durable.Context
 
   workflow "parallel_isolation" do
-    step(:setup, fn _data ->
+    step :setup, fn _data ->
       {:ok, %{}}
-    end)
+    end
 
     parallel :peers, into: fn _ctx, results -> {:ok, %{read: results}} end do
-      step(:writer_step, fn _data ->
+      step :writer_step, fn _data ->
         # Writes made inside one parallel sibling must NOT be visible to another.
         put_context(:sibling_wrote, true)
         {:ok, %{wrote: true}}
-      end)
+      end
 
-      step(:peer_step, fn _data ->
+      step :peer_step, fn _data ->
         # Give the writer a head start — this is still not enough for
         # cross-sibling reads to work because parallel siblings are isolated.
         Process.sleep(5)
         {:ok, %{saw_sibling: get_context(:sibling_wrote)}}
-      end)
+      end
     end
   end
 end
@@ -904,16 +904,16 @@ defmodule IntoPassthroughWorkflow do
   use Durable.Context
 
   workflow "into_passthrough" do
-    step(:setup, fn _data ->
+    step :setup, fn _data ->
       {:ok, %{}}
-    end)
+    end
 
     # The user's into: callback passes the `results` map through untouched.
     # Before the fix, `results` contained raw {:ok, _} tuples and storage
     # crashed. After the fix, results are pre-serialized to lists.
     parallel :tasks, into: fn _ctx, results -> {:ok, %{pass_through: results}} end do
-      step(:task_x, fn _data -> {:ok, %{x: 1}} end)
-      step(:task_y, fn _data -> {:ok, %{y: 2}} end)
+      step :task_x, fn _data -> {:ok, %{x: 1}} end
+      step :task_y, fn _data -> {:ok, %{y: 2}} end
     end
   end
 end

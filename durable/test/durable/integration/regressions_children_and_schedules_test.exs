@@ -15,11 +15,11 @@ defmodule Durable.Integration.ChildrenAndSchedulesRegressionsTest do
     alias Durable.IntegrationProbe, as: Probe
 
     workflow "r_slow_child" do
-      step(:w, fn data ->
+      step :w, fn data ->
         Probe.note(:child)
         Probe.wait_for(:never)
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -29,12 +29,12 @@ defmodule Durable.Integration.ChildrenAndSchedulesRegressionsTest do
     alias Durable.IntegrationProbe, as: Probe
 
     workflow "r_calls_child" do
-      step(:w, fn data ->
+      step :w, fn data ->
         Probe.note(:parent)
         result = call_workflow(SlowChild, %{}, timeout: 100, timeout_value: :gave_up)
         Probe.put(:call_result, result)
         {:ok, Map.put(data, "result", inspect(result))}
-      end)
+      end
     end
   end
 
@@ -44,19 +44,19 @@ defmodule Durable.Integration.ChildrenAndSchedulesRegressionsTest do
 
     workflow "r_branched" do
       parallel :both do
-        step(:fast, fn data -> {:ok, Map.put(data, "fast", 1)} end)
+        step :fast, fn data -> {:ok, Map.put(data, "fast", 1)} end
 
-        step(:slow, fn data ->
+        step :slow, fn data ->
           Probe.note(:slow)
           Probe.wait_for(:finish_slow)
           {:ok, Map.put(data, "slow", 1)}
-        end)
+        end
       end
 
-      step(:after, fn data ->
+      step :after, fn data ->
         Probe.put(:after_data, Map.keys(data))
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -65,10 +65,10 @@ defmodule Durable.Integration.ChildrenAndSchedulesRegressionsTest do
     use Durable.Wait
 
     workflow "r_c_asks_input" do
-      step(:w, fn data ->
+      step :w, fn data ->
         r = wait_for_input("answer")
         {:ok, Map.put(data, "result", inspect(r))}
-      end)
+      end
     end
   end
 
@@ -78,14 +78,14 @@ defmodule Durable.Integration.ChildrenAndSchedulesRegressionsTest do
     alias Durable.IntegrationProbe, as: Probe
 
     workflow "r_collides" do
-      step(:first, fn data -> {:ok, Map.put(data, :approved, false)} end)
+      step :first, fn data -> {:ok, Map.put(data, :approved, false)} end
 
-      step(:w, fn data ->
+      step :w, fn data ->
         Probe.note(:body)
         got = wait_for_event("approved")
         Probe.put(:got, got)
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -94,10 +94,10 @@ defmodule Durable.Integration.ChildrenAndSchedulesRegressionsTest do
     use Durable.Wait
 
     workflow "r_any_of_nothing" do
-      step(:w, fn data ->
+      step :w, fn data ->
         wait_for_any([])
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -105,7 +105,7 @@ defmodule Durable.Integration.ChildrenAndSchedulesRegressionsTest do
     use Durable
 
     workflow "r_c_tick" do
-      step(:work, fn data -> {:ok, data} end)
+      step :work, fn data -> {:ok, data} end
     end
   end
 

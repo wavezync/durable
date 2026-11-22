@@ -33,11 +33,11 @@ defmodule Durable.ParkTest do
 
     workflow "fails_in_branch" do
       parallel :calls do
-        step(:flaky, [retry: [max_attempts: 2, backoff: :constant, base: 1]], fn data ->
+        step :flaky, [retry: [max_attempts: 2, backoff: :constant, base: 1]], fn data ->
           if attempt() == 1, do: {:error, :down}, else: {:ok, assign(data, :flaky, true)}
-        end)
+        end
 
-        step(:steady, fn data -> {:ok, assign(data, :steady, true)} end)
+        step :steady, fn data -> {:ok, assign(data, :steady, true)} end
       end
     end
   end
@@ -48,21 +48,21 @@ defmodule Durable.ParkTest do
     use Durable.Context
 
     workflow "retries_in_branch" do
-      step(:start, fn data -> {:ok, assign(data, :path, "a")} end)
+      step :start, fn data -> {:ok, assign(data, :path, "a")} end
 
       branch on: fn data -> data[:path] || data["path"] end do
         "a" ->
-          step(:a1, [retry: [max_attempts: 2, backoff: :constant, base: 1]], fn data ->
+          step :a1, [retry: [max_attempts: 2, backoff: :constant, base: 1]], fn data ->
             if attempt() == 1, do: {:error, :down}, else: {:ok, assign(data, :a1, true)}
-          end)
+          end
 
-          step(:a2, fn data -> {:ok, assign(data, :a2, true)} end)
+          step :a2, fn data -> {:ok, assign(data, :a2, true)} end
 
         "b" ->
-          step(:b1, fn data -> {:ok, assign(data, :b1, true)} end)
+          step :b1, fn data -> {:ok, assign(data, :b1, true)} end
       end
 
-      step(:after_branch, fn data -> {:ok, assign(data, :after_branch, true)} end)
+      step :after_branch, fn data -> {:ok, assign(data, :after_branch, true)} end
     end
   end
 
@@ -74,15 +74,15 @@ defmodule Durable.ParkTest do
     workflow "sleeps_in_branch" do
       branch on: fn _data -> "a" end do
         "a" ->
-          step(:a1, fn data ->
+          step :a1, fn data ->
             sleep(1)
             {:ok, assign(data, :a1, true)}
-          end)
+          end
 
-          step(:a2, fn data -> {:ok, assign(data, :a2, true)} end)
+          step :a2, fn data -> {:ok, assign(data, :a2, true)} end
 
         "b" ->
-          step(:b1, fn data -> {:ok, assign(data, :b1, true)} end)
+          step :b1, fn data -> {:ok, assign(data, :b1, true)} end
       end
     end
   end
@@ -92,7 +92,7 @@ defmodule Durable.ParkTest do
     use Durable.Helpers
 
     workflow "snoozes" do
-      step(:export, fn data ->
+      step :export, fn data ->
         case Process.get(:snoozes_left, 2) do
           0 ->
             {:ok, assign(data, :exported, true)}
@@ -105,7 +105,7 @@ defmodule Durable.ParkTest do
             Process.put(:snoozes_left, n - 1)
             {:snooze, seconds(60), "another export is running"}
         end
-      end)
+      end
     end
   end
 

@@ -64,33 +64,33 @@ defmodule Durable.Fuzz.Audit4ApiWaitsTest do
     # change: an atom, a tuple, a map that looks like the engine's own wrapper,
     # and for the last nothing, which is `{:timeout, received}`.
     workflow "audit4_api_every_wait" do
-      step(:ask, fn data ->
+      step :ask, fn data ->
         got = wait_for_input("i1", timeout: 3_600_000, timeout_value: :late)
         {:ok, Map.put(data, "ask", T.describe(got))}
-      end)
+      end
 
-      step(:event, fn data ->
+      step :event, fn data ->
         got = wait_for_event("e1", timeout: 3_600_000, timeout_value: {:late, "e1"})
         {:ok, Map.put(data, "event", T.describe(got))}
-      end)
+      end
 
-      step(:nap, fn data ->
+      step :nap, fn data ->
         sleep(60_000)
         {:ok, Map.put(data, "nap", "slept")}
-      end)
+      end
 
-      step(:any, fn data ->
+      step :any, fn data ->
         got = wait_for_any(["g_a", "g_b"], timeout: 3_600_000, timeout_value: T.late_map())
         {:ok, Map.put(data, "any", T.describe(got))}
-      end)
+      end
 
-      step(:all, fn data ->
+      step :all, fn data ->
         got = wait_for_all(["g_c", "g_d"], timeout: 3_600_000)
         {:ok, Map.put(data, "all", T.describe(got))}
-      end)
+      end
 
       parallel :lanes do
-        step(:lane, fn data -> {:ok, Map.put(data, "lane", T.describe(wait_for_event("l1")))} end)
+        step :lane, fn data -> {:ok, Map.put(data, "lane", T.describe(wait_for_event("l1")))} end
       end
     end
   end
@@ -392,16 +392,16 @@ defmodule Durable.Fuzz.Audit4ApiWaitsTest do
     use Durable.Wait
 
     workflow "audit4_api_comes_back" do
-      step(:produce, fn _input -> {:ok, Process.get(:audit4_api_data)} end)
+      step :produce, fn _input -> {:ok, Process.get(:audit4_api_data)} end
 
-      step(:observe, [retry: [max_attempts: 2, backoff: :constant, base: 1]], fn data ->
+      step :observe, [retry: [max_attempts: 2, backoff: :constant, base: 1]], fn data ->
         seen = Process.get(:audit4_api_seen, [])
         Process.put(:audit4_api_seen, seen ++ [data])
 
         if seen == [],
           do: __MODULE__.leave(Process.get(:audit4_api_way)),
           else: {:ok, data}
-      end)
+      end
     end
 
     def leave(way) do

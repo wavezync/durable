@@ -91,16 +91,16 @@ defmodule Audit4Dash.Chaos do
   end
 
   workflow "audit4_chaos" do
-    step(:go, fn data ->
+    step :go, fn data ->
       case Audit4Dash.Chaos.result(data["mode"]) do
         {tag, _} = result when tag in [:ok, :error, :cancel] -> result
         {:snooze, _, _} = result -> result
         :whatever -> :whatever
         _answer -> {:ok, data}
       end
-    end)
+    end
 
-    step(:after, fn data -> {:ok, data} end)
+    step :after, fn data -> {:ok, data} end
   end
 end
 
@@ -110,24 +110,24 @@ defmodule Audit4Dash.Lanes do
   use Durable.Wait
 
   workflow "audit4_lanes" do
-    step(:prepare, fn data -> {:ok, data} end)
+    step :prepare, fn data -> {:ok, data} end
 
     parallel :lookups do
-      step(:credit, fn _data -> raise "credit bureau down" end)
+      step :credit, fn _data -> raise "credit bureau down" end
 
       lane :sanctions do
-        step(:query, fn data ->
+        step :query, fn data ->
           _ = wait_for_event("sanctions_result")
           {:ok, data}
-        end)
+        end
 
-        step(:file, fn data -> {:ok, data} end)
+        step :file, fn data -> {:ok, data} end
       end
 
-      step(:device, fn data -> {:ok, data} end)
+      step :device, fn data -> {:ok, data} end
     end
 
-    step(:decide, fn data -> {:ok, data} end)
+    step :decide, fn data -> {:ok, data} end
   end
 end
 

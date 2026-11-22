@@ -7,7 +7,7 @@ defmodule Durable.StartManyTest do
     use Durable
 
     workflow "import_row" do
-      step(:save, fn data -> {:ok, data} end)
+      step :save, fn data -> {:ok, data} end
     end
   end
 
@@ -15,7 +15,7 @@ defmodule Durable.StartManyTest do
     use Durable
 
     workflow "strict_row", on_duplicate: :error do
-      step(:save, fn data -> {:ok, data} end)
+      step :save, fn data -> {:ok, data} end
     end
   end
 

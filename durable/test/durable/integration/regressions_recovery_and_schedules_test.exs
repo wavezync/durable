@@ -21,21 +21,21 @@ defmodule Durable.Integration.RecoveryAndSchedulesRegressionsTest do
     alias Durable.IntegrationProbe, as: Probe
 
     workflow "r_booked", on_failure: :rollback do
-      step(:book, [compensate: :unbook], fn data ->
+      step :book, [compensate: :unbook], fn data ->
         Probe.note(:booked)
         {:ok, data}
-      end)
+      end
 
-      step(:charge, [retry: [max_attempts: 3, backoff: :constant, base: 1]], fn data ->
+      step :charge, [retry: [max_attempts: 3, backoff: :constant, base: 1]], fn data ->
         Probe.note(:charge)
         Probe.wait_for(:release)
         {:ok, data}
-      end)
+      end
 
-      compensate(:unbook, fn data ->
+      compensate :unbook, fn data ->
         Probe.note(:unbooked)
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -174,16 +174,16 @@ defmodule Durable.Integration.RecoveryAndSchedulesRegressionsTest do
     alias Durable.IntegrationProbe, as: Probe
 
     workflow "r_two_steps" do
-      step(:first, fn data ->
+      step :first, fn data ->
         Probe.note(:first)
         {:ok, Map.put(data, "who", inspect(self()))}
-      end)
+      end
 
-      step(:second, fn data ->
+      step :second, fn data ->
         Probe.note(:second)
         Probe.inside([:second_peak], fn -> Probe.wait_for(:finish_second) end)
         {:ok, Map.put(data, "second_by", inspect(self()))}
-      end)
+      end
     end
   end
 
@@ -237,7 +237,7 @@ defmodule Durable.Integration.RecoveryAndSchedulesRegressionsTest do
     use Durable
 
     workflow "r_map_message" do
-      step(:w, fn _data -> {:fail, %{type: "validation", message: %{field: "name"}}} end)
+      step :w, fn _data -> {:fail, %{type: "validation", message: %{field: "name"}}} end
     end
   end
 
@@ -245,7 +245,7 @@ defmodule Durable.Integration.RecoveryAndSchedulesRegressionsTest do
     use Durable
 
     workflow "r_fine" do
-      step(:w, fn data -> {:ok, data} end)
+      step :w, fn data -> {:ok, data} end
     end
   end
 
@@ -301,7 +301,7 @@ defmodule Durable.Integration.RecoveryAndSchedulesRegressionsTest do
     require Logger
 
     workflow "r_over_limit" do
-      step(:w, fn data ->
+      step :w, fn data ->
         Logger.info("one")
         Logger.info("two")
         Logger.info("three")
@@ -312,7 +312,7 @@ defmodule Durable.Integration.RecoveryAndSchedulesRegressionsTest do
         )
 
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -323,7 +323,7 @@ defmodule Durable.Integration.RecoveryAndSchedulesRegressionsTest do
     require Logger
 
     workflow "r_late_task" do
-      step(:w, fn data ->
+      step :w, fn data ->
         Task.start(
           bind(fn ->
             Probe.wait_for(:step_over)
@@ -333,7 +333,7 @@ defmodule Durable.Integration.RecoveryAndSchedulesRegressionsTest do
         )
 
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -417,7 +417,7 @@ defmodule Durable.Integration.RecoveryAndSchedulesRegressionsTest do
     use Durable
 
     workflow "r_tick" do
-      step(:work, fn data -> {:ok, data} end)
+      step :work, fn data -> {:ok, data} end
     end
   end
 
@@ -496,7 +496,7 @@ defmodule Durable.Integration.RecoveryAndSchedulesRegressionsTest do
 
         @schedule cron: "0 0 31 2 *"
         workflow "r_feb31" do
-          step(:work, fn data -> {:ok, data} end)
+          step :work, fn data -> {:ok, data} end
         end
       end
 

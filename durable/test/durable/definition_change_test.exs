@@ -15,14 +15,14 @@ defmodule Durable.DefinitionChangeTest do
     use Durable.Wait
 
     workflow "order" do
-      step(:reserve, fn data -> {:ok, data} end)
+      step :reserve, fn data -> {:ok, data} end
 
-      step(:approve, fn data ->
+      step :approve, fn data ->
         wait_for_input("ok")
         {:ok, data}
-      end)
+      end
 
-      step(:ship, fn data -> {:ok, assign(data, :shipped, true)} end)
+      step :ship, fn data -> {:ok, assign(data, :shipped, true)} end
     end
   end
 
@@ -33,14 +33,14 @@ defmodule Durable.DefinitionChangeTest do
     use Durable.Wait
 
     workflow "order" do
-      step(:reserve, fn data -> {:ok, data} end)
+      step :reserve, fn data -> {:ok, data} end
 
-      step(:review, fn data ->
+      step :review, fn data ->
         wait_for_input("ok")
         {:ok, data}
-      end)
+      end
 
-      step(:ship, fn data -> {:ok, assign(data, :shipped, true)} end)
+      step :ship, fn data -> {:ok, assign(data, :shipped, true)} end
     end
   end
 

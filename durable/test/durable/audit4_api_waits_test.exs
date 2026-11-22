@@ -20,14 +20,14 @@ defmodule Durable.Audit4ApiWaitsTest do
     use Durable.Wait
 
     workflow "audit4_api_sleeps" do
-      step(:nap, fn data ->
+      step :nap, fn data ->
         sleep(data["ms"])
         {:ok, Map.put(data, "napped", true)}
-      end)
+      end
 
-      step(:ask, fn data ->
+      step :ask, fn data ->
         {:ok, Map.put(data, "answer", inspect(wait_for_input("ok")))}
-      end)
+      end
     end
   end
 
@@ -36,9 +36,9 @@ defmodule Durable.Audit4ApiWaitsTest do
     use Durable.Wait
 
     workflow "audit4_api_bad_waits_inline" do
-      step(:first, fn data -> {:ok, data} end)
+      step :first, fn data -> {:ok, data} end
 
-      step(:wait, fn data ->
+      step :wait, fn data ->
         case data["kind"] do
           "sleep_too_long" -> sleep(10 ** 30)
           "sleep_before_time" -> sleep(-(10 ** 15))
@@ -49,7 +49,7 @@ defmodule Durable.Audit4ApiWaitsTest do
         end
 
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -58,9 +58,9 @@ defmodule Durable.Audit4ApiWaitsTest do
     use Durable.Wait
 
     workflow "audit4_api_bad_wait_undone", on_failure: :rollback do
-      step(:hold, [compensate: :release], fn data -> {:ok, data} end)
-      step(:wait, fn _data -> sleep(10 ** 30) end)
-      compensate(:release, fn data -> {:ok, data} end)
+      step :hold, [compensate: :release], fn data -> {:ok, data} end
+      step :wait, fn _data -> sleep(10 ** 30) end
+      compensate :release, fn data -> {:ok, data} end
     end
   end
 
@@ -69,16 +69,16 @@ defmodule Durable.Audit4ApiWaitsTest do
     use Durable.Wait
 
     workflow "audit4_api_three_waits" do
-      step(:gather, fn data ->
+      step :gather, fn data ->
         a = wait_for_event("a")
         b = wait_for_input("b")
         sleep(5)
         {:ok, Map.merge(data, %{"got_a" => a, "got_b" => b})}
-      end)
+      end
 
-      step(:after, fn data ->
+      step :after, fn data ->
         {:ok, Map.put(data, "got_c", inspect(wait_for_event("c")))}
-      end)
+      end
     end
   end
 
@@ -88,16 +88,16 @@ defmodule Durable.Audit4ApiWaitsTest do
 
     workflow "audit4_api_lanes" do
       parallel :lookups do
-        step(:credit, fn data ->
+        step :credit, fn data ->
           {:ok, Map.put(data, "credit", inspect(wait_for_event("credit_done")))}
-        end)
+        end
 
-        step(:fraud, fn data ->
+        step :fraud, fn data ->
           {:ok, Map.put(data, "fraud", inspect(wait_for_input("fraud_ok")))}
-        end)
+        end
       end
 
-      step(:after, fn data -> {:ok, Map.put(data, "after", true)} end)
+      step :after, fn data -> {:ok, Map.put(data, "after", true)} end
     end
   end
 
@@ -108,18 +108,18 @@ defmodule Durable.Audit4ApiWaitsTest do
     use Durable.Wait
 
     workflow "audit4_api_signing" do
-      step(:sign, fn data ->
+      step :sign, fn data ->
         {:ok, Map.put(data, "signature", inspect(wait_for_input("signature")))}
-      end)
+      end
     end
 
     workflow "audit4_api_checked_signing" do
       parallel :checks do
-        step(:identity, fn data ->
+        step :identity, fn data ->
           {:ok, Map.put(data, "identity", inspect(wait_for_event("identity_checked")))}
-        end)
+        end
 
-        step(:address, fn data -> {:ok, Map.put(data, "address", "found")} end)
+        step :address, fn data -> {:ok, Map.put(data, "address", "found")} end
       end
     end
   end
@@ -130,24 +130,24 @@ defmodule Durable.Audit4ApiWaitsTest do
     use Durable.Orchestration
 
     workflow "audit4_api_loan" do
-      step(:sign, fn data ->
+      step :sign, fn data ->
         {:ok, signed} = call_workflow(Audit4ApiSigning, %{}, workflow: "audit4_api_signing")
         {:ok, Map.put(data, "signature", signed["signature"])}
-      end)
+      end
     end
 
     workflow "audit4_api_loan_with_lookups" do
       parallel :lookups do
-        step(:signing, fn data ->
+        step :signing, fn data ->
           {:ok, checked} =
             call_workflow(Audit4ApiSigning, %{}, workflow: "audit4_api_checked_signing")
 
           {:ok, Map.put(data, "identity", checked["checks"]["identity"]["identity"])}
-        end)
+        end
 
-        step(:credit, fn data ->
+        step :credit, fn data ->
           {:ok, Map.put(data, "credit", inspect(wait_for_event("credit_done")))}
-        end)
+        end
       end
     end
   end
@@ -159,7 +159,7 @@ defmodule Durable.Audit4ApiWaitsTest do
     alias Durable.Audit4ApiWaitsTest, as: T
 
     workflow "audit4_api_times_out" do
-      step(:wait, fn data ->
+      step :wait, fn data ->
         opts = [timeout: 0] ++ T.timeout_opts(data["value"])
 
         got =
@@ -171,7 +171,7 @@ defmodule Durable.Audit4ApiWaitsTest do
           end
 
         {:ok, Map.put(data, "got", T.describe(got))}
-      end)
+      end
     end
   end
 
@@ -180,11 +180,11 @@ defmodule Durable.Audit4ApiWaitsTest do
     use Durable.Wait
 
     workflow "audit4_api_times_out_with_text" do
-      step(:wait, fn data ->
+      step :wait, fn data ->
         value = %{"__atom__" => Process.get(:audit4_api_atom_name)}
         wait_for_event("go", timeout: 0, timeout_value: value)
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -195,11 +195,11 @@ defmodule Durable.Audit4ApiWaitsTest do
     @numbers [999_999.5, 2_000_000.0, 1.0e16, 1.0e300]
 
     workflow "audit4_api_keeps_floats" do
-      step(:make, fn data ->
+      step :make, fn data ->
         {:ok, Map.merge(data, %{"numbers" => @numbers, "big" => 2 ** 200})}
-      end)
+      end
 
-      step(:wait, fn data ->
+      step :wait, fn data ->
         wait_for_event("go")
 
         {:ok,
@@ -208,7 +208,7 @@ defmodule Durable.Audit4ApiWaitsTest do
            "values" =>
              data["numbers"] |> Enum.zip(@numbers) |> Enum.map(fn {a, b} -> a / 1 == b end)
          })}
-      end)
+      end
     end
   end
 
@@ -219,9 +219,9 @@ defmodule Durable.Audit4ApiWaitsTest do
     alias Durable.Audit4ApiWaitsTest, as: T
 
     workflow "audit4_api_floats_everywhere" do
-      step(:make, fn data -> {:ok, Map.put(data, "made", T.floats())} end)
+      step :make, fn data -> {:ok, Map.put(data, "made", T.floats())} end
 
-      step(:wait, fn data ->
+      step :wait, fn data ->
         event = wait_for_event("go")
         input = wait_for_input("ask")
 
@@ -231,7 +231,7 @@ defmodule Durable.Audit4ApiWaitsTest do
            "event" => T.all_floats?(event),
            "input" => T.all_floats?(input)
          })}
-      end)
+      end
     end
   end
 
@@ -240,9 +240,9 @@ defmodule Durable.Audit4ApiWaitsTest do
     use Durable.Wait
 
     workflow "audit4_api_waits_any" do
-      step(:wait, fn data ->
+      step :wait, fn data ->
         {:ok, Map.put(data, "got", inspect(wait_for_any(["a", "b"])))}
-      end)
+      end
     end
   end
 
@@ -253,9 +253,9 @@ defmodule Durable.Audit4ApiWaitsTest do
     alias Durable.Audit4ApiWaitsTest, as: T
 
     workflow "audit4_api_waits_all" do
-      step(:wait, fn data ->
+      step :wait, fn data ->
         {:ok, Map.put(data, "got", T.string_keys(wait_for_all(["a", "b"])))}
-      end)
+      end
     end
   end
 

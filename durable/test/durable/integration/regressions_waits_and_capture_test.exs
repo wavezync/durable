@@ -17,11 +17,11 @@ defmodule Durable.Integration.WaitsAndCaptureRegressionsTest do
     alias Durable.IntegrationProbe, as: Probe
 
     workflow "r_wait_any" do
-      step(:w, fn data ->
+      step :w, fn data ->
         Probe.note(:body)
         r = wait_for_any(["a", "b"], timeout: 100, timeout_value: {:timeout, nil})
         {:ok, Map.put(data, "result", inspect(r))}
-      end)
+      end
     end
   end
 
@@ -31,11 +31,11 @@ defmodule Durable.Integration.WaitsAndCaptureRegressionsTest do
     alias Durable.IntegrationProbe, as: Probe
 
     workflow "r_wait_all" do
-      step(:w, fn data ->
+      step :w, fn data ->
         Probe.note(:body)
         r = wait_for_all(["a", "b"], timeout: 100, timeout_value: {:timeout, :partial})
         {:ok, Map.put(data, "result", inspect(r))}
-      end)
+      end
     end
   end
 
@@ -45,11 +45,11 @@ defmodule Durable.Integration.WaitsAndCaptureRegressionsTest do
     alias Durable.IntegrationProbe, as: Probe
 
     workflow "r_wait_event" do
-      step(:w, fn data ->
+      step :w, fn data ->
         Probe.note(:body)
         r = wait_for_event("go")
         {:ok, Map.put(data, "result", inspect(r))}
-      end)
+      end
     end
   end
 
@@ -58,10 +58,10 @@ defmodule Durable.Integration.WaitsAndCaptureRegressionsTest do
     require Logger
 
     workflow "r_unreadable" do
-      step(:work, fn data ->
+      step :work, fn data ->
         Logger.info([0x110000])
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -70,11 +70,11 @@ defmodule Durable.Integration.WaitsAndCaptureRegressionsTest do
     require Logger
 
     workflow "r_chardata" do
-      step(:w, fn data ->
+      step :w, fn data ->
         # A perfectly legal Logger message: chardata with a codepoint above 255.
         Logger.info(["snow ", 0x2603])
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -83,11 +83,11 @@ defmodule Durable.Integration.WaitsAndCaptureRegressionsTest do
     require Logger
 
     workflow "r_source" do
-      step(:w, fn data ->
+      step :w, fn data ->
         # credo:disable-for-next-line Credo.Check.Warning.MissedMetadataKeyInLoggerConfig
         Logger.info("from kafka", source: {"orders", 3})
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -96,10 +96,10 @@ defmodule Durable.Integration.WaitsAndCaptureRegressionsTest do
     require Logger
 
     workflow "r_plain" do
-      step(:w, fn data ->
+      step :w, fn data ->
         Logger.info("a plain line")
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -108,12 +108,12 @@ defmodule Durable.Integration.WaitsAndCaptureRegressionsTest do
     require Logger
 
     workflow "r_mixed" do
-      step(:w, fn data ->
+      step :w, fn data ->
         IO.puts("printed first")
         Process.sleep(200)
         Logger.info("logged second")
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -240,10 +240,10 @@ defmodule Durable.Integration.WaitsAndCaptureRegressionsTest do
       use Durable.Wait
 
       workflow "r_asks_input" do
-        step(:w, fn data ->
+        step :w, fn data ->
           r = wait_for_input("answer")
           {:ok, Map.put(data, "result", inspect(r))}
-        end)
+        end
       end
     end
 

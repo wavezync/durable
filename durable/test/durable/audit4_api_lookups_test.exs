@@ -23,9 +23,9 @@ defmodule Durable.Audit4ApiLookupsTest do
     use Durable.Wait
 
     workflow "audit4_api_lookup_asks" do
-      step(:ask, fn data ->
+      step :ask, fn data ->
         {:ok, Map.put(data, "answer", wait_for_input("ok"))}
-      end)
+      end
     end
   end
 
@@ -33,9 +33,9 @@ defmodule Durable.Audit4ApiLookupsTest do
     use Durable
 
     workflow "audit4_api_lookup_fails" do
-      step(:work, [compensate: :undo], fn data -> {:ok, data} end)
-      step(:break, fn _data -> {:error, "it's 100% broken_"} end)
-      compensate(:undo, fn data -> {:ok, data} end)
+      step :work, [compensate: :undo], fn data -> {:ok, data} end
+      step :break, fn _data -> {:error, "it's 100% broken_"} end
+      compensate :undo, fn data -> {:ok, data} end
     end
   end
 

@@ -43,49 +43,49 @@ defmodule Durable.OnFailureTest do
     use Durable.Wait
 
     workflow "book_trip" do
-      step(:book_flight, [compensate: :cancel_flight], fn trip -> Steps.book_flight(trip) end)
-      step(:charge_card, fn trip -> Steps.charge_card(trip) end)
-      compensate(:cancel_flight, fn trip -> Steps.cancel_flight(trip) end)
+      step :book_flight, [compensate: :cancel_flight], fn trip -> Steps.book_flight(trip) end
+      step :charge_card, fn trip -> Steps.charge_card(trip) end
+      compensate :cancel_flight, fn trip -> Steps.cancel_flight(trip) end
     end
 
     workflow "book_trip_rolls_back", on_failure: :rollback do
-      step(:book_flight, [compensate: :cancel_flight], fn trip -> Steps.book_flight(trip) end)
-      step(:charge_card, fn trip -> Steps.charge_card(trip) end)
-      compensate(:cancel_flight, fn trip -> Steps.cancel_flight(trip) end)
+      step :book_flight, [compensate: :cancel_flight], fn trip -> Steps.book_flight(trip) end
+      step :charge_card, fn trip -> Steps.charge_card(trip) end
+      compensate :cancel_flight, fn trip -> Steps.cancel_flight(trip) end
     end
 
     # The seat is held for a week; five days is long enough to wait for a fix.
     workflow "book_trip_waits_five_days", on_failure: [rollback_after: days(5)] do
-      step(:book_flight, [compensate: :cancel_flight], fn trip -> Steps.book_flight(trip) end)
-      step(:charge_card, fn trip -> Steps.charge_card(trip) end)
-      compensate(:cancel_flight, fn trip -> Steps.cancel_flight(trip) end)
+      step :book_flight, [compensate: :cancel_flight], fn trip -> Steps.book_flight(trip) end
+      step :charge_card, fn trip -> Steps.charge_card(trip) end
+      compensate :cancel_flight, fn trip -> Steps.cancel_flight(trip) end
     end
 
     # A booking has to be through within the hour.
     workflow "book_trip_within_the_hour", timeout: hours(1) do
-      step(:book_flight, [compensate: :cancel_flight], fn trip -> Steps.book_flight(trip) end)
-      step(:charge_card, fn trip -> Steps.charge_card(trip) end)
-      compensate(:cancel_flight, fn trip -> Steps.cancel_flight(trip) end)
+      step :book_flight, [compensate: :cancel_flight], fn trip -> Steps.book_flight(trip) end
+      step :charge_card, fn trip -> Steps.charge_card(trip) end
+      compensate :cancel_flight, fn trip -> Steps.cancel_flight(trip) end
     end
 
     workflow "quotes_wait_five_days", on_failure: [rollback_after: days(5)] do
       parallel :insurers do
-        step(:north, fn _trip -> {:error, "insurer is down"} end)
+        step :north, fn _trip -> {:error, "insurer is down"} end
       end
     end
 
     # One booking per traveller, ever.
     workflow "book_trip_once", reuse: :never do
-      step(:book_flight, [compensate: :cancel_flight], fn trip -> Steps.book_flight(trip) end)
-      step(:charge_card, fn trip -> Steps.charge_card(trip) end)
-      compensate(:cancel_flight, fn trip -> Steps.cancel_flight(trip) end)
+      step :book_flight, [compensate: :cancel_flight], fn trip -> Steps.book_flight(trip) end
+      step :charge_card, fn trip -> Steps.charge_card(trip) end
+      compensate :cancel_flight, fn trip -> Steps.cancel_flight(trip) end
     end
 
     workflow "rolls_back_and_looks", on_failure: :rollback do
-      step(:book_flight, [compensate: :cancel_flight], fn trip -> Steps.book_flight(trip) end)
-      step(:charge_card, fn trip -> Steps.charge_card(trip) end)
+      step :book_flight, [compensate: :cancel_flight], fn trip -> Steps.book_flight(trip) end
+      step :charge_card, fn trip -> Steps.charge_card(trip) end
 
-      compensate(:cancel_flight, fn trip ->
+      compensate :cancel_flight, fn trip ->
         run =
           Durable.TestRepo.get!(
             Durable.Storage.Schemas.WorkflowExecution,
@@ -94,51 +94,51 @@ defmodule Durable.OnFailureTest do
 
         Seen.note({:holds_key_while_undone, run.holds_key})
         {:ok, trip}
-      end)
+      end
     end
 
     workflow "nothing_to_undo" do
-      step(:charge_card, fn trip -> Steps.charge_card(trip) end)
+      step :charge_card, fn trip -> Steps.charge_card(trip) end
     end
 
     # The seat is held while the traveller confirms.
     workflow "awaits_traveller" do
-      step(:book_flight, [compensate: :cancel_flight], fn trip -> Steps.book_flight(trip) end)
+      step :book_flight, [compensate: :cancel_flight], fn trip -> Steps.book_flight(trip) end
 
-      step(:confirm, fn trip ->
+      step :confirm, fn trip ->
         wait_for_input("confirmation")
         {:ok, trip}
-      end)
+      end
 
-      compensate(:cancel_flight, fn trip -> Steps.cancel_flight(trip) end)
+      compensate :cancel_flight, fn trip -> Steps.cancel_flight(trip) end
     end
 
     workflow "awaits_nothing_booked" do
-      step(:confirm, fn trip ->
+      step :confirm, fn trip ->
         wait_for_input("confirmation")
         {:ok, trip}
-      end)
+      end
     end
 
     workflow "by_fare" do
-      step(:book_flight, [compensate: :cancel_flight], fn trip -> Steps.book_flight(trip) end)
+      step :book_flight, [compensate: :cancel_flight], fn trip -> Steps.book_flight(trip) end
 
       branch :fare, fn _trip -> {:rollback, "the fare is no longer sold"} end do
-        :flexible -> step(:add_changes, fn trip -> {:ok, trip} end)
+        :flexible -> step :add_changes, fn trip -> {:ok, trip} end
       end
 
-      compensate(:cancel_flight, fn trip -> Steps.cancel_flight(trip) end)
+      compensate :cancel_flight, fn trip -> Steps.cancel_flight(trip) end
     end
 
     workflow "quotes" do
-      step(:book_flight, [compensate: :cancel_flight], fn trip -> Steps.book_flight(trip) end)
+      step :book_flight, [compensate: :cancel_flight], fn trip -> Steps.book_flight(trip) end
 
       parallel :insurers do
-        step(:north, fn _trip -> {:rollback, "no insurer will cover this trip"} end)
-        step(:south, fn trip -> {:ok, trip} end)
+        step :north, fn _trip -> {:rollback, "no insurer will cover this trip"} end
+        step :south, fn trip -> {:ok, trip} end
       end
 
-      compensate(:cancel_flight, fn trip -> Steps.cancel_flight(trip) end)
+      compensate :cancel_flight, fn trip -> Steps.cancel_flight(trip) end
     end
   end
 

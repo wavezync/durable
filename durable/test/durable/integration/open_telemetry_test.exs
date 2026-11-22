@@ -25,7 +25,7 @@ defmodule Durable.Integration.OpenTelemetryTest do
     require Logger
 
     workflow "otel_passes" do
-      step(:first, fn d ->
+      step :first, fn d ->
         Probe.put(
           :first_logger,
           Map.take(Map.new(Logger.metadata()), [:otel_trace_id, :otel_span_id])
@@ -39,12 +39,12 @@ defmodule Durable.Integration.OpenTelemetryTest do
         )
 
         {:ok, d}
-      end)
+      end
 
-      step(:second, fn d ->
+      step :second, fn d ->
         Probe.put(:second_logger, Map.take(Map.new(Logger.metadata()), [:otel_span_id]))
         {:ok, d}
-      end)
+      end
     end
   end
 
@@ -53,9 +53,9 @@ defmodule Durable.Integration.OpenTelemetryTest do
     alias Durable.IntegrationProbe, as: Probe
 
     workflow "otel_fails_once" do
-      step(:work, [retry: [max_attempts: 2, backoff: :constant, base: 1]], fn d ->
+      step :work, [retry: [max_attempts: 2, backoff: :constant, base: 1]], fn d ->
         if Probe.note(:body) == 1, do: {:error, "declined"}, else: {:ok, d}
-      end)
+      end
     end
   end
 
@@ -64,14 +64,14 @@ defmodule Durable.Integration.OpenTelemetryTest do
     alias Durable.IntegrationProbe, as: Probe
 
     workflow "otel_killed_once" do
-      step(:work, [retry: [max_attempts: 2, backoff: :constant, base: 1]], fn d ->
+      step :work, [retry: [max_attempts: 2, backoff: :constant, base: 1]], fn d ->
         if Probe.note(:body) == 1 do
           Process.sleep(30)
           Process.exit(self(), :kill)
         end
 
         {:ok, d}
-      end)
+      end
     end
   end
 
@@ -80,11 +80,11 @@ defmodule Durable.Integration.OpenTelemetryTest do
     alias Durable.IntegrationProbe, as: Probe
 
     workflow "otel_held" do
-      step(:work, fn d ->
+      step :work, fn d ->
         Probe.note(:body)
         Probe.wait_for(:release)
         {:ok, d}
-      end)
+      end
     end
   end
 
@@ -93,7 +93,7 @@ defmodule Durable.Integration.OpenTelemetryTest do
 
     workflow "otel_branches" do
       parallel :fan do
-        step(:branch, fn d -> {:ok, d} end)
+        step :branch, fn d -> {:ok, d} end
       end
     end
   end
@@ -102,9 +102,9 @@ defmodule Durable.Integration.OpenTelemetryTest do
     use Durable
 
     workflow "otel_compensated", on_failure: :rollback do
-      step(:book, [compensate: :unbook], fn d -> {:ok, d} end)
-      step(:charge, fn _d -> {:fail, "declined"} end)
-      compensate(:unbook, fn d -> {:ok, d} end)
+      step :book, [compensate: :unbook], fn d -> {:ok, d} end
+      step :charge, fn _d -> {:fail, "declined"} end
+      compensate :unbook, fn d -> {:ok, d} end
     end
   end
 

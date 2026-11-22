@@ -9,22 +9,22 @@ defmodule Durable.TestingTest do
     use Durable.Wait
 
     workflow "order" do
-      step(:reserve, fn data -> {:ok, assign(data, :reserved, true)} end)
+      step :reserve, fn data -> {:ok, assign(data, :reserved, true)} end
 
       parallel :notify do
-        step(:email, fn data -> {:ok, assign(data, :emailed, true)} end)
-        step(:invoice, fn data -> {:ok, assign(data, :invoiced, true)} end)
+        step :email, fn data -> {:ok, assign(data, :emailed, true)} end
+        step :invoice, fn data -> {:ok, assign(data, :invoiced, true)} end
       end
 
-      step(:cool_off, fn data ->
+      step :cool_off, fn data ->
         sleep(hours(24))
         {:ok, data}
-      end)
+      end
 
-      step(:approve, fn data ->
+      step :approve, fn data ->
         %{"approved" => approved} = wait_for_input("approval")
         {:ok, assign(data, :approved, approved)}
-      end)
+      end
     end
   end
 
@@ -33,11 +33,11 @@ defmodule Durable.TestingTest do
     use Durable.Helpers
 
     workflow "flaky" do
-      step(:charge, [retry: [max_attempts: 3]], fn data ->
+      step :charge, [retry: [max_attempts: 3]], fn data ->
         calls = Process.get(:charge_calls, 0) + 1
         Process.put(:charge_calls, calls)
         if calls < 3, do: {:error, "card declined"}, else: {:ok, assign(data, :charged, true)}
-      end)
+      end
     end
   end
 
@@ -46,7 +46,7 @@ defmodule Durable.TestingTest do
     use Durable.Helpers
 
     workflow "payment" do
-      step(:authorize, fn _data -> {:ok, %{payment_id: "pay_1"}} end)
+      step :authorize, fn _data -> {:ok, %{payment_id: "pay_1"}} end
     end
   end
 
@@ -56,14 +56,14 @@ defmodule Durable.TestingTest do
     use Durable.Orchestration
 
     workflow "trip", on_failure: :rollback do
-      step(:pay, [compensate: :refund], fn data ->
+      step :pay, [compensate: :refund], fn data ->
         {:ok, child} = call_workflow(Payment, %{})
         {:ok, assign(data, :payment_id, child["payment_id"])}
-      end)
+      end
 
-      step(:book, fn _data -> {:error, "sold out"} end)
+      step :book, fn _data -> {:error, "sold out"} end
 
-      compensate(:refund, fn data -> {:ok, data} end)
+      compensate :refund, fn data -> {:ok, data} end
     end
   end
 
@@ -71,7 +71,7 @@ defmodule Durable.TestingTest do
     use Durable
 
     workflow "declined", on_failure: :rollback do
-      step(:charge, fn _data -> {:error, "card declined"} end)
+      step :charge, fn _data -> {:error, "card declined"} end
     end
   end
 

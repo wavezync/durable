@@ -1178,18 +1178,18 @@ defmodule SleepTestWorkflow do
   use Durable.Wait
 
   workflow "sleep_test" do
-    step(:before_sleep, fn data ->
+    step :before_sleep, fn data ->
       {:ok, assign(data, :before, true)}
-    end)
+    end
 
-    step(:sleep_step, fn data ->
+    step :sleep_step, fn data ->
       sleep(seconds(30))
       {:ok, assign(data, :after_sleep, true)}
-    end)
+    end
 
-    step(:after_sleep, fn data ->
+    step :after_sleep, fn data ->
       {:ok, assign(data, :completed, true)}
-    end)
+    end
   end
 end
 
@@ -1199,14 +1199,14 @@ defmodule ScheduleAtTestWorkflow do
   use Durable.Wait
 
   workflow "schedule_at_test" do
-    step(:before_schedule, fn data ->
+    step :before_schedule, fn data ->
       {:ok, assign(data, :before, true)}
-    end)
+    end
 
-    step(:schedule_step, fn data ->
+    step :schedule_step, fn data ->
       schedule_at(next_business_day(hour: 9))
       {:ok, assign(data, :after_schedule, true)}
-    end)
+    end
   end
 end
 
@@ -1221,14 +1221,14 @@ defmodule ShortSleepWorkflow do
   use Durable.Wait
 
   workflow "short_sleep" do
-    step(:before_step, fn data -> {:ok, assign(data, :before, true)} end)
+    step :before_step, fn data -> {:ok, assign(data, :before, true)} end
 
-    step(:sleep_step, fn data ->
+    step :sleep_step, fn data ->
       sleep(1)
       {:ok, assign(data, :slept, true)}
-    end)
+    end
 
-    step(:after_step, fn data -> {:ok, assign(data, :completed, true)} end)
+    step :after_step, fn data -> {:ok, assign(data, :completed, true)} end
   end
 end
 
@@ -1238,10 +1238,10 @@ defmodule ShortScheduleAtWorkflow do
   use Durable.Wait
 
   workflow "short_schedule_at" do
-    step(:schedule_step, fn data ->
+    step :schedule_step, fn data ->
       schedule_at(DateTime.add(DateTime.utc_now(), -1, :second))
       {:ok, assign(data, :scheduled, true)}
-    end)
+    end
   end
 end
 
@@ -1251,15 +1251,15 @@ defmodule TwoSleepWorkflow do
   use Durable.Wait
 
   workflow "two_sleep" do
-    step(:first_sleep, fn data ->
+    step :first_sleep, fn data ->
       sleep(1)
       {:ok, assign(data, :first_done, true)}
-    end)
+    end
 
-    step(:second_sleep, fn data ->
+    step :second_sleep, fn data ->
       sleep(1)
       {:ok, assign(data, :second_done, true)}
-    end)
+    end
   end
 end
 
@@ -1273,15 +1273,15 @@ defmodule SleepThenEventWorkflow do
   # woke and completed, the row's stale scheduled_at made the SleepWaker
   # repeatedly flip the event-waiting row back to :pending.
   workflow "sleep_then_event" do
-    step(:nap, fn data ->
+    step :nap, fn data ->
       sleep(1)
       {:ok, assign(data, :napped, true)}
-    end)
+    end
 
-    step(:await, fn data ->
+    step :await, fn data ->
       result = wait_for_event("go")
       {:ok, assign(data, :result, result)}
-    end)
+    end
   end
 end
 
@@ -1291,7 +1291,7 @@ defmodule EventWaitTestWorkflow do
   use Durable.Wait
 
   workflow "event_wait_test" do
-    step(:wait_step, fn data ->
+    step :wait_step, fn data ->
       result =
         wait_for_event("payment_confirmed",
           timeout: hours(1),
@@ -1299,7 +1299,7 @@ defmodule EventWaitTestWorkflow do
         )
 
       {:ok, assign(data, :result, result)}
-    end)
+    end
   end
 end
 
@@ -1309,7 +1309,7 @@ defmodule WaitAnyTestWorkflow do
   use Durable.Wait
 
   workflow "wait_any_test" do
-    step(:wait_step, fn data ->
+    step :wait_step, fn data ->
       {event_name, payload} = wait_for_any(["success", "failure"])
 
       data =
@@ -1318,7 +1318,7 @@ defmodule WaitAnyTestWorkflow do
         |> assign(:payload, payload)
 
       {:ok, data}
-    end)
+    end
   end
 end
 
@@ -1328,10 +1328,10 @@ defmodule WaitAllTestWorkflow do
   use Durable.Wait
 
   workflow "wait_all_test" do
-    step(:wait_step, fn data ->
+    step :wait_step, fn data ->
       results = wait_for_all(["approval_a", "approval_b"])
       {:ok, assign(data, :results, results)}
-    end)
+    end
   end
 end
 
@@ -1341,7 +1341,7 @@ defmodule InputWaitTestWorkflow do
   use Durable.Wait
 
   workflow "input_wait_test" do
-    step(:wait_step, fn data ->
+    step :wait_step, fn data ->
       result =
         wait_for_approval("manager_approval",
           prompt: "Approve?",
@@ -1351,7 +1351,7 @@ defmodule InputWaitTestWorkflow do
         )
 
       {:ok, assign(data, :approval, result)}
-    end)
+    end
   end
 end
 
@@ -1361,10 +1361,10 @@ defmodule ApprovalTestWorkflow do
   use Durable.Wait
 
   workflow "approval_test" do
-    step(:wait_step, fn data ->
+    step :wait_step, fn data ->
       result = wait_for_approval("expense_approval", prompt: "Approve expense?")
       {:ok, assign(data, :result, result)}
-    end)
+    end
   end
 end
 
@@ -1374,7 +1374,7 @@ defmodule ChoiceTestWorkflow do
   use Durable.Wait
 
   workflow "choice_test" do
-    step(:wait_step, fn data ->
+    step :wait_step, fn data ->
       result =
         wait_for_choice("shipping_method",
           prompt: "Select shipping:",
@@ -1385,7 +1385,7 @@ defmodule ChoiceTestWorkflow do
         )
 
       {:ok, assign(data, :result, result)}
-    end)
+    end
   end
 end
 
@@ -1395,10 +1395,10 @@ defmodule TextTestWorkflow do
   use Durable.Wait
 
   workflow "text_test" do
-    step(:wait_step, fn data ->
+    step :wait_step, fn data ->
       result = wait_for_text("feedback", prompt: "Enter feedback:")
       {:ok, assign(data, :result, result)}
-    end)
+    end
   end
 end
 
@@ -1408,7 +1408,7 @@ defmodule FormTestWorkflow do
   use Durable.Wait
 
   workflow "form_test" do
-    step(:wait_step, fn data ->
+    step :wait_step, fn data ->
       result =
         wait_for_form("equipment_request",
           prompt: "Select equipment:",
@@ -1419,7 +1419,7 @@ defmodule FormTestWorkflow do
         )
 
       {:ok, assign(data, :result, result)}
-    end)
+    end
   end
 end
 
@@ -1429,7 +1429,7 @@ defmodule ShortTimeoutInputWorkflow do
   use Durable.Wait
 
   workflow "short_timeout_input" do
-    step(:wait_step, fn data ->
+    step :wait_step, fn data ->
       result =
         wait_for_input("quick_input",
           timeout: seconds(1),
@@ -1437,7 +1437,7 @@ defmodule ShortTimeoutInputWorkflow do
         )
 
       {:ok, assign(data, :result, result)}
-    end)
+    end
   end
 end
 
@@ -1447,7 +1447,7 @@ defmodule ShortTimeoutEventWorkflow do
   use Durable.Wait
 
   workflow "short_timeout_event" do
-    step(:wait_step, fn data ->
+    step :wait_step, fn data ->
       result =
         wait_for_event("quick_event",
           timeout: seconds(1),
@@ -1455,7 +1455,7 @@ defmodule ShortTimeoutEventWorkflow do
         )
 
       {:ok, assign(data, :result, result)}
-    end)
+    end
   end
 end
 
@@ -1464,9 +1464,9 @@ defmodule SimpleCompletingWorkflow do
   use Durable.Helpers
 
   workflow "simple_completing" do
-    step(:complete, fn data ->
+    step :complete, fn data ->
       {:ok, assign(data, :done, true)}
-    end)
+    end
   end
 end
 
@@ -1480,16 +1480,16 @@ defmodule ContextPreservationWorkflow do
   use Durable.Wait
 
   workflow "context_preservation" do
-    step(:setup, fn data ->
+    step :setup, fn data ->
       data =
         data
         |> assign(:before_wait, "preserved")
         |> assign(:counter, 1)
 
       {:ok, data}
-    end)
+    end
 
-    step(:wait_and_check, fn data ->
+    step :wait_and_check, fn data ->
       result = wait_for_event("continue")
       # These should still be accessible after resume
       before = data[:before_wait]
@@ -1500,7 +1500,7 @@ defmodule ContextPreservationWorkflow do
         |> assign(:verified_before, before)
 
       {:ok, data}
-    end)
+    end
   end
 end
 
@@ -1510,23 +1510,23 @@ defmodule MultiStepResumeWorkflow do
   use Durable.Wait
 
   workflow "multi_step_resume" do
-    step(:first, fn data ->
+    step :first, fn data ->
       {:ok, assign(data, :step1, true)}
-    end)
+    end
 
-    step(:wait_step, fn data ->
+    step :wait_step, fn data ->
       result = wait_for_event("trigger")
       {:ok, assign(data, :wait_result, result)}
-    end)
+    end
 
-    step(:after_wait, fn data ->
+    step :after_wait, fn data ->
       data =
         data
         |> assign(:step3, true)
         |> assign(:final, data[:step1] && data[:wait_result])
 
       {:ok, data}
-    end)
+    end
   end
 end
 
@@ -1536,21 +1536,21 @@ defmodule SequentialWaitsWorkflow do
   use Durable.Wait
 
   workflow "sequential_waits" do
-    step(:first_wait, fn data ->
+    step :first_wait, fn data ->
       result1 = wait_for_event("event1")
       {:ok, assign(data, :result1, result1)}
-    end)
+    end
 
-    step(:second_wait, fn data ->
+    step :second_wait, fn data ->
       result2 = wait_for_event("event2")
       {:ok, assign(data, :result2, result2)}
-    end)
+    end
 
-    step(:combine, fn data ->
+    step :combine, fn data ->
       r1 = data[:result1]
       r2 = data[:result2]
       {:ok, assign(data, :combined, %{first: r1, second: r2})}
-    end)
+    end
   end
 end
 
@@ -1560,7 +1560,7 @@ defmodule ZeroTimeoutEventWorkflow do
   use Durable.Wait
 
   workflow "zero_timeout_event" do
-    step(:wait_step, fn data ->
+    step :wait_step, fn data ->
       result =
         wait_for_event("quick_event",
           timeout: 0,
@@ -1568,7 +1568,7 @@ defmodule ZeroTimeoutEventWorkflow do
         )
 
       {:ok, assign(data, :result, result)}
-    end)
+    end
   end
 end
 
@@ -1580,10 +1580,10 @@ defmodule SpecialCharEventWorkflow do
   use Durable.Wait
 
   workflow "special_char_event" do
-    step(:wait_step, fn data ->
+    step :wait_step, fn data ->
       result = wait_for_event("event-with_special.chars:123")
       {:ok, assign(data, :result, result)}
-    end)
+    end
   end
 end
 
@@ -1593,10 +1593,10 @@ defmodule UnicodeEventWorkflow do
   use Durable.Wait
 
   workflow "unicode_event" do
-    step(:wait_step, fn data ->
+    step :wait_step, fn data ->
       result = wait_for_event("событие_イベント")
       {:ok, assign(data, :result, result)}
-    end)
+    end
   end
 end
 
@@ -1610,11 +1610,11 @@ defmodule TupleTimeoutValueWorkflow do
   use Durable.Wait
 
   workflow "tuple_timeout" do
-    step(:wait_step, fn data ->
+    step :wait_step, fn data ->
       # Idiomatic Elixir tuple — would crash JSONB insert before fix.
       result = wait_for_event("evt", timeout: hours(1), timeout_value: {:error, :timeout})
       {:ok, assign(data, :result, result)}
-    end)
+    end
   end
 end
 
@@ -1624,7 +1624,7 @@ defmodule NestedTupleTimeoutValueWorkflow do
   use Durable.Wait
 
   workflow "nested_tuple_timeout" do
-    step(:wait_step, fn data ->
+    step :wait_step, fn data ->
       result =
         wait_for_event("evt",
           timeout: hours(1),
@@ -1632,6 +1632,6 @@ defmodule NestedTupleTimeoutValueWorkflow do
         )
 
       {:ok, assign(data, :result, result)}
-    end)
+    end
   end
 end

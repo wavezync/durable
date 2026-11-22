@@ -14,15 +14,15 @@ defmodule Durable.StepStopTest do
     use Durable.Helpers
 
     workflow "fail_now", on_failure: :rollback do
-      step(:book, [compensate: :unbook], fn data -> {:ok, assign(data, :booked, true)} end)
+      step :book, [compensate: :unbook], fn data -> {:ok, assign(data, :booked, true)} end
 
-      step(:fetch, [retry: [max_attempts: 5, backoff: :constant, base: 1]], fn _data ->
+      step :fetch, [retry: [max_attempts: 5, backoff: :constant, base: 1]], fn _data ->
         {:fail, %{type: "gone", message: "410"}}
-      end)
+      end
 
-      step(:after, fn data -> {:ok, assign(data, :after, true)} end)
+      step :after, fn data -> {:ok, assign(data, :after, true)} end
 
-      compensate(:unbook, fn data -> {:ok, data} end)
+      compensate :unbook, fn data -> {:ok, data} end
     end
   end
 
@@ -31,15 +31,15 @@ defmodule Durable.StepStopTest do
     use Durable.Helpers
 
     workflow "cancel_now", on_failure: :rollback do
-      step(:book, [compensate: :unbook], fn data -> {:ok, assign(data, :booked, true)} end)
+      step :book, [compensate: :unbook], fn data -> {:ok, assign(data, :booked, true)} end
 
-      step(:fetch, [retry: [max_attempts: 5, backoff: :constant, base: 1]], fn _data ->
+      step :fetch, [retry: [max_attempts: 5, backoff: :constant, base: 1]], fn _data ->
         {:cancel, "record deleted"}
-      end)
+      end
 
-      step(:after, fn data -> {:ok, assign(data, :after, true)} end)
+      step :after, fn data -> {:ok, assign(data, :after, true)} end
 
-      compensate(:unbook, fn data -> {:ok, data} end)
+      compensate :unbook, fn data -> {:ok, data} end
     end
   end
 
@@ -47,7 +47,7 @@ defmodule Durable.StepStopTest do
     use Durable
 
     workflow "cancelling_child" do
-      step(:work, fn _data -> {:cancel, :not_needed} end)
+      step :work, fn _data -> {:cancel, :not_needed} end
     end
   end
 
@@ -57,12 +57,12 @@ defmodule Durable.StepStopTest do
     use Durable.Orchestration
 
     workflow "calls_cancelling_child" do
-      step(:call, fn data ->
+      step :call, fn data ->
         case call_workflow(CancellingChild, %{}) do
           {:ok, result} -> {:ok, assign(data, :result, result)}
           {:error, reason} -> {:ok, assign(data, :child_error, reason)}
         end
-      end)
+      end
     end
   end
 
@@ -72,8 +72,8 @@ defmodule Durable.StepStopTest do
 
     workflow "skips_one_branch" do
       parallel :mail, on_error: :collect do
-        step(:skipped, fn _data -> {:cancel, "nothing to send", scope: :run} end)
-        step(:sent, fn data -> {:ok, assign(data, :sent, true)} end)
+        step :skipped, fn _data -> {:cancel, "nothing to send", scope: :run} end
+        step :sent, fn data -> {:ok, assign(data, :sent, true)} end
       end
     end
   end
@@ -83,16 +83,16 @@ defmodule Durable.StepStopTest do
     use Durable.Helpers
 
     workflow "cancels_from_branch", on_failure: :rollback do
-      step(:book, [compensate: :unbook], fn data -> {:ok, assign(data, :booked, true)} end)
+      step :book, [compensate: :unbook], fn data -> {:ok, assign(data, :booked, true)} end
 
       parallel :checks do
-        step(:check, fn _data -> {:cancel, "order withdrawn"} end)
-        step(:other, fn data -> {:ok, data} end)
+        step :check, fn _data -> {:cancel, "order withdrawn"} end
+        step :other, fn data -> {:ok, data} end
       end
 
-      step(:after, fn data -> {:ok, assign(data, :after, true)} end)
+      step :after, fn data -> {:ok, assign(data, :after, true)} end
 
-      compensate(:unbook, fn data -> {:ok, data} end)
+      compensate :unbook, fn data -> {:ok, data} end
     end
   end
 
@@ -100,7 +100,7 @@ defmodule Durable.StepStopTest do
     use Durable
 
     workflow "cancels_tree" do
-      step(:work, fn _data -> {:cancel, "account closed", scope: :root} end)
+      step :work, fn _data -> {:cancel, "account closed", scope: :root} end
     end
   end
 
@@ -110,12 +110,12 @@ defmodule Durable.StepStopTest do
     use Durable.Orchestration
 
     workflow "calls_cancels_tree", on_failure: :rollback do
-      step(:call, fn data ->
+      step :call, fn data ->
         case call_workflow(CancelsTree, %{}) do
           {:ok, result} -> {:ok, assign(data, :result, result)}
           {:error, reason} -> {:ok, assign(data, :child_error, reason)}
         end
-      end)
+      end
     end
   end
 

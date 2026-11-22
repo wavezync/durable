@@ -18,7 +18,7 @@ defmodule Durable.PubSubTest do
     use Durable
 
     workflow "snoozes" do
-      step(:later, fn _data -> {:snooze, 60_000} end)
+      step :later, fn _data -> {:snooze, 60_000} end
     end
   end
 
@@ -116,10 +116,10 @@ defmodule Durable.PubSubTest do
       use Durable.Wait
 
       workflow "approval" do
-        step(:ask, fn _data ->
+        step :ask, fn _data ->
           approval = wait_for_input("approve", type: :approval, prompt: "OK?")
           {:ok, %{approval: approval}}
-        end)
+        end
       end
     end
 

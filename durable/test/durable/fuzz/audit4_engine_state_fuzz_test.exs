@@ -121,7 +121,7 @@ defmodule Durable.Fuzz.Audit4EngineStateTest do
     alias Durable.Fuzz.Audit4EngineStateTest, as: T
 
     workflow "audit4_es_charge" do
-      step(:charge, fn payment ->
+      step :charge, fn payment ->
         T.hit(:charge_started)
         payment = T.dirty(payment)
         confirmed = wait_for_event("bank_confirmed")
@@ -130,9 +130,9 @@ defmodule Durable.Fuzz.Audit4EngineStateTest do
          payment
          |> Map.merge(T.as_map(confirmed))
          |> Map.put("bank", T.kind(confirmed))}
-      end)
+      end
 
-      step(:receipt, fn payment -> {:ok, payment |> T.dirty() |> Map.put("paid", true)} end)
+      step :receipt, fn payment -> {:ok, payment |> T.dirty() |> Map.put("paid", true)} end
     end
   end
 
@@ -145,69 +145,69 @@ defmodule Durable.Fuzz.Audit4EngineStateTest do
     alias Durable.Fuzz.Audit4EngineStateTest.Audit4EsCharge
 
     workflow "audit4_es_order" do
-      step(:intake, fn order ->
+      step :intake, fn order ->
         T.hit(:intake)
         {:ok, T.dirty(order)}
-      end)
+      end
 
-      step(:reserve_stock, [compensate: :release_stock], fn order ->
+      step :reserve_stock, [compensate: :release_stock], fn order ->
         T.hit(:reserved)
         {:ok, order |> T.dirty() |> Map.put("reserved", true)}
-      end)
+      end
 
-      step(:cool_off, fn order ->
+      step :cool_off, fn order ->
         order = T.dirty(order)
         sleep(60_000)
         T.hit(:cooled_off)
         {:ok, Map.put(order, "cooled_off", true)}
-      end)
+      end
 
-      step(:await_payment_method, fn order ->
+      step :await_payment_method, fn order ->
         order = T.dirty(order)
         method = wait_for_event("method_chosen")
         T.hit(:method)
         {:ok, order |> Map.merge(T.as_map(method)) |> Map.put("method", T.kind(method))}
-      end)
+      end
 
-      step(:approve, fn order ->
+      step :approve, fn order ->
         order = T.dirty(order)
         answer = wait_for_input("approval")
         T.hit(:approved)
         {:ok, order |> Map.merge(T.as_map(answer)) |> Map.put("approval", T.kind(answer))}
-      end)
+      end
 
       branch on: fn order -> order["route"] end do
         "express" ->
-          step(:book_courier, fn order ->
+          step :book_courier, fn order ->
             T.hit(:courier)
             {:ok, order |> T.dirty() |> Map.put("by", "courier")}
-          end)
+          end
 
         _ ->
-          step(:post, fn order ->
+          step :post, fn order ->
             T.hit(:post)
             {:ok, order |> T.dirty() |> Map.put("by", "post")}
-          end)
+          end
       end
 
       parallel :lookups,
         into: fn order, results ->
           {:ok, order |> Map.merge(T.poison()) |> Map.put("lookups", T.describe(results))}
         end do
-        step(:stock, fn order ->
+        step :stock, fn order ->
           order = T.dirty(order)
           counted = wait_for_event("stock_counted")
           T.hit(:stock)
           {:ok, order |> Map.merge(T.as_map(counted)) |> Map.put("stock", T.kind(counted))}
-        end)
+        end
 
-        step(:address, fn order ->
+        step :address, fn order ->
           T.hit(:address)
           {:ok, order |> T.dirty() |> Map.put("address", "found")}
-        end)
+        end
       end
 
-      step(:charge, fn order ->
+      step :charge, fn order ->
         order = T.dirty(order)
         payment = Map.merge(%{"amount" => 5}, T.poison())
 
@@ -215,9 +215,9 @@ defmodule Durable.Fuzz.Audit4EngineStateTest do
           {:ok, paid} -> {:ok, order |> Map.merge(paid) |> Map.put("charged", true)}
           {:error, reason} -> {:error, reason}
         end
-      end)
+      end
 
-      step(:dispatch, fn order ->
+      step :dispatch, fn order ->
         order = T.dirty(order)
         T.hit(:dispatch)
 
@@ -226,13 +226,13 @@ defmodule Durable.Fuzz.Audit4EngineStateTest do
           "fail" -> {:error, "the depot is closed"}
           _ -> {:ok, Map.put(order, "dispatched", true)}
         end
-      end)
+      end
 
-      compensate(:release_stock, fn order ->
+      compensate :release_stock, fn order ->
         T.hit(:released)
         T.seen(order)
         {:ok, order}
-      end)
+      end
     end
   end
 

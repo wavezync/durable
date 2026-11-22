@@ -34,25 +34,25 @@ defmodule Durable.OperatorControlsTest do
     end
 
     workflow "flaky" do
-      step(:s1, [retry: [max_attempts: 2, backoff: :constant, base: 1]], fn data ->
+      step :s1, [retry: [max_attempts: 2, backoff: :constant, base: 1]], fn data ->
         __MODULE__.act(1, data)
-      end)
+      end
 
-      step(:s2, [retry: [max_attempts: 2, backoff: :constant, base: 1]], fn data ->
+      step :s2, [retry: [max_attempts: 2, backoff: :constant, base: 1]], fn data ->
         __MODULE__.act(2, data)
-      end)
+      end
 
-      step(:s3, [retry: [max_attempts: 2, backoff: :constant, base: 1]], fn data ->
+      step :s3, [retry: [max_attempts: 2, backoff: :constant, base: 1]], fn data ->
         __MODULE__.act(3, data)
-      end)
+      end
 
-      step(:s4, [retry: [max_attempts: 2, backoff: :constant, base: 1]], fn data ->
+      step :s4, [retry: [max_attempts: 2, backoff: :constant, base: 1]], fn data ->
         __MODULE__.act(4, data)
-      end)
+      end
 
-      step(:s5, [retry: [max_attempts: 2, backoff: :constant, base: 1]], fn data ->
+      step :s5, [retry: [max_attempts: 2, backoff: :constant, base: 1]], fn data ->
         __MODULE__.act(5, data)
-      end)
+      end
     end
   end
 
@@ -61,14 +61,14 @@ defmodule Durable.OperatorControlsTest do
     use Durable
 
     workflow "flaky_parallel" do
-      step(:setup, fn data -> Flaky.act(1, data) end)
+      step :setup, fn data -> Flaky.act(1, data) end
 
       parallel :sides do
-        step(:left, fn data -> Flaky.act(2, data) end)
-        step(:right, fn data -> Flaky.act(3, data) end)
+        step :left, fn data -> Flaky.act(2, data) end
+        step :right, fn data -> Flaky.act(3, data) end
       end
 
-      step(:finish, fn data -> Flaky.act(4, data) end)
+      step :finish, fn data -> Flaky.act(4, data) end
     end
   end
 
@@ -77,9 +77,9 @@ defmodule Durable.OperatorControlsTest do
     use Durable
 
     workflow "compensated", on_failure: :rollback do
-      step(:book, [compensate: :unbook], fn data -> {:ok, data} end)
-      step(:fail, fn _data -> raise "nope" end)
-      compensate(:unbook, fn data -> {:ok, data} end)
+      step :book, [compensate: :unbook], fn data -> {:ok, data} end
+      step :fail, fn _data -> raise "nope" end
+      compensate :unbook, fn data -> {:ok, data} end
     end
   end
 

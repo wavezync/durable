@@ -21,7 +21,7 @@ defmodule PhoenixDemo.Workflows.ExpenseApprovalWorkflow do
   @dual_approval_threshold 1_000
 
   workflow "expense_approval", timeout: hours(48) do
-    step(:collect_expense, fn data ->
+    step :collect_expense, fn data ->
       employee = data["employee"] || "Anonymous"
       put_context(:employee, employee)
 
@@ -73,9 +73,9 @@ defmodule PhoenixDemo.Workflows.ExpenseApprovalWorkflow do
          "category" => result["category"],
          "description" => result["description"]
        })}
-    end)
+    end
 
-    decision(:route_by_amount, fn data ->
+    decision :route_by_amount, fn data ->
       amount = get_context(:amount) || 0
 
       if amount > @dual_approval_threshold do
@@ -87,9 +87,9 @@ defmodule PhoenixDemo.Workflows.ExpenseApprovalWorkflow do
         put_context(:approval_path, "single")
         {:goto, :single_approval, data}
       end
-    end)
+    end
 
-    step(:dual_approval, fn data ->
+    step :dual_approval, fn data ->
       employee = get_context(:employee)
       amount = get_context(:amount)
 
@@ -113,9 +113,9 @@ defmodule PhoenixDemo.Workflows.ExpenseApprovalWorkflow do
         Logger.warning("[Expense] Approval denied — manager=#{manager_ok} cfo=#{cfo_ok}")
         {:ok, assign(data, :approved, false)}
       end
-    end)
+    end
 
-    step(:single_approval, fn data ->
+    step :single_approval, fn data ->
       employee = get_context(:employee)
       amount = get_context(:amount)
       category = get_context(:category)
@@ -139,9 +139,9 @@ defmodule PhoenixDemo.Workflows.ExpenseApprovalWorkflow do
 
       Logger.info("[Expense] Single approval result: #{approved}")
       {:ok, assign(data, :approved, approved)}
-    end)
+    end
 
-    step(:record_expense, fn data ->
+    step :record_expense, fn data ->
       employee = get_context(:employee)
       amount = get_context(:amount)
       category = get_context(:category)
@@ -163,7 +163,7 @@ defmodule PhoenixDemo.Workflows.ExpenseApprovalWorkflow do
          "status" => status,
          "recorded_at" => DateTime.utc_now() |> DateTime.to_iso8601()
        }}
-    end)
+    end
   end
 
   defp approved?(:approved), do: true

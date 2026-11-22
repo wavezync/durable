@@ -239,17 +239,17 @@ defmodule DecisionTypeTestWorkflow do
   use Durable.Helpers
 
   workflow "decision_type_test" do
-    step(:setup, fn data ->
+    step :setup, fn data ->
       {:ok, data}
-    end)
+    end
 
-    decision(:branch, fn data ->
+    decision :branch, fn data ->
       {:goto, :option_a, data}
-    end)
+    end
 
-    step(:option_a, fn data ->
+    step :option_a, fn data ->
       {:ok, data}
-    end)
+    end
   end
 end
 
@@ -258,13 +258,13 @@ defmodule RetryDecisionTestWorkflow do
   use Durable.Helpers
 
   workflow "retry_decision" do
-    decision(:risky_decision, [retry: [max_attempts: 3]], fn data ->
+    decision :risky_decision, [retry: [max_attempts: 3]], fn data ->
       {:ok, data}
-    end)
+    end
 
-    step(:next, fn data ->
+    step :next, fn data ->
       {:ok, data}
-    end)
+    end
   end
 end
 
@@ -273,25 +273,25 @@ defmodule GotoTestWorkflow do
   use Durable.Helpers
 
   workflow "goto_test" do
-    step(:setup, fn data ->
+    step :setup, fn data ->
       {:ok, assign(data, :amount, data["amount"])}
-    end)
+    end
 
-    decision(:check_amount, fn data ->
+    decision :check_amount, fn data ->
       if data[:amount] > 1000 do
         {:goto, :manager_approval, data}
       else
         {:goto, :auto_approve, data}
       end
-    end)
+    end
 
-    step(:auto_approve, fn data ->
+    step :auto_approve, fn data ->
       {:ok, assign(data, :approved_by, "system")}
-    end)
+    end
 
-    step(:manager_approval, fn data ->
+    step :manager_approval, fn data ->
       {:ok, assign(data, :approved_by, "manager")}
-    end)
+    end
   end
 end
 
@@ -300,25 +300,25 @@ defmodule MultiSkipTestWorkflow do
   use Durable.Helpers
 
   workflow "multi_skip" do
-    step(:step_one, fn data ->
+    step :step_one, fn data ->
       {:ok, data}
-    end)
+    end
 
-    decision(:decide, fn data ->
+    decision :decide, fn data ->
       {:goto, :step_four, data}
-    end)
+    end
 
-    step(:step_two, fn data ->
+    step :step_two, fn data ->
       {:ok, assign(data, :step_two, true)}
-    end)
+    end
 
-    step(:step_three, fn data ->
+    step :step_three, fn data ->
       {:ok, assign(data, :step_three, true)}
-    end)
+    end
 
-    step(:step_four, fn data ->
+    step :step_four, fn data ->
       {:ok, assign(data, :reached, true)}
-    end)
+    end
   end
 end
 
@@ -327,21 +327,21 @@ defmodule ContinueTestWorkflow do
   use Durable.Helpers
 
   workflow "continue_test" do
-    step(:first, fn data ->
+    step :first, fn data ->
       {:ok, assign(data, :first, true)}
-    end)
+    end
 
-    decision(:decide, fn data ->
+    decision :decide, fn data ->
       {:ok, data}
-    end)
+    end
 
-    step(:second, fn data ->
+    step :second, fn data ->
       {:ok, assign(data, :second, true)}
-    end)
+    end
 
-    step(:third, fn data ->
+    step :third, fn data ->
       {:ok, assign(data, :third, true)}
-    end)
+    end
   end
 end
 
@@ -350,13 +350,13 @@ defmodule PlainReturnTestWorkflow do
   use Durable.Helpers
 
   workflow "plain_return" do
-    decision(:decide, fn data ->
+    decision :decide, fn data ->
       {:ok, data}
-    end)
+    end
 
-    step(:next, fn data ->
+    step :next, fn data ->
       {:ok, assign(data, :reached, true)}
-    end)
+    end
   end
 end
 
@@ -365,13 +365,13 @@ defmodule InvalidTargetTestWorkflow do
   use Durable.Helpers
 
   workflow "invalid_target" do
-    decision(:decide, fn data ->
+    decision :decide, fn data ->
       {:goto, :nonexistent_step, data}
-    end)
+    end
 
-    step(:real_step, fn data ->
+    step :real_step, fn data ->
       {:ok, data}
-    end)
+    end
   end
 end
 
@@ -380,21 +380,21 @@ defmodule BackwardJumpTestWorkflow do
   use Durable.Helpers
 
   workflow "backward_jump" do
-    step(:first, fn data ->
+    step :first, fn data ->
       {:ok, data}
-    end)
+    end
 
-    step(:second, fn data ->
+    step :second, fn data ->
       {:ok, data}
-    end)
+    end
 
-    decision(:decide, fn data ->
+    decision :decide, fn data ->
       {:goto, :first, data}
-    end)
+    end
 
-    step(:third, fn data ->
+    step :third, fn data ->
       {:ok, data}
-    end)
+    end
   end
 end
 
@@ -403,13 +403,13 @@ defmodule SelfJumpTestWorkflow do
   use Durable.Helpers
 
   workflow "self_jump" do
-    decision(:decide, fn data ->
+    decision :decide, fn data ->
       {:goto, :decide, data}
-    end)
+    end
 
-    step(:next, fn data ->
+    step :next, fn data ->
       {:ok, data}
-    end)
+    end
   end
 end
 
@@ -418,14 +418,14 @@ defmodule DecisionWithContextTestWorkflow do
   use Durable.Helpers
 
   workflow "decision_with_context" do
-    step(:setup, fn data ->
+    step :setup, fn data ->
       {:ok,
        data
        |> assign(:value, 150)
        |> assign(:threshold, data["threshold"])}
-    end)
+    end
 
-    decision(:branch, fn data ->
+    decision :branch, fn data ->
       threshold = data[:threshold]
 
       if data[:value] > threshold do
@@ -435,15 +435,15 @@ defmodule DecisionWithContextTestWorkflow do
         data = assign(data, :branch_taken, "low")
         {:goto, :low_path, data}
       end
-    end)
+    end
 
-    step(:low_path, fn data ->
+    step :low_path, fn data ->
       {:ok, assign(data, :path, "low")}
-    end)
+    end
 
-    step(:high_path, fn data ->
+    step :high_path, fn data ->
       {:ok, assign(data, :path, "high")}
-    end)
+    end
   end
 end
 
@@ -452,37 +452,37 @@ defmodule DecisionChainTestWorkflow do
   use Durable.Helpers
 
   workflow "decision_chain" do
-    step(:setup, fn data ->
+    step :setup, fn data ->
       {:ok, assign(data, :level, data["level"])}
-    end)
+    end
 
-    decision(:first_decision, fn data ->
+    decision :first_decision, fn data ->
       if data[:level] > 5 do
         {:goto, :second_decision, data}
       else
         {:goto, :low_level, data}
       end
-    end)
+    end
 
-    step(:low_level, fn data ->
+    step :low_level, fn data ->
       {:ok, assign(data, :result, "low")}
-    end)
+    end
 
-    decision(:second_decision, fn data ->
+    decision :second_decision, fn data ->
       if data[:level] > 10 do
         {:goto, :very_high, data}
       else
         {:goto, :medium, data}
       end
-    end)
+    end
 
-    step(:medium, fn data ->
+    step :medium, fn data ->
       {:ok, assign(data, :result, "medium")}
-    end)
+    end
 
-    step(:very_high, fn data ->
+    step :very_high, fn data ->
       {:ok, assign(data, :result, "very_high")}
-    end)
+    end
   end
 end
 
@@ -491,16 +491,16 @@ defmodule ExceptionDecisionTestWorkflow do
   use Durable.Helpers
 
   workflow "exception_decision" do
-    step(:setup, fn data ->
+    step :setup, fn data ->
       {:ok, data}
-    end)
+    end
 
-    decision(:boom, fn _data ->
+    decision :boom, fn _data ->
       raise "Intentional exception in decision"
-    end)
+    end
 
-    step(:never_reached, fn data ->
+    step :never_reached, fn data ->
       {:ok, data}
-    end)
+    end
   end
 end

@@ -125,20 +125,20 @@ defmodule Durable.Fuzz.Audit4ExecOpsTest do
 
       quote bind_quoted: [], unquote: true do
         workflow unquote(name), unquote(opts) do
-          step(:s1, [compensate: :u1], fn data -> unquote(acts).act(data, :s1) end)
+          step :s1, [compensate: :u1], fn data -> unquote(acts).act(data, :s1) end
 
           branch :pick, fn data -> unquote(acts).pick(data) end do
             :left ->
-              step(:l1, [compensate: :ul], fn data -> unquote(acts).act(data, :l1) end)
+              step :l1, [compensate: :ul], fn data -> unquote(acts).act(data, :l1) end
 
             :right ->
               parallel :fan do
                 lane :a do
-                  step(:a1, fn data -> unquote(acts).act(data, :a1) end)
+                  step :a1, fn data -> unquote(acts).act(data, :a1) end
                 end
 
                 lane :b do
-                  step(:b1, fn data -> unquote(acts).act(data, :b1) end)
+                  step :b1, fn data -> unquote(acts).act(data, :b1) end
                 end
               end
 
@@ -146,15 +146,15 @@ defmodule Durable.Fuzz.Audit4ExecOpsTest do
               pass()
           end
 
-          step(:s2, [compensate: :u2, retry: [max_attempts: 2]], fn data ->
+          step :s2, [compensate: :u2, retry: [max_attempts: 2]], fn data ->
             unquote(acts).act(data, :s2)
-          end)
+          end
 
-          step(:s3, fn data -> unquote(acts).act(data, :s3) end)
+          step :s3, fn data -> unquote(acts).act(data, :s3) end
 
-          compensate(:u1, fn data -> unquote(acts).undo(data, :u1) end)
-          compensate(:ul, fn data -> unquote(acts).undo(data, :ul) end)
-          compensate(:u2, fn data -> unquote(acts).undo(data, :u2) end)
+          compensate :u1, fn data -> unquote(acts).undo(data, :u1) end
+          compensate :ul, fn data -> unquote(acts).undo(data, :ul) end
+          compensate :u2, fn data -> unquote(acts).undo(data, :u2) end
         end
       end
     end

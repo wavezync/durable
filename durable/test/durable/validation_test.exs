@@ -145,9 +145,9 @@ defmodule NilReturnWorkflow do
   use Durable.Helpers
 
   workflow "nil_return" do
-    step(:returns_nil, fn _data ->
+    step :returns_nil, fn _data ->
       nil
-    end)
+    end
   end
 end
 
@@ -156,9 +156,9 @@ defmodule PlainValueReturnWorkflow do
   use Durable.Helpers
 
   workflow "plain_value_return" do
-    step(:returns_plain, fn _data ->
+    step :returns_plain, fn _data ->
       "just a string"
-    end)
+    end
   end
 end
 
@@ -167,9 +167,9 @@ defmodule ErrorReturnWorkflow do
   use Durable.Helpers
 
   workflow "error_return" do
-    step(:returns_error, fn _data ->
+    step :returns_error, fn _data ->
       {:error, "This step explicitly failed"}
-    end)
+    end
   end
 end
 
@@ -178,9 +178,9 @@ defmodule ErrorMapReturnWorkflow do
   use Durable.Helpers
 
   workflow "error_map_return" do
-    step(:returns_error, fn _data ->
+    step :returns_error, fn _data ->
       {:error, %{reason: "This step explicitly failed", code: "STEP_ERROR"}}
-    end)
+    end
   end
 end
 
@@ -189,9 +189,9 @@ defmodule RaisingStepWorkflow do
   use Durable.Helpers
 
   workflow "raising_step" do
-    step(:raises, fn _data ->
+    step :raises, fn _data ->
       raise "This step raises an exception"
-    end)
+    end
   end
 end
 
@@ -200,13 +200,13 @@ defmodule OkNilDataWorkflow do
   use Durable.Helpers
 
   workflow "ok_nil_data" do
-    step(:returns_ok_nil, fn _data ->
+    step :returns_ok_nil, fn _data ->
       {:ok, nil}
-    end)
+    end
 
-    step(:after_nil, fn data ->
+    step :after_nil, fn data ->
       {:ok, assign(data || %{}, :after_nil, true)}
-    end)
+    end
   end
 end
 
@@ -215,9 +215,9 @@ defmodule WrongTupleFormatWorkflow do
   use Durable.Helpers
 
   workflow "wrong_tuple_format" do
-    step(:wrong_format, fn data ->
+    step :wrong_format, fn data ->
       {:ok, data, "extra_element"}
-    end)
+    end
   end
 end
 
@@ -226,9 +226,9 @@ defmodule SimpleInputWorkflow do
   use Durable.Helpers
 
   workflow "simple_input" do
-    step(:process, fn data ->
+    step :process, fn data ->
       {:ok, assign(data || %{}, :input_received, true)}
-    end)
+    end
   end
 end
 
@@ -237,7 +237,7 @@ defmodule ExpectedInputWorkflow do
   use Durable.Helpers
 
   workflow "expected_input" do
-    step(:process, fn data ->
+    step :process, fn data ->
       name = data["name"]
 
       data =
@@ -246,7 +246,7 @@ defmodule ExpectedInputWorkflow do
         |> assign(:name_present, name != nil)
 
       {:ok, data}
-    end)
+    end
   end
 end
 
@@ -255,10 +255,10 @@ defmodule NumericInputWorkflow do
   use Durable.Helpers
 
   workflow "numeric_input" do
-    step(:process, fn data ->
+    step :process, fn data ->
       count = data["count"]
       {:ok, assign(data, :count_value, count)}
-    end)
+    end
   end
 end
 
@@ -267,9 +267,9 @@ defmodule SingleStepWorkflow do
   use Durable.Helpers
 
   workflow "single_step" do
-    step(:only_step, fn data ->
+    step :only_step, fn data ->
       {:ok, assign(data, :done, true)}
-    end)
+    end
   end
 end
 
@@ -278,9 +278,9 @@ defmodule InputModificationWorkflow do
   use Durable.Helpers
 
   workflow "input_modification" do
-    step(:double_value, fn data ->
+    step :double_value, fn data ->
       value = data["value"] || 0
       {:ok, assign(data, :doubled, value * 2)}
-    end)
+    end
   end
 end

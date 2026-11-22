@@ -8,11 +8,11 @@ defmodule Durable.Integration.ShutdownTest do
     use Durable
 
     workflow "shut_slow" do
-      step(:work, fn data ->
+      step :work, fn data ->
         Probe.here(:work)
         Process.sleep(data["ms"])
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -20,7 +20,7 @@ defmodule Durable.Integration.ShutdownTest do
     use Durable
 
     workflow "shut_quick" do
-      step(:work, fn data -> {:ok, data} end)
+      step :work, fn data -> {:ok, data} end
     end
   end
 
@@ -28,16 +28,16 @@ defmodule Durable.Integration.ShutdownTest do
     use Durable
 
     workflow "shut_two_steps" do
-      step(:first, fn data ->
+      step :first, fn data ->
         Probe.here(:first)
         Process.sleep(400)
         {:ok, data}
-      end)
+      end
 
-      step(:second, fn data ->
+      step :second, fn data ->
         Probe.here(:second)
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -45,26 +45,26 @@ defmodule Durable.Integration.ShutdownTest do
     use Durable
 
     workflow "shut_in_branch" do
-      step(:pick, fn data -> {:ok, Map.put(data, "path", "a")} end)
+      step :pick, fn data -> {:ok, Map.put(data, "path", "a")} end
 
       branch on: fn data -> data["path"] end do
         "a" ->
-          step(:a1, fn data ->
+          step :a1, fn data ->
             Probe.here(:a1)
             Process.sleep(400)
             {:ok, data}
-          end)
+          end
 
-          step(:a2, fn data ->
+          step :a2, fn data ->
             Probe.here(:a2)
             {:ok, data}
-          end)
+          end
 
         "b" ->
-          step(:b1, fn data ->
+          step :b1, fn data ->
             Probe.here(:b1)
             {:ok, data}
-          end)
+          end
       end
     end
   end
@@ -74,14 +74,14 @@ defmodule Durable.Integration.ShutdownTest do
     use Durable.Context
 
     workflow "shut_cooperative" do
-      step(:long, fn data ->
+      step :long, fn data ->
         Probe.here(:long)
 
         stopping =
           Enum.find_value(1..100, fn _ -> shutting_down?() || (Process.sleep(10) && nil) end)
 
         if stopping, do: {:snooze, 0, "node stopping"}, else: {:ok, data}
-      end)
+      end
     end
   end
 
@@ -89,10 +89,10 @@ defmodule Durable.Integration.ShutdownTest do
     use Durable
 
     workflow "shut_slow_once" do
-      step(:work, fn data ->
+      step :work, fn data ->
         if Probe.here(:once) == 1, do: Process.sleep(30_000)
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -100,14 +100,14 @@ defmodule Durable.Integration.ShutdownTest do
     use Durable
 
     workflow "shut_slow_undo", on_failure: :rollback do
-      step(:book, [compensate: :unbook], fn data -> {:ok, data} end)
-      step(:charge, fn _data -> {:fail, "declined"} end)
+      step :book, [compensate: :unbook], fn data -> {:ok, data} end
+      step :charge, fn _data -> {:fail, "declined"} end
 
-      compensate(:unbook, fn data ->
+      compensate :unbook, fn data ->
         Probe.here(:undoing)
         Process.sleep(500)
         {:ok, data}
-      end)
+      end
     end
   end
 

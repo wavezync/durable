@@ -8,14 +8,14 @@ defmodule DurableTest do
         use Durable.Helpers
 
         workflow "test_workflow" do
-          step(:first, fn data ->
+          step :first, fn data ->
             {:ok, assign(data, :value, 1)}
-          end)
+          end
 
-          step(:second, fn data ->
+          step :second, fn data ->
             value = data[:value]
             {:ok, assign(data, :result, value + 1)}
-          end)
+          end
         end
       end
 
@@ -30,9 +30,9 @@ defmodule DurableTest do
         use Durable
 
         workflow "retry_test" do
-          step(:with_retry, [retry: [max_attempts: 3, backoff: :exponential]], fn _data ->
+          step :with_retry, [retry: [max_attempts: 3, backoff: :exponential]], fn _data ->
             {:ok, :ok}
-          end)
+          end
         end
       end
 

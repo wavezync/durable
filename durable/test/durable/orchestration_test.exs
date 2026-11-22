@@ -480,9 +480,9 @@ defmodule SimpleChildWorkflow do
   use Durable.Helpers
 
   workflow "simple_child" do
-    step(:do_work, fn data ->
+    step :do_work, fn data ->
       {:ok, assign(data, :child_result, "done")}
-    end)
+    end
   end
 end
 
@@ -491,9 +491,9 @@ defmodule FailingChildWorkflow do
   use Durable.Helpers
 
   workflow "failing_child" do
-    step(:fail_step, fn _data ->
+    step :fail_step, fn _data ->
       {:error, %{type: "child_failure", message: "child failed on purpose"}}
-    end)
+    end
   end
 end
 
@@ -503,11 +503,11 @@ defmodule CallWorkflowParent do
   use Durable.Orchestration
 
   workflow "call_parent" do
-    step(:before, fn data ->
+    step :before, fn data ->
       {:ok, assign(data, :before_call, true)}
-    end)
+    end
 
-    step(:call_child, fn data ->
+    step :call_child, fn data ->
       case call_workflow(SimpleChildWorkflow, %{}) do
         {:ok, result} ->
           {:ok, assign(data, :call_result, result)}
@@ -515,11 +515,11 @@ defmodule CallWorkflowParent do
         {:error, reason} ->
           {:ok, assign(data, :call_error, reason)}
       end
-    end)
+    end
 
-    step(:after, fn data ->
+    step :after, fn data ->
       {:ok, assign(data, :after_call, true)}
-    end)
+    end
   end
 end
 
@@ -529,7 +529,7 @@ defmodule CallWorkflowFailingParent do
   use Durable.Orchestration
 
   workflow "call_failing_parent" do
-    step(:call_failing_child, fn data ->
+    step :call_failing_child, fn data ->
       case call_workflow(FailingChildWorkflow, %{}) do
         {:ok, result} ->
           {:ok, assign(data, :call_result, result)}
@@ -537,7 +537,7 @@ defmodule CallWorkflowFailingParent do
         {:error, _reason} ->
           {:ok, assign(data, :got_error, true)}
       end
-    end)
+    end
   end
 end
 
@@ -547,20 +547,20 @@ defmodule FireForgetParent do
   use Durable.Orchestration
 
   workflow "fire_forget_parent" do
-    step(:before, fn data ->
+    step :before, fn data ->
       {:ok, assign(data, :before_fire, true)}
-    end)
+    end
 
-    step(:fire_child, fn data ->
+    step :fire_child, fn data ->
       {:ok, child_id} =
         start_workflow(SimpleChildWorkflow, %{}, ref: :confirmation_email)
 
       {:ok, assign(data, :child_id, child_id)}
-    end)
+    end
 
-    step(:after, fn data ->
+    step :after, fn data ->
       {:ok, assign(data, :after_fire, true)}
-    end)
+    end
   end
 end
 
@@ -570,7 +570,7 @@ defmodule FireForgetIdempotentParent do
   use Durable.Orchestration
 
   workflow "fire_forget_idempotent" do
-    step(:fire_two_children, fn data ->
+    step :fire_two_children, fn data ->
       {:ok, child1_id} =
         start_workflow(SimpleChildWorkflow, %{}, ref: :email1)
 
@@ -581,7 +581,7 @@ defmodule FireForgetIdempotentParent do
       |> assign(:child1_id, child1_id)
       |> assign(:child2_id, child2_id)
       |> then(&{:ok, &1})
-    end)
+    end
   end
 end
 
@@ -592,7 +592,7 @@ defmodule ParentWorkflow do
   use Durable.Orchestration
 
   workflow "parent_wf" do
-    step(:call_simple, fn data ->
+    step :call_simple, fn data ->
       case call_workflow(SimpleChildWorkflow, %{}) do
         {:ok, result} ->
           {:ok, assign(data, :child_result, result)}
@@ -600,7 +600,7 @@ defmodule ParentWorkflow do
         {:error, reason} ->
           {:ok, assign(data, :child_error, reason)}
       end
-    end)
+    end
   end
 end
 
@@ -610,7 +610,7 @@ defmodule GrandparentWorkflow do
   use Durable.Orchestration
 
   workflow "grandparent_wf" do
-    step(:call_parent, fn data ->
+    step :call_parent, fn data ->
       case call_workflow(ParentWorkflow, %{}) do
         {:ok, result} ->
           {:ok, data |> assign(:nested_result, result) |> assign(:chain_complete, true)}
@@ -618,6 +618,6 @@ defmodule GrandparentWorkflow do
         {:error, reason} ->
           {:ok, assign(data, :nested_error, reason)}
       end
-    end)
+    end
   end
 end

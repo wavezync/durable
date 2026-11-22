@@ -19,15 +19,15 @@ defmodule Durable.StepQueueTest do
     use Durable.Helpers
 
     workflow "import_document", queue: :documents do
-      step(:download, [queue: :downloads], fn data ->
+      step :download, [queue: :downloads], fn data ->
         {:ok, assign(data, :file, data["url"] <> ".pdf")}
-      end)
+      end
 
-      step(:ocr, [queue: "ocr"], fn data ->
+      step :ocr, [queue: "ocr"], fn data ->
         {:ok, assign(data, :text, "#{data.file} from #{data["url"]}")}
-      end)
+      end
 
-      step(:save, fn data -> {:ok, assign(data, :saved, true)} end)
+      step :save, fn data -> {:ok, assign(data, :saved, true)} end
     end
   end
 
@@ -37,9 +37,9 @@ defmodule Durable.StepQueueTest do
     use Durable.Context
 
     workflow "flaky_ocr" do
-      step(:ocr, [queue: :ocr, retry: [max_attempts: 2, backoff: :constant, base: 1]], fn data ->
+      step :ocr, [queue: :ocr, retry: [max_attempts: 2, backoff: :constant, base: 1]], fn data ->
         if attempt() == 1, do: {:error, :down}, else: {:ok, assign(data, :text, "ok")}
-      end)
+      end
     end
   end
 
@@ -50,14 +50,14 @@ defmodule Durable.StepQueueTest do
     workflow "queue_in_branch" do
       branch on: fn _data -> "a" end do
         "a" ->
-          step(:a1, [queue: :ocr], fn data -> {:ok, assign(data, :a1, true)} end)
-          step(:a2, fn data -> {:ok, assign(data, :a2, true)} end)
+          step :a1, [queue: :ocr], fn data -> {:ok, assign(data, :a1, true)} end
+          step :a2, fn data -> {:ok, assign(data, :a2, true)} end
 
         "b" ->
-          step(:b1, fn data -> {:ok, assign(data, :b1, true)} end)
+          step :b1, fn data -> {:ok, assign(data, :b1, true)} end
       end
 
-      step(:done, fn data -> {:ok, assign(data, :done, true)} end)
+      step :done, fn data -> {:ok, assign(data, :done, true)} end
     end
   end
 
@@ -66,11 +66,11 @@ defmodule Durable.StepQueueTest do
     use Durable.Helpers
 
     workflow "queue_then_parallel" do
-      step(:prepare, [queue: :ocr], fn data -> {:ok, data} end)
+      step :prepare, [queue: :ocr], fn data -> {:ok, data} end
 
       parallel :extract do
-        step(:plain, fn data -> {:ok, assign(data, :plain, true)} end)
-        step(:llm, [queue: :llm], fn data -> {:ok, assign(data, :llm, true)} end)
+        step :plain, fn data -> {:ok, assign(data, :plain, true)} end
+        step :llm, [queue: :llm], fn data -> {:ok, assign(data, :llm, true)} end
       end
     end
   end
@@ -79,13 +79,13 @@ defmodule Durable.StepQueueTest do
     use Durable
 
     workflow "one_ocr_at_a_time" do
-      step(:ocr, [queue: :ocr], fn data ->
+      step :ocr, [queue: :ocr], fn data ->
         running = :ets.update_counter(:step_queue_test, :running, 1)
         :ets.insert(:step_queue_test, {{:seen, running}})
         Process.sleep(150)
         :ets.update_counter(:step_queue_test, :running, -1)
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -94,14 +94,14 @@ defmodule Durable.StepQueueTest do
     use Durable.Helpers
 
     workflow "branch_stays_put" do
-      step(:prepare, [queue: :ocr], fn data -> {:ok, data} end)
+      step :prepare, [queue: :ocr], fn data -> {:ok, data} end
 
       branch on: fn _data -> "a" end do
         "a" ->
-          step(:a1, [queue: :ocr], fn data -> {:ok, assign(data, :a1, true)} end)
+          step :a1, [queue: :ocr], fn data -> {:ok, assign(data, :a1, true)} end
 
         "b" ->
-          step(:b1, fn data -> {:ok, assign(data, :b1, true)} end)
+          step :b1, fn data -> {:ok, assign(data, :b1, true)} end
       end
     end
   end
@@ -110,8 +110,8 @@ defmodule Durable.StepQueueTest do
     use Durable
 
     workflow "already_there", queue: :ocr do
-      step(:one, [queue: "ocr"], fn data -> {:ok, data} end)
-      step(:two, [queue: :ocr], fn data -> {:ok, data} end)
+      step :one, [queue: "ocr"], fn data -> {:ok, data} end
+      step :two, [queue: :ocr], fn data -> {:ok, data} end
     end
   end
 
@@ -119,8 +119,8 @@ defmodule Durable.StepQueueTest do
     use Durable
 
     workflow "quick_moves" do
-      step(:ocr, [queue: :ocr], fn data -> {:ok, data} end)
-      step(:save, fn data -> {:ok, data} end)
+      step :ocr, [queue: :ocr], fn data -> {:ok, data} end
+      step :save, fn data -> {:ok, data} end
     end
   end
 
@@ -128,7 +128,7 @@ defmodule Durable.StepQueueTest do
     use Durable
 
     workflow "ends_on_llm", queue: :documents do
-      step(:summarize, [queue: :llm], fn data -> {:ok, data} end)
+      step :summarize, [queue: :llm], fn data -> {:ok, data} end
     end
   end
 
@@ -136,11 +136,11 @@ defmodule Durable.StepQueueTest do
     use Durable
 
     workflow "snoozes_on_ocr" do
-      step(:ocr, [queue: :ocr], fn data ->
+      step :ocr, [queue: :ocr], fn data ->
         if Process.put(:snoozed, true), do: {:ok, data}, else: {:snooze, 1}
-      end)
+      end
 
-      step(:save, fn data -> {:ok, data} end)
+      step :save, fn data -> {:ok, data} end
     end
   end
 
@@ -149,12 +149,12 @@ defmodule Durable.StepQueueTest do
     use Durable.Wait
 
     workflow "waits_on_ocr" do
-      step(:ocr, [queue: :ocr], fn data ->
+      step :ocr, [queue: :ocr], fn data ->
         wait_for_event("go")
         {:ok, data}
-      end)
+      end
 
-      step(:save, fn data -> {:ok, data} end)
+      step :save, fn data -> {:ok, data} end
     end
   end
 
@@ -163,12 +163,12 @@ defmodule Durable.StepQueueTest do
     use Durable.Wait
 
     workflow "sleeps_on_ocr" do
-      step(:ocr, [queue: :ocr], fn data ->
+      step :ocr, [queue: :ocr], fn data ->
         sleep(1)
         {:ok, data}
-      end)
+      end
 
-      step(:save, fn data -> {:ok, data} end)
+      step :save, fn data -> {:ok, data} end
     end
   end
 
@@ -177,13 +177,13 @@ defmodule Durable.StepQueueTest do
     use Durable.Helpers
 
     workflow "saga_across_queues", on_failure: :rollback do
-      step(:charge, [queue: :ocr, compensate: :refund], fn data ->
+      step :charge, [queue: :ocr, compensate: :refund], fn data ->
         {:ok, assign(data, :charged, true)}
-      end)
+      end
 
-      step(:ship, [queue: :llm], fn _data -> {:error, :down} end)
+      step :ship, [queue: :llm], fn _data -> {:error, :down} end
 
-      compensate(:refund, fn data -> {:ok, assign(data, :refunded, true)} end)
+      compensate :refund, fn data -> {:ok, assign(data, :refunded, true)} end
     end
   end
 
@@ -191,11 +191,11 @@ defmodule Durable.StepQueueTest do
     use Durable
 
     workflow "fails_until_allowed" do
-      step(:ocr, [queue: :ocr], fn data ->
+      step :ocr, [queue: :ocr], fn data ->
         if Process.get(:allow_ocr), do: {:ok, data}, else: {:error, :down}
-      end)
+      end
 
-      step(:save, fn data -> {:ok, data} end)
+      step :save, fn data -> {:ok, data} end
     end
   end
 
@@ -204,9 +204,9 @@ defmodule Durable.StepQueueTest do
     use Durable.Helpers
 
     workflow "decides_on_ocr" do
-      decision(:route, [queue: :ocr], fn data -> {:goto, :finish, data} end)
-      step(:skipped, [queue: :llm], fn data -> {:ok, assign(data, :skipped, true)} end)
-      step(:finish, fn data -> {:ok, assign(data, :finished, true)} end)
+      decision :route, [queue: :ocr], fn data -> {:goto, :finish, data} end
+      step :skipped, [queue: :llm], fn data -> {:ok, assign(data, :skipped, true)} end
+      step :finish, fn data -> {:ok, assign(data, :finished, true)} end
     end
   end
 
@@ -214,7 +214,7 @@ defmodule Durable.StepQueueTest do
     use Durable
 
     workflow "debounced_on_ocr", debounce: [period: 50] do
-      step(:ocr, [queue: :ocr], fn data -> {:ok, data} end)
+      step :ocr, [queue: :ocr], fn data -> {:ok, data} end
     end
   end
 
@@ -222,8 +222,8 @@ defmodule Durable.StepQueueTest do
     use Durable
 
     workflow "run_again_on_ocr", on_duplicate: :run_again do
-      step(:ocr, [queue: :ocr], fn data -> {:ok, data} end)
-      step(:save, fn data -> {:ok, data} end)
+      step :ocr, [queue: :ocr], fn data -> {:ok, data} end
+      step :save, fn data -> {:ok, data} end
     end
   end
 
@@ -231,7 +231,7 @@ defmodule Durable.StepQueueTest do
     use Durable
 
     workflow "times_out_on_ocr", timeout: hours(1) do
-      step(:ocr, [queue: :ocr], fn data -> {:ok, data} end)
+      step :ocr, [queue: :ocr], fn data -> {:ok, data} end
     end
   end
 
@@ -241,14 +241,14 @@ defmodule Durable.StepQueueTest do
     use Durable.Helpers
 
     workflow "context_moved" do
-      step(:first, [queue: :ocr], fn data ->
+      step :first, [queue: :ocr], fn data ->
         put_context(:written, "by first")
         {:ok, assign(data, :returned, "by first")}
-      end)
+      end
 
-      step(:second, [queue: :llm], fn data ->
+      step :second, [queue: :llm], fn data ->
         {:ok, assign(data, :seen, [get_context(:written), data[:returned], input()])}
-      end)
+      end
     end
   end
 
@@ -258,14 +258,14 @@ defmodule Durable.StepQueueTest do
     use Durable.Helpers
 
     workflow "context_unmoved", on_failure: :rollback do
-      step(:first, fn data ->
+      step :first, fn data ->
         put_context(:written, "by first")
         {:ok, assign(data, :returned, "by first")}
-      end)
+      end
 
-      step(:second, fn data ->
+      step :second, fn data ->
         {:ok, assign(data, :seen, [get_context(:written), data[:returned], input()])}
-      end)
+      end
     end
   end
 

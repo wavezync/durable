@@ -14,11 +14,11 @@ defmodule Durable.Integration.EngineRegressionsTest do
     alias Durable.IntegrationProbe, as: Probe
 
     workflow "eng_background" do
-      step(:work, fn data ->
+      step :work, fn data ->
         Probe.note(:background)
         Probe.wait_for(:never)
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -28,40 +28,40 @@ defmodule Durable.Integration.EngineRegressionsTest do
     alias Durable.IntegrationProbe, as: Probe
 
     workflow "eng_fail_fast" do
-      step(:start_background, fn data ->
+      step :start_background, fn data ->
         {:ok, _} = start_workflow(Background, %{}, ref: :background)
         {:ok, data}
-      end)
+      end
 
       parallel :charge do
         # Several to cancel, and new atoms, because a small map orders atom keys
         # by when each atom was made: a cancelled error has to come up first.
-        step(:ff_cancelled_one, fn data ->
+        step :ff_cancelled_one, fn data ->
           Probe.note(:slow)
           Probe.wait_for(:never)
           {:ok, data}
-        end)
+        end
 
-        step(:ff_cancelled_two, fn data ->
+        step :ff_cancelled_two, fn data ->
           Probe.wait_for(:never)
           {:ok, data}
-        end)
+        end
 
-        step(:ff_cancelled_three, fn data ->
+        step :ff_cancelled_three, fn data ->
           Probe.wait_for(:never)
           {:ok, data}
-        end)
+        end
 
-        step(:ff_the_failure, fn _data ->
+        step :ff_the_failure, fn _data ->
           Probe.wait_for(:fail_now)
           {:error, %{type: "card_declined", message: "no"}}
-        end)
+        end
       end
 
-      step(:after_block, fn data ->
+      step :after_block, fn data ->
         Probe.note(:after_block)
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -71,13 +71,13 @@ defmodule Durable.Integration.EngineRegressionsTest do
 
     workflow "eng_collect" do
       parallel :work, on_error: :collect do
-        step(:bad, fn _data -> {:error, "nope"} end)
+        step :bad, fn _data -> {:error, "nope"} end
 
-        step(:slow, fn data ->
+        step :slow, fn data ->
           Probe.note(:slow)
           Probe.wait_for(:release)
           {:ok, data}
-        end)
+        end
       end
     end
   end
@@ -88,13 +88,13 @@ defmodule Durable.Integration.EngineRegressionsTest do
 
     workflow "eng_into" do
       parallel :work, into: fn data, _results -> {:ok, data} end do
-        step(:bad, fn _data -> {:error, "nope"} end)
+        step :bad, fn _data -> {:error, "nope"} end
 
-        step(:slow, fn data ->
+        step :slow, fn data ->
           Probe.note(:slow)
           Probe.wait_for(:release)
           {:ok, data}
-        end)
+        end
       end
     end
   end
@@ -105,13 +105,13 @@ defmodule Durable.Integration.EngineRegressionsTest do
     alias Durable.IntegrationProbe, as: Probe
 
     workflow "eng_two_waits" do
-      step(:w, fn data ->
+      step :w, fn data ->
         Probe.note(:body)
         first = wait_for_any(["a", "b"], timeout: 50, timeout_value: :first_timed_out)
         second = wait_for_event("second")
         Probe.put(:got, {first, second})
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -121,16 +121,16 @@ defmodule Durable.Integration.EngineRegressionsTest do
     alias Durable.IntegrationProbe, as: Probe
 
     workflow "eng_cancel_then_sleep" do
-      step(:w, fn data ->
+      step :w, fn data ->
         Probe.put(:got, wait_for_event("go"))
         {:ok, data}
-      end)
+      end
 
-      step(:nap, fn data ->
+      step :nap, fn data ->
         Probe.put(:nap_keys, Map.keys(data))
         sleep(:timer.hours(1))
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -140,10 +140,10 @@ defmodule Durable.Integration.EngineRegressionsTest do
     alias Durable.IntegrationProbe, as: Probe
 
     workflow "eng_event_equals_data" do
-      step(:w, fn data ->
+      step :w, fn data ->
         Probe.put(:got, wait_for_event("approved"))
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -152,10 +152,10 @@ defmodule Durable.Integration.EngineRegressionsTest do
     alias Durable.IntegrationProbe, as: Probe
 
     workflow "eng_quick" do
-      step(:work, fn data ->
+      step :work, fn data ->
         Probe.note(:ran)
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -164,10 +164,10 @@ defmodule Durable.Integration.EngineRegressionsTest do
     alias Durable.IntegrationProbe, as: Probe
 
     workflow "eng_long_child" do
-      step(:work, fn data ->
+      step :work, fn data ->
         Probe.wait_for(:never)
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -177,10 +177,10 @@ defmodule Durable.Integration.EngineRegressionsTest do
     alias Durable.IntegrationProbe, as: Probe
 
     workflow "eng_calls_default_timeout" do
-      step(:call, fn data ->
+      step :call, fn data ->
         Probe.put(:result, call_workflow(LongChild, %{}, ref: :child, timeout: 50))
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -189,10 +189,10 @@ defmodule Durable.Integration.EngineRegressionsTest do
     alias Durable.IntegrationProbe, as: Probe
 
     workflow "eng_console_limit" do
-      step(:work, [timeout: 5_000], fn data ->
+      step :work, [timeout: 5_000], fn data ->
         Probe.put(:line, Handler.console_filter(%{level: :info, meta: %{}}, []))
         {:ok, data}
-      end)
+      end
     end
   end
 

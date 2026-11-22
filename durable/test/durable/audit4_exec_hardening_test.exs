@@ -49,39 +49,39 @@ defmodule Durable.Audit4ExecHardeningTest do
 
     # One loan per applicant, by key. The three differ only in when the key is free.
     workflow "audit4_loan_after_close", reuse: :after_close do
-      step(:reserve_funds, [compensate: :release_funds], fn loan ->
+      step :reserve_funds, [compensate: :release_funds], fn loan ->
         Audit4ExecLoan.reserve(loan)
-      end)
+      end
 
-      step(:pay_out, fn loan -> Audit4ExecLoan.pay_out(loan) end)
-      compensate(:release_funds, fn loan -> Audit4ExecLoan.release(loan) end)
+      step :pay_out, fn loan -> Audit4ExecLoan.pay_out(loan) end
+      compensate :release_funds, fn loan -> Audit4ExecLoan.release(loan) end
     end
 
     workflow "audit4_loan_after_failure", reuse: :after_failure do
-      step(:reserve_funds, [compensate: :release_funds], fn loan ->
+      step :reserve_funds, [compensate: :release_funds], fn loan ->
         Audit4ExecLoan.reserve(loan)
-      end)
+      end
 
-      step(:pay_out, fn loan -> Audit4ExecLoan.pay_out(loan) end)
-      compensate(:release_funds, fn loan -> Audit4ExecLoan.release(loan) end)
+      step :pay_out, fn loan -> Audit4ExecLoan.pay_out(loan) end
+      compensate :release_funds, fn loan -> Audit4ExecLoan.release(loan) end
     end
 
     workflow "audit4_loan_never", reuse: :never do
-      step(:reserve_funds, [compensate: :release_funds], fn loan ->
+      step :reserve_funds, [compensate: :release_funds], fn loan ->
         Audit4ExecLoan.reserve(loan)
-      end)
+      end
 
-      step(:pay_out, fn loan -> Audit4ExecLoan.pay_out(loan) end)
-      compensate(:release_funds, fn loan -> Audit4ExecLoan.release(loan) end)
+      step :pay_out, fn loan -> Audit4ExecLoan.pay_out(loan) end
+      compensate :release_funds, fn loan -> Audit4ExecLoan.release(loan) end
     end
 
     workflow "audit4_loan_rolls_back", on_failure: :rollback do
-      step(:reserve_funds, [compensate: :release_funds], fn loan ->
+      step :reserve_funds, [compensate: :release_funds], fn loan ->
         Audit4ExecLoan.reserve(loan)
-      end)
+      end
 
-      step(:pay_out, fn loan -> Audit4ExecLoan.pay_out(loan) end)
-      compensate(:release_funds, fn loan -> Audit4ExecLoan.release(loan) end)
+      step :pay_out, fn loan -> Audit4ExecLoan.pay_out(loan) end
+      compensate :release_funds, fn loan -> Audit4ExecLoan.release(loan) end
     end
   end
 
@@ -93,39 +93,39 @@ defmodule Durable.Audit4ExecHardeningTest do
     workflow "audit4_claim_jumps" do
       branch :risk, fn claim -> {:review, claim} end do
         :review ->
-          step(:ask_assessor, fn claim ->
+          step :ask_assessor, fn claim ->
             {:goto, String.to_existing_atom(claim["then"]), assign(claim, :asked, true)}
-          end)
+          end
 
-          step(:record_answer, fn claim -> {:ok, assign(claim, :recorded, true)} end)
+          step :record_answer, fn claim -> {:ok, assign(claim, :recorded, true)} end
 
         :blocked ->
-          step(:refuse, fn claim -> {:ok, assign(claim, :refused, true)} end)
+          step :refuse, fn claim -> {:ok, assign(claim, :refused, true)} end
       end
 
-      step(:close, fn claim -> {:ok, assign(claim, :closed, true)} end)
+      step :close, fn claim -> {:ok, assign(claim, :closed, true)} end
     end
 
     # Two lookups side by side. The credit bureau is down until it's fixed.
     workflow "audit4_claim_lookups" do
       parallel :lookups do
         lane :credit do
-          step(:query, fn claim ->
+          step :query, fn claim ->
             if :bureau_back in Audit4ExecSeen.all(),
               do: {:ok, assign(claim, :score, 710)},
               else: {:fail, "the bureau is down"}
-          end)
+          end
         end
 
         lane :fraud do
-          step(:query, fn claim ->
+          step :query, fn claim ->
             Audit4ExecSeen.note(:fraud_queried)
             {:ok, assign(claim, :fraud, 0.02)}
-          end)
+          end
         end
       end
 
-      step(:decide, fn claim -> {:ok, assign(claim, :decided, true)} end)
+      step :decide, fn claim -> {:ok, assign(claim, :decided, true)} end
     end
   end
 
@@ -135,10 +135,10 @@ defmodule Durable.Audit4ExecHardeningTest do
     use Durable.Wait
 
     workflow "audit4_signature" do
-      step(:await_signature, fn contract ->
+      step :await_signature, fn contract ->
         wait_for_input("signature")
         {:ok, contract}
-      end)
+      end
     end
   end
 
@@ -148,9 +148,9 @@ defmodule Durable.Audit4ExecHardeningTest do
     use Durable.Orchestration
 
     workflow "audit4_contract" do
-      step(:sign, fn contract ->
+      step :sign, fn contract ->
         with {:ok, _signed} <- call_workflow(Audit4ExecSignature, %{}), do: {:ok, contract}
-      end)
+      end
     end
   end
 
@@ -160,16 +160,16 @@ defmodule Durable.Audit4ExecHardeningTest do
     use Durable.Orchestration
 
     workflow "audit4_sale" do
-      step(:hold_car, [compensate: :release_car], fn sale -> {:ok, sale} end)
+      step :hold_car, [compensate: :release_car], fn sale -> {:ok, sale} end
 
-      step(:contract, fn sale ->
+      step :contract, fn sale ->
         with {:ok, _contract} <- call_workflow(Audit4ExecContract, %{}), do: {:ok, sale}
-      end)
+      end
 
-      compensate(:release_car, fn sale ->
+      compensate :release_car, fn sale ->
         Audit4ExecSeen.note(:car_released)
         {:ok, sale}
-      end)
+      end
     end
   end
 

@@ -67,11 +67,11 @@ defmodule Audit4Dash.Bugs do
   def failure("stacktrace_list"), do: {:error, %{message: "x", stacktrace: [%{"file" => "a"}]}}
 
   workflow "audit4_bad_error" do
-    step(:call_api, fn data -> Audit4Dash.Bugs.failure(data["mode"]) end)
+    step :call_api, fn data -> Audit4Dash.Bugs.failure(data["mode"]) end
   end
 
   workflow "audit4_select_form" do
-    step(:ask, fn data ->
+    step :ask, fn data ->
       _ =
         wait_for_form("equipment",
           fields: [
@@ -84,14 +84,14 @@ defmodule Audit4Dash.Bugs do
         )
 
       {:ok, data}
-    end)
+    end
   end
 
   workflow "audit4_required_form" do
-    step(:ask, fn data ->
+    step :ask, fn data ->
       _ = wait_for_form("budget", fields: [%{name: :amount, type: :number, required: true}])
       {:ok, data}
-    end)
+    end
   end
 end
 

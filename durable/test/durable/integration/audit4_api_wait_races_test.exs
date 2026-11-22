@@ -19,10 +19,10 @@ defmodule Durable.Integration.Audit4ApiWaitRacesTest do
     use Durable.Wait
 
     workflow "audit4_api_race_event" do
-      step(:wait, fn data ->
+      step :wait, fn data ->
         got = wait_for_event("go", timeout: 3_600_000, timeout_value: "timed out")
         {:ok, Map.put(data, "got", got)}
-      end)
+      end
     end
   end
 
@@ -31,10 +31,10 @@ defmodule Durable.Integration.Audit4ApiWaitRacesTest do
     use Durable.Wait
 
     workflow "audit4_api_race_input" do
-      step(:wait, fn data ->
+      step :wait, fn data ->
         got = wait_for_input("answer", timeout: 3_600_000, timeout_value: "timed out")
         {:ok, Map.put(data, "got", got)}
-      end)
+      end
     end
   end
 
@@ -43,10 +43,10 @@ defmodule Durable.Integration.Audit4ApiWaitRacesTest do
     use Durable.Wait
 
     workflow "audit4_api_race_any" do
-      step(:wait, fn data ->
+      step :wait, fn data ->
         got = wait_for_any(["go", "stop"], timeout: 3_600_000, timeout_value: "timed out")
         {:ok, Map.put(data, "got", inspect(got))}
-      end)
+      end
     end
   end
 
@@ -57,12 +57,12 @@ defmodule Durable.Integration.Audit4ApiWaitRacesTest do
     alias Durable.IntegrationProbe, as: Probe
 
     workflow "audit4_api_race_buffered" do
-      step(:prepare, fn data ->
+      step :prepare, fn data ->
         Probe.wait_for(:go_on)
         {:ok, data}
-      end)
+      end
 
-      step(:wait, fn data -> {:ok, Map.put(data, "got", wait_for_event("go"))} end)
+      step :wait, fn data -> {:ok, Map.put(data, "got", wait_for_event("go"))} end
     end
   end
 
@@ -71,9 +71,9 @@ defmodule Durable.Integration.Audit4ApiWaitRacesTest do
     use Durable.Wait
 
     workflow "audit4_api_bad_waits" do
-      step(:first, fn data -> {:ok, data} end)
+      step :first, fn data -> {:ok, data} end
 
-      step(:wait, fn data ->
+      step :wait, fn data ->
         case data["kind"] do
           "sleep_too_long" -> sleep(10 ** 30)
           "sleep_before_time" -> sleep(-(10 ** 15))
@@ -84,7 +84,7 @@ defmodule Durable.Integration.Audit4ApiWaitRacesTest do
 
         deep = Enum.reduce(1..20_000, [], fn _n, nested -> [nested] end)
         {:ok, Map.put(data, "deep", deep)}
-      end)
+      end
     end
   end
 

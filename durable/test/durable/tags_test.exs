@@ -10,10 +10,10 @@ defmodule Durable.TagsTest do
     use Durable.Wait
 
     workflow "tagged_order" do
-      step(:wait, fn data ->
+      step :wait, fn data ->
         wait_for_event("paid")
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -21,7 +21,7 @@ defmodule Durable.TagsTest do
     use Durable
 
     workflow "tagged_export" do
-      step(:run, fn data -> {:ok, data} end)
+      step :run, fn data -> {:ok, data} end
     end
   end
 

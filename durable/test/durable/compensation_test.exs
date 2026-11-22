@@ -12,32 +12,32 @@ defmodule Durable.CompensationTest do
     use Durable.Helpers
 
     workflow "book_trip", on_failure: :rollback do
-      step(:book_flight, [compensate: :cancel_flight], fn data ->
+      step :book_flight, [compensate: :cancel_flight], fn data ->
         {:ok,
          data
          |> assign(:flight_booked, true)
          |> assign(:flight_id, "FL-123")}
-      end)
+      end
 
-      step(:book_hotel, [compensate: :cancel_hotel], fn data ->
+      step :book_hotel, [compensate: :cancel_hotel], fn data ->
         {:ok,
          data
          |> assign(:hotel_booked, true)
          |> assign(:hotel_id, "HT-456")}
-      end)
+      end
 
-      step(:charge_payment, fn _data ->
+      step :charge_payment, fn _data ->
         # This step fails, triggering compensations
         raise "Payment failed"
-      end)
+      end
 
-      compensate(:cancel_flight, fn data ->
+      compensate :cancel_flight, fn data ->
         {:ok, assign(data, :flight_cancelled, true)}
-      end)
+      end
 
-      compensate(:cancel_hotel, fn data ->
+      compensate :cancel_hotel, fn data ->
         {:ok, assign(data, :hotel_cancelled, true)}
-      end)
+      end
     end
   end
 
@@ -47,17 +47,17 @@ defmodule Durable.CompensationTest do
     use Durable.Helpers
 
     workflow "failing_compensation", on_failure: :rollback do
-      step(:do_work, [compensate: :undo_work], fn data ->
+      step :do_work, [compensate: :undo_work], fn data ->
         {:ok, assign(data, :work_done, true)}
-      end)
+      end
 
-      step(:fail_step, fn _data ->
+      step :fail_step, fn _data ->
         raise "Step failed"
-      end)
+      end
 
-      compensate(:undo_work, fn _data ->
+      compensate :undo_work, fn _data ->
         raise "Compensation failed too"
-      end)
+      end
     end
   end
 
@@ -67,13 +67,13 @@ defmodule Durable.CompensationTest do
     use Durable.Helpers
 
     workflow "no_compensation" do
-      step(:step_one, fn data ->
+      step :step_one, fn data ->
         {:ok, assign(data, :one, true)}
-      end)
+      end
 
-      step(:step_two, fn _data ->
+      step :step_two, fn _data ->
         raise "No compensation here"
-      end)
+      end
     end
   end
 
@@ -83,17 +83,17 @@ defmodule Durable.CompensationTest do
     use Durable.Helpers
 
     workflow "successful", on_failure: :rollback do
-      step(:step_one, [compensate: :undo_one], fn data ->
+      step :step_one, [compensate: :undo_one], fn data ->
         {:ok, assign(data, :one, true)}
-      end)
+      end
 
-      step(:step_two, fn data ->
+      step :step_two, fn data ->
         {:ok, assign(data, :two, true)}
-      end)
+      end
 
-      compensate(:undo_one, fn data ->
+      compensate :undo_one, fn data ->
         {:ok, assign(data, :one_undone, true)}
-      end)
+      end
     end
   end
 
@@ -103,27 +103,27 @@ defmodule Durable.CompensationTest do
     use Durable.Helpers
 
     workflow "partial_compensation", on_failure: :rollback do
-      step(:step_one, [compensate: :undo_one], fn data ->
+      step :step_one, [compensate: :undo_one], fn data ->
         {:ok, assign(data, :one, true)}
-      end)
+      end
 
-      step(:step_two, [compensate: :undo_two], fn data ->
+      step :step_two, [compensate: :undo_two], fn data ->
         {:ok, assign(data, :two, true)}
-      end)
+      end
 
-      step(:fail_step, fn _data ->
+      step :fail_step, fn _data ->
         raise "Step failed"
-      end)
+      end
 
       # This compensation runs first (reverse order) and succeeds
-      compensate(:undo_two, fn data ->
+      compensate :undo_two, fn data ->
         {:ok, assign(data, :two_undone, true)}
-      end)
+      end
 
       # This compensation runs second and fails
-      compensate(:undo_one, fn _data ->
+      compensate :undo_one, fn _data ->
         raise "Compensation for step_one failed"
-      end)
+      end
     end
   end
 
@@ -132,12 +132,12 @@ defmodule Durable.CompensationTest do
     use Durable
 
     workflow "undo_returns", on_failure: :rollback do
-      step(:book, [compensate: :unbook], fn data -> {:ok, data} end)
-      step(:charge, fn _data -> {:fail, "card declined"} end)
+      step :book, [compensate: :unbook], fn data -> {:ok, data} end
+      step :charge, fn _data -> {:fail, "card declined"} end
 
-      compensate(:unbook, fn data ->
+      compensate :unbook, fn data ->
         Durable.CompensationTest.returned(data[:returns] || data["returns"], data)
-      end)
+      end
     end
   end
 
@@ -145,10 +145,10 @@ defmodule Durable.CompensationTest do
     use Durable
 
     workflow "undo_retries", on_failure: :rollback do
-      step(:book, [compensate: :unbook], fn data -> {:ok, data} end)
-      step(:charge, fn _data -> {:fail, "card declined"} end)
+      step :book, [compensate: :unbook], fn data -> {:ok, data} end
+      step :charge, fn _data -> {:fail, "card declined"} end
 
-      compensate(:unbook, [retry: [max_attempts: 3, backoff: :constant, base: 1]], fn data ->
+      compensate :unbook, [retry: [max_attempts: 3, backoff: :constant, base: 1]], fn data ->
         tries = Process.get(:undo_tries, 0) + 1
         Process.put(:undo_tries, tries)
 
@@ -157,7 +157,7 @@ defmodule Durable.CompensationTest do
         else
           Durable.CompensationTest.returned(data[:returns] || data["returns"], data)
         end
-      end)
+      end
     end
   end
 
@@ -165,12 +165,12 @@ defmodule Durable.CompensationTest do
     use Durable
 
     workflow "undo_chain", on_failure: :rollback do
-      step(:first, [compensate: :undo_first], fn data -> {:ok, data} end)
-      step(:second, [compensate: :undo_second], fn data -> {:ok, data} end)
-      step(:charge, fn _data -> {:fail, "card declined"} end)
+      step :first, [compensate: :undo_first], fn data -> {:ok, data} end
+      step :second, [compensate: :undo_second], fn data -> {:ok, data} end
+      step :charge, fn _data -> {:fail, "card declined"} end
 
-      compensate(:undo_first, fn data -> {:ok, data} end)
-      compensate(:undo_second, fn _data -> {:error, :gateway_down} end)
+      compensate :undo_first, fn data -> {:ok, data} end
+      compensate :undo_second, fn _data -> {:error, :gateway_down} end
     end
   end
 
@@ -179,9 +179,9 @@ defmodule Durable.CompensationTest do
     use Durable
 
     workflow "step_returns_error", on_failure: :rollback do
-      step(:charge, fn data ->
+      step :charge, fn data ->
         Durable.CompensationTest.returned(data[:returns] || data["returns"], data)
-      end)
+      end
     end
   end
 
@@ -545,17 +545,17 @@ defmodule SingleStepRaisingCompensationWorkflow do
   use Durable.Helpers
 
   workflow "single_step_raising_compensation", on_failure: :rollback do
-    step(:setup_step, [compensate: :undo_setup], fn data ->
+    step :setup_step, [compensate: :undo_setup], fn data ->
       {:ok, assign(data, :setup_done, true)}
-    end)
+    end
 
-    step(:failing_step, fn _data ->
+    step :failing_step, fn _data ->
       raise "Intentional failure"
-    end)
+    end
 
-    compensate(:undo_setup, fn data ->
+    compensate :undo_setup, fn data ->
       {:ok, assign(data, :undone, true)}
-    end)
+    end
   end
 end
 
@@ -564,16 +564,16 @@ defmodule ErrorMapCompensationWorkflow do
   use Durable.Helpers
 
   workflow "error_map_compensation", on_failure: :rollback do
-    step(:do_work, [compensate: :undo_work], fn data ->
+    step :do_work, [compensate: :undo_work], fn data ->
       {:ok, assign(data, :work_done, true)}
-    end)
+    end
 
-    step(:fail_step, fn _data ->
+    step :fail_step, fn _data ->
       raise "Step failed"
-    end)
+    end
 
-    compensate(:undo_work, fn _data ->
+    compensate :undo_work, fn _data ->
       {:error, %{reason: "Compensation returned error"}}
-    end)
+    end
   end
 end

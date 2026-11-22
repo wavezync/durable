@@ -17,34 +17,34 @@ defmodule Durable.Integration.NamedBlocksTest do
     workflow "named_waits", timeout: hours(1) do
       parallel :both do
         lane :a do
-          step(:a1, fn data ->
+          step :a1, fn data ->
             Probe.note(:a1)
             {:ok, data}
-          end)
+          end
 
-          step(:a2, fn data ->
+          step :a2, fn data ->
             answer = wait_for_event("go")
             Probe.note(:a2)
             {:ok, Map.put(data, :went, answer["with"])}
-          end)
+          end
 
-          step(:a3, fn data ->
+          step :a3, fn data ->
             Probe.note(:a3)
             {:ok, data}
-          end)
+          end
         end
 
-        step(:b, fn data ->
+        step :b, fn data ->
           answer = wait_for_input("ok")
           Probe.note(:b)
           {:ok, Map.put(data, :said, answer["value"])}
-        end)
+        end
       end
 
-      step(:after, fn %{both: %{a: a, b: b}} = data ->
+      step :after, fn %{both: %{a: a, b: b}} = data ->
         Probe.note(:after)
         {:ok, Map.put(data, :joined, [a["went"], b["said"]])}
-      end)
+      end
     end
   end
 
@@ -55,34 +55,34 @@ defmodule Durable.Integration.NamedBlocksTest do
     workflow "named_breaks" do
       parallel :both do
         lane :slow do
-          step(:s1, fn data ->
+          step :s1, fn data ->
             Probe.note(:s1)
             {:ok, data}
-          end)
+          end
 
-          step(:s2, fn data ->
+          step :s2, fn data ->
             Probe.note(:s2_started)
             Probe.wait_for(:release_slow)
             Probe.note(:s2)
             {:ok, data}
-          end)
+          end
         end
 
         lane :quick do
-          step(:q1, fn data ->
+          step :q1, fn data ->
             Probe.wait_for(:slow_is_in_s2)
 
             if Probe.set?(:fixed),
               do: {:ok, data},
               else: {:fail, "quick is broken"}
-          end)
+          end
         end
       end
 
-      step(:after, fn data ->
+      step :after, fn data ->
         Probe.note(:after)
         {:ok, data}
-      end)
+      end
     end
   end
 

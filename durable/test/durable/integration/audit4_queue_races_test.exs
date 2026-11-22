@@ -4,10 +4,10 @@ defmodule Audit4QueueRaceOnce do
   alias Durable.IntegrationProbe, as: Probe
 
   workflow "audit4_queue_race_once" do
-    step(:work, fn data ->
+    step :work, fn data ->
       Probe.note(:once)
       {:ok, data}
-    end)
+    end
   end
 end
 

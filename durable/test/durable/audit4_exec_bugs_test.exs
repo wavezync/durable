@@ -32,11 +32,11 @@ defmodule Durable.Audit4ExecBugsTest do
 
     # The card is charged once the bank confirms. An hour is long enough.
     workflow "audit4_charge", timeout: hours(1) do
-      step(:await_bank, fn payment ->
+      step :await_bank, fn payment ->
         Audit4ExecBugSeen.hit(:charge_started)
         wait_for_event("bank_confirmed")
         {:ok, Map.put(payment, "paid", true)}
-      end)
+      end
     end
   end
 
@@ -62,96 +62,96 @@ defmodule Durable.Audit4ExecBugsTest do
     workflow "audit4_notice" do
       parallel :send, into: fn notice, _sent -> {:goto, :send__post__stamp, notice} end do
         lane :post do
-          step(:stamp, fn notice ->
+          step :stamp, fn notice ->
             Audit4ExecBugSeen.hit(:posted)
             {:ok, notice}
-          end)
+          end
         end
       end
     end
 
     # An order arrives as the webhook sent it and is carried from step to step.
     workflow "audit4_order" do
-      step(:receive_order, fn order -> {:ok, assign(order, :received, true)} end)
+      step :receive_order, fn order -> {:ok, assign(order, :received, true)} end
 
-      step(:pack, fn order ->
+      step :pack, fn order ->
         Audit4ExecBugSeen.hit(:packed)
         {:ok, assign(order, :packed, true)}
-      end)
+      end
     end
 
     workflow "audit4_order_held" do
-      step(:reserve_stock, [compensate: :release_stock], fn order ->
+      step :reserve_stock, [compensate: :release_stock], fn order ->
         {:ok, assign(order, :reserved, true)}
-      end)
+      end
 
-      step(:cool_off, fn order ->
+      step :cool_off, fn order ->
         sleep(seconds(1))
         {:ok, order}
-      end)
+      end
 
-      step(:pack, fn order ->
+      step :pack, fn order ->
         Audit4ExecBugSeen.hit(:packed)
         {:ok, order}
-      end)
+      end
 
-      compensate(:release_stock, fn order ->
+      compensate :release_stock, fn order ->
         Audit4ExecBugSeen.hit(:stock_released)
         {:ok, order}
-      end)
+      end
     end
 
     workflow "audit4_order_paid" do
-      step(:receive_order, fn order -> {:ok, assign(order, :received, true)} end)
+      step :receive_order, fn order -> {:ok, assign(order, :received, true)} end
 
-      step(:take_payment, fn order ->
+      step :take_payment, fn order ->
         with {:ok, payment} <- call_workflow(Audit4ExecBugCharge, %{"total" => 40}, ref: :charge) do
           {:ok, assign(order, :payment, payment)}
         end
-      end)
+      end
     end
 
     workflow "audit4_order_checked" do
-      step(:receive_order, fn order -> {:ok, assign(order, :received, true)} end)
+      step :receive_order, fn order -> {:ok, assign(order, :received, true)} end
 
       parallel :checks do
-        step(:address, fn order ->
+        step :address, fn order ->
           Audit4ExecBugSeen.hit(:address_checked)
           {:ok, assign(order, :address_ok, true)}
-        end)
+        end
       end
 
-      step(:pack, fn order -> {:ok, order} end)
+      step :pack, fn order -> {:ok, order} end
     end
 
     # The whole order has an hour, and so does the charge it calls.
     workflow "audit4_order_within_the_hour", timeout: hours(1) do
-      step(:take_payment, fn order ->
+      step :take_payment, fn order ->
         with {:ok, payment} <- call_workflow(Audit4ExecBugCharge, %{"total" => 40}) do
           {:ok, assign(order, :payment, payment)}
         end
-      end)
+      end
     end
 
     workflow "audit4_order_with_receipt" do
-      step(:send_receipt, fn order ->
+      step :send_receipt, fn order ->
         {:ok, _id} = start_workflow(Audit4ExecBugCharge, %{"total" => 40})
         {:ok, order}
-      end)
+      end
     end
 
     # The card is charged while the stock is counted.
     workflow "audit4_order_counted" do
       parallel :prepare do
-        step(:charge, fn _order ->
+        step :charge, fn _order ->
           with {:ok, payment} <- call_workflow(Audit4ExecBugCharge, %{"total" => 40}) do
             {:ok, %{payment: payment}}
           end
-        end)
+        end
 
-        step(:count_stock, fn _order ->
+        step :count_stock, fn _order ->
           if Audit4ExecBugSeen.get(:stock_out), do: {:fail, "out of stock"}, else: {:ok, %{}}
-        end)
+        end
       end
     end
 
@@ -161,9 +161,9 @@ defmodule Durable.Audit4ExecBugsTest do
         lane :surveyor, timeout: minutes(10) do
           parallel :rooms do
             lane :kitchen, timeout: hours(1) do
-              step(:measure, fn _house ->
+              step :measure, fn _house ->
                 if Audit4ExecBugSeen.get(:locked), do: {:fail, "locked"}, else: {:ok, %{}}
-              end)
+              end
             end
           end
         end
@@ -174,16 +174,16 @@ defmodule Durable.Audit4ExecBugsTest do
     workflow "audit4_dispatch" do
       parallel :arrange do
         lane :courier do
-          step(:quote, fn _parcel ->
+          step :quote, fn _parcel ->
             {:cancel, "the courier doesn't serve this area", scope: :run}
-          end)
+          end
         end
 
         lane :warehouse do
-          step(:await_picker, fn parcel ->
+          step :await_picker, fn parcel ->
             wait_for_input("picked")
             {:ok, parcel}
-          end)
+          end
         end
       end
     end
@@ -191,167 +191,167 @@ defmodule Durable.Audit4ExecBugsTest do
     # Two pickers are asked, and the job needs both.
     workflow "audit4_pick" do
       parallel :pickers do
-        step(:north, fn job ->
+        step :north, fn job ->
           wait_for_input("north_picked")
           {:ok, job}
-        end)
+        end
 
-        step(:south, fn job ->
+        step :south, fn job ->
           wait_for_input("south_picked")
           {:ok, job}
-        end)
+        end
       end
     end
 
     workflow "audit4_pick_spare" do
       parallel :pickers do
-        step(:north, fn job ->
+        step :north, fn job ->
           wait_for_input("north_picked")
           {:ok, job}
-        end)
+        end
 
         lane :spare, optional: true do
-          step(:stand_by, fn job ->
+          step :stand_by, fn job ->
             wait_for_input("spare_picked")
             {:ok, job}
-          end)
+          end
         end
       end
     end
 
     workflow "audit4_refund" do
-      decision(:route, fn refund ->
+      decision :route, fn refund ->
         {:goto, :pay_out, Map.update(refund, "routed", 1, &(&1 + 1))}
-      end)
+      end
 
-      step(:ask_manager, fn refund -> {:ok, refund} end)
+      step :ask_manager, fn refund -> {:ok, refund} end
 
-      step(:pay_out, fn refund ->
+      step :pay_out, fn refund ->
         Audit4ExecBugSeen.put(:stored_after_route, Audit4ExecBugOrders.stored_now())
         {:ok, refund}
-      end)
+      end
     end
 
     workflow "audit4_parcel" do
       branch on: fn parcel -> parcel["size"] end do
         "large" ->
-          step(:weigh, fn parcel -> {:ok, Map.update(parcel, "weighed", 1, &(&1 + 1))} end)
+          step :weigh, fn parcel -> {:ok, Map.update(parcel, "weighed", 1, &(&1 + 1))} end
 
-          step(:book_lorry, fn parcel ->
+          step :book_lorry, fn parcel ->
             Audit4ExecBugSeen.put(:stored_after_weigh, Audit4ExecBugOrders.stored_now())
             {:ok, parcel}
-          end)
+          end
 
         "tiny" ->
-          step(:slip_in, fn parcel ->
+          step :slip_in, fn parcel ->
             {:goto, Audit4ExecBugOrders.step_named("audit4_parcel", "__queue_at_counter"), parcel}
-          end)
+          end
 
         _ ->
-          step(:frank, fn parcel ->
+          step :frank, fn parcel ->
             {:goto, :hand_over, Map.update(parcel, "franked", 1, &(&1 + 1))}
-          end)
+          end
 
-          step(:queue_at_counter, fn parcel -> {:ok, Map.put(parcel, "queued", true)} end)
+          step :queue_at_counter, fn parcel -> {:ok, Map.put(parcel, "queued", true)} end
       end
 
-      step(:hand_over, fn parcel ->
+      step :hand_over, fn parcel ->
         Audit4ExecBugSeen.put(:stored_after_frank, Audit4ExecBugOrders.stored_now())
         {:ok, parcel}
-      end)
+      end
     end
 
     workflow "audit4_refund_routed" do
-      decision(:route, fn refund ->
+      decision :route, fn refund ->
         {:goto, String.to_atom(refund["to"]), Map.update(refund, "routed", 1, &(&1 + 1))}
-      end)
+      end
 
-      step(:ask_manager, fn refund -> {:ok, refund} end)
-      step(:pay_out, fn refund -> {:ok, refund} end)
+      step :ask_manager, fn refund -> {:ok, refund} end
+      step :pay_out, fn refund -> {:ok, refund} end
     end
 
     workflow "audit4_claim" do
-      decision(:triage, fn claim -> {:goto, String.to_existing_atom(claim["to"]), claim} end)
+      decision :triage, fn claim -> {:goto, String.to_existing_atom(claim["to"]), claim} end
 
       branch :risk, fn claim -> {:clear, claim} end do
         :clear ->
-          step(:pay, fn claim -> {:ok, assign(claim, :paid, true)} end)
+          step :pay, fn claim -> {:ok, assign(claim, :paid, true)} end
 
         :review ->
-          step(:ask_assessor, fn claim -> {:ok, assign(claim, :asked, true)} end)
+          step :ask_assessor, fn claim -> {:ok, assign(claim, :asked, true)} end
 
         :blocked ->
-          step(:refuse, fn claim -> {:ok, assign(claim, :refused, true)} end)
+          step :refuse, fn claim -> {:ok, assign(claim, :refused, true)} end
       end
 
       parallel :notify do
         lane :customer do
-          step(:email, fn claim -> {:ok, assign(claim, :emailed, true)} end)
+          step :email, fn claim -> {:ok, assign(claim, :emailed, true)} end
         end
 
         lane :broker do
-          step(:letter, fn claim -> {:ok, assign(claim, :lettered, true)} end)
+          step :letter, fn claim -> {:ok, assign(claim, :lettered, true)} end
         end
       end
 
-      step(:close, fn claim -> {:ok, claim} end)
+      step :close, fn claim -> {:ok, claim} end
     end
 
     workflow "audit4_trip", on_failure: :rollback do
-      step(:book_flight, [compensate: :cancel_flight], fn trip ->
+      step :book_flight, [compensate: :cancel_flight], fn trip ->
         {:ok, Map.put(trip, "id", "FL-123")}
-      end)
-
-      parallel :checks do
-        step(:visa, fn _trip -> {:fail, "no visa"} end)
       end
 
-      compensate(:cancel_flight, fn trip ->
+      parallel :checks do
+        step :visa, fn _trip -> {:fail, "no visa"} end
+      end
+
+      compensate :cancel_flight, fn trip ->
         Audit4ExecBugSeen.put(:cancelled_flight, trip["id"])
         {:ok, trip}
-      end)
+      end
     end
 
     # The trip is booked on its own, while the planner waits for the traveller.
     workflow "audit4_trip_planned" do
-      step(:book, fn plan ->
+      step :book, fn plan ->
         {:ok, _id} = start_workflow(__MODULE__, %{}, workflow: "audit4_trip_halts")
         {:ok, plan}
-      end)
+      end
 
-      step(:await_traveller, fn plan ->
+      step :await_traveller, fn plan ->
         wait_for_input("approved")
         {:ok, plan}
-      end)
+      end
     end
 
     workflow "audit4_trip_approved", on_failure: :rollback, timeout: hours(1) do
-      step(:book_flight, [compensate: :cancel_flight], fn trip ->
+      step :book_flight, [compensate: :cancel_flight], fn trip ->
         {:ok, Map.put(trip, "id", "FL-123")}
-      end)
+      end
 
-      step(:await_approval, fn trip ->
+      step :await_approval, fn trip ->
         wait_for_input("approved", on_timeout: :fail)
         {:ok, trip}
-      end)
+      end
 
-      compensate(:cancel_flight, fn trip ->
+      compensate :cancel_flight, fn trip ->
         Audit4ExecBugSeen.put(:cancelled_flight, trip["id"])
         {:ok, trip}
-      end)
+      end
     end
 
     workflow "audit4_trip_halts" do
-      step(:book_flight, [compensate: :cancel_flight], fn trip ->
+      step :book_flight, [compensate: :cancel_flight], fn trip ->
         {:ok, Map.put(trip, "id", "FL-123")}
-      end)
+      end
 
-      step(:charge_card, fn _trip -> {:fail, "card declined"} end)
+      step :charge_card, fn _trip -> {:fail, "card declined"} end
 
-      compensate(:cancel_flight, fn trip ->
+      compensate :cancel_flight, fn trip ->
         Audit4ExecBugSeen.put(:cancelled_flight, trip["id"])
         {:ok, trip}
-      end)
+      end
     end
   end
 

@@ -13,15 +13,15 @@ defmodule Durable.Integration.WaitMarkersRegressionsTest do
     alias Durable.IntegrationProbe, as: Probe
 
     workflow "r_h_times_out" do
-      step(:w, fn data ->
+      step :w, fn data ->
         v = wait_for_event("x", timeout: 100, timeout_value: :none)
         {:ok, Map.put(data, "v", inspect(v))}
-      end)
+      end
 
-      step(:next, fn data ->
+      step :next, fn data ->
         Probe.put(:keys, Map.keys(data))
         {:ok, data}
-      end)
+      end
     end
   end
 

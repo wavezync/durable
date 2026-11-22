@@ -126,7 +126,7 @@ defmodule Durable.QueryTest do
     use Durable
 
     workflow "orders" do
-      step(:a, fn data -> {:ok, data} end)
+      step :a, fn data -> {:ok, data} end
     end
   end
 
@@ -134,7 +134,7 @@ defmodule Durable.QueryTest do
     use Durable
 
     workflow "refunds" do
-      step(:a, fn data -> {:ok, data} end)
+      step :a, fn data -> {:ok, data} end
     end
   end
 

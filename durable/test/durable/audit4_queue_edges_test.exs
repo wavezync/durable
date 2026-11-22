@@ -3,7 +3,7 @@ defmodule Audit4QueueEdgeRow do
   use Durable
 
   workflow "audit4_queue_edge_row" do
-    step(:save, fn data -> {:ok, data} end)
+    step :save, fn data -> {:ok, data} end
   end
 end
 
@@ -12,9 +12,9 @@ defmodule Audit4QueueEdgeUndo do
   use Durable
 
   workflow "audit4_queue_edge_undo" do
-    step(:save, [compensate: :unsave], fn data -> {:ok, data} end)
-    step(:charge, fn _data -> {:fail, "declined"} end)
-    compensate(:unsave, fn data -> {:ok, data} end)
+    step :save, [compensate: :unsave], fn data -> {:ok, data} end
+    step :charge, fn _data -> {:fail, "declined"} end
+    compensate :unsave, fn data -> {:ok, data} end
   end
 end
 
@@ -28,7 +28,7 @@ defmodule Audit4QueueEdgeChild do
 
   # Its parent finishes and is pruned while this step is still running.
   workflow "audit4_queue_edge_child" do
-    step(:outlive_parent, fn data ->
+    step :outlive_parent, fn data ->
       config = Durable.Config.get(Durable)
       long_ago = DateTime.add(DateTime.utc_now(), -3_600, :second)
 
@@ -40,7 +40,7 @@ defmodule Audit4QueueEdgeChild do
 
       pruned = Durable.Pruner.prune(%{config | prune: [completed: 1_000]})
       {:ok, Map.put(data, "pruned", pruned.completed)}
-    end)
+    end
   end
 end
 
@@ -51,12 +51,12 @@ defmodule Audit4QueueEdgeParent do
   use Durable.Orchestration
 
   workflow "audit4_queue_edge_parent" do
-    step(:kick_off, fn data ->
+    step :kick_off, fn data ->
       {:ok, child} =
         start_workflow(Audit4QueueEdgeChild, %{"parent" => workflow_id()}, ref: :child)
 
       {:ok, Map.put(data, "child", child)}
-    end)
+    end
   end
 end
 

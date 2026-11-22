@@ -22,7 +22,7 @@ defmodule Durable.ReadContractTest do
     use Durable.Wait
 
     workflow "read_contract_asks" do
-      step(:ask, fn data -> {:ok, Map.put(data, "answer", wait_for_input("ok"))} end)
+      step :ask, fn data -> {:ok, Map.put(data, "answer", wait_for_input("ok"))} end
     end
   end
 

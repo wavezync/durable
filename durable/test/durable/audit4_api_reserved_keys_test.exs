@@ -20,14 +20,14 @@ defmodule Durable.Audit4ApiReservedKeysTest do
     use Durable.Wait
 
     workflow "audit4_api_pass_then_sleep" do
-      step(:first, fn data -> {:ok, data} end)
+      step :first, fn data -> {:ok, data} end
 
-      step(:second, fn data ->
+      step :second, fn data ->
         sleep(10)
         {:ok, Map.put(data, "second", true)}
-      end)
+      end
 
-      step(:third, fn data -> {:ok, Map.put(data, "third", true)} end)
+      step :third, fn data -> {:ok, Map.put(data, "third", true)} end
     end
   end
 
@@ -35,9 +35,9 @@ defmodule Durable.Audit4ApiReservedKeysTest do
     use Durable
 
     workflow "audit4_api_books" do
-      step(:book, [compensate: :unbook], fn data -> {:ok, data} end)
-      step(:confirm, fn data -> {:ok, Map.put(data, "confirmed", true)} end)
-      compensate(:unbook, fn data -> {:ok, data} end)
+      step :book, [compensate: :unbook], fn data -> {:ok, data} end
+      step :confirm, fn data -> {:ok, Map.put(data, "confirmed", true)} end
+      compensate :unbook, fn data -> {:ok, data} end
     end
   end
 
@@ -46,9 +46,9 @@ defmodule Durable.Audit4ApiReservedKeysTest do
     use Durable.Wait
 
     workflow "audit4_api_asks_first" do
-      step(:ask, fn data ->
+      step :ask, fn data ->
         {:ok, Map.put(data, "answer", inspect(wait_for_approval("ok")))}
-      end)
+      end
     end
   end
 
@@ -57,10 +57,10 @@ defmodule Durable.Audit4ApiReservedKeysTest do
     use Durable.Wait
 
     workflow "audit4_api_sleeps_first" do
-      step(:nap, fn data ->
+      step :nap, fn data ->
         sleep(3_600_000)
         {:ok, Map.put(data, "napped", true)}
-      end)
+      end
     end
   end
 
@@ -134,7 +134,7 @@ defmodule Durable.Audit4ApiReservedKeysTest do
     use Durable.Wait
 
     workflow "audit4_api_waits_under_engine_name" do
-      step(:ask, fn data -> {:ok, Map.put(data, "got", wait_for_event(data["name"]))} end)
+      step :ask, fn data -> {:ok, Map.put(data, "got", wait_for_event(data["name"]))} end
     end
   end
 

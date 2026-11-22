@@ -4,14 +4,14 @@ defmodule Audit4QueueGate do
   alias Durable.IntegrationProbe, as: Probe
 
   workflow "audit4_queue_gate" do
-    step(:work, fn data ->
+    step :work, fn data ->
       Probe.inside([:slots], fn ->
         Probe.note(:gate)
         Probe.wait_for(data["flag"])
       end)
 
       {:ok, data}
-    end)
+    end
   end
 end
 
@@ -21,10 +21,10 @@ defmodule Audit4QueueOnce do
   alias Durable.IntegrationProbe, as: Probe
 
   workflow "audit4_queue_once" do
-    step(:work, fn data ->
+    step :work, fn data ->
       Probe.note(:once)
       {:ok, data}
-    end)
+    end
   end
 end
 
@@ -34,15 +34,15 @@ defmodule Audit4QueueTwoSteps do
   alias Durable.IntegrationProbe, as: Probe
 
   workflow "audit4_queue_two_steps" do
-    step(:first, fn data ->
+    step :first, fn data ->
       Probe.note(:first)
       {:ok, Map.put(data, "first", "done")}
-    end)
+    end
 
-    step(:second, fn data ->
+    step :second, fn data ->
       Probe.note(:second)
       {:ok, data}
-    end)
+    end
   end
 end
 
@@ -52,15 +52,15 @@ defmodule Audit4QueueSeesData do
   alias Durable.IntegrationProbe, as: Probe
 
   workflow "audit4_queue_sees_data" do
-    step(:first, fn data ->
+    step :first, fn data ->
       Probe.note(:first)
       {:ok, Map.put(data, :total, data["order"] * 3)}
-    end)
+    end
 
-    step(:second, fn data ->
+    step :second, fn data ->
       Probe.put(:second_got, data)
       {:ok, data}
-    end)
+    end
   end
 end
 
@@ -71,16 +71,16 @@ defmodule Audit4QueuePutsContext do
   alias Durable.IntegrationProbe, as: Probe
 
   workflow "audit4_queue_puts_context" do
-    step(:first, fn data ->
+    step :first, fn data ->
       Probe.note(:first)
       put_context(:receipt, "r-1")
       {:ok, data}
-    end)
+    end
 
-    step(:second, fn data ->
+    step :second, fn data ->
       Probe.put(:second_got, {data, get_context(:receipt)})
       {:ok, data}
-    end)
+    end
   end
 end
 
@@ -90,14 +90,14 @@ defmodule Audit4QueueSlowUndo do
   alias Durable.IntegrationProbe, as: Probe
 
   workflow "audit4_queue_slow_undo", on_failure: :rollback do
-    step(:book, [compensate: :unbook], fn data -> {:ok, data} end)
-    step(:charge, fn _data -> {:fail, "declined"} end)
+    step :book, [compensate: :unbook], fn data -> {:ok, data} end
+    step :charge, fn _data -> {:fail, "declined"} end
 
-    compensate(:unbook, fn data ->
+    compensate :unbook, fn data ->
       Probe.note(:undoing)
       Probe.wait_for(:never)
       {:ok, data}
-    end)
+    end
   end
 end
 
@@ -108,24 +108,24 @@ defmodule Audit4QueueTwoUndos do
 
   # The refund goes through, and the node stops while the booking is released.
   workflow "audit4_queue_two_undos", on_failure: :rollback do
-    step(:book, [compensate: :unbook], fn data -> {:ok, data} end)
-    step(:pay, [compensate: :refund], fn data -> {:ok, data} end)
+    step :book, [compensate: :unbook], fn data -> {:ok, data} end
+    step :pay, [compensate: :refund], fn data -> {:ok, data} end
 
-    step(:ship, fn _data ->
+    step :ship, fn _data ->
       Probe.note(:ship)
       {:fail, "declined"}
-    end)
+    end
 
-    compensate(:refund, fn data ->
+    compensate :refund, fn data ->
       Probe.note(:refund)
       {:ok, data}
-    end)
+    end
 
-    compensate(:unbook, fn data ->
+    compensate :unbook, fn data ->
       Probe.note(:unbook)
       Probe.wait_for("unbooked")
       {:ok, data}
-    end)
+    end
   end
 end
 
@@ -136,16 +136,16 @@ defmodule Audit4QueueCooperative do
   alias Durable.IntegrationProbe, as: Probe
 
   workflow "audit4_queue_cooperative" do
-    step(:first, fn data ->
+    step :first, fn data ->
       Probe.note(:first)
       Probe.put(:stopping_seen, shutting_down?())
       {:ok, data}
-    end)
+    end
 
-    step(:second, fn data ->
+    step :second, fn data ->
       Probe.here(:second)
       {:ok, data}
-    end)
+    end
   end
 end
 

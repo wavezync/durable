@@ -69,61 +69,61 @@ defmodule Durable.Integration.Audit4EngineStateMigrationTest do
 
     # An order waits to be paid for, and is then shipped.
     workflow "migrated_order" do
-      step(:receive_order, fn order ->
+      step :receive_order, fn order ->
         Seen.hit(:received)
         {:ok, Map.put(order, :received, true)}
-      end)
+      end
 
-      step(:await_payment, fn order ->
+      step :await_payment, fn order ->
         payment = wait_for_event("payment_received")
         Seen.hit(:paid)
         {:ok, Map.put(order, :paid, payment["amount"])}
-      end)
+      end
 
-      step(:ship, fn order ->
+      step :ship, fn order ->
         Seen.hit(:shipped)
         {:ok, Map.put(order, :shipped, true)}
-      end)
+      end
     end
 
     # A loan is checked against two bureaus at once, each of which answers later.
     workflow "migrated_loan" do
-      step(:receive_application, fn loan -> {:ok, Map.put(loan, :received, true)} end)
+      step :receive_application, fn loan -> {:ok, Map.put(loan, :received, true)} end
 
       parallel :checks do
-        step(:credit, fn _loan ->
+        step :credit, fn _loan ->
           Seen.hit(:credit_asked)
           {:ok, %{score: wait_for_event("credit_scored")["score"]}}
-        end)
+        end
 
-        step(:fraud, fn _loan ->
+        step :fraud, fn _loan ->
           Seen.hit(:fraud_asked)
           {:ok, %{clear: wait_for_event("fraud_checked")["clear"]}}
-        end)
+        end
       end
 
-      step(:decide, fn loan ->
+      step :decide, fn loan ->
         Seen.hit(:decided)
         {:ok, Map.put(loan, :approved, loan.checks.credit["score"] > 600)}
-      end)
+      end
     end
 
     # A trip whose payment is declined is left failed, its flight still booked.
     workflow "migrated_trip" do
-      step(:book_flight, [compensate: :cancel_flight], fn trip ->
+      step :book_flight, [compensate: :cancel_flight], fn trip ->
         Seen.hit(:booked)
         {:ok, Map.put(trip, :flight, "FL-123")}
-      end)
+      end
 
-      step(:charge, fn _trip ->
+      step :charge, fn _trip ->
         Seen.hit(:charged)
         {:error, "card declined"}
-      end)
+      end
 
-      compensate(:cancel_flight, fn trip ->
+      compensate :cancel_flight, fn trip ->
         Seen.hit({:cancelled, trip.flight})
         {:ok, trip}
-      end)
+      end
     end
   end
 

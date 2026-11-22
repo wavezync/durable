@@ -16,9 +16,9 @@ defmodule Durable.HostileValuesTest do
     use Durable
 
     workflow "hostile_returns" do
-      step(:a, fn data ->
+      step :a, fn data ->
         Durable.HostileValuesTest.returned(data[:what] || data["what"])
-      end)
+      end
     end
   end
 
@@ -51,10 +51,10 @@ defmodule Durable.HostileValuesTest do
     use Durable.Wait
 
     workflow "hostile_timeout_value" do
-      step(:a, fn data ->
+      step :a, fn data ->
         wait_for_event("never", timeout: 1, timeout_value: ~U[2026-01-01 00:00:00Z])
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -63,15 +63,15 @@ defmodule Durable.HostileValuesTest do
     use Durable.Wait
 
     workflow "hostile_any_then_same_name" do
-      step(:a, fn data ->
+      step :a, fn data ->
         wait_for_any(["x", "y"])
         {:ok, data}
-      end)
+      end
 
-      step(:b, fn data ->
+      step :b, fn data ->
         wait_for_event("y")
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -93,9 +93,9 @@ defmodule Durable.HostileValuesTest do
     use Durable.Context
 
     workflow "hostile_throws_once" do
-      step(:a, [retry: [max_attempts: 2, backoff: :constant, base: 1]], fn data ->
+      step :a, [retry: [max_attempts: 2, backoff: :constant, base: 1]], fn data ->
         if attempt() == 1, do: throw(:boom), else: {:ok, data}
-      end)
+      end
     end
   end
 
@@ -244,10 +244,10 @@ defmodule Durable.HostileValuesTest do
     use Durable.Wait
 
     workflow "hostile_waits_by_name" do
-      step(:a, fn data ->
+      step :a, fn data ->
         wait_for_event(data[:name] || data["name"])
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -291,10 +291,10 @@ defmodule Durable.HostileValuesTest do
     use Durable.Orchestration
 
     workflow "hostile_child_input" do
-      step(:a, fn data ->
+      step :a, fn data ->
         start_workflow(Durable.HostileValuesTest.Returns, ~D[2026-01-01], ref: :child)
         {:ok, data}
-      end)
+      end
     end
   end
 

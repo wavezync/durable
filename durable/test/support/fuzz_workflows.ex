@@ -18,9 +18,9 @@ defmodule Durable.FuzzWorkflows do
         fn data -> Durable.FuzzWorkflows.act(data) end
       )
 
-      step(:next, fn data -> Durable.FuzzWorkflows.next(data) end)
+      step :next, fn data -> Durable.FuzzWorkflows.next(data) end
 
-      compensate(:undo, fn data -> Durable.FuzzWorkflows.undo(data) end)
+      compensate :undo, fn data -> Durable.FuzzWorkflows.undo(data) end
     end
   end
 
@@ -30,9 +30,9 @@ defmodule Durable.FuzzWorkflows do
     use Durable
 
     workflow "fuzz_hostile_undo", on_failure: :rollback do
-      step(:book, [compensate: :undo], fn data -> {:ok, data} end)
-      step(:charge, fn _data -> {:fail, "declined"} end)
-      compensate(:undo, fn data -> Durable.FuzzWorkflows.undo(data) end)
+      step :book, [compensate: :undo], fn data -> {:ok, data} end
+      step :charge, fn _data -> {:fail, "declined"} end
+      compensate :undo, fn data -> Durable.FuzzWorkflows.undo(data) end
     end
   end
 
@@ -41,7 +41,7 @@ defmodule Durable.FuzzWorkflows do
     use Durable
 
     workflow "fuzz_quick" do
-      step(:a, fn data -> {:ok, data} end)
+      step :a, fn data -> {:ok, data} end
     end
   end
 
@@ -51,10 +51,10 @@ defmodule Durable.FuzzWorkflows do
     use Durable.Wait
 
     workflow "fuzz_waits" do
-      step(:a, fn data ->
+      step :a, fn data ->
         wait_for_event("go")
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -64,10 +64,10 @@ defmodule Durable.FuzzWorkflows do
     use Durable.Wait
 
     workflow "fuzz_waits_any" do
-      step(:a, fn data ->
+      step :a, fn data ->
         wait_for_any(["yes", "no"])
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -77,10 +77,10 @@ defmodule Durable.FuzzWorkflows do
     use Durable.Wait
 
     workflow "fuzz_asks" do
-      step(:a, fn data ->
+      step :a, fn data ->
         wait_for_input("approve")
         {:ok, data}
-      end)
+      end
     end
   end
 
@@ -109,9 +109,9 @@ defmodule Durable.FuzzWorkflows do
           fn d -> F.scripted(:s2, :q_a, d) end
         )
 
-        step(:s3, [retry: [max_attempts: 3, backoff: :constant, base: 1]], fn d ->
+        step :s3, [retry: [max_attempts: 3, backoff: :constant, base: 1]], fn d ->
           F.scripted(:s3, nil, d)
-        end)
+        end
 
         step(
           :s4,
@@ -119,9 +119,9 @@ defmodule Durable.FuzzWorkflows do
           fn d -> F.scripted(:s4, :q_b, d) end
         )
 
-        step(:s5, [queue: :q_a, retry: [max_attempts: 3, backoff: :constant, base: 1]], fn d ->
+        step :s5, [queue: :q_a, retry: [max_attempts: 3, backoff: :constant, base: 1]], fn d ->
           F.scripted(:s5, :q_a, d)
-        end)
+        end
 
         step(
           :s6,
@@ -131,10 +131,10 @@ defmodule Durable.FuzzWorkflows do
           end
         )
 
-        compensate(:u1, fn d -> F.scripted_undo(:s1, d) end)
-        compensate(:u2, fn d -> F.scripted_undo(:s2, d) end)
-        compensate(:u4, fn d -> F.scripted_undo(:s4, d) end)
-        compensate(:u6, fn d -> F.scripted_undo(:s6, d) end)
+        compensate :u1, fn d -> F.scripted_undo(:s1, d) end
+        compensate :u2, fn d -> F.scripted_undo(:s2, d) end
+        compensate :u4, fn d -> F.scripted_undo(:s4, d) end
+        compensate :u6, fn d -> F.scripted_undo(:s6, d) end
       end
     end
   end
@@ -161,9 +161,9 @@ defmodule Durable.FuzzWorkflows do
     alias Durable.FuzzWorkflows, as: F
 
     workflow "fuzz_tree_child", on_failure: :rollback do
-      step(:book, [compensate: :unbook], fn d -> {:ok, d} end)
-      step(:work, fn d -> F.tree_child(d) end)
-      compensate(:unbook, fn d -> {:ok, d} end)
+      step :book, [compensate: :unbook], fn d -> {:ok, d} end
+      step :work, fn d -> F.tree_child(d) end
+      compensate :unbook, fn d -> {:ok, d} end
     end
   end
 
@@ -175,49 +175,49 @@ defmodule Durable.FuzzWorkflows do
     alias Durable.FuzzWorkflows, as: F
 
     workflow "fuzz_tree", on_failure: :rollback do
-      step(:first, [compensate: :undo_first], fn d -> F.tree(:first, d) end)
+      step :first, [compensate: :undo_first], fn d -> F.tree(:first, d) end
 
       branch on: fn d -> F.tree_path(d) end do
         "a" ->
-          step(:a1, [queue: :q_a, retry: [max_attempts: 3, backoff: :constant, base: 1]], fn d ->
+          step :a1, [queue: :q_a, retry: [max_attempts: 3, backoff: :constant, base: 1]], fn d ->
             F.tree(:a1, d)
-          end)
+          end
 
-          step(:a2, fn d -> F.tree(:a2, d) end)
+          step :a2, fn d -> F.tree(:a2, d) end
 
         "b" ->
-          step(:b1, [retry: [max_attempts: 3, backoff: :constant, base: 1]], fn d ->
+          step :b1, [retry: [max_attempts: 3, backoff: :constant, base: 1]], fn d ->
             F.tree(:b1, d)
-          end)
+          end
 
         _ ->
-          step(:c1, [queue: :q_b], fn d -> F.tree(:c1, d) end)
+          step :c1, [queue: :q_b], fn d -> F.tree(:c1, d) end
       end
 
       parallel :fan do
-        step(:p1, [queue: :q_a], fn d -> F.tree(:p1, d) end)
-        step(:p2, [queue: :q_b], fn d -> F.tree(:p2, d) end)
-        step(:p3, fn d -> F.tree(:p3, d) end)
+        step :p1, [queue: :q_a], fn d -> F.tree(:p1, d) end
+        step :p2, [queue: :q_b], fn d -> F.tree(:p2, d) end
+        step :p3, fn d -> F.tree(:p3, d) end
       end
 
-      step(:call, fn d ->
+      step :call, fn d ->
         case call_workflow(Durable.FuzzWorkflows.TreeChild, %{"case" => F.case_of(d)},
                ref: :child
              ) do
           {:ok, _result} -> F.tree(:call, d)
           {:error, _reason} -> {:fail, "child didn't finish"}
         end
-      end)
+      end
 
-      decision(:route, fn d -> F.tree_route(d) end)
+      decision :route, fn d -> F.tree_route(d) end
 
-      step(:skipped, fn d -> F.tree(:skipped, d) end)
-      step(:last, fn d -> F.tree(:last, d) end)
+      step :skipped, fn d -> F.tree(:skipped, d) end
+      step :last, fn d -> F.tree(:last, d) end
 
-      compensate(:undo_first, fn d ->
+      compensate :undo_first, fn d ->
         Durable.IntegrationProbe.note({F.case_of(d), :undo, :first})
         {:ok, d}
-      end)
+      end
     end
   end
 
@@ -231,7 +231,7 @@ defmodule Durable.FuzzWorkflows do
     # is the one that can be retried.
     defmacro steps(first_opts) do
       quote do
-        step(:first, unquote(first_opts), fn d -> F.named(:first, d) end)
+        step :first, unquote(first_opts), fn d -> F.named(:first, d) end
 
         branch :route, [retry: [max_attempts: 3, backoff: :constant, base: 1]], fn d ->
           F.named_decide(:route, d)
@@ -247,8 +247,8 @@ defmodule Durable.FuzzWorkflows do
 
             branch :inner, fn d -> F.named_decide(:inner, d) end do
               :x ->
-                step(:x1, fn d -> F.named(:x1, d) end)
-                step(:x2, [queue: :q_b], fn d -> F.named(:x2, d) end)
+                step :x1, fn d -> F.named(:x1, d) end
+                step :x2, [queue: :q_b], fn d -> F.named(:x2, d) end
 
               :y ->
                 pass()
@@ -256,26 +256,26 @@ defmodule Durable.FuzzWorkflows do
               :z ->
                 parallel :zp do
                   lane :l1 do
-                    step(:z1, [retry: [max_attempts: 3, backoff: :constant, base: 1]], fn d ->
+                    step :z1, [retry: [max_attempts: 3, backoff: :constant, base: 1]], fn d ->
                       F.named(:z1, d)
-                    end)
+                    end
 
-                    step(:z2, fn d -> F.named(:z2, d) end)
+                    step :z2, fn d -> F.named(:z2, d) end
                   end
 
-                  step(:z3, [queue: :q_a], fn d -> F.named(:z3, d) end)
+                  step :z3, [queue: :q_a], fn d -> F.named(:z3, d) end
                 end
 
-                step(:zjoin, fn d -> F.named_join(:zjoin, :zp, [:l1, :z3], d) end)
+                step :zjoin, fn d -> F.named_join(:zjoin, :zp, [:l1, :z3], d) end
             end
 
-            step(:a2, fn d -> F.named(:a2, d) end)
+            step :a2, fn d -> F.named(:a2, d) end
 
           :b ->
             pass()
 
           :c ->
-            step(:c1, [queue: :q_b], fn d -> F.named(:c1, d) end)
+            step :c1, [queue: :q_b], fn d -> F.named(:c1, d) end
         end
 
         parallel :fan do
@@ -292,43 +292,43 @@ defmodule Durable.FuzzWorkflows do
               F.named_decide(:pick, d)
             end do
               :m ->
-                step(:m1, fn d -> F.named(:m1, d) end)
+                step :m1, fn d -> F.named(:m1, d) end
 
               :n ->
-                step(:n1, fn d -> F.named(:n1, d) end)
-                step(:n2, [queue: :q_b], fn d -> F.named(:n2, d) end)
+                step :n1, fn d -> F.named(:n1, d) end
+                step :n2, [queue: :q_b], fn d -> F.named(:n2, d) end
             end
 
-            step(:p2, fn d -> F.named(:p2, d) end)
+            step :p2, fn d -> F.named(:p2, d) end
           end
 
           lane :two do
-            step(:q1, [retry: [max_attempts: 3, backoff: :constant, base: 1]], fn d ->
+            step :q1, [retry: [max_attempts: 3, backoff: :constant, base: 1]], fn d ->
               F.named(:q1, d)
-            end)
+            end
 
             parallel :deep do
               lane :da do
-                step(:d1, fn d -> F.named(:d1, d) end)
+                step :d1, fn d -> F.named(:d1, d) end
 
-                step(:d2, [retry: [max_attempts: 3, backoff: :constant, base: 1]], fn d ->
+                step :d2, [retry: [max_attempts: 3, backoff: :constant, base: 1]], fn d ->
                   F.named(:d2, d)
-                end)
+                end
               end
 
               lane :db do
-                step(:d3, fn d -> F.named(:d3, d) end)
+                step :d3, fn d -> F.named(:d3, d) end
               end
             end
 
-            step(:q2, fn d -> F.named_join(:q2, :deep, [:da, :db], d) end)
+            step :q2, fn d -> F.named_join(:q2, :deep, [:da, :db], d) end
           end
 
-          step(:solo, fn d -> F.named(:solo, d) end)
+          step :solo, fn d -> F.named(:solo, d) end
         end
 
-        step(:join, fn d -> F.named_join(:join, :fan, [:one, :two, :solo], d) end)
-        step(:last, fn d -> F.named(:last, d) end)
+        step :join, fn d -> F.named_join(:join, :fan, [:one, :two, :solo], d) end
+        step :last, fn d -> F.named(:last, d) end
       end
     end
   end
@@ -342,10 +342,10 @@ defmodule Durable.FuzzWorkflows do
     workflow "fuzz_named_tree", on_failure: :rollback do
       Body.steps(compensate: :undo_first)
 
-      compensate(:undo_first, fn d ->
+      compensate :undo_first, fn d ->
         Durable.IntegrationProbe.note({Durable.FuzzWorkflows.case_of(d), :undo, :first})
         {:ok, d}
-      end)
+      end
     end
   end
 
@@ -368,41 +368,41 @@ defmodule Durable.FuzzWorkflows do
     alias Durable.FuzzWorkflows, as: F
 
     workflow "fuzz_named_collect" do
-      step(:first, fn d -> F.named(:first, d) end)
+      step :first, fn d -> F.named(:first, d) end
 
       parallel :lookups, on_error: :collect do
         lane :a do
-          step(:a1, [retry: [max_attempts: 3, backoff: :constant, base: 1]], fn d ->
+          step :a1, [retry: [max_attempts: 3, backoff: :constant, base: 1]], fn d ->
             F.named(:a1, d)
-          end)
+          end
 
-          step(:a2, [queue: :q_a], fn d -> F.named(:a2, d) end)
+          step :a2, [queue: :q_a], fn d -> F.named(:a2, d) end
         end
 
         lane :b do
-          step(:b1, fn d -> F.named(:b1, d) end)
+          step :b1, fn d -> F.named(:b1, d) end
 
           parallel :inner do
-            step(:i1, [retry: [max_attempts: 3, backoff: :constant, base: 1]], fn d ->
+            step :i1, [retry: [max_attempts: 3, backoff: :constant, base: 1]], fn d ->
               F.named(:i1, d)
-            end)
+            end
 
-            step(:i2, [queue: :q_b], fn d -> F.named(:i2, d) end)
+            step :i2, [queue: :q_b], fn d -> F.named(:i2, d) end
           end
 
-          step(:b2, fn d -> F.named_join(:b2, :inner, [:i1, :i2], d) end)
+          step :b2, fn d -> F.named_join(:b2, :inner, [:i1, :i2], d) end
         end
 
-        step(:c, [retry: [max_attempts: 3, backoff: :constant, base: 1]], fn d ->
+        step :c, [retry: [max_attempts: 3, backoff: :constant, base: 1]], fn d ->
           F.named(:c, d)
-        end)
+        end
       end
 
-      step(:reduce, [retry: [max_attempts: 3, backoff: :constant, base: 1]], fn d ->
+      step :reduce, [retry: [max_attempts: 3, backoff: :constant, base: 1]], fn d ->
         F.named_reduce(:reduce, :lookups, [:a, :b, :c], d)
-      end)
+      end
 
-      step(:last, fn d -> F.named(:last, d) end)
+      step :last, fn d -> F.named(:last, d) end
     end
   end
 
@@ -414,29 +414,29 @@ defmodule Durable.FuzzWorkflows do
     alias Durable.FuzzWorkflows, as: F
 
     workflow "fuzz_named_optional" do
-      step(:first, fn d -> F.named(:first, d) end)
+      step :first, fn d -> F.named(:first, d) end
 
       parallel :lookups do
         lane :a, optional: true, default: %{fallback: true}, timeout: minutes(5) do
-          step(:a1, [retry: [max_attempts: 3, backoff: :constant, base: 1]], fn d ->
+          step :a1, [retry: [max_attempts: 3, backoff: :constant, base: 1]], fn d ->
             F.named(:a1, d)
-          end)
+          end
 
-          step(:a2, [queue: :q_a], fn d -> F.named(:a2, d) end)
+          step :a2, [queue: :q_a], fn d -> F.named(:a2, d) end
         end
 
-        step(:b1, [queue: :q_b], fn d -> F.named(:b1, d) end)
+        step :b1, [queue: :q_b], fn d -> F.named(:b1, d) end
 
-        step(:c, [retry: [max_attempts: 3, backoff: :constant, base: 1]], fn d ->
+        step :c, [retry: [max_attempts: 3, backoff: :constant, base: 1]], fn d ->
           F.named(:c, d)
-        end)
+        end
       end
 
-      step(:reduce, [retry: [max_attempts: 3, backoff: :constant, base: 1]], fn d ->
+      step :reduce, [retry: [max_attempts: 3, backoff: :constant, base: 1]], fn d ->
         F.named_reduce(:reduce, :lookups, [:a, :b1, :c], d)
-      end)
+      end
 
-      step(:last, fn d -> F.named(:last, d) end)
+      step :last, fn d -> F.named(:last, d) end
     end
   end
 
@@ -553,7 +553,7 @@ defmodule Durable.FuzzWorkflows do
     use Durable
 
     workflow "fuzz_keyed", on_duplicate: :use_existing do
-      step(:work, fn d -> Durable.FuzzWorkflows.keyed(d) end)
+      step :work, fn d -> Durable.FuzzWorkflows.keyed(d) end
     end
   end
 
@@ -562,7 +562,7 @@ defmodule Durable.FuzzWorkflows do
     use Durable
 
     workflow "fuzz_keyed_again", on_duplicate: :run_again do
-      step(:work, fn d -> Durable.FuzzWorkflows.keyed(d) end)
+      step :work, fn d -> Durable.FuzzWorkflows.keyed(d) end
     end
   end
 

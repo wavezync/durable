@@ -13,22 +13,22 @@ defmodule Durable.Integration.RegressionsRollbackTest do
 
     # The depot is asked twice. The second answer is final: the slot is gone.
     workflow "rb_delivery" do
-      step(:reserve_van, [compensate: :release_van], fn order -> {:ok, order} end)
+      step :reserve_van, [compensate: :release_van], fn order -> {:ok, order} end
 
-      step(:confirm_slot, [retry: [max_attempts: 2, backoff: :constant, base: 30]], fn _order ->
+      step :confirm_slot, [retry: [max_attempts: 2, backoff: :constant, base: 30]], fn _order ->
         case Probe.note({:confirm, Durable.Context.workflow_id()}) do
           1 -> {:error, "depot didn't answer"}
           _ -> {:rollback, "the slot is gone"}
         end
-      end)
+      end
 
       # The first release takes its process down with it, as a node going would.
-      compensate(:release_van, fn order ->
+      compensate :release_van, fn order ->
         if Probe.note({:release, Durable.Context.workflow_id()}) == 1,
           do: Process.exit(self(), :kill)
 
         {:ok, order}
-      end)
+      end
     end
   end
 
@@ -39,20 +39,20 @@ defmodule Durable.Integration.RegressionsRollbackTest do
 
     # The seat is held while the traveller confirms, and only then paid for.
     workflow "rb_booking" do
-      step(:hold_seat, [compensate: :release_seat], fn trip -> {:ok, trip} end)
+      step :hold_seat, [compensate: :release_seat], fn trip -> {:ok, trip} end
 
-      step(:confirm, fn trip ->
+      step :confirm, fn trip ->
         Probe.note({:ask, Durable.Context.workflow_id()})
         wait_for_input("confirmation")
         {:ok, trip}
-      end)
+      end
 
-      step(:charge_card, fn trip -> {:ok, trip} end)
+      step :charge_card, fn trip -> {:ok, trip} end
 
-      compensate(:release_seat, fn trip ->
+      compensate :release_seat, fn trip ->
         Probe.note({:release, Durable.Context.workflow_id()})
         {:ok, trip}
-      end)
+      end
     end
   end
 
@@ -63,25 +63,25 @@ defmodule Durable.Integration.RegressionsRollbackTest do
     # The assessor is booked while the policy is looked up. Closing the claim
     # stands the assessor down if one was booked, as the parallel guide says to.
     workflow "rb_claim", on_failure: :rollback do
-      step(:open_claim, [compensate: :close_claim], fn claim -> {:ok, claim} end)
+      step :open_claim, [compensate: :close_claim], fn claim -> {:ok, claim} end
 
       parallel :checks do
-        step(:policy, fn _claim ->
+        step :policy, fn _claim ->
           Process.sleep(50)
           {:error, "no such policy"}
-        end)
+        end
 
-        step(:assessor, fn claim ->
+        step :assessor, fn claim ->
           Process.sleep(300)
           Probe.note(:assessor_booked)
           {:ok, claim}
-        end)
+        end
       end
 
-      compensate(:close_claim, fn claim ->
+      compensate :close_claim, fn claim ->
         Probe.note({:closed_with_assessor_booked, Probe.hits(:assessor_booked)})
         {:ok, claim}
-      end)
+      end
     end
   end
 
@@ -92,20 +92,20 @@ defmodule Durable.Integration.RegressionsRollbackTest do
     # The garage is booked while the job is open. Closing the job cancels the
     # garage if one was booked.
     workflow "rb_repair" do
-      step(:open_job, [compensate: :close_job], fn job -> {:ok, job} end)
+      step :open_job, [compensate: :close_job], fn job -> {:ok, job} end
 
       parallel :bookings do
-        step(:garage, fn job ->
+        step :garage, fn job ->
           Process.sleep(300)
           Probe.note(:garage_booked)
           {:ok, job}
-        end)
+        end
       end
 
-      compensate(:close_job, fn job ->
+      compensate :close_job, fn job ->
         Probe.note({:closed_with_garage_booked, Probe.hits(:garage_booked)})
         {:ok, job}
-      end)
+      end
     end
   end
 

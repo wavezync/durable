@@ -32,11 +32,11 @@ defmodule Durable.NamedBlocksEdgesTest do
             do: {:error, "scorer is down"},
             else: {:ok, assign(application, :scores, results |> Map.keys() |> Enum.sort())}
         end do
-        step(:credit, fn application -> {:ok, assign(application, :credit, 710)} end)
-        step(:fraud, fn application -> {:ok, assign(application, :fraud, 0.02)} end)
+        step :credit, fn application -> {:ok, assign(application, :credit, 710)} end
+        step :fraud, fn application -> {:ok, assign(application, :fraud, 0.02)} end
       end
 
-      step(:decide, fn application -> {:ok, assign(application, :decided, true)} end)
+      step :decide, fn application -> {:ok, assign(application, :decided, true)} end
     end
   end
 
@@ -46,16 +46,16 @@ defmodule Durable.NamedBlocksEdgesTest do
 
     # The rate is held while the lookups run. `into:` forgets its `{:ok, _}`.
     workflow "rate_lock", on_failure: :rollback do
-      step(:lock_rate, [compensate: :release_rate], fn loan -> {:ok, assign(loan, :rate, 4.1)} end)
+      step :lock_rate, [compensate: :release_rate], fn loan -> {:ok, assign(loan, :rate, 4.1)} end
 
       parallel :lookups, into: fn loan, _results -> assign(loan, :scored, true) end do
-        step(:credit, fn loan -> {:ok, assign(loan, :credit, 710)} end)
+        step :credit, fn loan -> {:ok, assign(loan, :credit, 710)} end
       end
 
-      compensate(:release_rate, fn loan ->
+      compensate :release_rate, fn loan ->
         Seen.put(:rate_released, true)
         {:ok, loan}
-      end)
+      end
     end
   end
 
@@ -68,7 +68,7 @@ defmodule Durable.NamedBlocksEdgesTest do
     # The applicant uploads a document while the credit bureau is asked.
     workflow "checks" do
       parallel :checks do
-        step(:identity, fn application ->
+        step :identity, fn application ->
           case call_workflow(__MODULE__, %{"applicant" => application["applicant"]},
                  ref: :identity,
                  workflow: "verify_identity"
@@ -76,19 +76,19 @@ defmodule Durable.NamedBlocksEdgesTest do
             {:ok, result} -> {:ok, %{verified: result["verified"]}}
             {:error, reason} -> {:error, reason}
           end
-        end)
+        end
 
-        step(:credit, [retry: [max_attempts: 2]], fn _application ->
+        step :credit, [retry: [max_attempts: 2]], fn _application ->
           if Seen.get(:bureau_down), do: {:error, "bureau is down"}, else: {:ok, %{score: 710}}
-        end)
+        end
       end
     end
 
     workflow "verify_identity" do
-      step(:check_document, fn applicant ->
+      step :check_document, fn applicant ->
         document = wait_for_input("document")
         {:ok, assign(applicant, :verified, document["valid"])}
-      end)
+      end
     end
   end
 
@@ -98,13 +98,13 @@ defmodule Durable.NamedBlocksEdgesTest do
 
     workflow "personal" do
       parallel :lookups, into: fn loan, _results -> {:ok, assign(loan, :desk, "personal")} end do
-        step(:credit, fn loan -> {:ok, loan} end)
+        step :credit, fn loan -> {:ok, loan} end
       end
     end
 
     workflow "business" do
       parallel :lookups, into: fn loan, _results -> {:ok, assign(loan, :desk, "business")} end do
-        step(:credit, fn loan -> {:ok, loan} end)
+        step :credit, fn loan -> {:ok, loan} end
       end
     end
   end
@@ -115,20 +115,20 @@ defmodule Durable.NamedBlocksEdgesTest do
 
     workflow "mixed" do
       parallel :lookups do
-        step(:credit, fn loan -> {:ok, assign(loan, :credit, 710)} end)
-        step(:fraud, fn loan -> {:ok, assign(loan, :fraud, 0.02)} end)
+        step :credit, fn loan -> {:ok, assign(loan, :credit, 710)} end
+        step :fraud, fn loan -> {:ok, assign(loan, :fraud, 0.02)} end
       end
 
-      step(:plain, fn loan ->
+      step :plain, fn loan ->
         Seen.put(:plain, loan.lookups |> Map.keys() |> Enum.sort())
         {:ok, loan}
-      end)
+      end
 
       parallel :send do
-        step(:notify, fn loan ->
+        step :notify, fn loan ->
           Seen.put(:later, loan.lookups |> Map.keys() |> Enum.sort())
           {:ok, loan}
-        end)
+        end
       end
     end
   end
@@ -139,25 +139,25 @@ defmodule Durable.NamedBlocksEdgesTest do
 
     workflow "loan" do
       parallel :lookups do
-        step(:credit, fn loan -> {:ok, assign(loan, :score, 710)} end)
-        step(:fraud, fn _loan -> {:ok, %{risk: 0.02}} end)
-        step(:address, fn loan -> {:ok, loan} end)
+        step :credit, fn loan -> {:ok, assign(loan, :score, 710)} end
+        step :fraud, fn _loan -> {:ok, %{risk: 0.02}} end
+        step :address, fn loan -> {:ok, loan} end
 
         lane :sanctions do
-          step(:query, fn loan -> {:ok, assign(loan, :hits, [])} end)
-          step(:screen, fn loan -> {:ok, assign(loan, :listed, loan.hits != [])} end)
+          step :query, fn loan -> {:ok, assign(loan, :hits, [])} end
+          step :screen, fn loan -> {:ok, assign(loan, :listed, loan.hits != [])} end
         end
       end
 
       parallel :quotes, on_error: :collect do
-        step(:north, fn loan -> {:ok, assign(loan, :rate, 6.1)} end)
-        step(:south, fn _loan -> {:error, "no answer"} end)
+        step :north, fn loan -> {:ok, assign(loan, :rate, 6.1)} end
+        step :south, fn _loan -> {:error, "no answer"} end
       end
 
-      step(:decide, fn loan ->
+      step :decide, fn loan ->
         Seen.put(:loan, loan)
         {:ok, loan}
-      end)
+      end
     end
 
     workflow "loan_into" do
@@ -166,7 +166,7 @@ defmodule Durable.NamedBlocksEdgesTest do
           Seen.put(:loan_into, results)
           {:ok, loan}
         end do
-        step(:credit, fn loan -> {:ok, assign(loan, :score, 710)} end)
+        step :credit, fn loan -> {:ok, assign(loan, :score, 710)} end
       end
     end
   end
@@ -175,17 +175,17 @@ defmodule Durable.NamedBlocksEdgesTest do
     use Durable
 
     workflow "queues" do
-      step(:transcribe, [queue: :gpu], fn call -> {:ok, call} end)
+      step :transcribe, [queue: :gpu], fn call -> {:ok, call} end
 
       branch :language, fn call ->
         Seen.queue(:decider)
         {:english, call}
       end do
         :english ->
-          step(:summarise, fn call ->
+          step :summarise, fn call ->
             Seen.queue(:arm)
             {:ok, call}
-          end)
+          end
       end
     end
   end
@@ -199,16 +199,16 @@ defmodule Durable.NamedBlocksEdgesTest do
         into: fn loan, _results ->
           {:goto, :approve, assign(loan, :joined, loan[:joined] || 1)}
         end do
-        step(:credit, fn loan -> {:ok, loan} end)
+        step :credit, fn loan -> {:ok, loan} end
       end
 
-      step(:manual_review, fn loan -> {:ok, assign(loan, :reviewed, true)} end)
+      step :manual_review, fn loan -> {:ok, assign(loan, :reviewed, true)} end
 
-      step(:approve, fn loan ->
+      step :approve, fn loan ->
         row = Repo.get(WorkflowExecution, Durable.Context.workflow_id())
         Seen.put(:record, row.engine_state["__done__"])
         {:ok, assign(loan, :approved, true)}
-      end)
+      end
     end
   end
 
@@ -219,25 +219,25 @@ defmodule Durable.NamedBlocksEdgesTest do
 
     workflow "loan" do
       parallel :lookups, on_error: :collect do
-        step(:credit, fn application -> {:ok, assign(application, :score, 710)} end)
+        step :credit, fn application -> {:ok, assign(application, :score, 710)} end
 
-        step(:fraud, fn application ->
+        step :fraud, fn application ->
           Seen.put(:fraud_ran, true)
           {:ok, assign(application, :fraud, 0.02)}
-        end)
+        end
 
         lane :sanctions do
-          step(:query, fn application ->
+          step :query, fn application ->
             if application["sanctions_down"],
               do: {:fail, "sanctions API is down"},
               else: {:ok, assign(application, :hits, [])}
-          end)
+          end
 
-          step(:screen, fn application -> {:ok, assign(application, :listed, false)} end)
+          step :screen, fn application -> {:ok, assign(application, :listed, false)} end
         end
       end
 
-      step(:decide, [retry: [max_attempts: 2, base: 1]], fn application ->
+      step :decide, [retry: [max_attempts: 2, base: 1]], fn application ->
         Seen.put({:decide, Logger.metadata()[:attempt]}, application.lookups)
 
         cond do
@@ -253,7 +253,7 @@ defmodule Durable.NamedBlocksEdgesTest do
             {:ok,
              assign(application, :outcome, if(score > 650, do: "approved", else: "declined"))}
         end
-      end)
+      end
     end
   end
 
@@ -264,48 +264,48 @@ defmodule Durable.NamedBlocksEdgesTest do
 
     workflow "enrich" do
       parallel :lookups do
-        step(:credit, fn application ->
+        step :credit, fn application ->
           if application["bureau_down"],
             do: {:fail, "credit bureau is down"},
             else: {:ok, assign(application, :score, 710)}
-        end)
+        end
 
-        step(:device, [optional: true], fn application ->
+        step :device, [optional: true], fn application ->
           if application["device_down"],
             do: {:fail, "device check is down"},
             else: {:ok, assign(application, :device, "known")}
-        end)
+        end
 
         lane :social, optional: true do
-          step(:find, fn application ->
+          step :find, fn application ->
             if application["social_down"],
               do: {:fail, "profile search is down"},
               else: {:ok, assign(application, :profiles, 2)}
-          end)
+          end
 
-          step(:rate, fn application -> {:ok, assign(application, :rated, true)} end)
+          step :rate, fn application -> {:ok, assign(application, :rated, true)} end
         end
       end
 
-      step(:decide, [retry: [max_attempts: 2, base: 1]], fn application ->
+      step :decide, [retry: [max_attempts: 2, base: 1]], fn application ->
         Seen.put({:enrich, Logger.metadata()[:attempt]}, application.lookups)
 
         if application["decide_flaky"] && Logger.metadata()[:attempt] == 1,
           do: {:error, "first attempt"},
           else: {:ok, assign(application, :decided, true)}
-      end)
+      end
     end
 
     workflow "enrich_collect" do
       parallel :lookups, on_error: :collect do
-        step(:credit, fn application -> {:ok, assign(application, :score, 710)} end)
-        step(:device, [optional: true], fn _application -> {:fail, "device check is down"} end)
+        step :credit, fn application -> {:ok, assign(application, :score, 710)} end
+        step :device, [optional: true], fn _application -> {:fail, "device check is down"} end
       end
 
-      step(:decide, fn application ->
+      step :decide, fn application ->
         Seen.put(:enrich_collect, application.lookups)
         {:ok, application}
-      end)
+      end
     end
   end
 

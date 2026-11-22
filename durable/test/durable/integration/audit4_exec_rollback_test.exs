@@ -10,22 +10,22 @@ defmodule Durable.Integration.Audit4ExecRollbackTest do
 
     # A parcel is labelled and a van reserved before customs turns it away.
     workflow "audit4_shipment" do
-      step(:reserve_van, [compensate: :release_van], fn parcel -> {:ok, parcel} end)
-      step(:print_label, [compensate: :void_label], fn parcel -> {:ok, parcel} end)
-      step(:clear_customs, fn _parcel -> {:fail, "customs refused the parcel"} end)
+      step :reserve_van, [compensate: :release_van], fn parcel -> {:ok, parcel} end
+      step :print_label, [compensate: :void_label], fn parcel -> {:ok, parcel} end
+      step :clear_customs, fn _parcel -> {:fail, "customs refused the parcel"} end
 
-      compensate(:void_label, fn parcel ->
+      compensate :void_label, fn parcel ->
         Probe.note({:void_label, Durable.Context.workflow_id()})
         {:ok, parcel}
-      end)
+      end
 
       # The first release takes its process down with it, as a node going would.
-      compensate(:release_van, fn parcel ->
+      compensate :release_van, fn parcel ->
         if Probe.note({:release_van, Durable.Context.workflow_id()}) == 1,
           do: Process.exit(self(), :kill)
 
         {:ok, parcel}
-      end)
+      end
     end
   end
 
@@ -35,19 +35,19 @@ defmodule Durable.Integration.Audit4ExecRollbackTest do
 
     # The same parcel, with undos that work.
     workflow "audit4_return" do
-      step(:reserve_van, [compensate: :release_van], fn parcel -> {:ok, parcel} end)
-      step(:print_label, [compensate: :void_label], fn parcel -> {:ok, parcel} end)
-      step(:clear_customs, fn _parcel -> {:fail, "customs refused the parcel"} end)
+      step :reserve_van, [compensate: :release_van], fn parcel -> {:ok, parcel} end
+      step :print_label, [compensate: :void_label], fn parcel -> {:ok, parcel} end
+      step :clear_customs, fn _parcel -> {:fail, "customs refused the parcel"} end
 
-      compensate(:void_label, fn parcel ->
+      compensate :void_label, fn parcel ->
         Probe.note(:void_label)
         {:ok, parcel}
-      end)
+      end
 
-      compensate(:release_van, fn parcel ->
+      compensate :release_van, fn parcel ->
         Probe.note(:release_van)
         {:ok, parcel}
-      end)
+      end
     end
   end
 

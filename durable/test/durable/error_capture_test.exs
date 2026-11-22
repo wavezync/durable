@@ -14,25 +14,25 @@ defmodule Durable.ErrorCaptureTest do
     use Durable.Helpers
 
     workflow "raises" do
-      step(:boom, fn _data -> raise ArgumentError, "bad amount" end)
+      step :boom, fn _data -> raise ArgumentError, "bad amount" end
     end
 
     workflow "exits" do
-      step(:call, fn _data -> exit({:timeout, {GenServer, :call, [:payments, :charge, 5000]}}) end)
+      step :call, fn _data -> exit({:timeout, {GenServer, :call, [:payments, :charge, 5000]}}) end
     end
 
     workflow "branch_raises" do
-      step(:start, fn data -> {:ok, data} end)
+      step :start, fn data -> {:ok, data} end
 
       branch on: fn _data -> raise KeyError, key: :tier, term: %{} end do
-        :gold -> step(:gold, fn data -> {:ok, data} end)
+        :gold -> step :gold, fn data -> {:ok, data} end
       end
     end
 
     workflow "compensation_raises", on_failure: :rollback do
-      step(:reserve, [compensate: :release], fn data -> {:ok, data} end)
-      step(:charge, fn _data -> raise "card declined" end)
-      compensate(:release, fn _data -> raise RuntimeError, "release failed" end)
+      step :reserve, [compensate: :release], fn data -> {:ok, data} end
+      step :charge, fn _data -> raise "card declined" end
+      compensate :release, fn _data -> raise RuntimeError, "release failed" end
     end
   end
 

@@ -206,10 +206,10 @@ defmodule InputWaitFixtureWorkflow do
   use Durable.Wait
 
   workflow "input_wait_fixture" do
-    step(:await, fn data ->
+    step :await, fn data ->
       result = wait_for_approval("manager_approval", prompt: "ok?")
       {:ok, assign(data, :result, result)}
-    end)
+    end
   end
 end
 
@@ -219,10 +219,10 @@ defmodule EventWaitFixtureWorkflow do
   use Durable.Wait
 
   workflow "event_wait_fixture" do
-    step(:await, fn data ->
+    step :await, fn data ->
       result = wait_for_event("payment_confirmed", timeout: hours(1))
       {:ok, assign(data, :result, result)}
-    end)
+    end
   end
 end
 
@@ -232,10 +232,10 @@ defmodule AnyEventWaitFixtureWorkflow do
   use Durable.Wait
 
   workflow "any_event_wait_fixture" do
-    step(:await, fn data ->
+    step :await, fn data ->
       result = wait_for_event("any_event", timeout: hours(1))
       {:ok, assign(data, :result, result)}
-    end)
+    end
   end
 end
 
@@ -244,7 +244,7 @@ defmodule FailingStepWorkflow do
   use Durable.Helpers
 
   workflow "failing_step" do
-    step(:boom, fn _data ->
+    step :boom, fn _data ->
       # User returns a tuple-bearing error map — H-3 says this must persist.
       {:error,
        %{
@@ -254,7 +254,7 @@ defmodule FailingStepWorkflow do
          worker: self(),
          ref: make_ref()
        }}
-    end)
+    end
   end
 end
 
@@ -263,7 +263,7 @@ defmodule NestedTupleOutputWorkflow do
   use Durable.Helpers
 
   workflow "nested_tuple_output" do
-    step(:produce_tuples, fn _data ->
+    step :produce_tuples, fn _data ->
       # User returns a map whose nested values include raw tuples. The old
       # shallow serialize_output left these untouched — JSONB would crash.
       {:ok,
@@ -271,6 +271,6 @@ defmodule NestedTupleOutputWorkflow do
          status: "ok",
          nested: %{tag: {:ok, "deep"}, list: [{:a, 1}, {:b, 2}]}
        }}
-    end)
+    end
   end
 end
