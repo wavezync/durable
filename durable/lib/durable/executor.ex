@@ -3363,10 +3363,13 @@ defmodule Durable.Executor do
 
   # Runs compensations in order and handles results
   defp run_compensations(execution, original_error, compensation_stack, _workflow_def, config) do
-    # Mark workflow as compensating
+    # Mark workflow as compensating. The error goes on the row now: a node
+    # that stops hands the rollback to another (release_node_jobs/2), which
+    # has only the row to tell it why the run is being undone.
     {:ok, exec} =
       execution
       |> WorkflowExecution.compensating_changeset()
+      |> Ecto.Changeset.change(error: original_error)
       |> without_key(execution)
       |> cas_update!(config)
 

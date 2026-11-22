@@ -111,7 +111,8 @@ All tables live in the `durable` schema.
 |---|---|
 | `running`, lock not refreshed for `stale_lock_timeout` (300 s) | `StaleJobRecovery` closes the attempt as failed (`worker_lost`) and sets the run back to `pending`, and the old worker is fenced out by its `lock_token` |
 | `waiting` with nothing left that could wake it | `StaleJobRecovery` marks it failed |
-| `compensating`, lock not refreshed for `stale_lock_timeout` | `StaleJobRecovery` marks it failed |
+| `compensating`, lock not refreshed for `stale_lock_timeout` | `StaleJobRecovery` marks it failed. `Durable.rollback/2` then finishes the job: the undos that completed aren't run again |
+| `compensating`, on a node that stops cleanly | The node hands it back with its rollback marker, and the next node to claim it undoes what is left |
 | Parent waiting on a child that finished, its notice lost | `StaleJobRecovery` sends the notice again |
 | A wait past its timeout | `TimeoutWorker` |
 
@@ -119,7 +120,7 @@ A step whose process dies uses one of its attempts. With attempts left the step 
 
 A lost worker uses no attempt, because the step may be fine: one outage can take every lock at once. The step runs again, and after three `worker_lost` rows the next claim fails the run, so a step that takes its node down can't loop forever.
 
-A node that stops cleanly needs none of this. `Queue.Drainer` stops claiming, and each run finishes its current step and goes back on its queue through the same path as a step's `queue:`. What's still running when `shutdown_grace_period` ends goes back on its queue before its worker is killed, with its lock token cleared. That doesn't use an attempt.
+A node that stops cleanly needs none of this. `Queue.Drainer` stops claiming, and each run finishes its current step and goes back on its queue through the same path as a step's `queue:`. What's still running when `shutdown_grace_period` ends goes back on its queue before its worker is killed, with its lock token cleared. That doesn't use an attempt. A run being rolled back goes back too, to be rolled back: the undo that was cut short runs again from the top, and the ones that completed don't.
 
 ## Rules to keep
 
@@ -153,3 +154,4 @@ CI runs the last two both direct and through PgBouncer in transaction mode. Set 
 16. **A run being rolled back doesn't hold its key** (`without_key/2`), unless `reuse: :never`. A start with the key must not be handed a run that only undoes.
 17. **A cancel leaves a run that carries the rollback marker alone** (`cancel_run/3`). On its queue to be undone it is `pending` like any other run, and cancelled it would end with nothing undone and no way to roll it back or retry it. To a cancel it has ended: `{:error, :already_completed}`.
 18. **An attempt's row is written once, `running`, after its start event, and a run has one open at a time.** Written in two steps, a process killed between them left a row nobody closed. A write can still land after whoever cleaned up had looked, so an attempt begins by closing what the run left open (`StepRunner.execute/5`).
+19. **A `compensating` run that goes back on its queue gets its rollback marker back** (`release_node_jobs/2`), and its error is on the row from the moment it is `compensating`. Put back `pending` without the marker, the next claim would run its steps.

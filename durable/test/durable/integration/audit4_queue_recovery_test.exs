@@ -81,6 +81,34 @@ defmodule Audit4QueueSlowUndo do
   end
 end
 
+defmodule Audit4QueueTwoUndos do
+  @moduledoc false
+  use Durable
+  alias Durable.IntegrationProbe, as: Probe
+
+  # The refund goes through, and the node stops while the booking is released.
+  workflow "audit4_queue_two_undos", on_failure: :rollback do
+    step(:book, [compensate: :unbook], fn data -> {:ok, data} end)
+    step(:pay, [compensate: :refund], fn data -> {:ok, data} end)
+
+    step(:ship, fn _data ->
+      Probe.note(:ship)
+      {:fail, "declined"}
+    end)
+
+    compensate(:refund, fn data ->
+      Probe.note(:refund)
+      {:ok, data}
+    end)
+
+    compensate(:unbook, fn data ->
+      Probe.note(:unbook)
+      Probe.wait_for("unbooked")
+      {:ok, data}
+    end)
+  end
+end
+
 defmodule Audit4QueueCooperative do
   @moduledoc false
   use Durable
@@ -563,11 +591,7 @@ defmodule Durable.Integration.Audit4QueueRecoveryTest do
   end
 
   describe "a node stopping while a compensation outlasts the grace period" do
-    # NEEDS A DECISION: the run is left :compensating and locked by the node
-    # that is gone, until the stale sweep fails it stale_lock_timeout later.
-    # Drainer.hand_back_running/1 (drainer.ex:91) releases through
-    # release_node_jobs/2, which only takes :running runs (postgres.ex:303).
-    @tag :skip
+    # The run goes back on its queue to be rolled back by whoever claims it.
     test "doesn't leave the run locked by the node that is gone" do
       start_durable!(%{default: 1}, shutdown_grace_period: 200)
       {:ok, id} = Durable.start(Audit4QueueSlowUndo, %{})
@@ -576,6 +600,27 @@ defmodule Durable.Integration.Audit4QueueRecoveryTest do
       stop_supervised!(Durable)
 
       assert get(id).locked_by == nil
+    end
+
+    test "has the next node finish the rollback: what was undone stays undone, and no step runs" do
+      start_durable!(%{default: 1}, shutdown_grace_period: 200)
+      {:ok, id} = Durable.start(Audit4QueueTwoUndos, %{})
+      assert_eventually(fn -> Probe.hits(:unbook) == 1 end)
+      assert Probe.hits(:refund) == 1
+
+      stop_supervised!(Durable)
+      assert %{status: :pending, locked_by: nil, lock_token: nil} = get(id)
+      assert [] = for(row <- step_rows(id), row.status == :running, do: row)
+
+      start_durable!(%{default: 1})
+      assert_eventually(fn -> Probe.hits(:unbook) == 2 end)
+      Probe.set("unbooked")
+      run = await_status(id, :compensated)
+
+      assert {Probe.hits(:refund), Probe.hits(:ship)} == {1, 1}
+      assert %{"message" => "declined"} = run.error
+      assert run.locked_by == nil
+      refute is_map_key(run.context, "__rollback__")
     end
   end
 end

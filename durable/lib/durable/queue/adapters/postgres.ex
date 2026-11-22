@@ -298,17 +298,37 @@ defmodule Durable.Queue.Adapters.Postgres do
 
   @impl true
   def release_node_jobs(%Config{} = config, node_id) when is_binary(node_id) do
-    query =
+    running =
       from(w in WorkflowExecution,
         where: w.status == :running and w.locked_by == ^node_id,
         select: w.id
       )
 
+    # A run being rolled back goes back to be rolled back, not to run: with
+    # the marker `Durable.rollback/2` leaves (Executor.roll_back/3), so the
+    # node that claims it undoes what is left and never runs a step.
+    compensating =
+      from(w in WorkflowExecution,
+        where: w.status == :compensating and w.locked_by == ^node_id,
+        select: w.id,
+        update: [
+          set: [
+            context:
+              fragment(
+                "jsonb_set(coalesce(?, '{}'), '{__rollback__}', jsonb_build_object('error', coalesce(?, '{}'), 'status', 'failed'))",
+                w.context,
+                w.error
+              )
+          ]
+        ]
+      )
+
     # A deploy isn't the step's fault: :snoozed doesn't use an attempt.
-    release_runs(config, query, :snoozed, %{
-      type: "node_stopped",
-      message: "the node stopped before this attempt finished"
-    })
+    stopped = %{type: "node_stopped", message: "the node stopped before this attempt finished"}
+
+    with {:ok, runs} <- release_runs(config, running, :snoozed, stopped),
+         {:ok, rollbacks} <- release_runs(config, compensating, :snoozed, stopped),
+         do: {:ok, runs + rollbacks}
   rescue
     e -> {:error, Exception.message(e)}
   end
