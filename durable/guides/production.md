@@ -225,7 +225,11 @@ PgBouncer in transaction mode. A PgBouncer older than 1.24 needs `prepare:
 - **Workers-only and web-only nodes work.** `queue_enabled: false` lets a node
   start runs without working them.
 - **Pause a queue in an incident** with `Durable.pause_queue(:name)`. It applies
-  on every node until you call `Durable.resume_queue(:name)`.
+  on every node until you call `Durable.resume_queue(:name)`. Any name is
+  accepted, so you can pause a queue ahead of the deploy that adds it.
+- **Queue settings are checked at boot.** A queue takes `concurrency` and
+  `poll_interval`, positive integers. Anything else stops Durable from
+  starting.
 
 ## Deploys
 
@@ -273,6 +277,14 @@ puts them back on the queue. You can shorten that with a smaller
 at boot if it's under 3). A worker whose lock was taken over is fenced out, so
 two copies can't both record a result.
 
+Smaller failures don't take a queue down. A poll that raises, because the
+database is away for a moment, is logged and tried again at the next tick. A
+queue manager or poller that restarts takes over the workers that are still
+running, so the queue stays within its `concurrency`. `Durable.start/3` works
+while the PubSub is down: the wake is dropped and the next poll finds the run.
+A node that stops in the middle of a rollback hands the run back, and the node
+that claims it undoes what is left.
+
 ### Roll out new workflows
 
 A node that doesn't have a workflow's code yet leaves the run for one that does: it goes back on its queue and is tried again every 30 seconds. If no node ever has the code, the run waits until its own `timeout:` or an operator cancels it, and shows up as your oldest ready run. A due schedule gets 15 minutes for a node with the code to fire it. After that each fire counts as a failure, and five in a row disable it.
@@ -281,7 +293,7 @@ A node that doesn't have a workflow's code yet leaves the run for one that does:
 
 A step whose process crashes uses one of its attempts and runs again if it has any left. A takeover like the one above uses none: the step runs again, and the run fails only after losing its worker three times.
 
-A step that finished is never run again by any of this. The danger is a step that was in the middle: the worker dies after the payment provider accepted the charge and before Durable recorded the step as done, and the step runs again on another node. So every step with an effect outside your database must be safe to repeat:
+A step that finished is never run again by any of this. That includes a step whose worker died after the step's row was written and before the run saved the result: the run that comes back takes the result from the row, with what the step put in the context. The danger is a step that was in the middle: the worker dies after the payment provider accepted the charge and before Durable recorded the step as done, and the step runs again on another node. So every step with an effect outside your database must be safe to repeat:
 
 ```elixir
 step :charge_card, [retry: [max_attempts: 3]], fn trip ->
@@ -312,9 +324,33 @@ builds. The latest one took under a second on a table of a million runs. `mix du
 database is behind, so you can put it in a deploy gate. The dashboard's Settings
 page shows the same thing.
 
-The migration that adds `workflow_executions.engine_state` (`20261122000000`) is the one exception to deploying as usual. Migrate first, as always: nodes on the old code carry on. Then stop every node on the old code before the first node on the new code starts. Old and new nodes must not work the same database together, because the old code can't read a run the new code has written, and would run a parallel lane as a whole workflow or start a child workflow twice. Runs in flight carry on after the upgrade. The names Durable keeps for itself (`__fail__`, `__child:…` and the rest, listed in `Durable.EngineState`) are dropped from a start's input, a step's result, `put_context`, an event's payload and an input's answer, and a run's context no longer holds them.
+#### From 1.x to 2.0
 
-#### From 1.x to 2.0: the functions that read
+**Nodes on 1.x and nodes on 2.0 must never work the same database at the same
+time.** This is the one upgrade that can't be a rolling deploy. Do it in this
+order:
+
+1. **Run the migration** (`20261122000000`, which adds
+   `workflow_executions.engine_state`) while the 1.x nodes are still up. They
+   carry on as before.
+2. **Stop every node on 1.x**, whether or not it runs queues, and wait until
+   they have all stopped.
+3. **Start the nodes on 2.0.**
+
+2.0 keeps the engine's own state for a run in the new column, out of the run's
+context. 1.x can't read a run that 2.0 has written: it would run a parallel
+lane as a whole workflow, or start a child workflow twice.
+
+Runs in flight carry on after the upgrade. The migration moves the state of
+runs that are over, and every other run is moved the first time a 2.0 node
+loads it. The migration's `down` moves the state back.
+
+Upgrade the dashboard with it: `durable_dashboard` 2.0 needs `durable` 2.0.
+
+Then go through what changed below. The functions that read are the change
+most apps have to make.
+
+##### The functions that read
 
 Every function that reads now returns `{:ok, result}` or `{:error, reason}`,
 and has a twin ending in `!` that returns the result or raises
@@ -337,7 +373,7 @@ That covers `list_executions`, `list_children`, `rollback_plan`,
 `list_schedules`, `list_nodes` and `paused_queues` on `Durable`, everything in
 `Durable.Query` and `Durable.Stats`, `Durable.Activity.list/1`,
 `Durable.Wait.list_pending_inputs/1` and `list_pending_events/1`, and
-`Durable.Scheduler.API.upcoming_runs/2`. `get_execution/2`, `get_schedule/2`
+`Durable.Scheduler.API.list_schedules/1` and `upcoming_runs/2`. `get_execution/2`, `get_schedule/2`
 and `Durable.Query.get_step_logs/3` already returned a tuple and only gain
 their `!` twin.
 
@@ -356,10 +392,90 @@ against nothing:
 - `list_children/2`, `rollback_plan/2` and `Durable.Query.get_step_executions/2`
   return `{:error, :not_found}` for an id that isn't a run. They used to
   return `[]`.
-- `Durable.Stats.timeline/1` returns `{:ok, buckets}`, and
-  `{:error, {:invalid_option, :bucket_seconds}}` for a bucket of 0.
+- An option the function doesn't know is an error too, so a misspelt filter
+  no longer matches everything:
+  `{:error, {:invalid_option, :statuz}}`.
+- `Durable.Stats.timeline/1` returns `{:ok, buckets}`,
+  `{:error, {:invalid_option, :bucket_seconds}}` for a bucket of 0, and
+  `{:error, {:too_many_buckets, n}}` for a window cut into more than 10,000
+  buckets.
+- `Durable.Scheduler.API.upcoming_runs/2` takes a count from 0 to 1,000.
+  Anything else is `{:error, {:invalid_option, :count}}`.
 
 `Durable.Query.Opts` lists every reason.
+
+##### Your data and the engine's
+
+- **A run's context holds your data only.** `get_execution`, a
+  `call_workflow` result and a lane's result no longer carry keys such as
+  `__fail__` or `__child:…`. Code that read one has nothing to read.
+- **Those names are dropped from your data** wherever it comes in: a start's
+  input, a step's result, `put_context` and `merge_context`, an event's
+  payload, an input's answer. Nothing is raised. A wait under one of them
+  raises `ArgumentError`, and an event or an input sent under one finds no
+  wait.
+- **A whole float stays a float.** `1000.0` used to come back from a save as
+  `1000`.
+
+##### Waits and events
+
+- **A wait that times out returns `timeout_value` exactly as written.**
+  `wait_for_event` and `wait_for_input` used to return the stored copy, so
+  `:auto_rejected` came back as `"auto_rejected"` and a tuple as a list. Match
+  on the atom or the tuple in the step that waits. Once the value is in the
+  context it is JSON again, so a later step still sees a string.
+- **`wait_for_any` and `wait_for_all` return a `timeout_value` of `nil` or
+  `false`.** They used to drop it.
+- **An event kept with `buffer: true` reaches `wait_for_any` and
+  `wait_for_all`**, not only `wait_for_event`. `wait_for_any` takes the first
+  of its names that has one.
+- **Only one sender of an event gets `:ok`.** A second `send_event` for the
+  same wait, or one that arrives after the wait timed out, gets
+  `{:error, :not_found}`.
+- **`cancel_wait` goes down to lanes and children.** On a run that waits for a
+  parallel block's lanes or a `call_workflow` child, it cancels the waits
+  under it, and the block or the call keeps waiting for them to finish. It is
+  also `Durable.cancel_wait/2` now.
+- **`:workflow_waiting` is broadcast for every wait**: an event, a group of
+  events and a sleep, as well as an input.
+
+##### Definitions and settings
+
+- **A workflow that can't run doesn't compile.** A `retry:` that isn't a
+  keyword list, a `compensate:` that names nothing and the like are a
+  `CompileError`, and an option that would be ignored is a warning. The
+  [README](../README.md#workflow-options) lists them. Compile your app on 2.0
+  before you deploy it.
+- **Queue settings are checked when Durable starts.** A queue takes
+  `concurrency` and `poll_interval`, both positive integers. Anything else, a
+  misspelt key included, stops the boot with an error that names the queue.
+
+##### Runs
+
+- **A child workflow's own `timeout:` is applied.** It never was, so a child
+  that outlives its `timeout:` now fails.
+- **A parent that times out cancels every child**, the ones started with
+  `start_workflow` included. A run that timed out waiting for its child can be
+  retried: the retry puts the child back to work.
+- **A cancelled lane ends a block that fails fast.** The block used to wait
+  for every other lane first.
+- **A `{:goto, step, data}` can't land inside a branch arm or a lane it isn't
+  in.** The jump is refused and the run fails. A step inside an arm can still
+  jump ahead in its arm or out of the block.
+- **A cancel leaves a run that is queued for rollback alone.** `Durable.cancel`
+  returns `{:error, :already_completed}`, `cancel_all` and a parent's cancel
+  pass over it, and a start with `on_duplicate: :cancel_existing` gets
+  `{:error, {:key_taken, id}}`. The rollback finishes.
+- **A rollback picks up where it stopped.** Asked for again, or resumed on
+  another node, it doesn't repeat the undos that completed.
+- **A step whose result was saved isn't run again.** See
+  [Make steps safe to run twice](#make-steps-safe-to-run-twice).
+- **An attempt gets at most one end event** in telemetry, where the docs said
+  exactly one.
+- **`Durable.pause_queue/2` accepts any queue name**, so a queue can be paused
+  before a node runs it. A misspelt name returns `:ok` and pauses nothing.
+- **`Durable.Testing` helpers fail the assertion** for an id that names no
+  run. They used to raise `BadMapError`.
 
 ### Change a workflow with runs in flight
 
@@ -405,6 +521,10 @@ A plain `Task` inside a step starts with none of this. Wrap its function in
 To see runs as traces, add the OpenTelemetry SDK and follow `Durable.OpenTelemetry`.
 Each step attempt becomes a span, and a run and everything under it are one trace,
 across sleeps, retries and nodes.
+
+Each step attempt sends at most one end event, from whichever node closed it. A
+worker killed between closing its row and leaving the span sends none, so count
+attempts from the step rows when the number has to be exact.
 
 Add `Durable.Telemetry.metrics/0` to your reporter:
 
