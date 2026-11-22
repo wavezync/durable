@@ -697,7 +697,8 @@ defmodule DurableDashboard.Live.WorkflowLive do
   end
 
   defp banner(%{workflow: %{status: :cancelled}} = assigns) do
-    assigns = assign(assigns, reason: get_in(assigns.workflow.error || %{}, ["message"]))
+    assigns =
+      assign(assigns, reason: Format.text(get_in(assigns.workflow.error || %{}, ["message"])))
 
     ~H"""
     <div class="mt-4 flex items-center gap-3 rounded-[10px] border border-border bg-secondary px-3.5 py-3">

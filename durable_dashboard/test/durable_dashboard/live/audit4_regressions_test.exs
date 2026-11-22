@@ -23,6 +23,8 @@ defmodule DurableDashboard.Live.Audit4RegressionsTest do
 
   # What went wrong running `fun` against a page, or nil. A LiveView that
   # crashes takes the (linked) test with it unless exits are trapped.
+  defp crashes(cases), do: for({label, fun} <- cases, reason = crash(fun), do: {label, reason})
+
   defp crash(fun) do
     Process.flag(:trap_exit, true)
     fun.()
@@ -233,5 +235,56 @@ defmodule DurableDashboard.Live.Audit4RegressionsTest do
 
       assert repo().get!(PendingInput, shown.id).status == :pending
     end
+  end
+
+  describe "a step's {:error, map} whose message isn't text" do
+    # `Trace.error_parts/1` called `to_string/1` on whatever the step put under
+    # `message`/`reason` and on `stacktrace`. A map or a list of maps raised,
+    # in every place an error is summarised: the run's page (all views), the
+    # Runs list and the workflow's runs, which stayed down for everyone while
+    # such a run was on the page. `Format.text/1` shows it inspected instead.
+    for mode <- ~w(message_map reason_map message_list stacktrace_list) do
+      test "#{mode}: its page, the Runs list and the workflow's runs still render",
+           %{conn: conn} do
+        {:ok, id} =
+          Durable.Executor.start_workflow(
+            Audit4Dash.Bugs,
+            %{"mode" => unquote(mode)},
+            workflow: "audit4_bad_error",
+            inline: true
+          )
+
+        assert Fixtures.get_run!(id).status == :failed
+
+        assert crashes(
+                 for path <- [
+                       "/executions/#{id}",
+                       "/executions/#{id}/graph",
+                       "/executions/#{id}?pane=attempts",
+                       "/executions",
+                       "/workflows/audit4_bad_error/runs"
+                     ] do
+                   {path, fn -> {:ok, _view, _html} = live(conn, dash(path)) end}
+                 end
+               ) == []
+      end
+    end
+  end
+
+  test "a huge term where a message was expected is cut short" do
+    huge = %{"message" => Enum.map(1..10_000, &%{"field" => String.duplicate("x", &1)})}
+    assert String.length(DurableDashboard.Trace.error_parts(huge).message) < 20_000
+  end
+
+  test "a cancel reason that isn't text still shows the cancelled run", %{conn: conn} do
+    id = Fixtures.run!(Fixtures.Approvals)
+    :ok = Durable.cancel(id, "x")
+
+    repo().update_all(from(w in WorkflowExecution, where: w.id == ^id),
+      set: [error: %{"message" => %{"code" => 7}}]
+    )
+
+    assert crashes([{id, fn -> {:ok, _view, _html} = live(conn, dash("/executions/#{id}")) end}]) ==
+             []
   end
 end

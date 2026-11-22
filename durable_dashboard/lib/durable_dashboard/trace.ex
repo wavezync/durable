@@ -12,6 +12,7 @@ defmodule DurableDashboard.Trace do
   `build/4` draws a run; `parked/2` says why a pending run is due later.
   """
 
+  alias DurableDashboard.Format
   alias DurableDashboard.GraphBuilder
 
   @live_statuses [:pending, :running, :waiting, :compensating]
@@ -295,23 +296,29 @@ defmodule DurableDashboard.Trace do
 
   # A snooze isn't an error, but it's stored in the same column: its reason.
   def error_parts(%{"type" => "snoozed"} = snooze),
-    do: %{type: nil, message: snooze["message"], details: nil, frames: []}
+    do: %{type: nil, message: Format.text(snooze["message"]), details: nil, frames: []}
 
   def error_parts(error) when is_map(error) do
     error = Map.new(error, fn {k, v} -> {to_string(k), v} end)
 
+    # Only a raised exception's stack is text; a `stacktrace` a step put in
+    # its own error map is one more field of it.
+    {stack, error} =
+      if is_binary(error["stacktrace"]),
+        do: Map.pop(error, "stacktrace"),
+        else: {"", error}
+
     frames =
-      (error["stacktrace"] || "")
-      |> to_string()
+      stack
       |> String.split("\n", trim: true)
       |> Enum.map(&String.trim/1)
       |> Enum.map(&frame/1)
 
     message = error["message"] || error["reason"]
-    details = Map.drop(error, ["type", "message", "reason", "stacktrace"])
+    details = Map.drop(error, ["type", "message", "reason"])
 
     %{
-      type: error["type"] && to_string(error["type"]),
+      type: Format.text(error["type"]),
       message: message_text(message, details),
       details: if(message && details != %{}, do: details),
       frames: frames
@@ -322,7 +329,7 @@ defmodule DurableDashboard.Trace do
 
   defp message_text(nil, details) when details == %{}, do: nil
   defp message_text(nil, details), do: Jason.encode!(details)
-  defp message_text(message, _details), do: to_string(message)
+  defp message_text(message, _details), do: Format.text(message)
 
   # "(my_app 0.1.0) lib/my_app/carrier.ex:48: MyApp.Carrier.ship/2" — the app
   # is optional; a line that isn't a frame is kept as it is.

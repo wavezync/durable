@@ -38,41 +38,6 @@ defmodule DurableDashboard.Live.Audit4KnownBugsTest do
 
   defp crashes(cases), do: for({label, fun} <- cases, reason = crash(fun), do: {label, reason})
 
-  describe "a step's {:error, map} whose message isn't text" do
-    # `Trace.error_parts/1` calls `to_string/1` on whatever the step put under
-    # `message`/`reason` (trace.ex:324 `message_text/2`) and on `stacktrace`
-    # (trace.ex:305). A map or a list of maps raises Protocol.UndefinedError /
-    # ArgumentError, in every place an error is summarised: the run's page (all
-    # views) and — worse — the Runs list and the workflow's runs, which stay
-    # down for everyone while such a run is on the page. Suspected fix: fall
-    # back to `inspect/1` (or Jason) for anything that isn't a binary.
-    for mode <- ~w(message_map reason_map message_list stacktrace_list) do
-      test "#{mode}: its page, the Runs list and the workflow's runs still render",
-           %{conn: conn} do
-        {:ok, id} =
-          Durable.Executor.start_workflow(
-            Audit4Dash.Bugs,
-            %{"mode" => unquote(mode)},
-            workflow: "audit4_bad_error",
-            inline: true
-          )
-
-        assert Fixtures.get_run!(id).status == :failed
-
-        assert crashes(
-                 for path <- [
-                       "/executions/#{id}",
-                       "/executions/#{id}/graph",
-                       "/executions",
-                       "/workflows/audit4_bad_error/runs"
-                     ] do
-                   {path, fn -> {:ok, _view, _html} = live(conn, dash(path)) end}
-                 end
-               ) == []
-      end
-    end
-  end
-
   # A form field's `options:` given as `%{value:, label:}` maps — the shape
   # `wait_for_choice/2` documents for its choices — is interpolated straight
   # into `<option value={opt}>{opt}</option>` (inputs_live.ex:568), which
