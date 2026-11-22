@@ -369,12 +369,12 @@ defmodule Durable.Fuzz.Audit4EngineStateTest do
 
   defp waits(ids) do
     events =
-      for wait <- Wait.list_pending_events(limit: 200),
+      for wait <- Wait.list_pending_events!(limit: 200),
           wait.workflow_id in ids and not EngineState.key?(wait.event_name),
           do: {:event, wait.workflow_id, wait.event_name}
 
     inputs =
-      for wait <- Wait.list_pending_inputs(limit: 200),
+      for wait <- Wait.list_pending_inputs!(limit: 200),
           wait.workflow_id in ids,
           do: {:input, wait.workflow_id, wait.input_name}
 
