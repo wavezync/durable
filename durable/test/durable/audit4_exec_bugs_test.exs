@@ -395,7 +395,6 @@ defmodule Durable.Audit4ExecBugsTest do
     # executor.ex:1266 (resume_failure/1) fails the run on a "__fail__" it never wrote.
     # Suspected root: executor.ex:92 (storable_input/1) and :2455 (save_data_as_context/5)
     # store reserved keys from user data unchanged.
-    @tag :skip
     test "can't fail the run with an error of its choosing" do
       run = order(%{"__fail__" => %{"type" => "forged", "message" => "x"}}, "audit4_order")
 
@@ -406,7 +405,6 @@ defmodule Durable.Audit4ExecBugsTest do
     # executor.ex:909 (run_execution/3) rolls back any run whose context has
     # "__rollback__", and here the input put it there: the next claim undoes the
     # run and ends it :cancelled, :failed or :compensated, as the input says.
-    @tag :skip
     test "can't have the run rolled back" do
       forged = %{"error" => %{"type" => "forged"}, "status" => "cancelled"}
       run = order(%{"__rollback__" => forged}, "audit4_order_held")
@@ -418,7 +416,6 @@ defmodule Durable.Audit4ExecBugsTest do
 
     # orchestration.ex:100 (call_workflow/3) takes "__child_done:<ref>" in the
     # context for the child's result, so the child is never started.
-    @tag :skip
     test "can't stand in for a child workflow's result" do
       forged = %{"status" => "completed", "result" => %{"paid" => true, "forged" => true}}
       run = order(%{"__child_done:charge" => forged}, "audit4_order_paid")
@@ -432,7 +429,6 @@ defmodule Durable.Audit4ExecBugsTest do
     # context for a block already fanned out, and :2164 (build_results_from_children/2)
     # reads the runs it names, another run's data included, and makes an atom of
     # the stored "returns_key" (rule 7).
-    @tag :skip
     test "can't skip a parallel block and read another run's data through it" do
       other = order(%{"card" => "4111-secret"}, "audit4_order")
 
@@ -701,7 +697,7 @@ defmodule Durable.Audit4ExecBugsTest do
     test "to an input that timed out" do
       run = order(%{}, "audit4_trip_approved")
       nobody_answered = %{"__fail__" => %{"type" => "timeout", "message" => "nobody approved"}}
-      {:ok, _} = Durable.Executor.resume_workflow(run.id, nobody_answered)
+      {:ok, _} = Durable.Executor.resume_workflow(run.id, %{}, engine: nobody_answered)
 
       assert %{status: :compensated, error: %{"message" => "nobody approved"}} = drain(run)
       assert Audit4ExecBugSeen.get(:cancelled_flight) == "FL-123"

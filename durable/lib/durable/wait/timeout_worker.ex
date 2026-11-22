@@ -13,6 +13,7 @@ defmodule Durable.Wait.TimeoutWorker do
 
   use GenServer
 
+  alias Durable.EngineState
   alias Durable.Executor
   alias Durable.NodeRegistry
   alias Durable.Repo
@@ -244,21 +245,20 @@ defmodule Durable.Wait.TimeoutWorker do
   end
 
   defp input_timeout_data(:resume, pending_input) do
-    %{
-      pending_input.input_name => stored_timeout_value(pending_input.timeout_value),
-      :__timeout__ => true
-    }
+    {%{pending_input.input_name => stored_timeout_value(pending_input.timeout_value)},
+     %{"__timeout__" => true}}
   end
 
   # The executor fails the run at the waiting step, so compensations run and a
   # parent run hears about it.
   defp input_timeout_data(:fail, pending_input) do
-    %{
-      "__fail__" => %{
-        "type" => "timeout",
-        "message" => "Timeout waiting for input: #{pending_input.input_name}"
-      }
-    }
+    {%{},
+     %{
+       "__fail__" => %{
+         "type" => "timeout",
+         "message" => "Timeout waiting for input: #{pending_input.input_name}"
+       }
+     }}
   end
 
   defp process_timed_out_events(config, now) do
@@ -282,10 +282,14 @@ defmodule Durable.Wait.TimeoutWorker do
   end
 
   defp handle_event_timeout(config, pending_event) do
-    resume_data = %{
-      pending_event.event_name => stored_timeout_value(pending_event.timeout_value),
-      :__timeout__ => true
-    }
+    ended = %{pending_event.event_name => stored_timeout_value(pending_event.timeout_value)}
+
+    # A call_workflow's wait is the engine's own, under the engine's own name.
+    resume_data =
+      case pending_event.event_name do
+        "__child_done:" <> _child_id -> {%{}, Map.put(ended, "__timeout__", true)}
+        _event_name -> {ended, %{"__timeout__" => true}}
+      end
 
     case atomic_resume_after_timeout(config, pending_event, resume_data) do
       {:ok, %{pending: {0, _}}} ->
@@ -337,8 +341,14 @@ defmodule Durable.Wait.TimeoutWorker do
   # The sweep read the wait before it had the run's lock. Whoever held the lock
   # may have answered or cancelled it, so it is closed only if still pending,
   # and the run is left alone if it wasn't.
-  defp atomic_resume_after_timeout(config, %schema{} = wait, resume_data) do
-    safe_resume = Executor.sanitize_for_json(resume_data)
+  #
+  # `resume_data` is `{answer, engine}`: what the wait ends with, under the
+  # wait's name in the user's data, and the engine's own markers.
+  defp atomic_resume_after_timeout(config, %schema{} = wait, {answer, engine}) do
+    safe_resume =
+      {answer |> Executor.sanitize_for_json() |> EngineState.strip(),
+       Executor.sanitize_for_json(engine)}
+
     now = DateTime.utc_now()
 
     multi =
@@ -370,13 +380,13 @@ defmodule Durable.Wait.TimeoutWorker do
 
   defp resume_timed_out(_repo, _workflow_id, _resume, 0), do: {:ok, %{no_op: true}}
 
-  defp resume_timed_out(repo, workflow_id, safe_resume, _closed) do
+  defp resume_timed_out(repo, workflow_id, {user, engine}, _closed) do
     case repo.get(WorkflowExecution, workflow_id) do
       nil ->
         {:error, :workflow_not_found}
 
       %WorkflowExecution{status: :waiting} = exec ->
-        new_context = Map.merge(exec.context || %{}, safe_resume)
+        new_context = exec.context |> Kernel.||(%{}) |> Map.merge(user) |> Map.merge(engine)
 
         exec
         |> Ecto.Changeset.change(
@@ -449,11 +459,12 @@ defmodule Durable.Wait.TimeoutWorker do
         :all -> {:timeout, received}
       end
 
-    %{
-      :__wait_group_result__ => fallback_result,
-      :__wait_group_status__ => per_event_status,
-      :__timeout__ => true
-    }
+    {%{},
+     %{
+       "__wait_group_result__" => fallback_result,
+       "__wait_group_status__" => per_event_status,
+       "__timeout__" => true
+     }}
   end
 
   defp log_wait_group_timeout_success(wait_group) do

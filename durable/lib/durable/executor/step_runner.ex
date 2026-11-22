@@ -11,6 +11,7 @@ defmodule Durable.Executor.StepRunner do
   alias Durable.Config
   alias Durable.Context
   alias Durable.Definition.Step
+  alias Durable.EngineState
   alias Durable.Executor.Backoff
   alias Durable.PubSub, as: DurablePubSub
   alias Durable.Repo
@@ -558,7 +559,7 @@ defmodule Durable.Executor.StepRunner do
 
   # Handle step result from pipeline model
   defp handle_result({:ok, new_data}, ctx) when is_run_data(new_data) do
-    new_data = without_wait_markers(new_data)
+    new_data = returned(new_data)
 
     %{step: step, step_exec: step_exec, logs: logs, duration_ms: duration_ms, config: config} =
       ctx
@@ -580,7 +581,7 @@ defmodule Durable.Executor.StepRunner do
   # Handle decision with goto
   defp handle_result({:goto, target, new_data}, ctx)
        when is_atom(target) and is_map(new_data) do
-    new_data = without_wait_markers(new_data)
+    new_data = returned(new_data)
 
     %{step_exec: step_exec, logs: logs, duration_ms: duration_ms, config: config} = ctx
 
@@ -684,6 +685,10 @@ defmodule Durable.Executor.StepRunner do
     {:ok, _} = fail_step_execution(config, step_exec, error, logs, duration_ms)
     {:error, error}
   end
+
+  # What a step returns is the user's data: none of the engine's keys in it
+  # is the engine's. Its own are in the process context, and saved from there.
+  defp returned(data), do: data |> without_wait_markers() |> EngineState.strip()
 
   @doc false
   # Carried on in the data, a marker would reach a parallel branch's input and

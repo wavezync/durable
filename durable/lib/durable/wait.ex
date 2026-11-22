@@ -42,6 +42,7 @@ defmodule Durable.Wait do
 
   alias Durable.Config
   alias Durable.Context
+  alias Durable.EngineState
   alias Durable.PubSub, as: DurablePubSub
   alias Durable.Query.Opts
   alias Durable.Repo
@@ -171,6 +172,17 @@ defmodule Durable.Wait do
       true ->
         false
     end
+  end
+
+  # A wait under one of the engine's own names could never be answered: the
+  # answer is the user's data, and those names are dropped from it.
+  defp own_name!(name) do
+    if EngineState.key?(name) do
+      raise ArgumentError,
+            "#{inspect(name)} is a name Durable keeps for itself, so nothing can wait under it"
+    end
+
+    name
   end
 
   # What a wait got, if it has been answered, and how its row ended. A nil
@@ -314,6 +326,7 @@ defmodule Durable.Wait do
   """
   @spec wait_for_event(String.t(), keyword()) :: term()
   def wait_for_event(event_name, opts \\ []) do
+    own_name!(event_name)
     # Check if we're resuming with event data already in context
     context = Process.get(:durable_context, %{})
 
@@ -355,7 +368,7 @@ defmodule Durable.Wait do
   @spec wait_for_any([String.t()], keyword()) :: {String.t(), term()}
   def wait_for_any(event_names, opts \\ []) when is_list(event_names) do
     # A name listed twice is one event to wait for.
-    event_names = Enum.uniq(event_names)
+    event_names = event_names |> Enum.uniq() |> Enum.map(&own_name!/1)
     # Check if we're resuming with event data already in context
     context = Process.get(:durable_context, %{})
 
@@ -399,7 +412,7 @@ defmodule Durable.Wait do
   """
   @spec wait_for_all([String.t()], keyword()) :: map()
   def wait_for_all(event_names, opts \\ []) when is_list(event_names) do
-    event_names = Enum.uniq(event_names)
+    event_names = event_names |> Enum.uniq() |> Enum.map(&own_name!/1)
     # Check if we're resuming with all events already in context
     context = Process.get(:durable_context, %{})
     answers = Enum.map(event_names, &answer(context, &1, PendingEvent))
@@ -454,6 +467,7 @@ defmodule Durable.Wait do
   """
   @spec wait_for_input(String.t(), keyword()) :: term()
   def wait_for_input(input_name, opts \\ []) do
+    own_name!(input_name)
     # Check if we're resuming with input data already in context
     context = Process.get(:durable_context, %{})
 
@@ -809,8 +823,12 @@ defmodule Durable.Wait do
   end
 
   # An id or a name that couldn't be in the database has no one waiting on it.
+  # Nor does a name the engine keeps for itself: its own events, a lane's or a
+  # child's finish, are never sent from outside.
   defp answerable(workflow_id, name) do
-    if Repo.id?(workflow_id) and not Repo.bad_text?(name), do: :ok, else: {:error, :not_found}
+    if Repo.id?(workflow_id) and not Repo.bad_text?(name) and not EngineState.key?(name),
+      do: :ok,
+      else: {:error, :not_found}
   end
 
   # The wait is looked up with the run locked: read before the lock, it could be
@@ -1112,7 +1130,9 @@ defmodule Durable.Wait do
   end
 
   defp resume_cancelled(config, workflow_id, reason, opts) do
-    case Durable.Executor.resume_workflow(workflow_id, %{__cancelled__: reason}, opts) do
+    engine = [engine: %{"__cancelled__" => reason}]
+
+    case Durable.Executor.resume_workflow(workflow_id, %{}, engine ++ opts) do
       {:ok, resumed} -> resumed
       {:error, error} -> config.repo.rollback(error)
     end

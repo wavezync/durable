@@ -46,6 +46,7 @@ defmodule Durable.Context do
   import Ecto.Query, only: [from: 2]
 
   alias Durable.Config
+  alias Durable.EngineState
   alias Durable.Queue.Drainer
   alias Durable.Repo
   alias Durable.Storage.Schemas.WorkflowExecution
@@ -143,6 +144,14 @@ defmodule Durable.Context do
   """
   @spec put_context(atom() | String.t(), any()) :: :ok
   def put_context(key, value) do
+    # The engine's own keys aren't the user's to write: dropped, like any
+    # other of the user's data that uses one.
+    if EngineState.key?(key), do: :ok, else: put_engine(key, value)
+  end
+
+  @doc false
+  # The engine's own writes to the context of the step that is running.
+  def put_engine(key, value) do
     context = context()
     Process.put(@context_key, Map.put(context, stored_key(context, key), value))
     :ok
@@ -159,7 +168,7 @@ defmodule Durable.Context do
   @spec put_context(map()) :: :ok
   def put_context(map) when is_map(map) do
     context = context()
-    Process.put(@context_key, Map.merge(context, as_stored(context, map)))
+    Process.put(@context_key, Map.merge(context, as_stored(context, EngineState.strip(map))))
     :ok
   end
 
@@ -190,7 +199,7 @@ defmodule Durable.Context do
   @spec merge_context(map()) :: :ok
   def merge_context(map) when is_map(map) do
     context = context()
-    Process.put(@context_key, deep_merge(context, as_stored(context, map)))
+    Process.put(@context_key, deep_merge(context, as_stored(context, EngineState.strip(map))))
     :ok
   end
 

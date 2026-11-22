@@ -13,6 +13,7 @@ defmodule Durable.Executor do
   alias Durable.Config
   alias Durable.Context
   alias Durable.Definition.Workflow
+  alias Durable.EngineState
   alias Durable.Executor.CompensationRunner
   alias Durable.Executor.StepRunner
   alias Durable.Keys
@@ -90,9 +91,11 @@ defmodule Durable.Executor do
   @spec storable_input(term()) :: {:ok, map()} | {:error, :invalid_input}
   def storable_input(input) when not is_map(input), do: {:error, :invalid_input}
 
+  # Every way a run is given its input comes through here, so this is where
+  # the engine's own keys are dropped from it.
   def storable_input(input) do
     case sanitize_for_json(input) do
-      map when not is_struct(map) -> {:ok, map}
+      map when not is_struct(map) -> {:ok, EngineState.strip(map)}
       _scalar -> {:error, :invalid_input}
     end
   end
@@ -1099,6 +1102,9 @@ defmodule Durable.Executor do
     Runs until the run finishes or parks: a retry, snooze, wait or move to a
     step's queue is left for the queue
   - `:durable` - The Durable instance name (default: Durable)
+  - `:engine` - The engine's own markers for the step that waited. Only the
+    engine passes this: `additional_context` is the user's data, and has the
+    engine's keys dropped from it
   """
   @spec resume_workflow(String.t(), map(), keyword()) :: {:ok, String.t()} | {:error, term()}
   def resume_workflow(workflow_id, additional_context \\ %{}, opts \\ []) do
@@ -1106,7 +1112,11 @@ defmodule Durable.Executor do
     config = Config.get(durable_name)
     # Sanitize at the API boundary — callers (provide_input, send_event,
     # timeout workers) supply maps that can carry arbitrary user terms.
-    safe_additional = sanitize_for_json(additional_context)
+    safe_additional =
+      additional_context
+      |> sanitize_for_json()
+      |> EngineState.strip()
+      |> Map.merge(sanitize_for_json(Keyword.get(opts, :engine, %{})))
 
     with {:ok, execution} <- load_execution(config, workflow_id),
          true <- execution.status == :waiting || {:error, :not_waiting},
@@ -2962,8 +2972,9 @@ defmodule Durable.Executor do
   end
 
   @doc false
+  # `additional_context` is the user's data: an event's payload under its name.
   def resume_parent_in_multi(repo, workflow_id, additional_context) do
-    safe_context = sanitize_for_json(additional_context)
+    safe_context = additional_context |> sanitize_for_json() |> EngineState.strip()
 
     case repo.get(WorkflowExecution, workflow_id) do
       nil ->

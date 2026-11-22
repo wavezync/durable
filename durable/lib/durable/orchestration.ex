@@ -158,7 +158,7 @@ defmodule Durable.Orchestration do
       # Create child and continue (no throw)
       :error ->
         {:ok, child_id} = create_child_execution(module, input, parent_id, [wake: true] ++ opts)
-        Context.put_context(fire_key, child_id)
+        Context.put_engine(fire_key, child_id)
         record_call_child(child_id, :fire, ref)
         {:ok, child_id}
     end
@@ -179,7 +179,7 @@ defmodule Durable.Orchestration do
 
     children = Context.get_context("__call_children", %{}) || %{}
 
-    Context.put_context("__call_children", Map.put(children, child_id, meta))
+    Context.put_engine("__call_children", Map.put(children, child_id, meta))
     :ok
   end
 
@@ -189,7 +189,7 @@ defmodule Durable.Orchestration do
 
   defp create_and_wait(module, input, parent_id, child_key, opts) do
     {:ok, child_id} = create_child_execution(module, input, parent_id, opts)
-    Context.put_context(child_key, child_id)
+    Context.put_engine(child_key, child_id)
     record_call_child(child_id, :call, Keyword.get(opts, :ref, module_to_ref(module)))
 
     throw(
