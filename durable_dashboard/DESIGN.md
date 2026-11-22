@@ -1071,7 +1071,7 @@ A parallel child's output is stored wrapped (`__output__` / `__context__` /
 
 Child runs are linked from the step's execution: when it belongs to a run
 other than this one, the card becomes a `child_workflow` that opens it.
-`__parallel_children` / `__call_children` in the root's context are a
+`__parallel_children` / `__call_children` in the root's engine state are a
 fallback for children that haven't produced a step yet.
 
 ---

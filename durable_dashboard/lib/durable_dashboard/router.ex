@@ -38,12 +38,14 @@ defmodule DurableDashboard.Router do
   `:durable_dashboard_assets`, once per router) and two scopes:
 
   - `GET /dashboard` (Overview)
-  - `GET /dashboard/workflows` (list of workflow definitions)
-  - `GET /dashboard/workflows/:name` (executions for that workflow)
-  - `GET /dashboard/executions` (global executions list)
-  - `GET /dashboard/executions/:id[/:tab]` (single execution detail)
-  - `GET /dashboard/inputs`
-  - `GET /dashboard/schedules`
+  - `GET /dashboard/workflows`, `/workflows/:name`, `/workflows/:name/runs`
+  - `GET /dashboard/executions` (Runs)
+  - `GET /dashboard/executions/:id[/:view]` (one run)
+  - `GET /dashboard/inputs` (Inbox)
+  - `GET /dashboard/keys`
+  - `GET /dashboard/queues` (Queues & nodes)
+  - `GET /dashboard/schedules`, `/schedules/:name`
+  - `GET /dashboard/telemetry`
   - `GET /dashboard/settings`
   - `GET /dashboard/__assets__/*` (CSS/JS/font assets — no CSRF, since
     cross-origin module-script loading is normal and the assets are

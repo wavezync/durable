@@ -46,11 +46,19 @@ Add `durable_dashboard` alongside `durable`:
 ```elixir
 def deps do
   [
-    {:durable, "~> 1.5"},
-    {:durable_dashboard, "~> 1.3"}
+    {:durable, "~> 2.0"},
+    {:durable_dashboard, "~> 2.0"}
   ]
 end
 ```
+
+### Upgrading from 1.x
+
+Dashboard 2.0 needs Durable 2.0, so upgrade the two together. Durable 2.0
+can't share a database with 1.x nodes: run its migration, **stop every node on
+1.x**, then start the new ones. The steps are in
+[Upgrade Durable](https://durable.wavezync.com/docs/production/#upgrade-durable).
+The router line doesn't change.
 
 ## Usage
 
@@ -67,7 +75,8 @@ end
 ```
 
 The macro emits the dashboard's pipelines, asset routes, and live routes
-inline in your router. Inside a `scope` it mounts under the scope's path.
+inline in your router. Inside a `scope` it mounts under the scope's path and
+its links follow. `mount: "/"` works too.
 
 ### Options
 
