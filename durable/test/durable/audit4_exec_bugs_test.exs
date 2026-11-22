@@ -268,6 +268,19 @@ defmodule Durable.Audit4ExecBugsTest do
       end)
     end
 
+    # The trip is booked on its own, while the planner waits for the traveller.
+    workflow "audit4_trip_planned" do
+      step(:book, fn plan ->
+        {:ok, _id} = start_workflow(__MODULE__, %{}, workflow: "audit4_trip_halts")
+        {:ok, plan}
+      end)
+
+      step(:await_traveller, fn plan ->
+        wait_for_input("approved")
+        {:ok, plan}
+      end)
+    end
+
     workflow "audit4_trip_halts" do
       step(:book_flight, [compensate: :cancel_flight], fn trip ->
         {:ok, Map.put(trip, "id", "FL-123")}
@@ -567,21 +580,65 @@ defmodule Durable.Audit4ExecBugsTest do
     assert Audit4ExecBugSeen.get(:cancelled_flight) == "FL-123"
   end
 
-  # executor.ex:223 (cancel_run/3) cancels any :pending run, and a failed run
-  # queued by Durable.rollback/1 is :pending until a worker claims it. The
-  # cancel ends it :cancelled with "__rollback__" still in its context:
-  # nothing is undone, and it can no longer be rolled back or retried. A parent's
-  # cancel reaches a child the same way (cancel_child_workflows/2, executor.ex:3026).
-  @tag :skip
-  test "cancelling a run that is waiting to be rolled back doesn't drop the rollback" do
-    run = order(%{}, "audit4_trip_halts")
-    assert run.status == :failed
-    {:ok, _} = Durable.rollback(run.id)
+  # A failed run queued by Durable.rollback/1 is :pending until a worker claims
+  # it. A cancel in between ended it :cancelled with "__rollback__" still in its
+  # context: nothing was undone, and it could no longer be rolled back or retried.
+  describe "a run that is waiting to be rolled back keeps its rollback" do
+    setup do
+      run = order(%{}, "audit4_trip_halts")
+      assert run.status == :failed
+      {:ok, _} = Durable.rollback(run.id)
+      %{run: run}
+    end
 
-    assert Durable.cancel(run.id) == {:error, :already_completed}
+    defp undone(run) do
+      assert %{status: :pending, context: %{"__rollback__" => _}} = reload(run)
+      assert drain(run).status == :compensated
+      assert Audit4ExecBugSeen.get(:cancelled_flight) == "FL-123"
+      refute is_map_key(reload(run).context, "__rollback__")
+    end
 
-    assert drain(run).status == :compensated
+    test "when it is cancelled", %{run: run} do
+      assert Durable.cancel(run.id) == {:error, :already_completed}
+      undone(run)
+    end
+
+    test "when it is cancelled with rollback: true", %{run: run} do
+      assert Durable.cancel(run.id, "again", rollback: true) == {:error, :already_completed}
+      undone(run)
+    end
+
+    test "when cancel_all matches it", %{run: run} do
+      assert Durable.cancel_all(workflow_name: "audit4_trip_halts") == {:ok, 0}
+      undone(run)
+    end
+
+    test "when a worker has claimed it and not yet begun to undo it", %{run: run} do
+      Repo.update_all(from(w in WorkflowExecution, where: w.id == ^run.id),
+        set: [status: :running]
+      )
+
+      assert Durable.cancel(run.id) == {:error, :already_completed}
+
+      Repo.update_all(from(w in WorkflowExecution, where: w.id == ^run.id),
+        set: [status: :pending]
+      )
+
+      undone(run)
+    end
+  end
+
+  # The same cancel reaches a child from its parent.
+  test "cancelling a parent leaves its child that is waiting to be rolled back to it" do
+    parent = order(%{}, "audit4_trip_planned")
+    assert parent.status == :waiting
+    [trip] = children(parent)
+    assert trip.status == :failed
+    {:ok, _} = Durable.rollback(trip.id)
+
+    :ok = Durable.cancel(parent.id)
+
+    assert drain(trip).status == :compensated
     assert Audit4ExecBugSeen.get(:cancelled_flight) == "FL-123"
-    refute is_map_key(reload(run).context, "__rollback__")
   end
 end

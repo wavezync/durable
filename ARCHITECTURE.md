@@ -149,3 +149,4 @@ CI runs the last two both direct and through PgBouncer in transaction mode. Set 
 14. **The rollback marker goes in the write that makes the run `compensating`** (`roll_back/3`). A run still `running` without it is one the next claim carries on with.
 15. **A run is undone only once nothing under it can still finish a step** (`settles_at/2`). A stopped run's worker hears of it at its next heartbeat, so the undo waits one heartbeat after the last run under it was stopped.
 16. **A run being rolled back doesn't hold its key** (`without_key/2`), unless `reuse: :never`. A start with the key must not be handed a run that only undoes.
+17. **A cancel leaves a run that carries the rollback marker alone** (`cancel_run/3`). On its queue to be undone it is `pending` like any other run, and cancelled it would end with nothing undone and no way to roll it back or retry it. To a cancel it has ended: `{:error, :already_completed}`.

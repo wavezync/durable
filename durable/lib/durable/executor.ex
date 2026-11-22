@@ -220,9 +220,13 @@ defmodule Durable.Executor do
     # still executing it: its ack/nack become no-ops, its next heartbeat stops
     # the step, and the executor's status compare-and-set stops it at the next
     # step boundary if the step finishes first.
+    #
+    # A run back on its queue to be undone is left to it: cancelled, it would
+    # end with nothing undone, and could be neither rolled back nor retried.
     cancellable =
       from(w in WorkflowExecution,
         where: w.id == ^workflow_id and w.status in [:pending, :running, :waiting],
+        where: is_nil(w.context[^@rollback]),
         select: w
       )
 
@@ -251,9 +255,15 @@ defmodule Durable.Executor do
   end
 
   # A rollback has to know whether a worker had the run, so its cancel only
-  # lands on the status it saw.
+  # lands on the status it saw. A run queued to be undone is being undone.
   defp status_now(config, workflow_id) do
-    Repo.one(config, from(w in WorkflowExecution, where: w.id == ^workflow_id, select: w.status))
+    run = from(w in WorkflowExecution, where: w.id == ^workflow_id)
+
+    case Repo.one(config, from(w in run, select: {w.status, is_nil(w.context[^@rollback])})) do
+      {status, true} -> status
+      {_queued, false} -> :compensating
+      nil -> nil
+    end
   end
 
   defp not_cancelled(nil, _seen, _cancel), do: {:error, :not_found}
