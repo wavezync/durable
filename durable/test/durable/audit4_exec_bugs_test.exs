@@ -8,6 +8,7 @@ defmodule Durable.Audit4ExecBugsTest do
   import Durable.Testing
 
   alias Durable.Storage.Schemas.PendingEvent
+  alias Durable.Storage.Schemas.PendingInput
   alias Durable.Storage.Schemas.WorkflowExecution
   alias Durable.TestRepo, as: Repo
 
@@ -161,6 +162,37 @@ defmodule Durable.Audit4ExecBugsTest do
           step(:await_picker, fn parcel ->
             wait_for_input("picked")
             {:ok, parcel}
+          end)
+        end
+      end
+    end
+
+    # Two pickers are asked, and the job needs both.
+    workflow "audit4_pick" do
+      parallel :pickers do
+        step(:north, fn job ->
+          wait_for_input("north_picked")
+          {:ok, job}
+        end)
+
+        step(:south, fn job ->
+          wait_for_input("south_picked")
+          {:ok, job}
+        end)
+      end
+    end
+
+    workflow "audit4_pick_spare" do
+      parallel :pickers do
+        step(:north, fn job ->
+          wait_for_input("north_picked")
+          {:ok, job}
+        end)
+
+        lane :spare, optional: true do
+          step(:stand_by, fn job ->
+            wait_for_input("spare_picked")
+            {:ok, job}
           end)
         end
       end
@@ -426,16 +458,40 @@ defmodule Durable.Audit4ExecBugsTest do
     assert [%{status: :pending}] = children(run)
   end
 
-  # executor.ex:2747 (stop_block_on_failure/4) ends a fail-fast block only for
-  # a lane that :failed. A lane that was cancelled (`{:cancel, _, scope: :run}`,
-  # or Durable.cancel/2 on the lane's run) is an error to the block too, but
-  # the block waits for every other lane first: here, for an input nobody gives.
-  @tag :skip
-  test "a cancelled lane ends a block that fails fast, as a failed lane does" do
-    run = order(%{}, "audit4_dispatch")
+  # A lane that was cancelled is an error to its block, which used to wait for
+  # every other lane first: here, for an input nobody gives.
+  describe "a cancelled lane ends a block that fails fast, as a failed lane does" do
+    test "when its step cancels it" do
+      run = order(%{}, "audit4_dispatch")
 
-    assert run.status == :failed
-    assert Enum.all?(children(run), &(&1.status in [:cancelled, :failed]))
+      assert run.status == :failed
+      assert run.error["message"] == "the courier doesn't serve this area"
+      assert Enum.all?(children(run), &(&1.status == :cancelled))
+      assert Repo.all(from(i in PendingInput, where: i.status == :pending)) == []
+    end
+
+    test "when an operator cancels its run" do
+      run = order(%{}, "audit4_pick")
+      assert run.status == :waiting
+      north = Enum.find(children(run), &(&1.context["__parallel_step"] == "pickers__north"))
+
+      :ok = Durable.cancel(north.id, "off sick")
+      run = drain(run)
+
+      assert %{status: :failed, error: %{"type" => "cancelled", "message" => "off sick"}} = run
+      assert Enum.all?(children(run), &(&1.status == :cancelled))
+    end
+
+    test "but not when the block can do without the lane" do
+      run = order(%{}, "audit4_pick_spare")
+      spare = Enum.find(children(run), &(&1.context["__parallel_step"] == "pickers__spare"))
+
+      :ok = Durable.cancel(spare.id, "off sick")
+      run = drain(run)
+
+      assert run.status == :waiting
+      assert [%{status: :waiting}] = Enum.reject(children(run), &(&1.id == spare.id))
+    end
   end
 
   describe "a run lost right after a step's result was saved" do

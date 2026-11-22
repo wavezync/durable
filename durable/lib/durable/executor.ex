@@ -2762,11 +2762,12 @@ defmodule Durable.Executor do
   # Mirrors the body of `resume_workflow/3` minus the standalone Repo.update,
   # so the resume composes into a transaction with the upstream event /
   # wait group updates.
-  # A failed branch under :fail_fast ends the block now. In the same transaction
+  # A failed branch under :fail_fast ends the block now, and so does one that
+  # was cancelled: to the block it is an error too. In the same transaction
   # as the parent's resume, so the parent finds every branch finished. nil when
   # the block carries on.
-  defp stop_block_on_failure(repo, branch, :failed, %{just_completed: false, wait_group: group})
-       when group.status == :pending do
+  defp stop_block_on_failure(repo, branch, status, %{just_completed: false, wait_group: group})
+       when status in [:failed, :cancelled] and group.status == :pending do
     parent = repo.get(WorkflowExecution, branch.parent_workflow_id)
 
     # A lane the block can do without doesn't end it.
