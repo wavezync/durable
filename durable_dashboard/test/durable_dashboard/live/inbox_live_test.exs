@@ -194,7 +194,7 @@ defmodule DurableDashboard.Live.InboxLiveTest do
       assert has_element?(
                view,
                "[role=alert]",
-               "It's no longer waiting — someone may have answered it already."
+               "That request changed while you were looking at it. Review it again."
              )
 
       assert %{response: %{"approved" => true}} = pending_input(run_id)

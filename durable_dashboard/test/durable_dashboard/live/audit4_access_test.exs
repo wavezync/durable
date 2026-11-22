@@ -115,7 +115,7 @@ defmodule DurableDashboard.Live.Audit4AccessTest do
           {"answer", %{"text" => "forged", "choice" => "a", "fields" => %{"a" => "1"}}}
         ] do
       {:ok, view, _html} = live(conn, "#{base}/inputs?id=#{input.id}")
-      render_submit(view, event, params)
+      render_submit(view, event, Map.put(params, "request", input.id))
     end
 
     {:ok, view, _html} = live(conn, "#{base}/inputs?tab=events")

@@ -87,12 +87,22 @@ defmodule DurableDashboard.Live.InputsLive do
   # ============================================================================
 
   @impl true
-  def handle_event("decide", params, socket),
-    do: respond(socket, approval(params["decision"] == "approve", params, socket))
+  def handle_event("decide", params, socket) do
+    case requested(socket, params) do
+      {:ok, input} ->
+        respond(socket, input, approval(params["decision"] == "approve", params, socket))
+
+      :error ->
+        request_changed(socket)
+    end
+  end
 
   def handle_event("answer", params, socket) do
-    case answer(socket.assigns.selected, params) do
-      {:ok, data} -> respond(socket, data)
+    with {:ok, input} <- requested(socket, params),
+         {:ok, data} <- answer(input, params) do
+      respond(socket, input, data)
+    else
+      :error -> request_changed(socket)
       {:error, message} -> {:noreply, assign(socket, action_error: message)}
     end
   end
@@ -131,9 +141,31 @@ defmodule DurableDashboard.Live.InputsLive do
     end
   end
 
-  defp respond(socket, data) do
-    input = socket.assigns.selected
+  # The request a form was rendered for (its hidden `request` field), read
+  # again now. The page re-picks what it shows on every live refresh, so the
+  # answer goes to the request the form names or to none: never to whichever
+  # one is selected when the click lands.
+  defp requested(socket, params) do
+    with config when config != nil <- Durable.Config.get_safe(socket.assigns.durable),
+         {:ok, id} <- Ecto.UUID.cast(params["request"]),
+         %PendingInput{} = input <-
+           Durable.Repo.one(config, where(inputs_query(), [p], p.id == ^id)) do
+      {:ok, input}
+    else
+      _ -> :error
+    end
+  end
 
+  # Refused, and recorded like any other attempt. The page is read again, so
+  # what it shows next is what's open now.
+  defp request_changed(socket) do
+    {:error, reason} =
+      Access.perform(socket, :operator, :provide_input, [], fn -> {:error, :request_changed} end)
+
+    {:noreply, socket |> assign(action_error: describe_error(reason)) |> load()}
+  end
+
+  defp respond(socket, input, data) do
     result =
       Access.perform(socket, :operator, :provide_input, [input.workflow_id], fn ->
         Durable.Wait.provide_input(input.workflow_id, input.input_name, data,
@@ -227,6 +259,9 @@ defmodule DurableDashboard.Live.InputsLive do
 
   defp describe_error(:not_found),
     do: "It's no longer waiting — someone may have answered it already."
+
+  defp describe_error(:request_changed),
+    do: "That request changed while you were looking at it. Review it again."
 
   defp describe_error(:invalid_json), do: "The payload isn't valid JSON."
   defp describe_error(other), do: "That didn't work: #{inspect(other)}"
@@ -469,6 +504,7 @@ defmodule DurableDashboard.Live.InputsLive do
   defp response_form(%{input: %{input_type: :approval}} = assigns) do
     ~H"""
     <form id={"answer-#{@input.id}"} phx-submit="decide" class="flex flex-col gap-3">
+      <.request_field input={@input} />
       <label class="flex flex-col gap-1.5 text-xs font-medium">
         <span>Comment <span class="font-normal text-muted-foreground">(optional)</span></span>
         <textarea id={"#{@input.id}-comment"} name="comment" rows="2" class={field_class()}></textarea>
@@ -501,6 +537,7 @@ defmodule DurableDashboard.Live.InputsLive do
        when type in [:single_choice, :multi_choice] do
     ~H"""
     <form id={"answer-#{@input.id}"} phx-submit="answer" class="flex flex-col gap-2">
+      <.request_field input={@input} />
       <p class="text-xs font-medium">{if @input.input_type == :single_choice, do: "Pick one", else: "Pick any"}</p>
       <label
         :for={choice <- @input.fields || []}
@@ -530,6 +567,7 @@ defmodule DurableDashboard.Live.InputsLive do
   defp response_form(%{input: %{input_type: :form}} = assigns) do
     ~H"""
     <form id={"answer-#{@input.id}"} phx-submit="answer" class="grid gap-3 sm:grid-cols-2">
+      <.request_field input={@input} />
       <label :for={field <- @input.fields || []} class={["flex flex-col gap-1.5 text-xs font-medium", field["type"] == "textarea" && "sm:col-span-2"]}>
         <span>
           {field_label(field)}
@@ -547,6 +585,7 @@ defmodule DurableDashboard.Live.InputsLive do
   defp response_form(assigns) do
     ~H"""
     <form id={"answer-#{@input.id}"} phx-submit="answer" class="flex flex-col gap-3">
+      <.request_field input={@input} />
       <label class="flex flex-col gap-1.5 text-xs font-medium">
         Response
         <textarea id={"#{@input.id}-text"} name="text" rows="4" class={field_class()}></textarea>
@@ -555,6 +594,15 @@ defmodule DurableDashboard.Live.InputsLive do
         <Core.button kind="primary" type="submit">Submit</Core.button>
       </div>
     </form>
+    """
+  end
+
+  attr :input, :map, required: true
+
+  # Names the request a form answers; see `requested/2`.
+  defp request_field(assigns) do
+    ~H"""
+    <input type="hidden" name="request" value={@input.id} />
     """
   end
 

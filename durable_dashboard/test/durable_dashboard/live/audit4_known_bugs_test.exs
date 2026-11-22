@@ -10,7 +10,7 @@ defmodule DurableDashboard.Live.Audit4KnownBugsTest do
 
   import Ecto.Query
 
-  alias Durable.Storage.Schemas.{PendingInput, WorkflowExecution}
+  alias Durable.Storage.Schemas.PendingInput
 
   @endpoint Audit4Dash.Endpoint
   @moduletag :known_bug
@@ -37,55 +37,6 @@ defmodule DurableDashboard.Live.Audit4KnownBugsTest do
   end
 
   defp crashes(cases), do: for({label, fun} <- cases, reason = crash(fun), do: {label, reason})
-
-  describe "Inbox: the answer goes to the request that was on screen" do
-    # "decide"/"answer" carry no request id: the server answers whatever
-    # `socket.assigns.selected` is when the event arrives, and `load/1`
-    # re-picks it on every refresh (inputs_live.ex:244 — the `?id=` request, or
-    # else the first by deadline). So when the list changes under an operator —
-    # a live refresh lands between reading and clicking — Approve lands on a
-    # request they never saw. Suspected fix: put the request id in the form
-    # (hidden input / phx-value) and refuse when it isn't `selected.id`, or
-    # look the request up by that id.
-    test "a request that arrives with an earlier deadline doesn't take the approval",
-         %{conn: conn} do
-      shown = input_of(Fixtures.run!(Fixtures.Approvals))
-      {:ok, view, html} = live(conn, dash("/inputs"))
-      assert html =~ "answer-#{shown.id}"
-
-      # Another run asks, with a deadline, so it sorts first.
-      newcomer = input_of(Fixtures.run!(Fixtures.Approvals))
-
-      repo().update_all(from(p in PendingInput, where: p.id == ^newcomer.id),
-        set: [timeout_at: DateTime.add(DateTime.utc_now(), 60, :second)]
-      )
-
-      # The refresh the input_requested broadcast schedules; then the click
-      # on the form the operator was looking at.
-      send(view.pid, :refresh)
-      render_submit(view, "decide", %{"decision" => "approve"})
-
-      assert repo().get!(PendingInput, newcomer.id).status == :pending
-    end
-
-    test "when the open request is answered elsewhere, Approve doesn't fall through to the next",
-         %{conn: conn} do
-      other_run = Fixtures.run!(Fixtures.Approvals)
-      open_run = Fixtures.run!(Fixtures.Approvals)
-      [other, open] = Enum.map([other_run, open_run], &input_of/1)
-
-      {:ok, view, _html} = live(conn, dash("/inputs?id=#{open.id}"))
-      assert has_element?(view, "#answer-#{open.id}")
-
-      # A colleague rejects it; this page refreshes; the operator's click lands.
-      :ok = Durable.provide_input(open_run, "manager_approval", %{"approved" => false})
-      send(view.pid, :refresh)
-      render_submit(view, "decide", %{"decision" => "approve"})
-
-      assert repo().get!(PendingInput, other.id).status == :pending
-      assert repo().get!(PendingInput, other.id).response == nil
-    end
-  end
 
   describe "a step's {:error, map} whose message isn't text" do
     # `Trace.error_parts/1` calls `to_string/1` on whatever the step put under

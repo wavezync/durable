@@ -167,4 +167,71 @@ defmodule DurableDashboard.Live.Audit4RegressionsTest do
       refute render(view) =~ "Pruning needs admin access."
     end
   end
+
+  describe "Inbox: the answer goes to the request that was on screen" do
+    # "decide"/"answer" carried no request id: the server answered whatever
+    # was selected when the event arrived, and the page re-picks that on every
+    # refresh (the `?id=` request, or else the first by deadline). So a live
+    # refresh between reading and clicking put Approve on a request the
+    # operator never saw. The form now names its request.
+    test "a request that arrives with an earlier deadline doesn't take the approval",
+         %{conn: conn} do
+      shown = input_of(Fixtures.run!(Fixtures.Approvals))
+      {:ok, view, html} = live(conn, dash("/inputs"))
+      assert html =~ "answer-#{shown.id}"
+
+      assert has_element?(
+               view,
+               ~s(#answer-#{shown.id} input[name="request"][value="#{shown.id}"])
+             )
+
+      # Another run asks, with a deadline, so it sorts first.
+      newcomer = input_of(Fixtures.run!(Fixtures.Approvals))
+
+      repo().update_all(from(p in PendingInput, where: p.id == ^newcomer.id),
+        set: [timeout_at: DateTime.add(DateTime.utc_now(), 60, :second)]
+      )
+
+      # The refresh the input_requested broadcast schedules; then the click
+      # on the form the operator was looking at.
+      send(view.pid, :refresh)
+      render_submit(view, "decide", %{"decision" => "approve", "request" => shown.id})
+
+      assert repo().get!(PendingInput, newcomer.id).status == :pending
+      assert repo().get!(PendingInput, shown.id).response["approved"] == true
+    end
+
+    test "when the open request is answered elsewhere, Approve doesn't fall through to the next",
+         %{conn: conn} do
+      other_run = Fixtures.run!(Fixtures.Approvals)
+      open_run = Fixtures.run!(Fixtures.Approvals)
+      [other, open] = Enum.map([other_run, open_run], &input_of/1)
+
+      {:ok, view, _html} = live(conn, dash("/inputs?id=#{open.id}"))
+      assert has_element?(view, "#answer-#{open.id}")
+
+      # A colleague rejects it; this page refreshes; the operator's click lands.
+      :ok = Durable.provide_input(open_run, "manager_approval", %{"approved" => false})
+      send(view.pid, :refresh)
+      html = render_submit(view, "decide", %{"decision" => "approve", "request" => open.id})
+
+      assert html =~ "That request changed while you were looking at it. Review it again."
+      assert repo().get!(PendingInput, other.id).status == :pending
+      assert repo().get!(PendingInput, other.id).response == nil
+      assert repo().get!(PendingInput, open.id).response["approved"] == false
+    end
+
+    test "an answer that names no request, or one that isn't a request, answers nothing",
+         %{conn: conn} do
+      shown = input_of(Fixtures.run!(Fixtures.Approvals))
+      {:ok, view, _html} = live(conn, dash("/inputs"))
+
+      for request <- [nil, "", "nope", %{"a" => "b"}, Ecto.UUID.generate()] do
+        html = render_submit(view, "decide", %{"decision" => "approve", "request" => request})
+        assert html =~ "That request changed"
+      end
+
+      assert repo().get!(PendingInput, shown.id).status == :pending
+    end
+  end
 end

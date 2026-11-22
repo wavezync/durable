@@ -526,15 +526,20 @@ defmodule DurableDashboard.Live.Audit4SmokeTest do
     assert repo().aggregate(undone, :count) == 1
 
     # An input answered twice, and one whose run was cancelled.
+    pending = from(p in PendingInput, where: p.status == :pending)
+    request = repo().one!(pending).id
     {:ok, view, _html} = live(conn, dash("/inputs"))
-    render_submit(view, "decide", %{"decision" => "approve"})
-    assert repo().aggregate(from(p in PendingInput, where: p.status == :pending), :count) == 0
+    render_submit(view, "decide", %{"decision" => "approve", "request" => request})
+    assert repo().aggregate(pending, :count) == 0
+    html = render_submit(view, "decide", %{"decision" => "approve", "request" => request})
+    assert html =~ "That request changed"
 
     waiting = Fixtures.run!(Fixtures.Approvals)
     {:ok, view, _html} = live(conn, dash("/inputs"))
+    request = repo().one!(from(p in PendingInput, where: p.workflow_id == ^waiting)).id
     :ok = Durable.cancel(waiting)
-    html = render_submit(view, "decide", %{"decision" => "approve"})
-    assert html =~ "no longer waiting"
+    html = render_submit(view, "decide", %{"decision" => "approve", "request" => request})
+    assert html =~ "That request changed"
     assert Fixtures.get_run!(waiting).status == :cancelled
   end
 end
