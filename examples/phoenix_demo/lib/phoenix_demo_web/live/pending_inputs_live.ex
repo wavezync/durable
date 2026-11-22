@@ -54,7 +54,7 @@ defmodule PhoenixDemoWeb.PendingInputsLive do
   defp normalize_type_filter(_), do: :all
 
   defp load_pending(filter) do
-    pending = Wait.list_pending_inputs(limit: 100)
+    pending = Wait.list_pending_inputs!(limit: 100)
 
     pending =
       case filter do

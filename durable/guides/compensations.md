@@ -79,7 +79,7 @@ Use `on_failure: :rollback` when no failure is worth retrying by hand. Otherwise
 
 A run that was rolled back can't be retried, because the work its later steps depend on is gone. `Durable.retry/2` returns `{:error, :rolled_back}`; `Durable.rerun/2` starts a fresh run.
 
-`Durable.rollback_plan(id)` returns what a rollback would run, newest first, without running it: `[book_hotel: :cancel_hotel, book_flight: :cancel_flight]`.
+`Durable.rollback_plan(id)` returns what a rollback would run, newest first, without running it: `{:ok, [book_hotel: :cancel_hotel, book_flight: :cancel_flight]}`. `Durable.rollback_plan!(id)` returns the list itself.
 
 ### A failed run that holds something that lapses
 

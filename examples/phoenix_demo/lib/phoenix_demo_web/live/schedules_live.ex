@@ -15,13 +15,13 @@ defmodule PhoenixDemoWeb.SchedulesLive do
      assign(socket,
        page_title: "Schedules",
        active_nav: :schedules,
-       schedules: Durable.list_schedules(limit: 100)
+       schedules: Durable.list_schedules!(limit: 100)
      )}
   end
 
   @impl true
   def handle_info(:refresh, socket) do
-    {:noreply, assign(socket, schedules: Durable.list_schedules(limit: 100))}
+    {:noreply, assign(socket, schedules: Durable.list_schedules!(limit: 100))}
   end
 
   @impl true
@@ -31,7 +31,7 @@ defmodule PhoenixDemoWeb.SchedulesLive do
         {:noreply,
          socket
          |> put_flash(:info, "Triggered: workflow #{String.slice(workflow_id, 0, 8)}")
-         |> assign(schedules: Durable.list_schedules(limit: 100))}
+         |> assign(schedules: Durable.list_schedules!(limit: 100))}
 
       {:error, reason} ->
         {:noreply, put_flash(socket, :error, "Trigger failed: #{inspect(reason)}")}
@@ -40,14 +40,14 @@ defmodule PhoenixDemoWeb.SchedulesLive do
 
   def handle_event("toggle", %{"name" => name, "enabled" => "true"}, socket) do
     case Durable.disable_schedule(name) do
-      {:ok, _} -> {:noreply, assign(socket, schedules: Durable.list_schedules(limit: 100))}
+      {:ok, _} -> {:noreply, assign(socket, schedules: Durable.list_schedules!(limit: 100))}
       err -> {:noreply, put_flash(socket, :error, "Disable failed: #{inspect(err)}")}
     end
   end
 
   def handle_event("toggle", %{"name" => name}, socket) do
     case Durable.enable_schedule(name) do
-      {:ok, _} -> {:noreply, assign(socket, schedules: Durable.list_schedules(limit: 100))}
+      {:ok, _} -> {:noreply, assign(socket, schedules: Durable.list_schedules!(limit: 100))}
       err -> {:noreply, put_flash(socket, :error, "Enable failed: #{inspect(err)}")}
     end
   end

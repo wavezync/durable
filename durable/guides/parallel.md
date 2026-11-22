@@ -158,7 +158,7 @@ end
 To send a lane an event or an input, use the lane's own id:
 
 ```elixir
-employer = Enum.find(Durable.list_children(run_id), &(&1.current_step == "checks__employer"))
+employer = Enum.find(Durable.list_children!(run_id), &(&1.current_step == "checks__employer"))
 Durable.send_event(employer.id, "employer_confirmed", %{"employed" => true})
 ```
 

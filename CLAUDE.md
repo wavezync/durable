@@ -50,6 +50,7 @@ lib/durable/
 ├── context.ex              # Workflow context (input/get_context/put_context)
 ├── wait.ex                 # Sleep/wait_for_event/wait_for_input
 ├── query.ex                # Query API for executions
+├── query/opts.ex           # The read contract: option checks, unwrap!/3 for the ! twins
 ├── queue/                  # Job queue system
 │   ├── adapter.ex          # Queue adapter behaviour
 │   ├── adapters/postgres.ex # PostgreSQL implementation (FOR UPDATE SKIP LOCKED)
@@ -125,6 +126,22 @@ children = [
 - `:stale_lock_timeout` - Seconds before lock is stale (default: `300`)
 - `:heartbeat_interval` - Worker heartbeat interval in ms (default: `30_000`)
 - `:shutdown_grace_period` - Ms a stopping node waits for running work (default: `15_000`)
+
+### Read functions
+
+Every public function that reads (`Durable.get_execution/2`, `list_executions/1`,
+all of `Durable.Query` and `Durable.Stats`, `Durable.Activity.list/1`, the
+pending listings in `Durable.Wait`, the schedule lookups) returns
+`{:ok, result}` or `{:error, reason}` and has a `!` twin that returns the result
+or raises `ArgumentError`. Options are checked once, in `Durable.Query.Opts`:
+a wrong one is `{:error, {:invalid_option, key}}`, an id that names nothing is
+`{:error, :not_found}`, and nothing is clamped. A new read function goes in
+`test/support/read_functions.ex`.
+
+```elixir
+{:ok, runs} = Durable.list_executions(status: :failed)
+runs = Durable.list_executions!(status: :failed)
+```
 
 ## Testing
 

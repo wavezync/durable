@@ -44,7 +44,7 @@ defmodule PhoenixDemoWeb.PendingEventsLive do
   def handle_info(_, socket), do: {:noreply, socket}
 
   defp load_pending do
-    pending = Wait.list_pending_events(limit: 100)
+    pending = Wait.list_pending_events!(limit: 100)
     workflows = preload_workflows(Enum.map(pending, & &1.workflow_id))
 
     Enum.map(pending, fn p ->

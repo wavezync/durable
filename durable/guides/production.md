@@ -312,6 +312,53 @@ builds. The latest one took under a second on a table of a million runs. `mix du
 database is behind, so you can put it in a deploy gate. The dashboard's Settings
 page shows the same thing.
 
+#### From 1.x to 2.0: the functions that read
+
+Every function that reads now returns `{:ok, result}` or `{:error, reason}`,
+and has a twin ending in `!` that returns the result or raises
+`ArgumentError`. Before, most returned the result bare. Add the `!` to keep
+the code you have, or match on the tuple:
+
+```elixir
+# 1.x
+runs = Durable.list_executions(status: :failed)
+children = Durable.list_children(run_id)
+stats = Durable.Stats.overview()
+
+# 2.0
+runs = Durable.list_executions!(status: :failed)
+{:ok, children} = Durable.list_children(run_id)
+{:ok, stats} = Durable.Stats.overview()
+```
+
+That covers `list_executions`, `list_children`, `rollback_plan`,
+`list_schedules`, `list_nodes` and `paused_queues` on `Durable`, everything in
+`Durable.Query` and `Durable.Stats`, `Durable.Activity.list/1`,
+`Durable.Wait.list_pending_inputs/1` and `list_pending_events/1`, and
+`Durable.Scheduler.API.upcoming_runs/2`. `get_execution/2`, `get_schedule/2`
+and `Durable.Query.get_step_logs/3` already returned a tuple and only gain
+their `!` twin.
+
+Bad input is an error now, where it used to be clamped, ignored or matched
+against nothing:
+
+- A negative `:limit` or `:offset` is `{:error, {:invalid_option, :limit}}`.
+  `list_executions/1` used to read it as 0.
+- A status no run has, alone or in a list, is `{:error, {:invalid_option, :status}}`.
+  So is a status given as text: pass `:failed`, not `"failed"`.
+- A filter of the wrong type is an error instead of being left out: a
+  `:workflow` that isn't a module, a `:from` that isn't a `DateTime`, an
+  `:enabled` that isn't a boolean.
+- Text with a NUL byte, or an id filter that isn't a UUID, is an error instead
+  of matching nothing.
+- `list_children/2`, `rollback_plan/2` and `Durable.Query.get_step_executions/2`
+  return `{:error, :not_found}` for an id that isn't a run. They used to
+  return `[]`.
+- `Durable.Stats.timeline/1` returns `{:ok, buckets}`, and
+  `{:error, {:invalid_option, :bucket_seconds}}` for a bucket of 0.
+
+`Durable.Query.Opts` lists every reason.
+
 ### Change a workflow with runs in flight
 
 A run resumes on whatever code is deployed. New steps after where it stopped are

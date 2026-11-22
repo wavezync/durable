@@ -248,11 +248,11 @@ Once a worker has picked the run up, the next start is an ordinary duplicate and
 
 ## Watching Keys
 
-- **Activity**: `Durable.Activity.list(kinds: ["key_duplicate"])`. The kinds are `"key_duplicate"` (its `outcome` says what the start did: `use_existing`, `error`, `cancel_existing`, `run_again` (with `runs_after` when a run waits), `send_event` or `debounced`), `"key_handed_off"` (a start took the key from a finished or replaced run), `"key_released"` and `"key_retaken"` (a retry took its key back). Each has `details.key` and `details.workflow`. Activity is kept for a week.
-- **Stats**: `Durable.Stats.keys(workflow: "process_article")` returns keys held, re-adds by outcome, dropped inputs, hand-offs, re-adds over time and the keys re-added most.
+- **Activity**: `Durable.Activity.list!(kinds: ["key_duplicate"])`. The kinds are `"key_duplicate"` (its `outcome` says what the start did: `use_existing`, `error`, `cancel_existing`, `run_again` (with `runs_after` when a run waits), `send_event` or `debounced`), `"key_handed_off"` (a start took the key from a finished or replaced run), `"key_released"` and `"key_retaken"` (a retry took its key back). Each has `details.key` and `details.workflow`. Activity is kept for a week.
+- **Stats**: `Durable.Stats.keys!(workflow: "process_article")` returns keys held, re-adds by outcome, dropped inputs, hand-offs, re-adds over time and the keys re-added most.
 - **Telemetry**: `[:durable, :key, :duplicate]`, `[:durable, :key, :handoff]` and `[:durable, :key, :release]`. See `Durable.Telemetry`.
-- **Query**: `Durable.list_executions(key: "article:42")` returns every run started with the key; the holder has `holds_key: true`.
-- **Query**: `Durable.Query.list_keys(workflow_name: "process_article")` lists keys with their holder, how many runs used each, and re-adds in the last day.
+- **Query**: `Durable.list_executions!(key: "article:42")` returns every run started with the key; the holder has `holds_key: true`.
+- **Query**: `Durable.Query.list_keys!(workflow_name: "process_article")` lists keys with their holder, how many runs used each, and re-adds in the last day.
 - **Dashboard**: the Keys page lists every key and its holder. A run's Key view lists its re-adds and every run with its key, and the workflow page has a Keys section. Search Runs with `key:article:42`.
 
 ## Cron Schedules

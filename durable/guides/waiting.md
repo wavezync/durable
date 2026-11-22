@@ -363,13 +363,13 @@ Find workflows waiting for human input:
 
 ```elixir
 # Get all pending inputs
-pending = Durable.Wait.list_pending_inputs()
+{:ok, pending} = Durable.Wait.list_pending_inputs()
 
 # Filter by status
-pending = Durable.Wait.list_pending_inputs(status: :pending)
+{:ok, pending} = Durable.Wait.list_pending_inputs(status: :pending)
 
-# Filter by timeout
-soon = Durable.Wait.list_pending_inputs(
+# Filter by timeout. The ! form returns the list, and raises on a bad filter
+soon = Durable.Wait.list_pending_inputs!(
   timeout_before: DateTime.add(DateTime.utc_now(), 3600)
 )
 ```

@@ -623,15 +623,15 @@ Durable.start(Module, input, queue: :priority, scheduled_at: datetime)
 Durable.start(Module, input, key: "article:42")   # at most one run per key
 Durable.start(Module, input, tags: ["account:7"]) # labels, to find runs across workflows
 Durable.start_many([{Module, input, key: "row:1"}, {Module, input2}])  # one transaction, keys checked
-Durable.get_execution(id)
-Durable.list_executions(workflow: Module, status: :running)
-Durable.list_executions(tag: "account:7")
+Durable.get_execution(id)                # {:ok, run} | {:error, :not_found}
+Durable.list_executions(workflow: Module, status: :running)  # {:ok, runs}
+Durable.list_executions!(tag: "account:7")                   # runs, or raises
 Durable.cancel(id, "reason")
 Durable.cancel_all([tag: "account:7"], "account closed")  # every open run that matches
 Durable.send_event(id, "event", payload)
 Durable.send_event(id, "event", payload, buffer: true)  # keep it until the run waits
 Durable.provide_input(id, "input_name", data)
-Durable.list_children(parent_id)
+Durable.list_children(parent_id)         # {:ok, runs} | {:error, :not_found}
 
 # Operating
 Durable.retry(id)                        # failed run: resume from the failed step
@@ -639,13 +639,26 @@ Durable.rerun(id, input: new_input)      # finished run: start a fresh copy
 Durable.release_key(id, by: user)        # finished run: let its key start again
 Durable.pause_queue(:default, by: user)  # on every node, until resume_queue/2
 Durable.drain()                          # this node: stop claiming, finish running steps
-Durable.list_nodes()                     # heartbeating instances and what they run
+Durable.list_nodes()                     # {:ok, nodes}: heartbeating instances and what they run
 Durable.prune()                          # apply the :prune retention now
 
 # Observing
-Durable.Stats.overview(since: dt)        # also timeline/1, workflows/1, step_performance/1,
-                                         # queues/1, queue_history/1, error_groups/1
-Durable.Activity.list()                  # recovered runs, fenced workers, queue pauses…
+Durable.Stats.overview(since: dt)        # {:ok, stats}; also timeline/1, workflows/1,
+                                         # step_performance/1, queues/1, queue_history/1,
+                                         # error_groups/1
+Durable.Activity.list()                  # {:ok, events}: recovered runs, fenced workers, queue pauses…
+```
+
+Every function that reads returns `{:ok, result}` or `{:error, reason}`, and has
+a twin ending in `!` that returns the result or raises `ArgumentError`. A wrong
+option is `{:error, {:invalid_option, key}}` (a negative `:limit`, a status no
+run has: nothing is clamped), and an id that names nothing is
+`{:error, :not_found}`. `Durable.Query.Opts` has the whole contract.
+
+```elixir
+{:ok, runs} = Durable.list_executions(status: :failed, limit: 20)
+runs = Durable.list_executions!(status: :failed, limit: 20)
+{:error, {:invalid_option, :limit}} = Durable.list_executions(limit: -1)
 ```
 
 Telemetry events and `Telemetry.Metrics` definitions are documented in

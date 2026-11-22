@@ -124,11 +124,13 @@ List child workflows for a parent:
 
 ```elixir
 # All children
-children = Durable.list_children(parent_workflow_id)
+{:ok, children} = Durable.list_children(parent_workflow_id)
 
 # Filter by status
-running = Durable.list_children(parent_workflow_id, status: :running)
-completed = Durable.list_children(parent_workflow_id, status: :completed)
+{:ok, running} = Durable.list_children(parent_workflow_id, status: :running)
+
+# The ! form returns the list, and raises for an id that isn't a run
+completed = Durable.list_children!(parent_workflow_id, status: :completed)
 ```
 
 ## Examples

@@ -32,7 +32,7 @@ defmodule PhoenixDemoWeb.WorkflowDetailLive do
            active_nav: :executions,
            workflow: workflow,
            steps: get_steps(id),
-           children: Durable.list_children(id)
+           children: Durable.list_children!(id)
          )}
     end
   end
@@ -47,7 +47,7 @@ defmodule PhoenixDemoWeb.WorkflowDetailLive do
     id = socket.assigns.workflow.id
     workflow = get_workflow(id)
     steps = get_steps(id)
-    children = Durable.list_children(id)
+    children = Durable.list_children!(id)
 
     {:noreply, assign(socket, workflow: workflow, steps: steps, children: children)}
   end
