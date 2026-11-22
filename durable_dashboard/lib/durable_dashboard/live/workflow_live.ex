@@ -167,7 +167,11 @@ defmodule DurableDashboard.Live.WorkflowLive do
   # Actions
   # ============================================================================
 
+  # The "Run not found" page has no run to act on.
   @impl true
+  def handle_event(event, _params, %{assigns: %{not_found?: true}} = socket),
+    do: Params.ignore(event, socket)
+
   def handle_event("cancel", _params, socket) do
     %{workflow_id: id, durable: durable} = socket.assigns
 
@@ -252,6 +256,10 @@ defmodule DurableDashboard.Live.WorkflowLive do
   def handle_event("close-editor", _params, socket) do
     {:noreply, assign(socket, rerun_editor: nil, action_error: nil)}
   end
+
+  def handle_event(event, _params, socket), do: Params.ignore(event, socket)
+
+  defp rerun_opts(%{"input" => json}) when not is_binary(json), do: {:error, :invalid_json}
 
   defp rerun_opts(%{"input" => json}) do
     case Jason.decode(json) do

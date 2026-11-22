@@ -56,7 +56,7 @@ defmodule DurableDashboard.Components.Workflow.FlowGraph do
     {:noreply, push_patch(socket, to: path)}
   end
 
-  def handle_event("step-clicked", _payload, socket), do: {:noreply, socket}
+  def handle_event(event, _payload, socket), do: DurableDashboard.Params.ignore(event, socket)
 
   @impl true
   def render(assigns) do

@@ -109,7 +109,8 @@ defmodule DurableDashboard.Components.Data.ExecutionFilters do
   # ============================================================================
 
   @impl true
-  def handle_event("toggle_facet", %{"facet" => facet}, socket) do
+  def handle_event("toggle_facet", %{"facet" => facet}, socket)
+      when facet in ~w(workflow status time) do
     facet = String.to_existing_atom(facet)
     open = if socket.assigns.open_facet == facet, do: nil, else: facet
     {:noreply, assign(socket, open_facet: open, wf_query: "")}
@@ -119,33 +120,34 @@ defmodule DurableDashboard.Components.Data.ExecutionFilters do
     {:noreply, assign(socket, open_facet: nil)}
   end
 
-  def handle_event("filter_workflows", %{"value" => q}, socket) do
+  def handle_event("filter_workflows", %{"value" => q}, socket) when is_binary(q) do
     {:noreply, assign(socket, wf_query: q)}
   end
 
-  def handle_event("select_workflow", %{"name" => name}, socket) do
+  def handle_event("select_workflow", %{"name" => name}, socket) when is_binary(name) do
     notify(%{workflow: name})
     {:noreply, assign(socket, open_facet: nil, wf_query: "")}
   end
 
-  def handle_event("toggle_status", %{"status" => status}, socket) do
+  def handle_event("toggle_status", %{"status" => status}, socket) when is_binary(status) do
     current = socket.assigns.statuses || []
     next = if status in current, do: List.delete(current, status), else: [status | current]
     notify(%{statuses: next})
     {:noreply, socket}
   end
 
-  def handle_event("set_range", %{"range" => range}, socket) do
+  def handle_event("set_range", %{"range" => range}, socket) when is_binary(range) do
     notify(%{range: range, from: nil, to: nil})
     {:noreply, assign(socket, open_facet: nil)}
   end
 
-  def handle_event("set_custom", %{"from" => from, "to" => to}, socket) do
+  def handle_event("set_custom", %{"from" => from, "to" => to}, socket)
+      when is_binary(from) and is_binary(to) do
     notify(%{range: nil, from: blank_to_nil(from), to: blank_to_nil(to)})
     {:noreply, socket}
   end
 
-  def handle_event("commit", %{"draft" => draft}, socket) do
+  def handle_event("commit", %{"draft" => draft}, socket) when is_binary(draft) do
     case String.trim(draft) do
       "" ->
         {:noreply, socket}
@@ -165,12 +167,15 @@ defmodule DurableDashboard.Components.Data.ExecutionFilters do
 
   def handle_event("draft_key", _params, socket), do: {:noreply, socket}
 
-  def handle_event("remove_tag", %{"tag" => id}, socket), do: remove(socket, id)
+  def handle_event("remove_tag", %{"tag" => id}, socket) when is_binary(id),
+    do: remove(socket, id)
 
   def handle_event("clear_all", _, socket) do
     notify(%{workflow: nil, statuses: [], range: nil, from: nil, to: nil, q: nil})
     {:noreply, socket |> assign(open_facet: nil, wf_query: "") |> bump()}
   end
+
+  def handle_event(event, _params, socket), do: DurableDashboard.Params.ignore(event, socket)
 
   defp remove(socket, id) do
     notify(remove_patch(socket.assigns, id))
@@ -184,9 +189,14 @@ defmodule DurableDashboard.Components.Data.ExecutionFilters do
   defp remove_patch(_assigns, "time"), do: %{range: nil, from: nil, to: nil}
 
   defp remove_patch(assigns, "q:" <> index) do
-    rest = assigns.q |> RunSearch.tokens() |> List.delete_at(String.to_integer(index))
+    # A tag's index is its place among the terms; one that isn't a number
+    # counts as past the end and removes nothing.
+    terms = RunSearch.tokens(assigns.q)
+    rest = List.delete_at(terms, DurableDashboard.Params.int(index, length(terms)))
     %{q: rest |> Enum.map_join(" ", & &1.raw) |> blank_to_nil()}
   end
+
+  defp remove_patch(_assigns, _unknown), do: %{}
 
   # Typed facets set the same filters the menus do; the rest joins the search.
   # A facet value the menus don't offer (status:nope, since:3w) is dropped.

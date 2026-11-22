@@ -38,59 +38,6 @@ defmodule DurableDashboard.Live.Audit4KnownBugsTest do
 
   defp crashes(cases), do: for({label, fun} <- cases, reason = crash(fun), do: {label, reason})
 
-  # Events pushed with no run loaded, nothing selected, or a param missing
-  # crash the LiveView instead of being ignored: `rollback` and `edit-input`
-  # read `socket.assigns.workflow.status`/`.input` on the "Run not found" page
-  # (workflow_live.ex:237, :246); `decide`/`send` read `selected.workflow_id` /
-  # `sending.workflow_id` when there is none (inputs_live.ex:138, :120);
-  # `answer` with `fields` not a map (inputs_live.ex:180); the rest have a
-  # single clause matching on the param they expect. Each only ends the
-  # sender's own LiveView, which the client remounts.
-  test "an event for something that isn't there is ignored", %{conn: conn} do
-    Fixtures.schedule!("card_sweep")
-    long = String.duplicate("q", 100_000)
-
-    cases = [
-      {"/executions/#{Ecto.UUID.generate()}", "rollback", %{}},
-      {"/executions/#{Ecto.UUID.generate()}", "edit-input", %{}},
-      {"/executions/nope", "no-such-event", %{}},
-      {"/inputs?tab=sleep", "decide", %{"decision" => "approve"}},
-      {"/inputs?tab=events", "send", %{"payload" => "{}"}},
-      {"/inputs?tab=events", "compose", %{}},
-      {"/queues", "toggle", %{}},
-      {"/queues", "toggle", %{"queue" => long}},
-      {"/schedules", "toggle", %{}},
-      {"/schedules", "run-now", %{}},
-      {"/keys", "toggle-status", %{"status" => "nope"}},
-      {"/keys", "page", %{}},
-      {"/executions", "bulk", %{"action" => "drop"}},
-      {"/executions", "page", %{"page" => %{}}}
-    ]
-
-    assert crashes(
-             for {path, event, params} <- cases do
-               {{path, event, params |> inspect() |> String.slice(0, 40)},
-                fn ->
-                  {:ok, view, _html} = live(conn, dash(path))
-                  render_click(view, event, params)
-                end}
-             end
-           ) == []
-  end
-
-  test "a form answered with fields that aren't a map is refused, not a crash", %{conn: conn} do
-    {:ok, id} =
-      Durable.Executor.start_workflow(Audit4Dash.Bugs, %{},
-        workflow: "audit4_required_form",
-        inline: true
-      )
-
-    {:ok, view, _html} = live(conn, dash("/inputs"))
-
-    assert crash(fn -> render_submit(view, "answer", %{"fields" => "not a map"}) end) == nil
-    assert input_of(id).status == :pending
-  end
-
   # `dashboard_routes/2` always names its live_session `:durable_dashboard`
   # and its pipelines `:durable_dashboard_browser`/`_assets` (router.ex:91,
   # :99, :111), so a host with two Durable instances can't mount a dashboard

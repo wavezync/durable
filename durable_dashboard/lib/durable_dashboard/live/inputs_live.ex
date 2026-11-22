@@ -134,9 +134,12 @@ defmodule DurableDashboard.Live.InputsLive do
   def handle_event("close-compose", _params, socket),
     do: {:noreply, assign(socket, sending: nil, action_error: nil)}
 
-  def handle_event("send", %{"payload" => json}, socket) do
-    event = socket.assigns.sending
-
+  def handle_event(
+        "send",
+        %{"payload" => json},
+        %{assigns: %{sending: %PendingEvent{} = event}} = socket
+      )
+      when is_binary(json) do
     with {:ok, payload} <- decode_payload(json),
          :ok <-
            Access.perform(socket, :operator, :send_event, [event.workflow_id], fn ->
@@ -152,6 +155,8 @@ defmodule DurableDashboard.Live.InputsLive do
       {:error, reason} -> {:noreply, assign(socket, action_error: describe_error(reason))}
     end
   end
+
+  def handle_event(event, _params, socket), do: Params.ignore(event, socket)
 
   # The request a form was rendered for (its hidden `request` field), read
   # again now. The page re-picks what it shows on every live refresh, so the
@@ -202,7 +207,7 @@ defmodule DurableDashboard.Live.InputsLive do
 
   defp approval(approved?, params, socket) do
     %{"approved" => approved?}
-    |> put_present("comment", String.trim(params["comment"] || ""))
+    |> put_present("comment", String.trim(Params.text(params["comment"]) || ""))
     |> put_present("by", socket.assigns[:user])
   end
 
@@ -211,14 +216,24 @@ defmodule DurableDashboard.Live.InputsLive do
 
   @doc false
   # Turns the submitted form into the value the run receives, per input type.
-  def answer(%{input_type: :single_choice}, %{"choice" => choice}) when choice != "",
-    do: {:ok, choice}
+  def answer(%{input_type: :single_choice}, %{"choice" => choice})
+      when is_binary(choice) and choice != "",
+      do: {:ok, choice}
 
   def answer(%{input_type: :single_choice}, _params), do: {:error, "Pick one option."}
 
-  def answer(%{input_type: :multi_choice}, params), do: {:ok, Map.get(params, "choices", [])}
+  def answer(%{input_type: :multi_choice}, params) do
+    choices = Map.get(params, "choices", [])
 
-  def answer(%{input_type: :free_text}, %{"text" => text}), do: {:ok, text}
+    if is_list(choices) and Enum.all?(choices, &is_binary/1),
+      do: {:ok, choices},
+      else: {:error, "Pick from the options."}
+  end
+
+  def answer(%{input_type: :free_text}, %{"text" => text}) when is_binary(text), do: {:ok, text}
+
+  def answer(%{input_type: :form}, %{"fields" => values}) when not is_map(values),
+    do: {:error, "Fill in the form's fields."}
 
   def answer(%{input_type: :form, fields: fields}, params) do
     values = Map.get(params, "fields", %{})
@@ -241,6 +256,8 @@ defmodule DurableDashboard.Live.InputsLive do
       do: {:error, "required"},
       else: {:ok, if(field["type"] in ["boolean", "checkbox"], do: false)}
   end
+
+  defp cast_field(_field, value) when not is_binary(value), do: {:error, "not a value"}
 
   defp cast_field(%{"type" => type}, value) when type in ["boolean", "checkbox"],
     do: {:ok, value == "true"}

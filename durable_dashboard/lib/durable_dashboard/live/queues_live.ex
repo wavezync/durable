@@ -58,8 +58,18 @@ defmodule DurableDashboard.Live.QueuesLive do
 
   @impl true
   def handle_event("toggle", %{"queue" => queue}, socket) do
+    # Pausing writes a row for whatever name it's given, so only a queue this
+    # page lists can be paused from here.
+    case Enum.find(socket.assigns.queues, &(&1.queue == queue)) do
+      nil -> DurableDashboard.Params.ignore("toggle", socket)
+      %{paused: paused?} -> toggle(socket, queue, paused?)
+    end
+  end
+
+  def handle_event(event, _params, socket), do: DurableDashboard.Params.ignore(event, socket)
+
+  defp toggle(socket, queue, paused?) do
     durable = socket.assigns.durable
-    paused? = Enum.any?(socket.assigns.queues, &(&1.queue == queue and &1.paused))
     action = if paused?, do: :resume_queue, else: :pause_queue
 
     result =

@@ -186,6 +186,9 @@ defmodule DurableDashboard.Live.TelemetryLive do
     do: {:noreply, assign(socket, current_path: URI.parse(uri).path)}
 
   @impl true
+  def handle_event(event, _params, socket), do: DurableDashboard.Params.ignore(event, socket)
+
+  @impl true
   def handle_info(:sample, socket) do
     now = sample(socket.assigns.counters, length(socket.assigns.events))
 

@@ -94,6 +94,8 @@ defmodule DurableDashboard.Live.KeysLive do
   def handle_event("clear", _params, socket),
     do: {:noreply, push_patch(socket, to: DPath.keys(socket.assigns.base_path))}
 
+  def handle_event(event, _params, socket), do: Params.ignore(event, socket)
+
   @impl true
   def handle_info({:durable_event, kind, _payload}, socket) when kind in @workflow_kinds do
     if socket.assigns.refresh_pending? do

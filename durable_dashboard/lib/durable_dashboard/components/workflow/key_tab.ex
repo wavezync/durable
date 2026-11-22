@@ -233,6 +233,8 @@ defmodule DurableDashboard.Components.Workflow.KeyTab do
     {:noreply, assign(socket, open: if(socket.assigns.open == id, do: nil, else: id))}
   end
 
+  def handle_event(event, _params, socket), do: DurableDashboard.Params.ignore(event, socket)
+
   @impl true
   def render(assigns) do
     ~H"""

@@ -114,7 +114,7 @@ defmodule DurableDashboard.Components.Command.CommandPalette do
      assign(socket, open?: false, query: "", selected_index: 0, results: [], groups: [])}
   end
 
-  def handle_event("palette:search", %{"value" => q}, socket) do
+  def handle_event("palette:search", %{"value" => q}, socket) when is_binary(q) do
     {:noreply, socket |> assign(selected_index: 0) |> assign_results(q)}
   end
 
@@ -123,7 +123,7 @@ defmodule DurableDashboard.Components.Command.CommandPalette do
   end
 
   def handle_event("palette:select", %{"index" => idx}, socket) do
-    {:noreply, assign(socket, selected_index: String.to_integer(idx))}
+    {:noreply, assign(socket, selected_index: max(DurableDashboard.Params.int(idx, 0), 0))}
   end
 
   def handle_event("palette:activate", _, socket) do
@@ -138,6 +138,8 @@ defmodule DurableDashboard.Components.Command.CommandPalette do
          |> push_navigate(to: item.href)}
     end
   end
+
+  def handle_event(event, _params, socket), do: DurableDashboard.Params.ignore(event, socket)
 
   # ============================================================================
   # Render

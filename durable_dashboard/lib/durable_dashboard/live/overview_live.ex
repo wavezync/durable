@@ -68,6 +68,9 @@ defmodule DurableDashboard.Live.OverviewLive do
   end
 
   @impl true
+  def handle_event(event, _params, socket), do: DurableDashboard.Params.ignore(event, socket)
+
+  @impl true
   def handle_info({:durable_event, kind, payload}, socket) when kind in @workflow_kinds do
     socket = update(socket, :feed, &Enum.take([feed_item(kind, payload) | &1], @feed_size))
 

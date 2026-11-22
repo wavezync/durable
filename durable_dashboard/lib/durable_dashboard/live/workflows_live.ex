@@ -51,6 +51,9 @@ defmodule DurableDashboard.Live.WorkflowsLive do
   end
 
   @impl true
+  def handle_event(event, _params, socket), do: DurableDashboard.Params.ignore(event, socket)
+
+  @impl true
   def handle_info({:durable_event, kind, _payload}, socket) when kind in @workflow_kinds do
     if socket.assigns.refresh_pending? do
       {:noreply, socket}

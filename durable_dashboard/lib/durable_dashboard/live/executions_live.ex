@@ -159,7 +159,7 @@ defmodule DurableDashboard.Live.ExecutionsLive do
     {:noreply, push_patch(socket, to: query_path(socket.assigns, query))}
   end
 
-  def handle_event("toggle", %{"id" => id}, socket) do
+  def handle_event("toggle", %{"id" => id}, socket) when is_binary(id) do
     selected = socket.assigns.selected
 
     selected =
@@ -184,7 +184,7 @@ defmodule DurableDashboard.Live.ExecutionsLive do
   def handle_event("show-latest", _params, socket), do: {:noreply, load_rows(socket)}
 
   # A chip on a row adds its tag to the query bar; clicking it twice changes nothing.
-  def handle_event("filter-tag", %{"tag" => tag}, socket) do
+  def handle_event("filter-tag", %{"tag" => tag}, socket) when is_binary(tag) do
     query = socket.assigns.query
     terms = query.q |> RunSearch.tokens() |> Enum.map(& &1.raw)
     term = RunSearch.term("tag", tag)
@@ -226,6 +226,8 @@ defmodule DurableDashboard.Live.ExecutionsLive do
 
     {:noreply, socket |> assign(selected: MapSet.new(), bulk_result: message) |> load_rows()}
   end
+
+  def handle_event(event, _params, socket), do: Params.ignore(event, socket)
 
   defp run_action(:retry, id, durable, _user), do: Durable.retry(id, durable: durable)
   defp run_action(:rerun, id, durable, _user), do: Durable.rerun(id, durable: durable)

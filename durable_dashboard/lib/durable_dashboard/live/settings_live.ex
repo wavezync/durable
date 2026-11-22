@@ -67,6 +67,8 @@ defmodule DurableDashboard.Live.SettingsLive do
     end
   end
 
+  def handle_event(event, _params, socket), do: DurableDashboard.Params.ignore(event, socket)
+
   defp load(socket) do
     case Durable.Config.get_safe(socket.assigns.durable) do
       nil ->

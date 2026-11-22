@@ -65,6 +65,9 @@ defmodule DurableDashboard.Live.WorkflowDetailLive do
   end
 
   @impl true
+  def handle_event(event, _params, socket), do: DurableDashboard.Params.ignore(event, socket)
+
+  @impl true
   def handle_info(
         {:durable_event, kind, %{workflow_name: name}},
         %{assigns: %{name: name}} = socket

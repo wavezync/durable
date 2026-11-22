@@ -84,7 +84,7 @@ defmodule DurableDashboard.Live.SchedulesLive do
   # ============================================================================
 
   @impl true
-  def handle_event("run-now", %{"name" => name}, socket) do
+  def handle_event("run-now", %{"name" => name}, socket) when is_binary(name) do
     durable = socket.assigns.durable
 
     result =
@@ -101,7 +101,7 @@ defmodule DurableDashboard.Live.SchedulesLive do
     end
   end
 
-  def handle_event("toggle", %{"name" => name}, socket) do
+  def handle_event("toggle", %{"name" => name}, socket) when is_binary(name) do
     durable = socket.assigns.durable
     enabled? = Enum.any?(socket.assigns.schedules, &(&1.name == name and &1.enabled))
     action = if enabled?, do: :disable_schedule, else: :enable_schedule
@@ -116,6 +116,8 @@ defmodule DurableDashboard.Live.SchedulesLive do
       {:error, reason} -> {:noreply, assign(socket, action_error: describe_error(reason))}
     end
   end
+
+  def handle_event(event, _params, socket), do: DurableDashboard.Params.ignore(event, socket)
 
   defp describe_error(:forbidden), do: "You don't have permission to do that."
   defp describe_error(:not_found), do: "That schedule no longer exists."

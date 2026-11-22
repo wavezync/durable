@@ -437,4 +437,177 @@ defmodule DurableDashboard.Live.Audit4RegressionsTest do
     assert Params.list("failed,,cancelled") == ["failed", "cancelled"]
     assert Enum.map([nil, ["a"], %{}], &Params.list/1) == [[], [], []]
   end
+
+  describe "events for something that isn't there" do
+    # Events pushed with no run loaded, nothing selected, a param missing or
+    # of the wrong shape, or a name no page has, crashed the sender's LiveView
+    # (a FunctionClauseError, or a read of `nil`). Handlers now check the state
+    # they need and every LiveView and live component ignores the rest.
+    test "are ignored by every page", %{conn: conn} do
+      Fixtures.schedule!("card_sweep")
+      run = Fixtures.run!(Fixtures.Payments, %{"decline" => true})
+      missing = "/executions/#{Ecto.UUID.generate()}"
+      long = String.duplicate("q", 100_000)
+
+      cases =
+        for(
+          event <- ~w(cancel retry rerun release-key rollback edit-input confirm-rollback),
+          do: {missing, event, %{}}
+        ) ++
+          for(
+            page <-
+              ~w(/ /executions /executions/#{run} /executions/nope /workflows
+                 /workflows/process_payment /inputs /keys /queues /schedules /telemetry /settings),
+            do: {page, "no-such-event", %{"a" => "b"}}
+          ) ++
+          [
+            {"/executions/#{run}", "rerun", %{"input" => %{"a" => "b"}}},
+            {"/inputs?tab=sleep", "decide", %{"decision" => "approve"}},
+            {"/inputs?tab=events", "send", %{"payload" => "{}"}},
+            {"/inputs?tab=events", "send", %{"payload" => %{}}},
+            {"/inputs?tab=events", "compose", %{}},
+            {"/inputs?tab=events", "compose", %{"id" => %{}}},
+            {"/queues", "toggle", %{}},
+            {"/queues", "toggle", %{"queue" => long}},
+            {"/queues", "toggle", %{"queue" => %{}}},
+            {"/schedules", "toggle", %{}},
+            {"/schedules", "toggle", %{"name" => %{}}},
+            {"/schedules", "run-now", %{}},
+            {"/schedules", "run-now", %{"name" => ["a"]}},
+            {"/keys", "toggle-status", %{"status" => "nope"}},
+            {"/keys", "page", %{}},
+            {"/keys", "page", %{"page" => %{}}},
+            {"/keys", "filter", %{"q" => %{}, "workflow" => ["a"]}},
+            {"/executions", "bulk", %{"action" => "drop"}},
+            {"/executions", "bulk", %{}},
+            {"/executions", "page", %{"page" => %{}}},
+            {"/executions", "page", %{}},
+            {"/executions", "view", %{"view" => %{}}},
+            {"/executions", "toggle", %{"id" => %{}}},
+            {"/executions", "filter-tag", %{"tag" => %{}}}
+          ]
+
+      assert crashes(
+               for {path, event, params} <- cases do
+                 {{path, event, params |> inspect() |> String.slice(0, 40)},
+                  fn ->
+                    {:ok, view, _html} = live(conn, dash(path))
+                    render_click(view, event, params)
+                  end}
+               end
+             ) == []
+    end
+
+    test "are ignored by the query bar, the palette and the run page's tabs", %{conn: conn} do
+      {:ok, keyed} = Durable.start(Fixtures.Invoices, %{}, key: "invoice:1", inline: true)
+
+      cases = [
+        {"/executions?q=a+b", "#executions-filters",
+         [
+           {"toggle_facet", %{"facet" => "nope"}},
+           {"toggle_facet", %{}},
+           {"filter_workflows", %{"value" => %{}}},
+           {"select_workflow", %{"name" => ["a"]}},
+           {"toggle_status", %{"status" => %{}}},
+           {"set_range", %{"range" => %{}}},
+           {"set_custom", %{"from" => %{}, "to" => "x"}},
+           {"commit", %{"draft" => %{}}},
+           {"remove_tag", %{"tag" => "nope"}},
+           {"remove_tag", %{"tag" => "q:abc"}},
+           {"remove_tag", %{"tag" => %{}}},
+           {"no-such-event", %{}}
+         ]},
+        {"/executions", "#command-palette",
+         [
+           {"palette:search", %{"value" => %{}}},
+           {"palette:search", %{}},
+           {"palette:select", %{"index" => "abc"}},
+           {"palette:select", %{"index" => %{}}},
+           {"palette:move", %{}},
+           {"no-such-event", %{}}
+         ]},
+        {"/executions/#{keyed}/logs", "#logs-#{keyed}",
+         [
+           {"filter:step", %{"step" => %{}}},
+           {"filter:level", %{}},
+           {"filter:search", %{"value" => ["a"]}},
+           {"page:set", %{"page" => %{}}},
+           {"page:set", %{}},
+           {"no-such-event", %{}}
+         ]},
+        {"/executions/#{keyed}/key", "#key-#{keyed}", [{"toggle", %{}}, {"no-such-event", %{}}]},
+        {"/executions/#{keyed}/graph", "#flow-#{keyed}",
+         [{"step-clicked", %{}}, {"no-such-event", %{}}]}
+      ]
+
+      assert crashes(
+               for {path, target, events} <- cases, {event, params} <- events do
+                 {{path, event, inspect(params)},
+                  fn ->
+                    {:ok, view, _html} = live(conn, dash(path))
+                    view |> with_target(target) |> render_click(event, params)
+                    render(view)
+                  end}
+               end
+             ) == []
+    end
+
+    # Pausing writes a row for whatever name it is given: the page only does
+    # it for a queue it lists.
+    test "Queues pauses a queue it lists, and no other", %{conn: conn} do
+      {:ok, view, _html} = live(conn, dash("/queues"))
+
+      for queue <- ["ghost", String.duplicate("q", 100_000), "", %{"a" => "b"}] do
+        render_click(view, "toggle", %{"queue" => queue})
+      end
+
+      assert Durable.paused_queues() == []
+      assert repo().aggregate(Durable.Storage.Schemas.Queue, :count) == 0
+
+      render_click(view, "toggle", %{"queue" => "default"})
+      assert Durable.paused_queues() == ["default"]
+    end
+
+    test "a form answered with fields that aren't a map is refused, not a crash", %{conn: conn} do
+      {:ok, id} =
+        Durable.Executor.start_workflow(Audit4Dash.Bugs, %{},
+          workflow: "audit4_required_form",
+          inline: true
+        )
+
+      request = input_of(id).id
+      {:ok, view, _html} = live(conn, dash("/inputs"))
+
+      for fields <- ["not a map", ["a"], %{"amount" => %{"x" => "1"}}, %{"amount" => ["1"]}] do
+        params = %{"fields" => fields, "request" => request}
+        assert crash(fn -> render_submit(view, "answer", params) end) == nil
+        assert has_element?(view, "[role=alert]")
+      end
+
+      assert input_of(id).status == :pending
+    end
+
+    test "an answer of the wrong shape for its request is refused", %{conn: conn} do
+      run = Fixtures.run!(Fixtures.HoldAwaitingCustomer)
+      request = input_of(run).id
+
+      for {type, params} <- [
+            {:free_text, %{"text" => %{"a" => "b"}}},
+            {:free_text, %{}},
+            {:single_choice, %{"choice" => %{"a" => "b"}}},
+            {:multi_choice, %{"choices" => "a"}},
+            {:multi_choice, %{"choices" => [%{"a" => "b"}]}},
+            {:approval, %{"comment" => %{"a" => "b"}}}
+          ] do
+        repo().update_all(from(p in PendingInput, where: p.id == ^request),
+          set: [input_type: type]
+        )
+
+        {:ok, view, _html} = live(conn, dash("/inputs"))
+        params = Map.put(params, "request", request)
+        assert crash(fn -> render_submit(view, "answer", params) end) == nil
+        assert input_of(run).status == :pending, inspect({type, params})
+      end
+    end
+  end
 end
