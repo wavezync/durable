@@ -836,6 +836,7 @@ defmodule Durable.Executor do
          {:ok, execution} <- mark_running(config, execution) do
       # Set workflow ID for logging/observability
       Context.set_workflow_id(execution.id)
+      Context.set_input(execution.input)
 
       meta = %{
         durable: config.name,

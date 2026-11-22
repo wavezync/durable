@@ -233,11 +233,12 @@ defmodule Durable.Context do
   end
 
   @doc """
-  Returns the initial workflow input.
+  Returns the input the run was started with, as it is stored: its keys are
+  strings, whatever they were when it was passed to `Durable.start/3`.
 
   ## Examples
 
-      order = input().order
+      order_id = input()["order_id"]
 
   """
   @spec input() :: map()
@@ -532,6 +533,12 @@ defmodule Durable.Context do
   @doc false
   def set_workflow_id(workflow_id) do
     Process.put(@workflow_id_key, workflow_id)
+    :ok
+  end
+
+  @doc false
+  def set_input(input) do
+    Process.put(@input_key, input || %{})
     :ok
   end
 
