@@ -45,8 +45,9 @@ defmodule Durable do
         use Durable.Helpers
 
         workflow "process_order", timeout: hours(2) do
+          # The input's keys are strings, and stay strings in every step
           step :validate, fn order ->
-            {:ok, %{order_id: order["id"], items: order["items"]}}
+            {:ok, assign(order, :order_id, order["id"])}
           end
 
           step :charge, [retry: [max_attempts: 3, backoff: :exponential]], fn data ->
@@ -58,7 +59,7 @@ defmodule Durable do
 
   Start a workflow:
 
-      {:ok, workflow_id} = Durable.start(MyApp.OrderWorkflow, %{order: order})
+      {:ok, workflow_id} = Durable.start(MyApp.OrderWorkflow, %{"id" => "order_123", "items" => items})
 
   Query execution status:
 

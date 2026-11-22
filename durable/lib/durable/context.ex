@@ -13,26 +13,26 @@ defmodule Durable.Context do
         use Durable.Context
 
         workflow "process_order" do
-          step :init do
-            order = input().order
-            put_context(:order_id, order.id)
-            put_context(:items, order.items)
+          step :init, fn order ->
+            put_context(:order_id, order["id"])
+            {:ok, order}
           end
 
-          step :calculate_total do
-            items = get_context(:items)
-            total = Enum.sum(Enum.map(items, & &1.price))
+          step :calculate_total, fn order ->
+            total = order["items"] |> Enum.map(& &1["price"]) |> Enum.sum()
             put_context(:total, total)
+            {:ok, order}
           end
 
-          step :finalize do
-            %{
-              order_id: get_context(:order_id),
-              total: get_context(:total)
-            }
+          step :finalize, fn order ->
+            Orders.close(get_context(:order_id), get_context(:total))
+            {:ok, order}
           end
         end
       end
+
+  A step still returns `{:ok, data}`. What it put in the context is kept
+  beside what it returns.
 
   ## Context Storage
 

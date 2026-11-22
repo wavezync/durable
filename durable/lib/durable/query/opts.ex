@@ -21,7 +21,9 @@ defmodule Durable.Query.Opts do
     * `{:invalid_option, key}` - the option `key` has a value of the wrong type
       or out of range: a negative or non-integer `:limit` or `:offset`, a status
       no run can have (alone or in a list), `bucket_seconds: 0`, text with a NUL
-      byte or bytes that aren't UTF-8, a filter on an id that isn't a UUID.
+      byte or bytes that aren't UTF-8, a filter on an id that isn't a UUID. An
+      option the function doesn't know is named the same way, so a misspelt
+      filter can't match everything: `{:invalid_option, :statuz}`.
       Nothing is clamped or quietly matched against nothing. Options that aren't
       a keyword list are `{:invalid_option, :opts}`, and an argument that isn't
       an option is named the same way (`:parent_ids`, `:count`).
@@ -30,8 +32,8 @@ defmodule Durable.Query.Opts do
     * `{:too_many_buckets, count}` - from `Durable.Stats.timeline/1` and
       `Durable.Stats.keys/1`, for a window cut into more than 10,000 buckets.
 
-  A `nil` value is an option that wasn't set, and an option the function doesn't
-  know is ignored.
+  A `nil` value is an option that wasn't set. `:durable`, the instance, is
+  accepted everywhere.
 
   The `!` twins raise `ArgumentError` for each of these, with a message that
   names the option and the value. Both forms raise `ArgumentError` for a

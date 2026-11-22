@@ -8,12 +8,12 @@ defmodule Durable.DSL.Workflow do
         use Durable
 
         workflow "process_order", timeout: hours(2) do
-          step :validate do
-            # ...
+          step :validate, fn order ->
+            {:ok, Map.put(order, :order_id, order["id"])}
           end
 
-          step :charge do
-            # ...
+          step :charge, [retry: [max_attempts: 3]], fn order ->
+            {:ok, Map.put(order, :receipt, Payments.charge(order["total"]))}
           end
         end
       end

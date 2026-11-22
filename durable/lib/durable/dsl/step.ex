@@ -102,11 +102,11 @@ defmodule Durable.DSL.Step do
   ## Examples
 
       step :validate, fn order ->
-        {:ok, %{order_id: order["id"], items: order["items"]}}
+        {:ok, assign(order, :order_id, order["id"])}
       end
 
       step :charge, [retry: [max_attempts: 3]], fn data ->
-        {:ok, assign(data, :receipt, PaymentService.charge(data.total))}
+        {:ok, assign(data, :receipt, PaymentService.charge(data["total"]))}
       end
 
   """

@@ -3,8 +3,8 @@ defmodule Durable.Telemetry do
   The `:telemetry` events Durable emits. This list is a contract: names,
   measurements and metadata keys only change in a major version.
 
-  Spans follow `:telemetry.span/3`: a `:start` event, then exactly one of
-  `:stop` or `:exception`, with `duration` in native time units — the same
+  Spans follow `:telemetry.span/3`: a `:start` event, then one of `:stop` or
+  `:exception` (never both), with `duration` in native time units — the same
   shape as Phoenix, Ecto and Oban, so existing tooling reads them as-is.
 
   Run, step, compensation and schedule events include `:durable` (the
@@ -55,7 +55,8 @@ defmodule Durable.Telemetry do
   ## Attempts that die
 
   An attempt's end event comes from whoever closes its row. That's one atomic
-  update, so each attempt gets exactly one. When its process dies, its node is
+  update, so each attempt gets at most one. A worker killed between closing
+  its row and leaving the span sends none. When its process dies, its node is
   lost or its run is cancelled, that's the worker, a sweep or the cancel,
   possibly on another node, which sends:
 

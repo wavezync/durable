@@ -11,17 +11,19 @@ defmodule Durable.Wait do
 
       defmodule MyApp.ApprovalWorkflow do
         use Durable
-        use Durable.Context
+        use Durable.Helpers
         use Durable.Wait
 
         workflow "approval" do
-          step :request_approval do
-            result = wait_for_approval("manager_approval",
+          step :request_approval, fn expense ->
+            answer = wait_for_approval("manager_approval",
               prompt: "Approve expense?",
               timeout: days(3),
-              timeout_value: :auto_reject
+              timeout_value: :no_answer
             )
-            put_context(:approval, result)
+
+            # An answer comes back with string keys; the timeout value as written.
+            {:ok, assign(expense, :approved, match?(%{"approved" => true}, answer))}
           end
         end
       end
@@ -480,7 +482,10 @@ defmodule Durable.Wait do
   @doc """
   Waits for an approval decision.
 
-  Returns `:approved`, `:rejected`, or `timeout_value` if timeout occurs.
+  Returns the answer as it was given, read back from storage, or
+  `timeout_value` if the timeout occurs. The dashboard's Inbox answers with
+  `%{"approved" => true}` or `%{"approved" => false}`, plus `"comment"` and
+  `"by"` when given.
 
   ## Options
 
@@ -492,7 +497,8 @@ defmodule Durable.Wait do
   ## Examples
 
       result = wait_for_approval("manager_approval")
-      # => :approved | :rejected
+      # => %{"approved" => true} after
+      #    Durable.provide_input(id, "manager_approval", %{"approved" => true})
 
       result = wait_for_approval("expense_approval",
         prompt: "Approve expense for $500?",
@@ -525,13 +531,13 @@ defmodule Durable.Wait do
       result = wait_for_choice("shipping_method",
         prompt: "Select shipping method:",
         choices: [
-          %{value: :express, label: "Express ($15)"},
-          %{value: :standard, label: "Standard (Free)"}
+          %{value: "express", label: "Express ($15)"},
+          %{value: "standard", label: "Standard (Free)"}
         ],
         timeout: hours(24),
-        timeout_value: :standard
+        timeout_value: "standard"
       )
-      # => :express | :standard
+      # => "express" | "standard"
 
   """
   @spec wait_for_choice(String.t(), keyword()) :: term()
