@@ -53,7 +53,7 @@ defmodule Durable.Integration.FailurePathsTest do
     workflow "fp_dies_then_waits" do
       step(
         :work,
-        [retry: [max_attempts: 2, backoff: :constant, base: 400, jitter: false]],
+        [retry: [max_attempts: 2, backoff: :constant, base: 400]],
         fn data ->
           if Probe.note(:body) == 1, do: Process.exit(self(), :kill)
           {:ok, data}
@@ -137,7 +137,7 @@ defmodule Durable.Integration.FailurePathsTest do
     workflow "fp_retried_then_done" do
       step(
         :work,
-        [retry: [max_attempts: 2, backoff: :constant, base: 300, jitter: false]],
+        [retry: [max_attempts: 2, backoff: :constant, base: 300]],
         fn data ->
           if Probe.note(:attempt) == 1, do: {:error, "again"}, else: {:ok, data}
         end

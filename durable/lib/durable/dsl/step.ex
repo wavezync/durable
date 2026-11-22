@@ -64,6 +64,13 @@ defmodule Durable.DSL.Step do
     up to that queue's `:poll_interval`. A run on a queue no live node polls
     waits there until the workflow's `:timeout`, if it has one. In a `parallel` block each branch is its own run on this queue
 
+  The options are checked when the workflow compiles. One that would crash or
+  hang a run is a compile error: a `:retry` that isn't a keyword list, a
+  `:max_attempts` or `:timeout` that isn't a positive integer, a `:backoff`
+  that doesn't exist, a `:compensate` naming no `compensate` of the workflow,
+  a step name that isn't an atom. An option the step doesn't take, such as
+  `retries:`, is ignored, so it compiles with a warning at the step's line.
+
   """
 
   @doc """
@@ -116,7 +123,7 @@ defmodule Durable.DSL.Step do
   end
 
   defp build_step(name, opts, body_fn, caller) do
-    normalized_opts = normalize_step_opts(opts)
+    normalized_opts = normalize_step_opts(opts, name, caller)
     func_name = body_name(caller, :step_body, name)
 
     quote do
@@ -151,12 +158,113 @@ defmodule Durable.DSL.Step do
     func_name
   end
 
-  @doc false
-  def normalize_step_opts(opts) do
+  @step_opts [:retry, :timeout, :compensate, :queue]
+  @retry_opts [:max_attempts, :backoff, :base, :max_backoff]
+  @backoffs [:exponential, :linear, :constant]
+
+  # Every step, wherever it is written, gets its options here. `allowed` is
+  # what that place reads; the rest is dropped, and said to be.
+  defp normalize_step_opts(opts, name, caller, allowed \\ @step_opts) do
+    warn_unknown_opts(opts, allowed, inspect(name), caller)
+
     opts
-    |> Keyword.take([:retry, :timeout, :compensate, :queue])
+    |> Keyword.take(@step_opts)
     |> Enum.into(%{})
     |> normalize_retry_opts()
+  end
+
+  # An option nobody reads is a mistake that still runs: `retries: [...]` is a
+  # step with no retries. It compiles, with a warning at its line.
+  defp warn_unknown_opts(opts, allowed, where, caller) do
+    for {key, value} <- opts, is_atom(key) do
+      if key not in allowed do
+        IO.warn(
+          "unknown option #{inspect(key)} on #{where} is ignored#{did_you_mean(key, allowed)}",
+          caller
+        )
+      end
+
+      if key == :retry and is_list(value),
+        do: warn_unknown_opts(value, @retry_opts, "retry: of #{where}", caller)
+    end
+  end
+
+  defp did_you_mean(key, allowed) do
+    closest = Enum.max_by(allowed, &String.jaro_distance(to_string(&1), to_string(key)))
+
+    if String.jaro_distance(to_string(closest), to_string(key)) > 0.77,
+      do: "; did you mean #{inspect(closest)}?",
+      else: ""
+  end
+
+  @doc false
+  # What would crash or hang a run is refused when the workflow compiles.
+  # Checked on the steps the workflow collected, in its module, where
+  # `timeout: seconds(30)` is a number, and whichever macro wrote the step.
+  def __check__(steps, compensations, workflow, env) do
+    undoes = Enum.map(compensations, & &1.name)
+
+    for %{name: name, opts: opts} <- steps ++ compensations do
+      problem =
+        name_problem(name) || retry_problem(opts[:retry]) || timeout_problem(opts[:timeout]) ||
+          compensate_problem(opts[:compensate], undoes)
+
+      if problem do
+        raise CompileError,
+          file: env.file,
+          line: env.line,
+          description: "step #{inspect(name)} of workflow #{inspect(workflow)} #{problem}"
+      end
+    end
+
+    :ok
+  end
+
+  defp name_problem(name) when is_atom(name), do: nil
+  defp name_problem(_name), do: "must be named by an atom, as in `step :charge`"
+
+  defp retry_problem(nil), do: nil
+
+  defp retry_problem(%{} = retry) do
+    cond do
+      not positive?(Map.get(retry, :max_attempts, 1)) ->
+        "has retry: #{inspect(Map.to_list(retry))}. " <>
+          "max_attempts takes a positive integer, as in retry: [max_attempts: 3]"
+
+      Map.get(retry, :backoff, :exponential) not in @backoffs ->
+        "has retry: #{inspect(Map.to_list(retry))}. backoff takes one of #{inspect(@backoffs)}"
+
+      not Enum.all?([:base, :max_backoff], &(Map.get(retry, &1, 0) |> non_negative?())) ->
+        "has retry: #{inspect(Map.to_list(retry))}. base and max_backoff take milliseconds"
+
+      true ->
+        nil
+    end
+  end
+
+  defp retry_problem(retry) do
+    "has retry: #{inspect(retry)}. It takes a keyword list written in place, " <>
+      "as in retry: [max_attempts: 3]"
+  end
+
+  defp positive?(value), do: is_integer(value) and value > 0
+  defp non_negative?(value), do: is_integer(value) and value >= 0
+
+  # Shared with a lane's `timeout:`.
+  defp timeout_problem(nil), do: nil
+
+  defp timeout_problem(ms) do
+    if not positive?(ms),
+      do: "has timeout: #{inspect(ms)}. It takes milliseconds, as in timeout: seconds(20)"
+  end
+
+  defp compensate_problem(nil, _undoes), do: nil
+
+  defp compensate_problem(name, undoes) do
+    if name not in undoes do
+      "has compensate: #{inspect(name)}, but the workflow has no " <>
+        "`compensate #{inspect(name)}, fn data -> ... end`"
+    end
   end
 
   defp normalize_retry_opts(%{retry: retry} = opts) when is_list(retry) do
@@ -216,7 +324,7 @@ defmodule Durable.DSL.Step do
 
     normalized_opts =
       opts
-      |> normalize_step_opts()
+      |> normalize_step_opts(name, caller, [:branches | @step_opts])
       |> Map.put(:branches, branches)
 
     func_name = body_name(caller, :decision_body, name)
@@ -284,6 +392,7 @@ defmodule Durable.DSL.Step do
   end
 
   defp build_compensate(name, opts, body_fn, caller) do
+    warn_unknown_opts(opts, [:retry, :timeout], "compensate #{inspect(name)}", caller)
     normalized_opts = normalize_compensate_opts(opts)
     func_name = body_name(caller, :compensate_body, name)
 
@@ -490,14 +599,14 @@ defmodule Durable.DSL.Step do
          {:step, _meta, [name, opts, {:fn, _, _} = body_fn]},
          branch_id,
          clause_name,
-         _env
+         env
        )
        when is_atom(name) and is_list(opts) do
     qualified_name = :"branch_#{branch_id}__#{clause_name}__#{name}"
 
     step_opts =
       opts
-      |> normalize_step_opts()
+      |> normalize_step_opts(name, env)
       |> Map.merge(%{
         branch_id: branch_id,
         clause: clause_name,
@@ -708,7 +817,11 @@ defmodule Durable.DSL.Step do
 
     inner = Enum.flat_map(compiled, &elem(&1, 0))
     func_name = body_name(caller, :branch_body, qualified)
-    step_opts = opts |> normalize_step_opts() |> Map.take([:retry, :timeout])
+
+    step_opts =
+      opts
+      |> normalize_step_opts(name, caller, [:retry, :timeout])
+      |> Map.take([:retry, :timeout])
 
     registration =
       quote do
@@ -914,10 +1027,8 @@ defmodule Durable.DSL.Step do
   @doc false
   # Checked in the workflow module, where `timeout: seconds(20)` is a number.
   def __lane_timeouts__(timeouts, block) do
-    for {lane, ms} <- timeouts, not (is_integer(ms) and ms > 0) do
-      raise ArgumentError,
-            "lane #{inspect(lane)} of parallel #{inspect(block)} has timeout: #{inspect(ms)}. " <>
-              "It takes milliseconds, as in timeout: seconds(20)"
+    for {lane, ms} <- timeouts, problem = timeout_problem(ms) do
+      raise ArgumentError, "lane #{inspect(lane)} of parallel #{inspect(block)} #{problem}"
     end
 
     Map.new(timeouts)
@@ -945,9 +1056,17 @@ defmodule Durable.DSL.Step do
        when is_atom(name),
        do: nested_step(name, [], body_fn, scope, caller)
 
-  defp compile_statement({:step, _, [name, opts, {:fn, _, _} = body_fn]}, scope, caller, _where)
-       when is_atom(name) and is_list(opts),
-       do: nested_step(name, opts, body_fn, scope, caller)
+  defp compile_statement(
+         {:step, meta, [name, opts, {:fn, _, _} = body_fn]},
+         scope,
+         caller,
+         _where
+       )
+       when is_atom(name) and is_list(opts) do
+    # The step's own line, for what is said about its options.
+    at = %{caller | line: Keyword.get(meta, :line, caller.line)}
+    nested_step(name, opts, body_fn, scope, at)
+  end
 
   defp compile_statement({:branch, _, [name, decider, [do: block]]}, scope, caller, _where)
        when is_atom(name),
@@ -979,7 +1098,11 @@ defmodule Durable.DSL.Step do
 
     qualified = qualify(scope.prefix, name)
     func_name = body_name(caller, :step_body, qualified)
-    step_opts = opts |> normalize_step_opts() |> Map.put(:original_name, name)
+
+    step_opts =
+      opts
+      |> normalize_step_opts(name, caller, @step_opts ++ [:optional, :default])
+      |> Map.put(:original_name, name)
 
     registration =
       quote do

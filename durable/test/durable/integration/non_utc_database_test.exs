@@ -34,7 +34,7 @@ defmodule Durable.Integration.NonUtcDatabaseTest do
     workflow "tz_retries" do
       step(
         :work,
-        [retry: [max_attempts: 2, backoff: :constant, base: 200, jitter: false]],
+        [retry: [max_attempts: 2, backoff: :constant, base: 200]],
         fn data ->
           if Probe.note(:body) == 1, do: {:error, "again"}, else: {:ok, data}
         end
