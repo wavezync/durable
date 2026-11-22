@@ -274,7 +274,7 @@ defmodule MyApp.ProcessOrderWorkflow do
       items = ctx["items"]
 
       reservations = Enum.map(items, fn item ->
-        {:ok, res} = Inventory.reserve(item.sku, item.quantity)
+        {:ok, res} = Inventory.reserve(item["sku"], item["quantity"])
         res.id
       end)
 

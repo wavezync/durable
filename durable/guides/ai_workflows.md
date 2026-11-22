@@ -62,12 +62,12 @@ defmodule MyApp.DocumentProcessor do
   workflow "process_document" do
     step :fetch, fn ctx ->
       doc = DocumentStore.get(ctx["doc_id"])
-      {:ok, %{doc: doc}}
+      {:ok, assign(ctx, :content, doc.content)}
     end
 
     # AI classification with automatic retry
     step :classify, [retry: [max_attempts: 3, backoff: :exponential]], fn ctx ->
-      content = ctx.doc.content
+      content = ctx.content
 
       doc_type = ReqLLM.generate_text!(
         "anthropic:claude-sonnet-4-20250514",
@@ -82,7 +82,7 @@ defmodule MyApp.DocumentProcessor do
     branch on: fn ctx -> ctx.doc_type end do
       "invoice" ->
         step :extract_invoice, [retry: [max_attempts: 3]], fn ctx ->
-          content = ctx.doc.content
+          content = ctx.content
 
           {:ok, extracted} = ReqLLM.generate_object(
             "anthropic:claude-sonnet-4-20250514",
@@ -99,14 +99,15 @@ defmodule MyApp.DocumentProcessor do
         end
 
         step :validate_invoice, fn ctx ->
+          # The extracted fields are a map inside the data: read by string key.
           extracted = ctx.extracted
-          calculated = Enum.sum(Enum.map(extracted.line_items, & &1.amount))
-          {:ok, assign(ctx, :valid, abs(calculated - extracted.total) < 0.01)}
+          calculated = Enum.sum(Enum.map(extracted["line_items"], & &1["amount"]))
+          {:ok, assign(ctx, :valid, abs(calculated - extracted["total"]) < 0.01)}
         end
 
       "contract" ->
         step :extract_contract, [retry: [max_attempts: 3]], fn ctx ->
-          content = ctx.doc.content
+          content = ctx.content
 
           {:ok, extracted} = ReqLLM.generate_object(
             "anthropic:claude-sonnet-4-20250514",
@@ -129,9 +130,7 @@ defmodule MyApp.DocumentProcessor do
 
     # Runs after any branch completes
     step :store, fn ctx ->
-      doc = ctx.doc
-
-      DocumentStore.update(doc.id, %{
+      DocumentStore.update(ctx["doc_id"], %{
         doc_type: ctx.doc_type,
         extracted_data: Map.get(ctx, :extracted, %{}),
         needs_review: Map.get(ctx, :needs_review, false)

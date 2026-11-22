@@ -249,8 +249,11 @@ end
 workflow "verify_user" do
   step :check_verification_status, fn ctx ->
     user = Users.get(ctx["user_id"])
+    # What later steps read is stored on its own, not inside the user: a map
+    # inside the data has string keys once the run has been saved and loaded.
     {:ok, %{
-      user: user,
+      email: user.email,
+      phone: user.phone,
       verified: user.email_verified and user.phone_verified,
       verification_method: to_string(user.preferred_verification)
     }}
@@ -268,14 +271,14 @@ workflow "verify_user" do
         "email" ->
           step :send_email_code, fn ctx ->
             code = generate_code()
-            Email.send_verification(ctx.user.email, code)
+            Email.send_verification(ctx.email, code)
             {:ok, assign(ctx, :pending_verification, :email)}
           end
 
         "sms" ->
           step :send_sms_code, fn ctx ->
             code = generate_code()
-            SMS.send(ctx.user.phone, code)
+            SMS.send(ctx.phone, code)
             {:ok, assign(ctx, :pending_verification, :sms)}
           end
 
