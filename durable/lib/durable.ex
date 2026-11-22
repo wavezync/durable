@@ -130,7 +130,8 @@ defmodule Durable do
 
   @doc false
   defmacro __before_compile__(env) do
-    workflows = Module.get_attribute(env.module, :durable_workflows) || []
+    # The attribute piles up newest first; the first one written is the default.
+    workflows = Enum.reverse(Module.get_attribute(env.module, :durable_workflows) || [])
     workflow_names = Enum.map(workflows, fn {name, _def_fn} -> name end)
 
     # Generate a function clause for each workflow
