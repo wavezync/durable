@@ -807,12 +807,17 @@ defmodule Durable.Executor do
   Executes a workflow by ID.
 
   This is called internally by queue workers or directly for immediate execution.
+
+  A worker passes the `lock_token` of its claim. The claim may have been taken
+  from it before it got here, and then the run is another worker's: nothing
+  runs, and this returns `{:error, :superseded}`.
   """
-  @spec execute_workflow(String.t(), Config.t()) ::
+  @spec execute_workflow(String.t(), Config.t(), String.t() | nil) ::
           {:ok, map()} | {:waiting, map()} | {:error, term()}
-  def execute_workflow(workflow_id, %Config{} = config) do
+  def execute_workflow(workflow_id, %Config{} = config, lock_token \\ nil) do
     with {:ok, execution} <- load_execution(config, workflow_id),
          true <- execution.status in [:pending, :running] || {:error, :superseded},
+         true <- lock_token in [nil, execution.lock_token] || {:error, :superseded},
          {:ok, workflow_def} <- definition_or_leave(config, execution),
          {:ok, execution} <- take_waiting_key(config, execution, workflow_def),
          resumed = execution.current_step != nil,

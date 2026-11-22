@@ -168,7 +168,7 @@ defmodule Durable.Queue.Worker do
   # Private functions
 
   defp execute_job(job, config) do
-    case Durable.Executor.execute_workflow(job.id, config) do
+    case Durable.Executor.execute_workflow(job.id, config, job[:lock_token]) do
       {:ok, _execution} ->
         :ok
 

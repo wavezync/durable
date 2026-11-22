@@ -215,11 +215,7 @@ defmodule Durable.Integration.Audit4QueueRecoveryTest do
   end
 
   describe "a claim taken over before its worker began" do
-    # BUG: the worker that lost the claim runs the step anyway, next to the new
-    # owner. Executor.execute_workflow/2 (executor.ex:782) loads the run by id
-    # and adopts whatever lock_token is on the row, so the claim's own token
-    # (job.lock_token, worker.ex:157) is never checked before the first step.
-    @tag :skip
+    # The worker gives the executor its claim's token, and the row has another.
     test "isn't run by the worker that lost it" do
       config = start_idle!()
       {:ok, id} = Durable.start(Audit4QueueOnce, %{})
@@ -236,6 +232,21 @@ defmodule Durable.Integration.Audit4QueueRecoveryTest do
       assert Probe.hits(:once) == 0
       assert result == :fenced
       assert %{status: :running, locked_by: "node-b"} = get(id)
+    end
+
+    test "isn't run by the worker that lost it when nobody has claimed it since" do
+      config = start_idle!()
+      {:ok, id} = Durable.start(Audit4QueueOnce, %{})
+
+      [lost] = Postgres.fetch_jobs(config, "default", 1, "node-a")
+      stale!(id)
+      {:ok, 1} = Postgres.recover_stale_locks(config, 300)
+
+      {:ok, worker} = Worker.start_link(job: lost, config: config, poller_pid: self())
+      assert_receive {:job_complete, ^worker, ^id, :fenced, _ms}, 5_000
+
+      assert Probe.hits(:once) == 0
+      assert %{status: :pending, locked_by: nil, current_step: nil} = get(id)
     end
 
     test "is run by the worker that has it now" do
