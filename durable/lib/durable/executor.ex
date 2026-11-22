@@ -3137,11 +3137,7 @@ defmodule Durable.Executor do
   # Back on its queue to be undone at `at`, as `queue_rollback/3` leaves a run
   # that failed. The context is read back: this process may hold less of it.
   defp undo_later(config, execution, error, at) do
-    context =
-      Repo.one(
-        config,
-        from(w in WorkflowExecution, where: w.id == ^execution.id, select: w.context)
-      )
+    context = stored_context(config, execution.id)
 
     {:ok, _} =
       execution
@@ -3160,6 +3156,15 @@ defmodule Durable.Executor do
       |> cas_update!(config)
 
     {:error, error}
+  end
+
+  # The context as it was last saved, with the record of its key shapes, which
+  # a run's struct is without once this process has saved it.
+  defp stored_context(config, workflow_id) do
+    Repo.one(
+      config,
+      from(w in WorkflowExecution, where: w.id == ^workflow_id, select: w.context)
+    )
   end
 
   # `rollback_workflow/2` asked: undo the run, keeping the error it failed with.
@@ -3244,7 +3249,11 @@ defmodule Durable.Executor do
 
     # A run that failed as it resumed (a parallel failure, its deadline, a
     # timed-out input) hasn't run a step in this process, so its data isn't here.
-    if Context.context() == %{}, do: Process.put(:durable_context, restore_keys(exec.context))
+    # It is read as stored, for the keys to come back the shape a step saw them.
+    if Context.context() == %{} do
+      stored = config |> stored_context(exec.id) |> Map.delete(@done)
+      Process.put(:durable_context, restore_keys(stored))
+    end
 
     # Run each compensation, collecting results
     results =

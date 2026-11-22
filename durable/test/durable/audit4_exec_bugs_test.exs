@@ -281,6 +281,22 @@ defmodule Durable.Audit4ExecBugsTest do
       end)
     end
 
+    workflow "audit4_trip_approved", on_failure: :rollback, timeout: hours(1) do
+      step(:book_flight, [compensate: :cancel_flight], fn trip ->
+        {:ok, Map.put(trip, "id", "FL-123")}
+      end)
+
+      step(:await_approval, fn trip ->
+        wait_for_input("approved", on_timeout: :fail)
+        {:ok, trip}
+      end)
+
+      compensate(:cancel_flight, fn trip ->
+        Audit4ExecBugSeen.put(:cancelled_flight, trip["id"])
+        {:ok, trip}
+      end)
+    end
+
     workflow "audit4_trip_halts" do
       step(:book_flight, [compensate: :cancel_flight], fn trip ->
         {:ok, Map.put(trip, "id", "FL-123")}
@@ -568,16 +584,32 @@ defmodule Durable.Audit4ExecBugsTest do
     end
   end
 
-  # executor.ex:3215 (run_compensations/5): a run that fails as it resumes has
-  # no data in its process, so the undo is handed `restore_keys(exec.context)`.
-  # That context is the in-memory one, without the stored record of its key
-  # shapes (save_data_as_context/5 returns it so, executor.ex:2468), and every
-  # key the code knows as an atom becomes one. The same undo gets "id" when the
-  # run fails in a step or is rolled back by hand (rule 10).
-  @tag :skip
-  test "an undo is handed the same data when the run fails as it resumes" do
-    assert order(%{}, "audit4_trip").status == :compensated
-    assert Audit4ExecBugSeen.get(:cancelled_flight) == "FL-123"
+  # A run that fails as it resumes has no data in its process, so its undo is
+  # handed the run's context. Read from the struct, which is without the stored
+  # record of its key shapes, every key the code knows as an atom became one:
+  # the undo that gets "id" when the run fails in a step got :id (rule 10).
+  describe "an undo is handed the same data when the run fails as it resumes" do
+    test "from a parallel block that failed" do
+      assert order(%{}, "audit4_trip").status == :compensated
+      assert Audit4ExecBugSeen.get(:cancelled_flight) == "FL-123"
+    end
+
+    test "past its deadline" do
+      run = order(%{}, "audit4_trip_approved")
+      assert run.status == :waiting
+
+      assert %{status: :compensated, error: %{"type" => "timeout"}} = timed_out(run)
+      assert Audit4ExecBugSeen.get(:cancelled_flight) == "FL-123"
+    end
+
+    test "to an input that timed out" do
+      run = order(%{}, "audit4_trip_approved")
+      nobody_answered = %{"__fail__" => %{"type" => "timeout", "message" => "nobody approved"}}
+      {:ok, _} = Durable.Executor.resume_workflow(run.id, nobody_answered)
+
+      assert %{status: :compensated, error: %{"message" => "nobody approved"}} = drain(run)
+      assert Audit4ExecBugSeen.get(:cancelled_flight) == "FL-123"
+    end
   end
 
   # A failed run queued by Durable.rollback/1 is :pending until a worker claims

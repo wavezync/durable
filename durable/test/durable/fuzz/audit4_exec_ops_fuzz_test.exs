@@ -106,11 +106,7 @@ defmodule Durable.Fuzz.Audit4ExecOpsTest do
     def undo(data, name) do
       Seen.note({:undo, Context.workflow_id(), name})
 
-      # An undo that runs for a failure found as the run resumed is handed
-      # atom keys (see audit4_exec_bugs_test.exs), so both are read here.
-      script = data["script"] || data[:script]
-
-      case script[Atom.to_string(name)] do
+      case data["script"][Atom.to_string(name)] do
         "error" -> {:error, "#{name} errored"}
         "raise" -> raise "#{name} raised"
         "throw" -> throw({:thrown_by, name})
