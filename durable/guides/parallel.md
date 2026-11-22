@@ -32,7 +32,7 @@ end
 - **A lane is its own run.** It retries, sleeps, waits and moves queues like any run, and comes back to the step it stopped at. It holds steps, named branches and named parallel blocks. A `step` written straight in the block is a lane of one step, named after it.
 - **Every lane starts from the same data** and sees nothing another lane does.
 - **The next step gets what each lane produced under the block's name**, by lane name: `%{lookups: %{credit: %{"score" => 712}, fraud: ..., sanctions: ...}}`. That is the block's collect step; you don't write one. What a lane produced is every key its steps added or changed. The data it was started with is left out, so a large application isn't copied once per lane. A lane's output has been stored, so the keys inside it are strings. A lane can't hand back that it removed a key.
-- **A lane that fails fails the block** and stops the other lanes. That is `on_error: :fail_fast`, the default.
+- **A lane that fails fails the block** and stops the other lanes. That is `on_error: :fail_fast`, the default. A lane that is cancelled, by its own step or by an operator, ends the block the same way.
 - **`Durable.retry/1` on the failed run** puts the lanes that didn't finish back to work where they stopped, including a lane inside a lane and a child workflow a lane was waiting for (`call_workflow`). Lanes that finished aren't run again. A lane stopped in the middle of a step is told at its worker's next heartbeat; retry before that and the step can run once more beside the one still finishing, so keep steps in a lane safe to repeat, as lookups are.
 - **Steps are stored under the block and the lane**, as `lookups__sanctions__query`.
 - **`compensate:` isn't allowed in a lane.** Put the undo on a step before the block.
@@ -133,6 +133,8 @@ end do
 end
 ```
 
+A `{:goto, step, data}` goes forward, to the block's own level: a step after the block. A jump to a step inside a lane or a branch arm is refused, and the run fails.
+
 Prefer `on_error: :collect` and a step. A step is retried, logged and shown like any other; the function is none of those.
 
 ## Child workflows and waits in a lane
@@ -161,6 +163,8 @@ To send a lane an event or an input, use the lane's own id:
 employer = Enum.find(Durable.list_children!(run_id), &(&1.current_step == "checks__employer"))
 Durable.send_event(employer.id, "employer_confirmed", %{"employed" => true})
 ```
+
+`Durable.cancel_wait(run_id)` on the block's run reaches the lanes too: every lane that is waiting has its wait cancelled, its `wait_for_event` returns `{:cancelled, reason}`, and the block goes on waiting for the lanes to finish.
 
 See the [Orchestration Guide](orchestration.md) for more on `call_workflow`.
 

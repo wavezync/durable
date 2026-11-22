@@ -13,17 +13,16 @@ A workflow key makes the database answer that question. At most one run of a wor
 ```elixir
 defmodule MyApp.ProcessArticle do
   use Durable
-  use Durable.Context
 
   # Process each article once. Try again only if the last attempt failed.
   workflow "process_article", reuse: :after_failure do
-    step :fetch do
-      article = MyApp.CMS.get_article!(input()["id"])
-      put_context(:body, article.body)
+    step :fetch, fn %{"id" => id} = article ->
+      {:ok, Map.put(article, :body, MyApp.CMS.get_article!(id).body)}
     end
 
-    step :summarize do
-      MyApp.Summaries.write(input()["id"], get_context(:body))
+    step :summarize, fn article ->
+      MyApp.Summaries.write(article["id"], article.body)
+      {:ok, article}
     end
   end
 end
@@ -174,7 +173,7 @@ Durable.start(ProcessArticle, %{"id" => 42, "rev" => 8}, key: "article:42", on_d
 #=> {:ok, new_id}
 ```
 
-The holder is cancelled and gives up its key in one step, and a new run starts with the new input. It works under any `reuse:`, `:never` included, because the holder hadn't finished. The cancel is the same as `Durable.cancel/2`: a step already running is stopped at its next heartbeat, no later step runs, and compensations don't run. The cancelled run's error says which run replaced it. A holder that is being rolled back under `reuse: :never` can't be cancelled, so that start returns `{:error, {:key_taken, holder_id}}`. This is Temporal's TERMINATE_EXISTING, and Inngest's singleton `cancel` mode.
+The holder is cancelled and gives up its key in one step, and a new run starts with the new input. It works under any `reuse:`, `:never` included, because the holder hadn't finished. The cancel is the same as `Durable.cancel/2`: a step already running is stopped at its next heartbeat, no later step runs, and compensations don't run. The cancelled run's error says which run replaced it. A holder that is on its queue to be rolled back, or is being rolled back under `reuse: :never`, can't be cancelled: that start returns `{:error, {:key_taken, holder_id}}` and the rollback finishes. This is Temporal's TERMINATE_EXISTING, and Inngest's singleton `cancel` mode.
 
 ### Run Once More After It: `:run_again`
 
@@ -202,20 +201,23 @@ In Oban this takes a job that finishes, checks for new work and snoozes to go ag
 
 ```elixir
 workflow "process_article", reuse: :after_failure do
-  step :fetch do
-    put_context(:article, MyApp.CMS.get_article!(input()["id"]))
+  step :fetch, fn %{"id" => id} = article ->
+    {:ok, Map.put(article, :body, MyApp.CMS.get_article!(id).body)}
   end
 
-  step :publish do
-    MyApp.Feeds.publish(get_context(:article))
+  step :publish, fn article ->
+    MyApp.Feeds.publish(article["id"], article.body)
+    {:ok, article}
   end
 
   # A later save during processing arrives here.
-  step :catch_up do
+  step :catch_up, fn article ->
     case wait_for_event("article_updated", timeout: minutes(5), timeout_value: :none) do
       :none -> :ok
-      %{"rev" => rev} -> MyApp.Feeds.refresh(input()["id"], rev)
+      %{"rev" => rev} -> MyApp.Feeds.refresh(article["id"], rev)
     end
+
+    {:ok, article}
   end
 end
 ```
