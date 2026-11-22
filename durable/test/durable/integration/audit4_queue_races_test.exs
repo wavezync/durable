@@ -208,20 +208,36 @@ defmodule Durable.Integration.Audit4QueueRacesTest do
       assert Probe.hits(:once) == 1
     end
 
-    # BUG: the start raises ArgumentError ("unknown registry"), after its run
-    # was inserted. Every broadcast goes to Phoenix.PubSub.broadcast/3
-    # unguarded (pubsub.ex:246), which raises when the PubSub isn't running;
-    # a step that ends then crashes the same way, and a poller can't start
-    # (subscribe, poller.ex:126).
-    @tag :skip
-    test "a start with the PubSub down still returns its run" do
+    defp start_pubsub! do
       pubsub = Supervisor.child_spec({Phoenix.PubSub, name: Audit4QueuePubSub}, id: :pubsub)
       start_supervised!(pubsub)
+    end
+
+    test "a start with the PubSub down still returns its run" do
+      start_pubsub!()
       start_idle!(pubsub: Audit4QueuePubSub)
       stop_supervised!(:pubsub)
 
       assert {:ok, id} = Durable.start(Audit4QueueRaceOnce, %{})
       assert get(id).status == :pending
+    end
+
+    test "with the PubSub down a poller still starts, and a run's steps still end" do
+      start_pubsub!()
+      start_durable!(%{default: 1}, pubsub: Audit4QueuePubSub)
+      stop_supervised!(:pubsub)
+
+      poller = Process.whereis(Durable.Queue.Poller.Default)
+      Process.exit(poller, :kill)
+
+      assert_eventually(fn ->
+        Process.whereis(Durable.Queue.Poller.Default) not in [nil, poller]
+      end)
+
+      {:ok, id} = Durable.start(Audit4QueueRaceOnce, %{})
+      await_status(id, :completed, 5_000)
+      assert Probe.hits(:once) == 1
+      assert [%{status: :completed}] = IntegrationRepo.all(StepExecution)
     end
   end
 end
