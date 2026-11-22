@@ -53,6 +53,48 @@ defmodule Audit4Dash.ReadOnlyRouter do
   use DurableDashboard.Router, mount: "/ro", durable: Durable
 end
 
+defmodule Audit4Dash.Bugs do
+  @moduledoc "Workflows for the bugs below: ordinary things a host app's step might do."
+  use Durable
+  use Durable.Wait
+
+  def failure("message_map"), do: {:error, %{message: %{"code" => 503, "body" => "down"}}}
+  def failure("reason_map"), do: {:error, %{reason: %{status: 503}}}
+
+  def failure("message_list"),
+    do: {:error, %{message: [%{"field" => "name", "error" => "is required"}]}}
+
+  def failure("stacktrace_list"), do: {:error, %{message: "x", stacktrace: [%{"file" => "a"}]}}
+
+  workflow "audit4_bad_error" do
+    step(:call_api, fn data -> Audit4Dash.Bugs.failure(data["mode"]) end)
+  end
+
+  workflow "audit4_select_form" do
+    step(:ask, fn data ->
+      _ =
+        wait_for_form("equipment",
+          fields: [
+            %{
+              name: :laptop,
+              type: :select,
+              options: [%{value: "mbp", label: "MacBook Pro"}, %{value: "x1", label: "ThinkPad"}]
+            }
+          ]
+        )
+
+      {:ok, data}
+    end)
+  end
+
+  workflow "audit4_required_form" do
+    step(:ask, fn data ->
+      _ = wait_for_form("budget", fields: [%{name: :amount, type: :number, required: true}])
+      {:ok, data}
+    end)
+  end
+end
+
 defmodule Audit4Dash.Endpoint do
   @moduledoc false
   use Phoenix.Endpoint, otp_app: :durable_dashboard

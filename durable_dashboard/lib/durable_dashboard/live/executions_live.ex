@@ -228,7 +228,7 @@ defmodule DurableDashboard.Live.ExecutionsLive do
 
   defp run_action(:retry, id, durable, _user), do: Durable.retry(id, durable: durable)
   defp run_action(:rerun, id, durable, _user), do: Durable.rerun(id, durable: durable)
-  defp run_action(:cancel, id, _durable, _user), do: Durable.cancel(id)
+  defp run_action(:cancel, id, durable, _user), do: Durable.cancel(id, nil, durable: durable)
 
   defp run_action(:release, id, durable, user),
     do: Durable.release_key(id, durable: durable, by: user)

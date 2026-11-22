@@ -1,47 +1,5 @@
 Code.require_file("../audit4_support_test.exs", __DIR__)
 
-defmodule Audit4Dash.Bugs do
-  @moduledoc "Workflows for the bugs below: ordinary things a host app's step might do."
-  use Durable
-  use Durable.Wait
-
-  def failure("message_map"), do: {:error, %{message: %{"code" => 503, "body" => "down"}}}
-  def failure("reason_map"), do: {:error, %{reason: %{status: 503}}}
-
-  def failure("message_list"),
-    do: {:error, %{message: [%{"field" => "name", "error" => "is required"}]}}
-
-  def failure("stacktrace_list"), do: {:error, %{message: "x", stacktrace: [%{"file" => "a"}]}}
-
-  workflow "audit4_bad_error" do
-    step(:call_api, fn data -> Audit4Dash.Bugs.failure(data["mode"]) end)
-  end
-
-  workflow "audit4_select_form" do
-    step(:ask, fn data ->
-      _ =
-        wait_for_form("equipment",
-          fields: [
-            %{
-              name: :laptop,
-              type: :select,
-              options: [%{value: "mbp", label: "MacBook Pro"}, %{value: "x1", label: "ThinkPad"}]
-            }
-          ]
-        )
-
-      {:ok, data}
-    end)
-  end
-
-  workflow "audit4_required_form" do
-    step(:ask, fn data ->
-      _ = wait_for_form("budget", fields: [%{name: :amount, type: :number, required: true}])
-      {:ok, data}
-    end)
-  end
-end
-
 defmodule DurableDashboard.Live.Audit4KnownBugsTest do
   @moduledoc """
   Bugs found by the fourth audit, each pinned by a test that fails today.
@@ -79,53 +37,6 @@ defmodule DurableDashboard.Live.Audit4KnownBugsTest do
   end
 
   defp crashes(cases), do: for({label, fun} <- cases, reason = crash(fun), do: {label, reason})
-
-  describe "a dashboard on a named Durable instance" do
-    setup %{conn: conn} do
-      # The host runs one instance, and it isn't called `Durable`.
-      stop_supervised!(Durable)
-      Durable.Config.delete(Durable)
-
-      start_supervised!(
-        {Durable,
-         name: Audit4Dash.Named,
-         repo: DurableDashboard.TestRepo,
-         queue_enabled: false,
-         pubsub: DurableDashboard.TestPubSub}
-      )
-
-      {:ok, id} =
-        Durable.Executor.start_workflow(Fixtures.Approvals, %{},
-          inline: true,
-          durable: Audit4Dash.Named
-        )
-
-      {:ok, conn: Plug.Conn.put_private(conn, :audit4_router, Audit4Dash.NamedRouter), id: id}
-    end
-
-    # Cancel on the run page crashes the LiveView with "Durable instance
-    # Durable not found" and the run stays as it was. Every other action passes
-    # `durable:`; this one doesn't — workflow_live.ex:176 `Durable.cancel(id)`.
-    # (With a default instance also running on another repo, the cancel would
-    # go to that one instead.)
-    test "Cancel on the run page cancels the run", %{conn: conn, id: id} do
-      {:ok, view, _html} = live(conn, "/named/executions/#{id}")
-      assert has_element?(view, ~s(button[phx-click="cancel"]))
-
-      assert crash(fn -> render_click(view, "cancel", %{}) end) == nil
-      assert repo().get!(WorkflowExecution, id).status == :cancelled
-    end
-
-    # The same omission in the Runs list's bulk bar — executions_live.ex:231
-    # `run_action(:cancel, id, _durable, _user), do: Durable.cancel(id)`.
-    test "bulk Cancel on Runs cancels the selected run", %{conn: conn, id: id} do
-      {:ok, view, _html} = live(conn, "/named/executions")
-      render_click(view, "toggle", %{"id" => id})
-
-      assert crash(fn -> render_click(view, "bulk", %{"action" => "cancel"}) end) == nil
-      assert repo().get!(WorkflowExecution, id).status == :cancelled
-    end
-  end
 
   describe "Inbox: the answer goes to the request that was on screen" do
     # "decide"/"answer" carry no request id: the server answers whatever

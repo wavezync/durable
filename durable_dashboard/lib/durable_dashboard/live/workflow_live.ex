@@ -172,8 +172,13 @@ defmodule DurableDashboard.Live.WorkflowLive do
 
   @impl true
   def handle_event("cancel", _params, socket) do
-    id = socket.assigns.workflow_id
-    result = Access.perform(socket, :operator, :cancel, [id], fn -> Durable.cancel(id) end)
+    %{workflow_id: id, durable: durable} = socket.assigns
+
+    result =
+      Access.perform(socket, :operator, :cancel, [id], fn ->
+        Durable.cancel(id, nil, durable: durable)
+      end)
+
     {:noreply, after_action(socket, result)}
   end
 
