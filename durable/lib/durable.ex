@@ -596,8 +596,8 @@ defmodule Durable do
   Sends an event to a waiting workflow.
 
   Returns `{:error, :not_found}` when the run isn't waiting for the event,
-  unless `buffer: true` keeps it until the run reaches
-  `wait_for_event(event_name)`.
+  unless `buffer: true` keeps it until the run reaches a wait for it
+  (`wait_for_event`, `wait_for_any` or `wait_for_all`).
 
   ## Options
 

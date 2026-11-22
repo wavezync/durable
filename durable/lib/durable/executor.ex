@@ -3774,6 +3774,11 @@ defmodule Durable.Executor do
         wait_group
       end)
 
+    # Events kept before the run got here are handed over now, as for
+    # wait_for_event. Once a wait_for_any has its answer, the events kept for
+    # its other names find no wait and stay kept.
+    Enum.each(event_names, &Durable.Wait.deliver_buffered(config, execution.id, &1))
+
     {:waiting, execution}
   end
 

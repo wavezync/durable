@@ -330,6 +330,10 @@ defmodule Durable.Wait do
 
   Returns `{event_name, payload}` when any event is received.
 
+  An event kept with `send_event(..., buffer: true)` before the run got here
+  counts: the wait takes the first of its names that has one, in the order
+  listed, and returns at once. Events kept for its other names stay kept.
+
   ## Options
 
   - `:timeout` - Timeout in milliseconds (optional)
@@ -370,6 +374,9 @@ defmodule Durable.Wait do
   Waits for all of the specified events.
 
   Returns a map of `%{event_name => payload}` when all events are received.
+
+  Events kept with `send_event(..., buffer: true)` before the run got here
+  count, so the wait is only for the names that have none.
 
   ## Options
 
@@ -775,10 +782,11 @@ defmodule Durable.Wait do
   ## Options
 
   - `:buffer` - Keep the event when the run isn't waiting for it yet, and
-    deliver it when the run reaches `wait_for_event(event_name)` (default:
-    `false`). A run gets one event per name, so when several were kept by
-    then, it gets the newest and the rest are dropped. Returns
-    `{:error, :finished}` for a run that has finished.
+    deliver it when the run reaches a wait for `event_name`: `wait_for_event/2`,
+    `wait_for_any/2` or `wait_for_all/2` (default: `false`). A run gets one
+    event per name, so when several were kept by then, it gets the newest and
+    the rest are dropped. Returns `{:error, :finished}` for a run that has
+    finished.
   - `:durable` - The Durable instance name (default: Durable)
 
   ## Examples

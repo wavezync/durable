@@ -162,6 +162,22 @@ defmodule Durable.Audit4ApiWaitsTest do
     end
   end
 
+  defmodule Audit4ApiWaitsAll do
+    use Durable
+    use Durable.Wait
+
+    alias Durable.Audit4ApiWaitsTest, as: T
+
+    workflow "audit4_api_waits_all" do
+      step(:wait, fn data ->
+        {:ok, Map.put(data, "got", T.string_keys(wait_for_all(["a", "b"])))}
+      end)
+    end
+  end
+
+  # An event's name is an atom key only if that atom happens to exist.
+  def string_keys(map), do: Map.new(map, fn {key, value} -> {to_string(key), value} end)
+
   def timeout_opts("none"), do: []
   def timeout_opts(value), do: [timeout_value: timeout_value(value)]
 
@@ -502,16 +518,52 @@ defmodule Durable.Audit4ApiWaitsTest do
   end
 
   describe "events kept for later" do
-    # `buffer: true` is documented for wait_for_event/2 only, and that is all it
-    # does: handle_wait_group/4 (executor.ex:3574) never calls
-    # Wait.deliver_buffered/3, so an event kept before a wait_for_any or
-    # wait_for_all is never handed over and the run waits for a second send.
-    @tag :skip
     test "an event kept before the run reached wait_for_any is delivered" do
       {:ok, id} = Durable.start(Audit4ApiWaitsAny, %{})
       assert Durable.send_event(id, "a", %{"n" => 1}, buffer: true) == :ok
 
-      assert drain(id).status == :completed
+      finished = drain(id)
+      assert finished.status == :completed
+      assert finished.context["got"] == ~s({"a", %{"n" => 1}})
+      assert TestRepo.all(from(p in PendingEvent, where: p.status == :buffered)) == []
+    end
+
+    test "wait_for_any takes the first name with a kept event, and the other stays kept" do
+      {:ok, id} = Durable.start(Audit4ApiWaitsAny, %{})
+      for n <- 1..2, do: :ok = Durable.send_event(id, "b", %{"n" => n}, buffer: true)
+      :ok = Durable.send_event(id, "a", %{"n" => 3}, buffer: true)
+
+      finished = drain(id)
+      assert finished.status == :completed
+      assert finished.context["got"] == ~s({"a", %{"n" => 3}})
+
+      assert [%{event_name: "b"}, %{event_name: "b"}] =
+               TestRepo.all(from(p in PendingEvent, where: p.status == :buffered))
+    end
+
+    test "wait_for_all takes the kept events and waits for the rest" do
+      {:ok, id} = Durable.start(Audit4ApiWaitsAll, %{})
+      for n <- 1..2, do: :ok = Durable.send_event(id, "a", %{"n" => n}, buffer: true)
+
+      waiting = drain(id)
+      assert waiting.status == :waiting
+      assert TestRepo.all(from(p in PendingEvent, where: p.status == :buffered)) == []
+      assert Durable.send_event(id, "a", %{"n" => 9}) == {:error, :not_found}
+
+      assert Durable.send_event(id, "b", %{"n" => 3}) == :ok
+      finished = drain(id)
+      assert finished.status == :completed
+      assert finished.context["got"] == %{"a" => %{"n" => 2}, "b" => %{"n" => 3}}
+    end
+
+    test "wait_for_all with every event kept doesn't wait" do
+      {:ok, id} = Durable.start(Audit4ApiWaitsAll, %{})
+      :ok = Durable.send_event(id, "b", %{"n" => 1}, buffer: true)
+      :ok = Durable.send_event(id, "a", %{"n" => 2}, buffer: true)
+
+      finished = drain(id)
+      assert finished.status == :completed
+      assert finished.context["got"] == %{"a" => %{"n" => 2}, "b" => %{"n" => 1}}
     end
 
     test "of several kept for one name, the run gets the newest and none is left" do

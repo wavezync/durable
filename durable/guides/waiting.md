@@ -216,7 +216,7 @@ Durable.Wait.send_event(
 )
 ```
 
-`send_event` returns `:ok` once the waiting run has the event. If nothing is waiting for it, it returns `{:error, :not_found}` and the event isn't kept, unless you pass `buffer: true`. Any payload counts as an answer, `nil` included. An event for a `wait_for_any` that already has its answer returns `:ok` and does nothing.
+`send_event` returns `:ok` once the waiting run has the event. If nothing is waiting for it, it returns `{:error, :not_found}` and the event isn't kept, unless you pass `buffer: true`: then it is handed over when the run reaches a `wait_for_event`, `wait_for_any` or `wait_for_all` for that name. Any payload counts as an answer, `nil` included. An event for a `wait_for_any` that already has its answer returns `:ok` and does nothing.
 
 ## Human-in-the-Loop
 

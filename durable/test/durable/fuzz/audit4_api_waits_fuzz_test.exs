@@ -87,7 +87,7 @@ defmodule Durable.Fuzz.Audit4ApiWaitsTest do
       {1, constant({:input, "nobody_asked"})},
       {8, tuple({constant(:event), member_of(["e1", "g_a", "g_b", "g_c", "g_d"])})},
       {1, constant({:event, "nobody_waits"})},
-      {2, constant({:kept_event, "e1"})},
+      {4, tuple({constant(:kept_event), member_of(["e1", "g_a", "g_b", "g_c", "g_d"])})},
       {1, constant({:kept_event, "nobody_waits"})},
       {2, constant(:cancel_wait)},
       {1, constant(:cancel)}
@@ -116,7 +116,7 @@ defmodule Durable.Fuzz.Audit4ApiWaitsTest do
       at: 0,
       status: :pending,
       answer: nil,
-      kept: nil,
+      kept: %{},
       any: :not_reached,
       all: :not_reached,
       results: %{}
@@ -132,16 +132,23 @@ defmodule Durable.Fuzz.Audit4ApiWaitsTest do
 
   defp expect(model, {:input, _name}, _n), do: {{:error, :not_found}, model}
 
-  defp expect(%{status: :waiting, at: 1} = model, {kind, "e1"}, n)
-       when kind in [:event, :kept_event],
-       do: {:ok, answered(model, %{"n" => n})}
-
   defp expect(%{status: status} = model, {:kept_event, _name}, _n)
        when status in [:completed, :cancelled],
        do: {{:error, :finished}, model}
 
-  defp expect(model, {:kept_event, "e1"}, n), do: {:ok, %{model | kept: %{"n" => n}}}
-  defp expect(model, {:kept_event, _name}, _n), do: {:ok, model}
+  # A kept event is delivered if something waits for it, like any other, and
+  # kept for a later wait if nothing does.
+  defp expect(model, {:kept_event, name}, n) do
+    case expect(model, {:event, name}, n) do
+      {:ok, %{any: :done} = same} when same == model -> {:ok, keep(model, name, n)}
+      {:ok, %{all: :done} = same} when same == model -> {:ok, keep(model, name, n)}
+      {:ok, delivered} -> {:ok, delivered}
+      {{:error, :not_found}, model} -> {:ok, keep(model, name, n)}
+    end
+  end
+
+  defp expect(%{status: :waiting, at: 1} = model, {:event, "e1"}, n),
+    do: {:ok, answered(model, %{"n" => n})}
 
   defp expect(%{any: :open} = model, {:event, name}, n) when name in ["g_a", "g_b"],
     do: {:ok, answered(%{model | any: :done}, {name, %{"n" => n}})}
@@ -177,6 +184,9 @@ defmodule Durable.Fuzz.Audit4ApiWaitsTest do
 
   defp answered(model, value), do: %{model | status: :pending, answer: {:got, value}}
 
+  # The newest of a name is the one a wait gets.
+  defp keep(model, name, n), do: put_in(model.kept[name], %{"n" => n})
+
   defp close_groups(model) do
     model
     |> Map.update!(:any, &if(&1 == :open, do: :closed, else: &1))
@@ -193,11 +203,33 @@ defmodule Durable.Fuzz.Audit4ApiWaitsTest do
     step(%{model | answer: nil, at: at + 1, results: Map.put(model.results, name(at), value)})
   end
 
-  defp step(%{at: 1, kept: %{} = kept} = model), do: step(%{answered(model, kept) | kept: nil})
+  defp step(%{at: 1, kept: %{"e1" => kept}} = model),
+    do: step(%{answered(model, kept) | kept: Map.delete(model.kept, "e1")})
+
   # Durable.Testing.drain/2 ends sleeps.
   defp step(%{at: 2} = model), do: step(answered(model, :slept))
-  defp step(%{at: 3} = model), do: %{model | status: :waiting, any: :open}
-  defp step(%{at: 4} = model), do: %{model | status: :waiting, all: {:open, %{}}}
+
+  # wait_for_any takes the first of its names with a kept event.
+  defp step(%{at: 3, kept: kept} = model) do
+    case Enum.find(["g_a", "g_b"], &is_map_key(kept, &1)) do
+      nil ->
+        %{model | status: :waiting, any: :open}
+
+      name ->
+        step(answered(%{model | any: :done, kept: Map.delete(kept, name)}, {name, kept[name]}))
+    end
+  end
+
+  # wait_for_all takes every kept event it has a name for, and waits for the rest.
+  defp step(%{at: 4, kept: kept} = model) do
+    got = Map.take(kept, ["g_c", "g_d"])
+    model = %{model | kept: Map.drop(kept, ["g_c", "g_d"])}
+
+    if map_size(got) == 2,
+      do: step(answered(%{model | all: :done}, got)),
+      else: %{model | status: :waiting, all: {:open, got}}
+  end
+
   defp step(model), do: %{model | status: :waiting}
 
   defp name(at), do: Enum.at(@steps, at)
