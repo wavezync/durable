@@ -548,6 +548,10 @@ defmodule Durable do
   Pauses a queue on every node. Runs already executing finish; no node claims
   new work from the queue until `resume_queue/2`. The pause survives restarts.
 
+  Any name is accepted, whether or not a node runs that queue yet, so a queue
+  can be paused ahead of the deploy that adds it. A misspelt name therefore
+  returns `:ok` and pauses nothing that runs.
+
   Recorded in `Durable.Activity` as `"queue_paused"`.
 
   ## Options
@@ -634,6 +638,21 @@ defmodule Durable do
   def prune(opts \\ []) do
     Durable.Pruner.prune(Config.get(Keyword.get(opts, :durable, Durable)))
   end
+
+  @doc """
+  Cancels what a waiting run is waiting for: its wait returns
+  `{:cancelled, reason}` and the run carries on. For a run that waits on its
+  lanes or a child, the waits under it are cancelled instead.
+
+  See `Durable.Wait.cancel_wait/2`.
+
+  ## Examples
+
+      :ok = Durable.cancel_wait(workflow_id, reason: "no longer needed")
+
+  """
+  @spec cancel_wait(String.t(), keyword()) :: :ok | {:error, term()}
+  defdelegate cancel_wait(workflow_id, opts \\ []), to: Durable.Wait
 
   @doc """
   Provides input for a waiting workflow (human-in-the-loop).

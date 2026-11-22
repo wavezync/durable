@@ -376,18 +376,11 @@ defmodule Durable.Audit4ApiLookupsTest do
   end
 
   describe "the docs" do
-    # The docs showed `Durable.cancel_wait(workflow_id, reason: ...)` when the
-    # function only exists as Durable.Wait.cancel_wait/2. The example was
-    # corrected, so what it shows has to be there to call.
-    test "the example for cancel_wait calls a function that exists", %{waiting: waiting} do
-      {:docs_v1, _, _, _, _, _, docs} = Code.fetch_docs(Durable.Wait)
-
-      [%{"en" => doc}] =
-        for {{:function, :cancel_wait, 2}, _, _, doc, _} <- docs, do: doc
-
-      assert doc =~ "Durable.Wait.cancel_wait(workflow_id, reason:"
-      refute doc =~ "Durable.cancel_wait("
-      assert Durable.Wait.cancel_wait(waiting, reason: "User cancelled") == :ok
+    # The docs showed `Durable.cancel_wait(workflow_id, reason: ...)` before the
+    # function was there. It is now, beside the other things an operator does.
+    test "Durable.cancel_wait/2 is there to call, as its example shows", %{waiting: waiting} do
+      assert Durable.cancel_wait(waiting, reason: "no longer needed") == :ok
+      assert Durable.cancel_wait(waiting) == {:error, :not_waiting}
     end
   end
 
