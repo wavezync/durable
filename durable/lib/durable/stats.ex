@@ -37,6 +37,8 @@ defmodule Durable.Stats do
 
   @failed [:failed, :compensated, :compensation_failed]
   @finished [:completed, :cancelled | @failed]
+  # timeline/1 builds a map for every bucket, empty or not.
+  @max_buckets 10_000
 
   @doc """
   Headline numbers for the window:
@@ -97,12 +99,25 @@ defmodule Durable.Stats do
 
   `failed` includes rolled-back runs; `p50_ms`/`p95_ms` are over runs
   completed in the bucket (nil when none).
+
+  Every bucket is returned, empty or not, so a window cut into more than
+  10,000 of them returns `{:error, {:too_many_buckets, count}}` instead: ask
+  for a shorter window or a larger `:bucket_seconds`.
   """
-  @spec timeline(keyword()) :: [map()]
+  @spec timeline(keyword()) :: [map()] | {:error, {:too_many_buckets, pos_integer()}}
   def timeline(opts \\ []) do
-    {config, since, until} = window(opts)
+    {_config, since, until} = window(opts)
     span = DateTime.diff(until, since, :second)
     bucket = Keyword.get(opts, :bucket_seconds, max(div(span, 48), 60))
+    count = if is_integer(bucket) and bucket > 0, do: div(max(span - 1, 0), bucket) + 1, else: 0
+
+    if count > @max_buckets,
+      do: {:error, {:too_many_buckets, count}},
+      else: timeline(opts, span, bucket)
+  end
+
+  defp timeline(opts, span, bucket) do
+    {config, since, until} = window(opts)
     runs = runs(opts)
     origin = bucket_origin(since)
 
