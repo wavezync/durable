@@ -1944,9 +1944,16 @@ defmodule Durable.Executor do
 
   defp find_exact_match(value, clauses) do
     Enum.find_value(clauses, fn {{pattern, _idx}, steps} ->
-      if pattern == value, do: steps
+      if clause_matches?(pattern, value), do: steps
     end)
   end
+
+  # An atom a step stored comes back from a save as its text, so an atom
+  # clause takes that text too: `:invoice ->` after a wait as before it.
+  defp clause_matches?(pattern, value) when is_atom(pattern) and is_binary(value),
+    do: Atom.to_string(pattern) == value
+
+  defp clause_matches?(pattern, value), do: pattern == value
 
   defp find_default_clause(clauses) do
     Enum.find_value(clauses, [], fn {{pattern, _idx}, steps} ->

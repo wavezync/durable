@@ -99,7 +99,7 @@ The `on:` option takes a function that returns a value. That value is matched ag
 
 A clause matches by equality, so any other pattern (a float, a tuple, a map, a guard) is a compile error. Compute the value to match on in `on:` instead.
 
-**Match a value read from the data as a string.** The run's data is stored as JSON, so an atom a step put there is a string once the run has been saved and loaded again: after a wait, a retry, a move to another queue or a deploy that hands the run to another node. `assign(ctx, :status, :active)` followed by an `:active ->` clause matches only while the run stays in one worker; after a reload the value is `"active"` and the default clause runs, or none. An atom clause is safe when `on:` builds the atom itself, as in `on: fn ctx -> if ctx.total > 100, do: :large, else: :small end`. A named branch has no such trap: its arm is recorded with the step.
+**An atom clause also matches the atom's text.** The run's data is stored as JSON, so an atom a step put there is a string once the run has been saved and loaded again: after a wait, a retry, a move to another queue or a deploy. `assign(ctx, :status, :active)` followed by an `:active ->` clause therefore matches on both passes: against `:active` while the run stays in one worker, and against `"active"` after a reload. A string clause matches only a string.
 
 ```elixir
 # Matching strings read from the data
