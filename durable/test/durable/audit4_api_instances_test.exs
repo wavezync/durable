@@ -30,6 +30,7 @@ defmodule Durable.Audit4ApiInstancesTest do
             "input_or_fail" -> wait_for_input("x", timeout: 0, on_timeout: :fail)
             "event" -> wait_for_event("x")
             "any" -> wait_for_any(["x", "y"])
+            "all" -> wait_for_all(["x", "y"])
             "sleep" -> sleep(60_000)
           end
 
@@ -116,7 +117,7 @@ defmodule Durable.Audit4ApiInstancesTest do
     for wait <- ["event", "any", "sleep"] do
       test "waiting on #{wait}: one span per segment, and nothing between them" do
         id = start_waiting(unquote(wait))
-        assert heard() == @first_segment ++ [{:workflow, :stop, :waiting}]
+        assert heard() == @first_segment ++ [:workflow_waiting, {:workflow, :stop, :waiting}]
 
         if unquote(wait) != "sleep", do: assert(Durable.send_event(id, "x", 1) == :ok)
         assert Durable.send_event(id, "x", 2) in [:ok, {:error, :not_found}]
@@ -127,15 +128,12 @@ defmodule Durable.Audit4ApiInstancesTest do
       end
     end
 
-    # Only handle_wait_for_input/3 broadcasts it (executor.ex:3560). A run that
-    # starts waiting for an event, a group of events or a sleep
-    # (executor.ex:3492-3534, :3574) says nothing on the workflows topic, so a
-    # list that follows it still shows the run as running.
-    for wait <- ["event", "any", "sleep"] do
-      @tag :skip
-      test "waiting on #{wait} broadcasts :workflow_waiting, as waiting for input does" do
+    # A list that follows the workflows topic would otherwise still show the
+    # run as running.
+    for wait <- ["event", "any", "all", "sleep"] do
+      test "waiting on #{wait} broadcasts :workflow_waiting once, as waiting for input does" do
         start_waiting(unquote(wait))
-        assert :workflow_waiting in heard()
+        assert Enum.count(heard(), &(&1 == :workflow_waiting)) == 1
       end
     end
 

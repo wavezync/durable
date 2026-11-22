@@ -3674,6 +3674,8 @@ defmodule Durable.Executor do
       )
       |> cas_update!(config)
 
+    DurablePubSub.broadcast_workflow(config, :workflow_waiting, workflow_event(execution))
+
     {:waiting, execution}
   end
 
@@ -3692,6 +3694,8 @@ defmodule Durable.Executor do
     }
 
     {execution, _event} = enter_wait(config, execution, fn -> insert_event!(config, attrs) end)
+
+    DurablePubSub.broadcast_workflow(config, :workflow_waiting, workflow_event(execution))
 
     # An event sent before the run got here (`send_event(..., buffer: true)`,
     # a keyed start with `on_duplicate: {:send_event, name}`) resumes it now.
@@ -3773,6 +3777,8 @@ defmodule Durable.Executor do
 
         wait_group
       end)
+
+    DurablePubSub.broadcast_workflow(config, :workflow_waiting, workflow_event(execution))
 
     # Events kept before the run got here are handed over now, as for
     # wait_for_event. Once a wait_for_any has its answer, the events kept for
