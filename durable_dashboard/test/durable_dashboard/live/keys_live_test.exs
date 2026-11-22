@@ -101,7 +101,7 @@ defmodule DurableDashboard.Live.KeysLiveTest do
       refute html =~ "Rerun would be refused"
 
       assert [%{details: %{"by" => "admin@example.com"}}] =
-               Durable.Activity.list(kinds: ["key_released"])
+               Durable.Activity.list!(kinds: ["key_released"])
     end
 
     test "a refused rerun says which run holds the key", %{conn: conn} do

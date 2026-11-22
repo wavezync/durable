@@ -51,8 +51,8 @@ defmodule DurableDashboard.Live.Audit4AccessTest do
         repo().all(from(p in PendingInput, order_by: p.id, select: {p.id, p.status, p.response})),
       events: repo().all(from(e in PendingEvent, order_by: e.id, select: {e.id, e.status})),
       steps: repo().aggregate(StepExecution, :count),
-      paused: Durable.paused_queues(),
-      schedules: Enum.map(Durable.list_schedules(), &{&1.name, &1.enabled, &1.last_run_at})
+      paused: Durable.paused_queues!(),
+      schedules: Enum.map(Durable.list_schedules!(), &{&1.name, &1.enabled, &1.last_run_at})
     }
   end
 

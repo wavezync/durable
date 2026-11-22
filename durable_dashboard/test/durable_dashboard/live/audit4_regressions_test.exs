@@ -167,11 +167,11 @@ defmodule DurableDashboard.Live.Audit4RegressionsTest do
 
       # Queues, schedules, settings.
       assert click.(open.("/queues"), "toggle", %{"queue" => "default"}) == nil
-      assert Durable.paused_queues(named) == ["default"]
+      assert Durable.paused_queues!(named) == ["default"]
 
       {:ok, _} = Durable.schedule(Fixtures.Payments, "*/5 * * * *", [name: "sweep"] ++ named)
       assert click.(open.("/schedules"), "toggle", %{"name" => "sweep"}) == nil
-      assert [%{enabled: false}] = Durable.list_schedules(named)
+      assert [%{enabled: false}] = Durable.list_schedules!(named)
 
       runs_before = repo().aggregate(WorkflowExecution, :count)
       assert click.(open.("/schedules"), "run-now", %{"name" => "sweep"}) == nil
@@ -574,11 +574,11 @@ defmodule DurableDashboard.Live.Audit4RegressionsTest do
         render_click(view, "toggle", %{"queue" => queue})
       end
 
-      assert Durable.paused_queues() == []
+      assert Durable.paused_queues!() == []
       assert repo().aggregate(Durable.Storage.Schemas.Queue, :count) == 0
 
       render_click(view, "toggle", %{"queue" => "default"})
-      assert Durable.paused_queues() == ["default"]
+      assert Durable.paused_queues!() == ["default"]
     end
 
     test "a form answered with fields that aren't a map is refused, not a crash", %{conn: conn} do

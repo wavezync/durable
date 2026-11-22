@@ -84,7 +84,7 @@ defmodule DurableDashboard.Live.SettingsLive do
               {version, module} <- Migrator.all_migrations(),
               do: {version, migration_name(module), version in applied}
             ),
-          counts: Durable.Query.count_by_status(durable: socket.assigns.durable),
+          counts: Durable.Query.count_by_status!(durable: socket.assigns.durable),
           log_capture:
             Keyword.merge(@log_defaults, Application.get_env(:durable, :log_capture, []))
         )

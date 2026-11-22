@@ -84,15 +84,18 @@ defmodule DurableDashboard.Live.QueuesLive do
   defp load(socket) do
     durable = socket.assigns.durable
     durable_config = Durable.Config.get_safe(durable)
-    nodes = if durable_config, do: Durable.list_nodes(durable: durable), else: []
-    queues = if durable_config, do: Durable.Stats.queues(durable: durable), else: []
+    nodes = if durable_config, do: Durable.list_nodes!(durable: durable), else: []
+    queues = if durable_config, do: Durable.Stats.queues!(durable: durable), else: []
     alive = Enum.filter(nodes, &(&1.status == :alive))
     now = DateTime.utc_now()
 
     history =
       if durable_config,
         do:
-          Durable.Stats.queue_history(durable: durable, since: DateTime.add(now, -3_600, :second)),
+          Durable.Stats.queue_history!(
+            durable: durable,
+            since: DateTime.add(now, -3_600, :second)
+          ),
         else: %{}
 
     assign(socket,
@@ -104,7 +107,7 @@ defmodule DurableDashboard.Live.QueuesLive do
       backlog_labels: minute_labels(now),
       activity:
         if(durable_config,
-          do: Durable.Activity.list(durable: durable, limit: 50, kinds: @operation_kinds),
+          do: Durable.Activity.list!(durable: durable, limit: 50, kinds: @operation_kinds),
           else: []
         ),
       now: now

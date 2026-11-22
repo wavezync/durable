@@ -98,20 +98,20 @@ defmodule DurableDashboard.Live.OverviewLive do
     since = DateTime.add(now, -span, :second)
     window = [durable: durable, since: since, until: now]
 
-    stats = Durable.Stats.overview(window)
+    stats = Durable.Stats.overview!(window)
 
     previous =
-      Durable.Stats.overview(
+      Durable.Stats.overview!(
         durable: durable,
         since: DateTime.add(since, -span, :second),
         until: since
       )
 
-    timeline = Durable.Stats.timeline(window ++ [bucket_seconds: bucket])
+    timeline = Durable.Stats.timeline!(window ++ [bucket_seconds: bucket])
 
     slowest =
       window
-      |> Durable.Stats.step_performance()
+      |> Durable.Stats.step_performance!()
       |> Enum.reject(&(&1.compensation or is_nil(&1.p95_ms)))
       |> Enum.sort_by(& &1.p95_ms, :desc)
       |> Enum.take(5)
@@ -120,11 +120,11 @@ defmodule DurableDashboard.Live.OverviewLive do
       stats: stats,
       previous: previous,
       timeline: timeline,
-      failing: Durable.Stats.failing_workflows(window),
+      failing: Durable.Stats.failing_workflows!(window),
       slowest: slowest,
-      queues: Durable.Stats.queues(durable: durable),
-      nodes: Durable.list_nodes(durable: durable),
-      workflows: length(Durable.Query.list_workflows(durable: durable))
+      queues: Durable.Stats.queues!(durable: durable),
+      nodes: Durable.list_nodes!(durable: durable),
+      workflows: length(Durable.Query.list_workflows!(durable: durable))
     )
   end
 

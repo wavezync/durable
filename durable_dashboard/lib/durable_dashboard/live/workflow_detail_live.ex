@@ -102,19 +102,19 @@ defmodule DurableDashboard.Live.WorkflowDetailLive do
       until: now
     ]
 
-    summary = Enum.find(Durable.Stats.workflows(window), &(&1.workflow == name))
+    summary = Enum.find(Durable.Stats.workflows!(window), &(&1.workflow == name))
     definition = definition(summary)
-    steps = Durable.Stats.step_performance(window)
-    stats = Durable.Stats.overview(window)
+    steps = Durable.Stats.step_performance!(window)
+    stats = Durable.Stats.overview!(window)
 
     assign(socket,
       summary: summary,
       stats: stats,
-      timeline: Durable.Stats.timeline(window ++ [bucket_seconds: bucket]),
+      timeline: Durable.Stats.timeline!(window ++ [bucket_seconds: bucket]),
       steps: order_steps(steps, definition),
       structure: definition && Structure.build(definition, steps, stats.started),
-      errors: Durable.Stats.error_groups(window),
-      keys: Durable.Stats.keys(window ++ [bucket_seconds: bucket]),
+      errors: Durable.Stats.error_groups!(window),
+      keys: Durable.Stats.keys!(window ++ [bucket_seconds: bucket]),
       definition: definition,
       schedules: schedules(durable, name)
     )
@@ -135,7 +135,7 @@ defmodule DurableDashboard.Live.WorkflowDetailLive do
 
   defp schedules(durable, name) do
     [durable: durable]
-    |> Durable.list_schedules()
+    |> Durable.list_schedules!()
     |> Enum.filter(&(&1.workflow_name == name))
   rescue
     _ -> []

@@ -132,7 +132,7 @@ defmodule DurableDashboard.Live.SchedulesLive do
     durable = socket.assigns.durable
 
     if Durable.Config.get_safe(durable) do
-      load_view(socket, Durable.list_schedules(durable: durable, limit: 500))
+      load_view(socket, Durable.list_schedules!(durable: durable, limit: 500))
     else
       assign(socket,
         schedules: [],
@@ -149,7 +149,7 @@ defmodule DurableDashboard.Live.SchedulesLive do
     # minutely schedule can crowd out rare ones' marks. Per-schedule queries if so.
     runs =
       [durable: socket.assigns.durable, trigger: :schedule, limit: 300]
-      |> Durable.Query.list_executions()
+      |> Durable.Query.list_executions!()
       |> Enum.group_by(& &1.trigger_ref)
 
     assign(socket,
@@ -167,7 +167,7 @@ defmodule DurableDashboard.Live.SchedulesLive do
     runs =
       if schedule,
         do:
-          Durable.Query.list_executions(
+          Durable.Query.list_executions!(
             durable: socket.assigns.durable,
             trigger: :schedule,
             trigger_ref: name,
@@ -179,7 +179,7 @@ defmodule DurableDashboard.Live.SchedulesLive do
       schedules: schedules,
       schedule: schedule,
       runs: runs,
-      upcoming: if(schedule, do: Durable.Scheduler.API.upcoming_runs(schedule, 6), else: []),
+      upcoming: if(schedule, do: Durable.Scheduler.API.upcoming_runs!(schedule, 6), else: []),
       page_title: name,
       breadcrumbs: [
         %{label: "Schedules", href: DPath.schedules(socket.assigns.base_path)},

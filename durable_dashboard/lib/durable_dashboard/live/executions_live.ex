@@ -771,8 +771,18 @@ defmodule DurableDashboard.Live.ExecutionsLive do
     filters = filters(durable, name, query)
     offset = (query.page - 1) * @per_page
 
-    {rows, total} =
-      Durable.Query.list_executions_with_total(filters ++ [limit: @per_page, offset: offset])
+    # The filters come from the URL. One the engine refuses (`?parent=` that
+    # isn't a run's id) matches nothing.
+    {rows, total, status_counts} =
+      with {:ok, {rows, total}} <-
+             Durable.Query.list_executions_with_total(
+               filters ++ [limit: @per_page, offset: offset]
+             ),
+           {:ok, status_counts} <- Durable.Query.count_by_status(filters) do
+        {rows, total, status_counts}
+      else
+        {:error, _invalid_filter} -> {[], 0, %{}}
+      end
 
     fresh = rows |> attach_step_stats(durable) |> attach_parked(durable)
     {rows, held} = if mode == :live, do: reconcile(socket.assigns.rows, fresh), else: {fresh, nil}
@@ -782,7 +792,7 @@ defmodule DurableDashboard.Live.ExecutionsLive do
       rows: rows,
       held: held,
       total: total,
-      status_counts: Durable.Query.count_by_status(filters),
+      status_counts: status_counts,
       now: DateTime.utc_now()
     )
     |> schedule_tick()
@@ -921,13 +931,13 @@ defmodule DurableDashboard.Live.ExecutionsLive do
   end
 
   defp fetch_workflows(durable) do
-    Durable.Query.list_workflows(durable: durable)
+    Durable.Query.list_workflows!(durable: durable)
   rescue
     _ -> []
   end
 
   defp fetch_schedules(durable) do
-    [durable: durable] |> Durable.list_schedules() |> Enum.map(& &1.name)
+    [durable: durable] |> Durable.list_schedules!() |> Enum.map(& &1.name)
   rescue
     _ -> []
   end

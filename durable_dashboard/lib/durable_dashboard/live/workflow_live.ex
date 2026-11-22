@@ -1842,9 +1842,14 @@ defmodule DurableDashboard.Live.WorkflowLive do
     Ecto.Query.CastError -> not_found(socket)
   end
 
+  # A run pruned since it was loaded has nothing to roll back.
   defp rollback_plan(%{status: status, id: id}, durable)
-       when status in [:failed, :pending, :running, :waiting],
-       do: Durable.rollback_plan(id, durable: durable)
+       when status in [:failed, :pending, :running, :waiting] do
+    case Durable.rollback_plan(id, durable: durable) do
+      {:ok, plan} -> plan
+      {:error, _not_found} -> []
+    end
+  end
 
   defp rollback_plan(_execution, _durable), do: []
 

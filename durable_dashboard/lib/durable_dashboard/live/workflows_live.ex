@@ -73,7 +73,7 @@ defmodule DurableDashboard.Live.WorkflowsLive do
     now = DateTime.utc_now()
 
     rows =
-      Durable.Stats.workflows(
+      Durable.Stats.workflows!(
         durable: socket.assigns.durable,
         since: DateTime.add(now, -span, :second),
         until: now

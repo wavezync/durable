@@ -122,16 +122,27 @@ defmodule DurableDashboard.Live.KeysLive do
         key_prefix: query.q,
         # The combobox is free text; only a known name filters.
         workflow_name: if(query.workflow in workflows, do: query.workflow),
-        holder_status: if(query.statuses != [], do: query.statuses)
+        # parse_query/1 keeps only the statuses in @statuses.
+        holder_status:
+          if(query.statuses != [], do: Enum.map(query.statuses, &String.to_existing_atom/1))
       ]
       |> Enum.reject(fn {_k, v} -> is_nil(v) end)
 
-    rows =
-      Durable.Query.list_keys(filters ++ [limit: @per_page, offset: (query.page - 1) * @per_page])
+    # The filters come from the URL. One the engine refuses matches nothing.
+    {rows, total} =
+      with {:ok, rows} <-
+             Durable.Query.list_keys(
+               filters ++ [limit: @per_page, offset: (query.page - 1) * @per_page]
+             ),
+           {:ok, total} <- Durable.Query.count_keys(filters) do
+        {rows, total}
+      else
+        {:error, _invalid_filter} -> {[], 0}
+      end
 
     assign(socket,
       rows: rows,
-      total: Durable.Query.count_keys(filters),
+      total: total,
       workflows: workflows,
       reuse: reuse_by_workflow(rows),
       filtered?: filters != [durable: durable],
