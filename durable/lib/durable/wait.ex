@@ -1063,7 +1063,7 @@ defmodule Durable.Wait do
 
   ## Examples
 
-      Durable.cancel_wait(workflow_id, reason: "User cancelled")
+      Durable.Wait.cancel_wait(workflow_id, reason: "User cancelled")
 
   """
   @spec cancel_wait(String.t(), keyword()) :: :ok | {:error, term()}
