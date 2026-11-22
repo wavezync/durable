@@ -772,15 +772,33 @@ defmodule Durable.Wait do
     if Repo.id?(workflow_id) and not Repo.bad_text?(name), do: :ok, else: {:error, :not_found}
   end
 
+  # The wait is looked up with the run locked: read before the lock, it could be
+  # one another sender or the timeout sweep has since closed, and this sender
+  # would overwrite what the run was given and report it delivered.
   defp deliver_to_waiter(config, workflow_id, event_name, safe_payload) do
+    sent =
+      Repo.transaction(config, fn ->
+        lock_run(config, workflow_id)
+        deliver_if_waiting(config, workflow_id, event_name, safe_payload)
+      end)
+
+    wake_resumed(config, sent)
+  end
+
+  defp deliver_if_waiting(config, workflow_id, event_name, payload) do
     case find_pending_event(config, workflow_id, event_name) do
       {:ok, pending_event} ->
-        deliver(config, workflow_id, event_name, pending_event, safe_payload)
+        deliver(config, workflow_id, event_name, pending_event, payload)
 
       {:error, :not_found} = not_found ->
         if late_for_group?(config, workflow_id, event_name), do: :ok, else: not_found
     end
   end
+
+  # The wake goes out once the transaction that resumed the run has committed.
+  defp wake_resumed(config, {:ok, {:resumed, run}}), do: DurablePubSub.wake(config, run)
+  defp wake_resumed(_config, {:ok, result}), do: result
+  defp wake_resumed(_config, {:error, reason}), do: {:error, reason}
 
   # An event for a wait_for_any that already has its answer is a no-op, not an
   # error: the sender can't know which event got there first.
@@ -819,7 +837,7 @@ defmodule Durable.Wait do
 
     case Repo.transaction(config, multi) do
       {:ok, %{resume: resumed}} ->
-        DurablePubSub.wake(config, resumed)
+        {:resumed, resumed}
 
       {:error, stage, reason, _} ->
         require Logger
@@ -829,7 +847,8 @@ defmodule Durable.Wait do
             "stage=#{stage} reason=#{inspect(reason)} workflow=#{workflow_id} event=#{event_name}"
         )
 
-        {:error, reason}
+        # Every caller holds the run's lock in a transaction of its own.
+        config.repo.rollback(reason)
     end
   end
 
@@ -837,17 +856,16 @@ defmodule Durable.Wait do
   # the run's row first, so one of them always sees the other: either the
   # sender finds the waiter and delivers, or the run finds the buffered event.
   defp send_or_buffer(config, workflow_id, event_name, payload) do
-    Repo.transaction(config, fn ->
-      case lock_run(config, workflow_id) do
-        nil -> {:error, :not_found}
-        %{status: status} when status in @finished -> {:error, :finished}
-        _open -> deliver_or_buffer(config, workflow_id, event_name, payload)
-      end
-    end)
-    |> case do
-      {:ok, result} -> result
-      {:error, reason} -> {:error, reason}
-    end
+    sent =
+      Repo.transaction(config, fn ->
+        case lock_run(config, workflow_id) do
+          nil -> {:error, :not_found}
+          %{status: status} when status in @finished -> {:error, :finished}
+          _open -> deliver_or_buffer(config, workflow_id, event_name, payload)
+        end
+      end)
+
+    wake_resumed(config, sent)
   end
 
   defp deliver_or_buffer(config, workflow_id, event_name, payload) do
@@ -883,16 +901,19 @@ defmodule Durable.Wait do
             p.status == :buffered
       )
 
-    Repo.transaction(config, fn ->
-      lock_run(config, workflow_id)
+    delivered =
+      Repo.transaction(config, fn ->
+        lock_run(config, workflow_id)
 
-      with [newest | _] <- Repo.all(config, from(p in buffered, order_by: [desc: p.inserted_at])),
-           {:ok, pending_event} <- find_pending_event(config, workflow_id, event_name) do
-        Repo.delete_all(config, buffered)
-        deliver(config, workflow_id, event_name, pending_event, newest.payload["__payload__"])
-      end
-    end)
+        with [newest | _] <-
+               Repo.all(config, from(p in buffered, order_by: [desc: p.inserted_at])),
+             {:ok, pending_event} <- find_pending_event(config, workflow_id, event_name) do
+          Repo.delete_all(config, buffered)
+          deliver(config, workflow_id, event_name, pending_event, newest.payload["__payload__"])
+        end
+      end)
 
+    wake_resumed(config, delivered)
     :ok
   end
 

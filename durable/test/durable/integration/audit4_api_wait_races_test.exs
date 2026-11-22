@@ -142,12 +142,8 @@ defmodule Durable.Integration.Audit4ApiWaitRacesTest do
   end
 
   describe "the same event sent twice at once" do
-    # deliver_to_waiter/4 looks for the pending event before the run is locked
-    # (wait.ex:776) and the multi then writes the row it read, whatever it has
-    # become since (wait.ex:931-934). resume_parent_in_multi/3 shrugs at a run
-    # that already moved on (executor.ex:2820), so the second sender gets :ok
-    # too, and its payload replaces the one the run was actually given.
-    @tag :skip
+    # The sender looks for the wait once it holds the run's lock, so the second
+    # one finds it already answered.
     test "one sender is told :ok, and the row keeps the payload the run got" do
       id = waiting(Audit4ApiWaitsEvent)
       holder = hold_lock(id)
@@ -168,10 +164,8 @@ defmodule Durable.Integration.Audit4ApiWaitRacesTest do
   end
 
   describe "an event against the timeout sweep" do
-    # The same stale read, the other way round: the sweep times the wait out
-    # first, the sender (which found the row pending before the lock) marks it
-    # :received and is told :ok, and the run carries on with the timeout value.
-    @tag :skip
+    # The other way round: the sweep times the wait out first, and the sender
+    # behind it finds no wait left.
     test "an event that lost to the timeout isn't reported as delivered" do
       id = waiting(Audit4ApiWaitsEvent)
       make_due(PendingEvent, id)
