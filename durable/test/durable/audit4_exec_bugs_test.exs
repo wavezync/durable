@@ -222,8 +222,26 @@ defmodule Durable.Audit4ExecBugsTest do
           end)
 
         _ ->
-          step(:post, fn parcel -> {:ok, parcel} end)
+          step(:frank, fn parcel ->
+            {:goto, :hand_over, Map.update(parcel, "franked", 1, &(&1 + 1))}
+          end)
+
+          step(:queue_at_counter, fn parcel -> {:ok, Map.put(parcel, "queued", true)} end)
       end
+
+      step(:hand_over, fn parcel ->
+        Audit4ExecBugSeen.put(:stored_after_frank, Audit4ExecBugOrders.stored_now())
+        {:ok, parcel}
+      end)
+    end
+
+    workflow "audit4_refund_routed" do
+      decision(:route, fn refund ->
+        {:goto, String.to_atom(refund["to"]), Map.update(refund, "routed", 1, &(&1 + 1))}
+      end)
+
+      step(:ask_manager, fn refund -> {:ok, refund} end)
+      step(:pay_out, fn refund -> {:ok, refund} end)
     end
 
     workflow "audit4_claim" do
@@ -319,6 +337,15 @@ defmodule Durable.Audit4ExecBugsTest do
   defp order(input, workflow) when is_binary(workflow), do: order(input, workflow: workflow)
   defp order(input, opts), do: run_workflow(Audit4ExecBugOrders, input, opts)
   defp reload(run), do: Repo.get!(WorkflowExecution, run.id)
+
+  # A clause's step is named after its branch, which has no name of its own.
+  defp clause_step(workflow, suffix) do
+    {:ok, definition} = Audit4ExecBugOrders.__workflow_definition__(workflow)
+
+    Enum.find_value(definition.steps, fn %{name: name} ->
+      if String.ends_with?(Atom.to_string(name), suffix), do: Atom.to_string(name)
+    end)
+  end
 
   defp children(run),
     do: Repo.all(from(w in WorkflowExecution, where: w.parent_workflow_id == ^run.id))
@@ -524,10 +551,8 @@ defmodule Durable.Audit4ExecBugsTest do
   end
 
   describe "a run lost right after a step's result was saved" do
-    # executor.ex:1556 (handle_decision_result/8) saves a decision's `{:goto, _, data}`
-    # without the `__done__` record a step's save has (executor.ex:1496), so the
-    # run that comes back runs the decision again, on its own result.
-    @tag :skip
+    # A decision's `{:goto, _, data}` was saved without the record a step's
+    # save has, so the run that came back ran the decision again, on its own result.
     test "doesn't run a decision that jumped again" do
       assert order(%{}, "audit4_refund").context["routed"] == 1
       stored = Audit4ExecBugSeen.get(:stored_after_route)
@@ -539,25 +564,43 @@ defmodule Durable.Audit4ExecBugsTest do
       assert run.context["routed"] == 1
     end
 
-    # executor.ex:1853 (run_branch_step/6) saves the result of a step in a
-    # `branch on:` clause without the record either.
-    @tag :skip
+    # And so was the result of a step in a `branch on:` clause.
     test "doesn't run a step of a `branch on:` clause again" do
       assert order(%{"size" => "large"}, "audit4_parcel").context["weighed"] == 1
       stored = Audit4ExecBugSeen.get(:stored_after_weigh)
       assert stored["weighed"] == 1
 
-      {:ok, definition} = Audit4ExecBugOrders.__workflow_definition__("audit4_parcel")
-
-      weigh =
-        Enum.find_value(definition.steps, fn %{name: name} ->
-          if String.ends_with?(Atom.to_string(name), "__weigh"), do: Atom.to_string(name)
-        end)
-
-      run = lost_after("audit4_parcel", weigh, stored)
+      run = lost_after("audit4_parcel", clause_step("audit4_parcel", "__weigh"), stored)
 
       assert run.status == :completed
       assert run.context["weighed"] == 1
+    end
+
+    test "doesn't run a step of a `branch on:` clause that jumped again" do
+      assert order(%{"size" => "small"}, "audit4_parcel").context["franked"] == 1
+      stored = Audit4ExecBugSeen.get(:stored_after_frank)
+      assert stored["franked"] == 1
+
+      run = lost_after("audit4_parcel", clause_step("audit4_parcel", "__frank"), stored)
+
+      assert run.status == :completed
+      assert run.context["franked"] == 1
+      refute run.context["queued"]
+    end
+
+    test "runs a decision whose jump was refused again when the run is retried" do
+      run = order(%{"to" => "nowhere"}, "audit4_refund_routed")
+      assert %{status: :failed, error: %{"type" => "decision_error"}} = run
+
+      Repo.update_all(from(w in WorkflowExecution, where: w.id == ^run.id),
+        set: [context: Map.put(run.context, "to", "pay_out")]
+      )
+
+      {:ok, _} = Durable.retry(run.id)
+      run = drain(run)
+
+      assert run.status == :completed
+      assert run.context["routed"] == 2
     end
   end
 

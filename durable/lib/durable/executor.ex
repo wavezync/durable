@@ -1584,10 +1584,12 @@ defmodule Durable.Executor do
          workflow_def,
          config
        ) do
-    {:ok, exec} = save_data_as_context(config, exec, data)
-
     case find_jump_target(target_step, remaining_steps, step.name, step_index) do
       {:ok, target_steps} ->
+        # Saved with the jump it made, so a run that comes back to this step
+        # goes on from its target, not through the step again.
+        {:ok, exec} = save_data_as_context(config, exec, data, :drop, {step.name, target_step})
+
         # Use the merged exec.context (prior put_context writes + goto data),
         # not the goto's raw data — otherwise put_context writes from prior
         # steps would silently vanish across the goto boundary.
@@ -1601,6 +1603,8 @@ defmodule Durable.Executor do
         )
 
       {:error, reason} ->
+        {:ok, exec} = save_data_as_context(config, exec, data)
+
         handle_step_failure(
           exec,
           decision_error(step.name, target_step, reason),
@@ -1881,7 +1885,7 @@ defmodule Durable.Executor do
 
     case StepRunner.execute(step, data, exec.id, config, exec.deadline_at) do
       {:ok, new_data} ->
-        {:ok, exec} = save_data_as_context(config, exec, new_data)
+        {:ok, exec} = save_data_as_context(config, exec, new_data, :drop, step.name)
 
         execute_branch_steps_sequential(
           rest,
