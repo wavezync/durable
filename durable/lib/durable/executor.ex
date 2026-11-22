@@ -609,13 +609,11 @@ defmodule Durable.Executor do
     stopped =
       for {id, s, child_context} <- children, s in [:failed, :cancelled], do: {id, child_context}
 
-    put_back(config, stopped, retry_attrs)
-
-    # A lane with a `timeout:` gets all of it again.
-    for {id, _ctx} <- stopped, ms = parallel_children(context)[id]["timeout"] do
-      Repo.update_all(config, from(c in WorkflowExecution, where: c.id == ^id),
-        set: [deadline_at: lane_deadline(retry_attrs[:deadline_at], ms)]
-      )
+    # A lane with a `timeout:` gets all of it again, and what is put back under
+    # the lane has until then too.
+    for {id, _ctx} = lane <- stopped do
+      ms = parallel_children(context)[id]["timeout"]
+      put_back(config, [lane], Keyword.update!(retry_attrs, :deadline_at, &lane_deadline(&1, ms)))
     end
 
     reopen_group(config, group_id, %{

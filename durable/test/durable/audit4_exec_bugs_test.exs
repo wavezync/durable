@@ -132,6 +132,21 @@ defmodule Durable.Audit4ExecBugsTest do
       end
     end
 
+    # The surveyor has ten minutes for the whole visit, however long a room may take.
+    workflow "audit4_survey" do
+      parallel :visit do
+        lane :surveyor, timeout: minutes(10) do
+          parallel :rooms do
+            lane :kitchen, timeout: hours(1) do
+              step(:measure, fn _house ->
+                if Audit4ExecBugSeen.get(:locked), do: {:fail, "locked"}, else: {:ok, %{}}
+              end)
+            end
+          end
+        end
+      end
+    end
+
     # The courier is asked for a quote while the warehouse waits for a picker.
     workflow "audit4_dispatch" do
       parallel :arrange do
@@ -345,6 +360,20 @@ defmodule Durable.Audit4ExecBugsTest do
       assert [%{status: :waiting, deadline_at: %DateTime{} = deadline}] = children(lane)
       assert_in_delta DateTime.diff(deadline, DateTime.utc_now()), 3600, 60
     end
+  end
+
+  test "a retried lane inside a lane has no longer than the lane it is in" do
+    Audit4ExecBugSeen.put(:locked, true)
+    run = order(%{}, "audit4_survey")
+    assert run.status == :failed
+
+    Audit4ExecBugSeen.put(:locked, false)
+    {:ok, _} = Durable.retry(run.id)
+
+    [surveyor] = children(run)
+    [kitchen] = children(surveyor)
+    assert_in_delta DateTime.diff(surveyor.deadline_at, DateTime.utc_now()), 600, 60
+    assert DateTime.compare(kitchen.deadline_at, surveyor.deadline_at) != :gt
   end
 
   # A run that times out while it waits for its child cancels the child
