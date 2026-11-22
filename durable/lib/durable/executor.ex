@@ -2223,14 +2223,19 @@ defmodule Durable.Executor do
       status: :pending,
       queue: to_string(queue),
       priority: parent_exec.priority,
-      input: data,
+      # Straight after another block the data is still as its `into:` or its
+      # lanes left it, tuples and all.
+      input: sanitize_for_json(data),
       context: parent_context,
       # Which lane the run is, for as long as the run is kept.
       engine_state:
         EngineState.new()
         |> Map.merge(EngineState.inherited(parent_exec.engine_state))
         |> Map.put("__parallel_step", Atom.to_string(step.name))
-        |> Map.put(@string_keys, string_key_names(parent_context)),
+        |> record_shapes(
+          string_key_names(parent_context),
+          Map.get(parent_exec.engine_state, @atom_twins, %{})
+        ),
       parent_workflow_id: parent_exec.id,
       root_workflow_id: parent_exec.root_workflow_id || parent_exec.id,
       trigger: :parent,
