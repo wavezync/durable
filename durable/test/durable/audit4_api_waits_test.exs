@@ -68,6 +68,57 @@ defmodule Durable.Audit4ApiWaitsTest do
     end
   end
 
+  # A loan application: the applicant signs in a child workflow, and that
+  # workflow looks two things up at once before it asks for the signature.
+  defmodule Audit4ApiSigning do
+    use Durable
+    use Durable.Wait
+
+    workflow "audit4_api_signing" do
+      step(:sign, fn data ->
+        {:ok, Map.put(data, "signature", inspect(wait_for_input("signature")))}
+      end)
+    end
+
+    workflow "audit4_api_checked_signing" do
+      parallel :checks do
+        step(:identity, fn data ->
+          {:ok, Map.put(data, "identity", inspect(wait_for_event("identity_checked")))}
+        end)
+
+        step(:address, fn data -> {:ok, Map.put(data, "address", "found")} end)
+      end
+    end
+  end
+
+  defmodule Audit4ApiLoan do
+    use Durable
+    use Durable.Wait
+    use Durable.Orchestration
+
+    workflow "audit4_api_loan" do
+      step(:sign, fn data ->
+        {:ok, signed} = call_workflow(Audit4ApiSigning, %{}, workflow: "audit4_api_signing")
+        {:ok, Map.put(data, "signature", signed["signature"])}
+      end)
+    end
+
+    workflow "audit4_api_loan_with_lookups" do
+      parallel :lookups do
+        step(:signing, fn data ->
+          {:ok, checked} =
+            call_workflow(Audit4ApiSigning, %{}, workflow: "audit4_api_checked_signing")
+
+          {:ok, Map.put(data, "identity", checked["checks"]["identity"]["identity"])}
+        end)
+
+        step(:credit, fn data ->
+          {:ok, Map.put(data, "credit", inspect(wait_for_event("credit_done")))}
+        end)
+      end
+    end
+  end
+
   defmodule Audit4ApiTimesOut do
     use Durable
     use Durable.Wait
@@ -347,20 +398,93 @@ defmodule Durable.Audit4ApiWaitsTest do
       assert run(id).status == :cancelled
     end
 
-    # The block's run is :waiting, on its lanes and not on anything of its own.
-    # cancel_wait cancels the block's wait group and resumes the run
-    # (wait.ex:1008-1016), which fails with "child_incomplete" while both lanes
-    # stay :waiting for ever, their input still in the inbox.
-    @tag :skip
-    test "on a run waiting for its parallel block doesn't break the block" do
+    # The block's run is :waiting, on its lanes and not on anything of its own:
+    # the call reaches the lanes' waits, and the block finishes by its own rules.
+    test "on a run waiting for its parallel block cancels its lanes' waits" do
       blocked = run_workflow(Audit4ApiLanes, %{})
       assert blocked.status == :waiting
 
-      Wait.cancel_wait(blocked.id, reason: "stop")
-      after_cancel = drain(blocked)
+      assert Wait.cancel_wait(blocked.id, reason: "stop") == :ok
+      # The block's own wait is left alone: it still waits for its lanes.
+      assert run(blocked.id).status == :waiting
+      refute Map.has_key?(run(blocked.id).context, "__cancelled__")
 
-      lanes = Durable.list_children(blocked.id)
-      refute after_cancel.status == :failed and Enum.any?(lanes, &(&1.status == :waiting))
+      finished = drain(blocked)
+
+      assert finished.status == :completed
+      assert finished.context["after"] == true
+      assert finished.context["lookups"]["credit"]["credit"] == ~s({:cancelled, "stop"})
+      assert finished.context["lookups"]["fraud"]["fraud"] == ~s({:cancelled, "stop"})
+      assert Enum.map(Durable.list_children(blocked.id), & &1.status) == [:completed, :completed]
+      assert Wait.list_pending_inputs() == []
+      assert [%{status: :completed}] = TestRepo.all(Durable.Storage.Schemas.WaitGroup)
+    end
+
+    test "on a block leaves a lane that isn't waiting alone" do
+      {:ok, id} = Durable.start(Audit4ApiLanes, %{})
+      assert execute(id).status == :waiting
+      [credit, fraud] = Enum.sort_by(Durable.list_children(id), & &1.context["__parallel_step"])
+      # Only the credit lane has got to its wait; the other has yet to start.
+      assert execute(credit.id).status == :waiting
+      assert run(fraud.id).status == :pending
+
+      assert Wait.cancel_wait(id, reason: "stop") == :ok
+
+      assert run(credit.id).context["__cancelled__"] == "stop"
+      assert run(fraud.id).status == :pending
+      refute Map.has_key?(run(fraud.id).context, "__cancelled__")
+
+      # The untouched lane reaches its own wait, and the block waits for it.
+      still_blocked = drain(id)
+      assert still_blocked.status == :waiting
+      assert run(credit.id).context["credit"] == ~s({:cancelled, "stop"})
+      assert [%{input_name: "fraud_ok", status: :pending}] = Wait.list_pending_inputs()
+
+      assert Durable.provide_input(fraud.id, "fraud_ok", %{"n" => 2}) == :ok
+      assert drain(id).status == :completed
+    end
+
+    test "on a block whose lanes are all still to start is :ok and changes nothing" do
+      {:ok, id} = Durable.start(Audit4ApiLanes, %{})
+      assert execute(id).status == :waiting
+
+      assert Wait.cancel_wait(id, reason: "stop") == :ok
+
+      assert run(id).status == :waiting
+      assert Enum.map(Durable.list_children(id), & &1.status) == [:pending, :pending]
+    end
+
+    test "on a run waiting for call_workflow cancels the child's wait" do
+      calling = run_workflow(Audit4ApiLoan, %{}, workflow: "audit4_api_loan")
+      assert calling.status == :waiting
+      [child] = Durable.list_children(calling.id)
+      assert_waiting_for_input(child.id, "signature")
+
+      assert Wait.cancel_wait(calling.id, reason: "withdrawn") == :ok
+      # The call itself still waits for the child to finish.
+      assert run(calling.id).status == :waiting
+
+      finished = drain(calling)
+      assert finished.status == :completed
+      assert finished.context["signature"] == ~s({:cancelled, "withdrawn"})
+      assert run(child.id).status == :completed
+      assert Wait.list_pending_inputs() == []
+    end
+
+    test "reaches a wait under a block, a call and another block" do
+      top = run_workflow(Audit4ApiLoan, %{}, workflow: "audit4_api_loan_with_lookups")
+      assert top.status == :waiting
+
+      assert [%{event_name: "identity_checked"}] =
+               Wait.list_pending_events(event_name: "identity_checked")
+
+      assert Wait.cancel_wait(top.id, reason: "withdrawn") == :ok
+      finished = drain(top)
+
+      assert finished.status == :completed
+      assert finished.context["lookups"]["signing"]["identity"] == ~s({:cancelled, "withdrawn"})
+      assert finished.context["lookups"]["credit"]["credit"] == ~s({:cancelled, "withdrawn"})
+      assert Wait.list_pending_events(event_name: "identity_checked") == []
     end
   end
 

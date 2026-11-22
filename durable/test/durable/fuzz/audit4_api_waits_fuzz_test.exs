@@ -3,9 +3,9 @@ defmodule Durable.Fuzz.Audit4ApiWaitsTest do
   Two properties of waits, run inline in the SQL sandbox so thousands of cases
   are cheap.
 
-  A run with one of every wait is sent random answers, kept events, cancels and
-  drains in any order; a model says what each call returns and where the run
-  is afterwards.
+  A run with one of every wait, the last of them inside a parallel block's
+  lane, is sent random answers, kept events, cancels and drains in any order; a
+  model says what each call returns and where the run is afterwards.
 
   And whatever a step's data is, the step sees the same data on the pass after
   a wait, a sleep, a retry or a snooze as it saw the first time, less only what
@@ -68,10 +68,14 @@ defmodule Durable.Fuzz.Audit4ApiWaitsTest do
       step(:all, fn data ->
         {:ok, Map.put(data, "all", T.describe(wait_for_all(["g_c", "g_d"])))}
       end)
+
+      parallel :lanes do
+        step(:lane, fn data -> {:ok, Map.put(data, "lane", T.describe(wait_for_event("l1")))} end)
+      end
     end
   end
 
-  @steps ["ask", "event", "nap", "any", "all"]
+  @steps ["ask", "event", "nap", "any", "all", "lanes"]
 
   # A wait's answer as text, with a map's keys as strings: an event's name is
   # an atom key only if that atom happens to exist.
@@ -87,6 +91,7 @@ defmodule Durable.Fuzz.Audit4ApiWaitsTest do
       {1, constant({:input, "nobody_asked"})},
       {8, tuple({constant(:event), member_of(["e1", "g_a", "g_b", "g_c", "g_d"])})},
       {1, constant({:event, "nobody_waits"})},
+      {2, constant(:lane_event)},
       {4, tuple({constant(:kept_event), member_of(["e1", "g_a", "g_b", "g_c", "g_d"])})},
       {1, constant({:kept_event, "nobody_waits"})},
       {2, constant(:cancel_wait)},
@@ -102,11 +107,12 @@ defmodule Durable.Fuzz.Audit4ApiWaitsTest do
     [],
     [:drain, {:event, "g_a"}],
     [:drain, {:event, "g_c"}, {:event, "g_d"}],
+    [:drain, :lane_event],
     [:drain]
   ]
 
   defp ops do
-    gen all(steps <- integer(0..6), rest <- list_of(op(), max_length: 20)) do
+    gen all(steps <- integer(0..7), rest <- list_of(op(), max_length: 20)) do
       (@past |> Enum.take(steps) |> List.flatten()) ++ rest
     end
   end
@@ -119,6 +125,7 @@ defmodule Durable.Fuzz.Audit4ApiWaitsTest do
       kept: %{},
       any: :not_reached,
       all: :not_reached,
+      lane: :not_reached,
       results: %{}
     }
   end
@@ -172,6 +179,19 @@ defmodule Durable.Fuzz.Audit4ApiWaitsTest do
 
   defp expect(model, {:event, _name}, _n), do: {{:error, :not_found}, model}
 
+  # The lane's wait is the lane's: its own id answers it.
+  defp expect(%{lane: :open} = model, :lane_event, n),
+    do: {:ok, %{model | lane: {:got, %{"n" => n}}}}
+
+  defp expect(model, :lane_event, _n), do: {{:error, :not_found}, model}
+
+  # A run waiting for its block has no wait of its own: the cancel goes to the
+  # lane if it is waiting, and the block goes on waiting for the lane.
+  defp expect(%{status: :waiting, at: 5, lane: :open} = model, :cancel_wait, _n),
+    do: {:ok, %{model | lane: {:got, {:cancelled, "stop"}}}}
+
+  defp expect(%{status: :waiting, at: 5} = model, :cancel_wait, _n), do: {:ok, model}
+
   defp expect(%{status: :waiting} = model, :cancel_wait, _n),
     do: {:ok, model |> close_groups() |> answered({:cancelled, "stop"})}
 
@@ -191,13 +211,18 @@ defmodule Durable.Fuzz.Audit4ApiWaitsTest do
     model
     |> Map.update!(:any, &if(&1 == :open, do: :closed, else: &1))
     |> Map.update!(:all, &if(match?({:open, _}, &1), do: :closed, else: &1))
+    |> Map.update!(:lane, &if(&1 == :not_reached, do: &1, else: :closed))
   end
 
-  # A drain runs a pending run until it waits again or ends.
+  # A drain runs a pending run until it waits again or ends, and its lanes too.
   defp forward(%{status: :pending} = model), do: step(model)
+
+  defp forward(%{status: :waiting, at: 5, lane: {:got, value}} = model),
+    do: step(%{model | lane: :done, at: 6, results: Map.put(model.results, "lanes", value)})
+
   defp forward(model), do: model
 
-  defp step(%{at: 5} = model), do: %{model | status: :completed}
+  defp step(%{at: 6} = model), do: %{model | status: :completed}
 
   defp step(%{answer: {:got, value}, at: at} = model) do
     step(%{model | answer: nil, at: at + 1, results: Map.put(model.results, name(at), value)})
@@ -230,6 +255,8 @@ defmodule Durable.Fuzz.Audit4ApiWaitsTest do
       else: %{model | status: :waiting, all: {:open, got}}
   end
 
+  # The block starts its lane, and the same drain runs the lane to its wait.
+  defp step(%{at: 5} = model), do: %{model | status: :waiting, lane: :open}
   defp step(model), do: %{model | status: :waiting}
 
   defp name(at), do: Enum.at(@steps, at)
@@ -247,8 +274,19 @@ defmodule Durable.Fuzz.Audit4ApiWaitsTest do
   defp apply_op(id, {:kept_event, name}, n),
     do: Durable.send_event(id, name, %{"n" => n}, buffer: true)
 
+  defp apply_op(id, :lane_event, n) do
+    case Durable.list_children(id) do
+      [lane] -> Durable.send_event(lane.id, "l1", %{"n" => n})
+      [] -> {:error, :not_found}
+    end
+  end
+
   defp apply_op(id, :cancel_wait, _n), do: Wait.cancel_wait(id, reason: "stop")
   defp apply_op(id, :cancel, _n), do: Durable.cancel(id, "stop")
+
+  # A block's result is under its name, each lane's under the lane's.
+  defp got(context, "lanes"), do: context["lanes"]["lane"]["lane"]
+  defp got(context, step), do: context[step]
 
   defp expected_result(:slept), do: "slept"
   defp expected_result(value), do: describe(value)
@@ -263,7 +301,7 @@ defmodule Durable.Fuzz.Audit4ApiWaitsTest do
       do: assert(run.current_step == name(model.at), "at #{run.current_step} #{told}")
 
     for {step, value} <- model.results, model.status in [:waiting, :completed] do
-      assert run.context[step] == expected_result(value), "#{step} #{told}"
+      assert got(run.context, step) == expected_result(value), "#{step} #{told}"
     end
   end
 

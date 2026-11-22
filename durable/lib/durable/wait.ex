@@ -1040,9 +1040,21 @@ defmodule Durable.Wait do
   # ============================================================================
 
   @doc """
-  Cancels a waiting workflow.
+  Cancels a waiting workflow's wait.
 
-  The workflow will resume with `{:cancelled, reason}`.
+  The wait returns `{:cancelled, reason}` and the run carries on from there.
+
+  A run that waits on other runs has no wait of its own to cancel: one in a
+  `parallel` block waits for its lanes, and one in `call_workflow` for the
+  child. For such a run the call goes down to them instead. Every lane or
+  child that is waiting has its wait cancelled the same way, and theirs in
+  turn if they wait on other runs. Lanes and children that aren't waiting are
+  left alone, and so is the block or the call itself: it still waits for them
+  to finish, and then finishes by its own rules. Returns `:ok` even when
+  nothing under the run was waiting.
+
+  Returns `{:error, :not_waiting}` for a run that isn't waiting and
+  `{:error, :not_found}` for an id that isn't a run.
 
   ## Options
 
@@ -1059,22 +1071,71 @@ defmodule Durable.Wait do
     config = get_config(opts)
     reason = Keyword.get(opts, :reason, "cancelled")
 
-    with {:ok, _execution} <- get_waiting_execution(config, workflow_id),
-         {:ok, _} <-
-           Repo.transaction(config, fn -> cancel_and_resume(config, workflow_id, reason, opts) end) do
-      :ok
+    with {:ok, _execution} <- get_waiting_execution(config, workflow_id) do
+      cancel_waits_under(config, workflow_id, reason, opts)
+    end
+  end
+
+  # Each run is handled under its own lock, and no lock is held across two
+  # runs: a child that finishes locks itself and then its parent.
+  defp cancel_waits_under(config, workflow_id, reason, opts) do
+    case Repo.transaction(config, fn -> cancel_and_resume(config, workflow_id, reason, opts) end) do
+      {:ok, {:waits_on, children}} ->
+        Enum.each(children, &cancel_wait_if_waiting(config, &1, reason, opts))
+
+      {:ok, _resumed} ->
+        :ok
+
+      {:error, error} ->
+        {:error, error}
+    end
+  end
+
+  defp cancel_wait_if_waiting(config, workflow_id, reason, opts) do
+    with {:ok, _execution} <- get_waiting_execution(config, workflow_id) do
+      cancel_waits_under(config, workflow_id, reason, opts)
     end
   end
 
   defp cancel_and_resume(config, workflow_id, reason, opts) do
     lock_run(config, workflow_id)
-    :ok = cancel_pending_waits(config, workflow_id)
 
+    case awaited_runs(config, workflow_id) do
+      [] ->
+        :ok = cancel_pending_waits(config, workflow_id)
+        resume_cancelled(config, workflow_id, reason, opts)
+
+      children ->
+        {:waits_on, children}
+    end
+  end
+
+  defp resume_cancelled(config, workflow_id, reason, opts) do
     case Durable.Executor.resume_workflow(workflow_id, %{__cancelled__: reason}, opts) do
       {:ok, resumed} -> resumed
       {:error, error} -> config.repo.rollback(error)
     end
   end
+
+  # The runs this one waits for: the lanes of its parallel block, or the child
+  # of its call_workflow. Cancelling the wait for them would resume a block
+  # with its lanes unfinished, which fails it and leaves them waiting for ever.
+  defp awaited_runs(config, workflow_id) do
+    names =
+      Repo.all(
+        config,
+        from(p in PendingEvent,
+          where: p.workflow_id == ^workflow_id and p.status == :pending,
+          select: p.event_name
+        )
+      )
+
+    for name <- names, id = awaited_run(name), Repo.id?(id), do: id
+  end
+
+  defp awaited_run("__parallel_done:" <> id), do: id
+  defp awaited_run("__child_done:" <> id), do: id
+  defp awaited_run(_event_name), do: nil
 
   @doc false
   @spec cancel_pending_waits(Config.t(), String.t()) :: :ok
