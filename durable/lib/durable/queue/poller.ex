@@ -117,7 +117,7 @@ defmodule Durable.Queue.Poller do
       poll_interval: Keyword.get(opts, :poll_interval, @default_poll_interval),
       worker_supervisor: worker_supervisor,
       node_id: config.node_id,
-      workers: %{},
+      workers: adopt_workers(worker_supervisor),
       # A poller restarted on a node that is draining doesn't claim either.
       paused: Drainer.stopping?(config.name),
       timer_ref: nil
@@ -249,6 +249,18 @@ defmodule Durable.Queue.Poller do
   end
 
   # Private functions
+
+  # The workers of a poller that died live on under their supervisor. They
+  # still hold the queue's slots, and they report here now, so their runs are
+  # settled as any other's.
+  defp adopt_workers(supervisor) do
+    for {_id, pid, _type, _modules} when is_pid(pid) <-
+          DynamicSupervisor.which_children(supervisor),
+        job = Worker.adopt(pid),
+        into: %{} do
+      {pid, %{ref: Process.monitor(pid), job_id: job.id, token: job[:lock_token]}}
+    end
+  end
 
   defp poll_and_process(state) do
     available_slots = state.concurrency - map_size(state.workers)

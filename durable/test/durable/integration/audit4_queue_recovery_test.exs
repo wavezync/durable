@@ -256,14 +256,12 @@ defmodule Durable.Integration.Audit4QueueRecoveryTest do
   end
 
   describe "a poller that is killed" do
-    # BUG: the queue runs over its limit. The new poller starts with no workers
-    # (poller.ex:119) while the old one's are still running under the worker
-    # supervisor, so it claims `concurrency` more.
-    @tag :skip
+    # The old poller's workers live on under the worker supervisor, and the
+    # new poller takes them over.
     test "still counts the runs its workers hold against the queue's limit" do
       start_durable!(%{default: 1})
 
-      {:ok, _first} = Durable.start(Audit4QueueGate, %{"flag" => "first"})
+      {:ok, first} = Durable.start(Audit4QueueGate, %{"flag" => "first"})
       assert_eventually(fn -> Probe.hits(:gate) == 1 end)
 
       poller = Process.whereis(@poller)
@@ -276,6 +274,34 @@ defmodule Durable.Integration.Audit4QueueRecoveryTest do
 
       assert Probe.peak(:slots) == 1
       assert get(second).status == :pending
+
+      # The slot comes free when the worker it took over is done.
+      Probe.set("first")
+      await_status(first, :completed)
+      assert_eventually(fn -> Probe.hits(:gate) == 2 end)
+      Probe.set("second")
+      await_status(second, :completed)
+
+      assert Probe.peak(:slots) == 1
+      assert_eventually(fn -> :sys.get_state(@poller).workers == %{} end)
+    end
+
+    test "is told how the workers it took over ended, and fails a run for one" do
+      start_durable!(%{default: 1})
+      {:ok, id} = Durable.start(Audit4QueueSlowUndo, %{})
+      assert_eventually(fn -> Probe.hits(:undoing) == 1 end)
+
+      poller = Process.whereis(@poller)
+      Process.exit(poller, :kill)
+      restarted!(@poller, poller)
+
+      # A compensation that dies is the poller's to fail the run for.
+      [{_id, worker, _type, _modules}] =
+        DynamicSupervisor.which_children(Durable.Queue.WorkerSupervisor.Default)
+
+      Process.exit(:sys.get_state(worker).task_pid, :kill)
+
+      assert %{locked_by: nil, error: %{"type" => "task_crash"}} = await_status(id, :failed)
     end
 
     test "leaves the step it interrupted nothing to do twice" do
