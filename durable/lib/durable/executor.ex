@@ -48,6 +48,7 @@ defmodule Durable.Executor do
   @rollback "__rollback__"
   # What 1.5.0 recorded on a park instead. Kept for runs parked over an upgrade.
   @atom_keys "__atom_keys__"
+  @atom_twins "__atom_twins__"
 
   @missing_code_retry_ms 30_000
   # As long as the scheduler gives a deploy to bring a schedule's code.
@@ -1057,15 +1058,45 @@ defmodule Durable.Executor do
 
   defp string_key_names(map), do: for({key, _} <- map, is_binary(key), do: key)
 
+  # A key the data has under both shapes (`:id` beside "id"). JSON holds one
+  # name once, so the atom's value goes in the record, and restore_keys/2 puts
+  # it back: a step reads `data.id` after a wait as it did before.
+  defp atom_twins(map) do
+    for {key, value} <- map,
+        is_atom(key) and is_map_key(map, Atom.to_string(key)),
+        into: %{},
+        do: {Atom.to_string(key), sanitize_for_json(value)}
+  end
+
+  defp without_atom_twins(map, twins),
+    do:
+      Map.reject(map, fn {key, _} -> is_atom(key) and is_map_key(twins, Atom.to_string(key)) end)
+
+  defp record_shapes(engine_state, strings, twins) do
+    engine_state = Map.put(engine_state, @string_keys, strings)
+
+    if twins == %{},
+      do: Map.delete(engine_state, @atom_twins),
+      else: Map.put(engine_state, @atom_twins, twins)
+  end
+
+  defp atom_twins_of(record) do
+    for {name, value} <- Map.get(record, @atom_twins, %{}),
+        key = Context.known_key(name),
+        is_atom(key),
+        into: %{},
+        do: {key, value}
+  end
+
   # Top-level context keys come back from JSON as strings. Every save records
   # which were strings, so a step sees the same data however the run got back
   # to it: a retry, a wait, a queue move, a crash (a first step still reads
   # input["id"]). What the record doesn't list becomes an atom if the code knows
   # it, which covers what was merged in after the save, such as a wait's answer.
   # A run saved before the record existed has every key treated that way.
-  defp restore_keys(context, %{@string_keys => strings}) when is_list(strings) do
+  defp restore_keys(context, %{@string_keys => strings} = record) when is_list(strings) do
     {kept, others} = Map.split(context, strings)
-    others |> atomize_keys() |> Map.merge(kept)
+    others |> atomize_keys() |> Map.merge(kept) |> Map.merge(atom_twins_of(record))
   end
 
   defp restore_keys(context, %{@atom_keys => atom_keys}) when is_list(atom_keys) do
@@ -1562,7 +1593,7 @@ defmodule Durable.Executor do
           step_index,
           workflow_def,
           config,
-          exec.context
+          passed_on(exec)
         )
 
       {:decision, target_step, new_data} ->
@@ -1722,7 +1753,7 @@ defmodule Durable.Executor do
           step_index,
           workflow_def,
           config,
-          exec.context
+          passed_on(exec)
         )
 
       {:error, reason} ->
@@ -1859,7 +1890,7 @@ defmodule Durable.Executor do
 
         remaining_steps
         |> only_clause(branch, arm_steps(branch, arm))
-        |> execute_steps_recursive(exec, step_index, workflow_def, config, exec.context)
+        |> execute_steps_recursive(exec, step_index, workflow_def, config, passed_on(exec))
 
       stopped ->
         step_stopped(stopped, exec, data, workflow_def, config)
@@ -2025,7 +2056,7 @@ defmodule Durable.Executor do
           step_index,
           workflow_def,
           config,
-          exec.context
+          passed_on(exec)
         )
 
       # The jump is made by execute_branch/7, which has the steps after the block.
@@ -2283,7 +2314,7 @@ defmodule Durable.Executor do
           ])
     }
 
-    clean_ctx = exec.context
+    clean_ctx = passed_on(exec)
 
     # Check for fail_fast. A lane the block can do without doesn't fail it.
     optional = for {_id, %{"optional" => true, "returns_key" => key}} <- children_map, do: key
@@ -2654,12 +2685,14 @@ defmodule Durable.Executor do
     # on top of string-keyed DB-round-tripped input) and atomize_keys/1
     # deduplicates non-deterministically via Map.new, which corrupted
     # values in the branch DSL path.
-    merged = process_ctx |> Map.merge(data) |> sanitize_for_json() |> EngineState.strip()
+    raw = Map.merge(process_ctx, data)
+    twins = atom_twins(raw)
+    merged = raw |> without_atom_twins(twins) |> sanitize_for_json() |> EngineState.strip()
 
     engine_state =
       execution.engine_state
       |> finish_wait_markers(markers)
-      |> Map.put(@string_keys, string_key_names(merged))
+      |> record_shapes(string_key_names(merged), twins)
 
     engine_state =
       if done,
@@ -2673,6 +2706,10 @@ defmodule Durable.Executor do
     |> Ecto.Changeset.force_change(:engine_state, engine_state)
     |> cas_update!(config)
   end
+
+  # What a save hands the next step in the same pass: the context it wrote,
+  # and the atom twins the record holds beside it.
+  defp passed_on(exec), do: Map.merge(exec.context, atom_twins_of(exec.engine_state))
 
   defp done_record({step, arm}),
     do: %{"step" => Atom.to_string(step), "arm" => Atom.to_string(arm)}
@@ -2694,7 +2731,7 @@ defmodule Durable.Executor do
 
     # A finished run's context is its result, and is no step's data any more:
     # the records that went with the last save go, in the same write.
-    engine_state = Map.drop(execution.engine_state, [@done, @string_keys])
+    engine_state = Map.drop(execution.engine_state, [@done, @string_keys, @atom_twins])
 
     {:ok, execution} =
       execution
@@ -3716,10 +3753,12 @@ defmodule Durable.Executor do
 
   # Back to :pending with the worker freed, keeping `data` for the next claim.
   defp release(config, execution, data, attrs) do
+    twins = atom_twins(data)
+
     context =
       execution.context
       |> string_keys()
-      |> Map.merge(string_keys(data))
+      |> Map.merge(data |> without_atom_twins(twins) |> string_keys())
       |> sanitize_for_json()
       |> EngineState.strip()
 
@@ -3728,7 +3767,7 @@ defmodule Durable.Executor do
     engine_state =
       execution.engine_state
       |> Map.drop([@atom_keys, @done])
-      |> Map.put(@string_keys, string_key_names(data))
+      |> record_shapes(string_key_names(data), twins)
 
     {:ok, execution} =
       execution

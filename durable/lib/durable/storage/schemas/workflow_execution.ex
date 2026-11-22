@@ -81,7 +81,7 @@ defmodule Durable.Storage.Schemas.WorkflowExecution do
     field(:context, Durable.Storage.JsonMap, default: %{})
     # The engine's own state for the run. Never the user's data: see
     # Durable.EngineState. A run this engine creates has its mark from the start.
-    field(:engine_state, :map, default: %{"v" => 1})
+    field(:engine_state, Durable.Storage.JsonMap, default: %{"v" => 1})
     field(:current_step, :string)
     field(:error, :map)
     field(:parent_workflow_id, :binary_id)

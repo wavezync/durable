@@ -244,6 +244,7 @@ defmodule Durable.Fuzz.Audit4EngineStateTest do
   defp forged("__fail__"), do: %{"type" => "rollback", "message" => @forged}
   defp forged("__rollback__"), do: %{"error" => %{"type" => @forged}, "status" => "cancelled"}
   defp forged("__done__"), do: %{"step" => "approve", "arm" => "dispatch", "by" => @forged}
+  defp forged("__atom_twins__"), do: %{"plan" => @forged, "route" => @forged}
   defp forged("__string_keys__"), do: ["plan", @forged]
   defp forged("__atom_keys__"), do: ["plan", "route", @forged]
   defp forged("__parallel_step"), do: "lookups__stock"

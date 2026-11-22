@@ -441,18 +441,22 @@ defmodule Durable.Fuzz.Audit4ApiWaitsTest do
     end)
   end
 
-  # Each name once, as an atom or as a string: JSON can't hold both.
+  # Each name as an atom, as a string, or as both with a value each: JSON
+  # holds a name once, and the engine keeps the atom's value beside it.
   defp run_data do
     gen all(
           names <- uniq_list_of(member_of(@names), max_length: 6),
-          shapes <- list_of(boolean(), length: length(names)),
-          values <- list_of(json_value(), length: length(names))
+          shapes <- list_of(member_of([:atom, :string, :both]), length: length(names)),
+          values <- list_of(tuple({json_value(), json_value()}), length: length(names))
         ) do
       [names, shapes, values]
       |> Enum.zip()
-      |> Map.new(fn {name, atom?, value} ->
-        {if(atom?, do: String.to_atom(name), else: name), value}
+      |> Enum.flat_map(fn
+        {name, :atom, {value, _}} -> [{String.to_atom(name), value}]
+        {name, :string, {value, _}} -> [{name, value}]
+        {name, :both, {value, other}} -> [{String.to_atom(name), value}, {name, other}]
       end)
+      |> Map.new()
     end
   end
 

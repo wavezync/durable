@@ -121,8 +121,8 @@ after a wait, a retry or a move to another node. So:
 
 - The input's keys are strings: read them as `ctx["id"]` in every step.
 - A key a step adds as an atom (`assign(ctx, :total, total)`) is an atom in
-  later steps: `ctx.total`. Don't add an atom key with the same name as a
-  string key that is already there. Give it a new name.
+  later steps: `ctx.total`. If the data has the same name under both shapes
+  (`:id` beside `"id"`), both are kept, each with its own value.
 - Values come back as JSON holds them: a map inside the data has string keys,
   an atom is a string, a `DateTime` is ISO 8601 text.
 

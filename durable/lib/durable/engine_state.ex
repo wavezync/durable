@@ -21,7 +21,7 @@ defmodule Durable.EngineState do
   alias Durable.Storage.Schemas.WorkflowExecution
 
   @keys ~w(
-    __fail__ __rollback__ __done__ __string_keys__ __atom_keys__
+    __fail__ __rollback__ __done__ __string_keys__ __atom_keys__ __atom_twins__
     __parallel_step __parallel_children __parallel_wait_group_id __parallel_error_strategy
     __sleep_satisfied__ __timeout__ __cancelled__ __wait_group_result__ __wait_group_status__
     __call_children
