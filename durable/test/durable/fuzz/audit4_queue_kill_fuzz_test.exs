@@ -156,18 +156,19 @@ defmodule Durable.Fuzz.Audit4QueueKillTest do
     assert run.locked_by == nil, "left locked: #{label}"
     assert Probe.peak({:run, case_id}) <= 1, "steps overlapped: #{label}"
 
-    # Not checked here: a task killed as its attempt begins can leave that
-    # attempt's row open for good. See "a task killed as its attempt begins"
-    # in integration/audit4_queue_recovery_test.exs.
     rows = IntegrationRepo.all(from(s in StepExecution, where: s.workflow_id == ^id))
 
+    # However an attempt died, somebody closed its row.
+    open = for %{status: status} = row <- rows, status in [:pending, :running], do: row.step_name
+    assert open == [], "attempts left open #{inspect(open)}: #{label}"
+
     # A step killed after its row was written and before the run saved its
-    # result runs again, so a step can have more than one completed row.
+    # result isn't run again: the run takes the result from the row.
     if run.status == :completed do
       done = for %{status: :completed, is_compensation: false} = row <- rows, do: row.step_name
 
-      assert steps() -- Enum.map(done, &String.to_existing_atom/1) == [],
-             "a step skipped: #{label}"
+      assert Enum.sort(done) == Enum.sort(Enum.map(steps(), &Atom.to_string/1)),
+             "a step skipped or completed twice: #{label}"
     end
 
     undone = for {{^case_id, :undo, step}, _queue, _node} <- Probe.log(), do: step
