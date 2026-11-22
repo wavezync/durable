@@ -463,9 +463,25 @@ defmodule Durable.Executor do
       true ->
         execution
         |> Ecto.Changeset.change([status: :pending] ++ retry_attrs)
-        |> cas_update(config)
+        |> reopen(config, retry_attrs)
         |> not_failed_if_superseded()
     end
+  end
+
+  # Reopens a run and puts back the child workflows that were stopped with it:
+  # its timeout cancelled them, and its step would find its child cancelled
+  # and fail again. In one transaction, or a worker could claim the run before
+  # its child is back.
+  defp reopen(changeset, config, retry_attrs, opts \\ []) do
+    {:ok, result} =
+      Repo.transaction(config, fn ->
+        with {:ok, retried} = ok <- cas_update(changeset, config, opts) do
+          put_back_called(config, [retried.id], retry_attrs)
+          ok
+        end
+      end)
+
+    result
   end
 
   # Reopens a run that holds its key, only if it still does: a start may be
@@ -474,7 +490,7 @@ defmodule Durable.Executor do
   defp retry_holder(config, execution, retry_attrs) do
     changeset = Ecto.Changeset.change(execution, [status: :pending] ++ retry_attrs)
 
-    case cas_update(%{changeset | filters: %{holds_key: true}}, config) do
+    case reopen(%{changeset | filters: %{holds_key: true}}, config, retry_attrs) do
       {:error, :superseded} ->
         with {:ok, lost} <- lost_its_key(config, execution),
              do: retry_and_retake(config, lost, retry_attrs)
@@ -508,7 +524,7 @@ defmodule Durable.Executor do
       execution
       |> Ecto.Changeset.change([status: :pending] ++ retry_attrs ++ key_attrs)
       |> Ecto.Changeset.unique_constraint(:key, name: :workflow_executions_key_holder_index)
-      |> cas_update(config, mode: :savepoint)
+      |> reopen(config, retry_attrs, mode: :savepoint)
       |> not_failed_if_superseded()
       |> key_taken_if_conflict(config, execution)
     end
@@ -573,7 +589,7 @@ defmodule Durable.Executor do
     |> Ecto.Changeset.change([status: status] ++ retry_attrs ++ key_attrs)
     |> still_holding(parent)
     |> Ecto.Changeset.unique_constraint(:key, name: :workflow_executions_key_holder_index)
-    |> cas_update(config, mode: :savepoint)
+    |> reopen(config, retry_attrs, mode: :savepoint)
     |> not_failed_if_superseded()
     |> key_taken_if_conflict(config, parent)
     |> case do

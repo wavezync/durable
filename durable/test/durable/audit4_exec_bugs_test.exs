@@ -7,6 +7,7 @@ defmodule Durable.Audit4ExecBugsTest do
 
   import Durable.Testing
 
+  alias Durable.Storage.Schemas.PendingEvent
   alias Durable.Storage.Schemas.WorkflowExecution
   alias Durable.TestRepo, as: Repo
 
@@ -254,7 +255,8 @@ defmodule Durable.Audit4ExecBugsTest do
     on_exit(&Audit4ExecBugSeen.clear/0)
   end
 
-  defp order(input, workflow), do: run_workflow(Audit4ExecBugOrders, input, workflow: workflow)
+  defp order(input, workflow) when is_binary(workflow), do: order(input, workflow: workflow)
+  defp order(input, opts), do: run_workflow(Audit4ExecBugOrders, input, opts)
   defp reload(run), do: Repo.get!(WorkflowExecution, run.id)
 
   defp children(run),
@@ -376,32 +378,52 @@ defmodule Durable.Audit4ExecBugsTest do
     assert DateTime.compare(kitchen.deadline_at, surveyor.deadline_at) != :gt
   end
 
-  # A run that times out while it waits for its child cancels the child
-  # (executor.ex:1272, fail_at/5). Durable.retry/1 then reopens the run alone
-  # (executor.ex:463, the last clause of reset_for_retry/2): its step finds the
-  # child cancelled and the run fails again with "parent_cancelled", for ever.
-  # A lane's child is put back by put_back/3 (executor.ex:650); this path isn't.
-  @tag :skip
-  test "a run that timed out waiting for its child can be retried" do
-    run = order(%{}, "audit4_order_within_the_hour")
-    assert run.status == :waiting
-
-    # Its deadline passes, and the timeout sweep wakes it to fail.
+  # Its deadline passes, and the timeout sweep wakes it to fail, closing its waits.
+  defp timed_out(run) do
     past = DateTime.add(DateTime.utc_now(), -1, :second)
 
     Repo.update_all(from(w in WorkflowExecution, where: w.id == ^run.id),
       set: [deadline_at: past, status: :pending]
     )
 
-    run = drain(run)
-    assert %{status: :failed, error: %{"type" => "timeout"}} = run
-    assert [%{status: :cancelled}] = children(run)
+    Repo.update_all(from(e in PendingEvent, where: e.workflow_id == ^run.id),
+      set: [status: :timeout]
+    )
 
+    drain(run)
+  end
+
+  # A run that times out while it waits for its child cancels the child. A
+  # retry that reopened the run alone had its step find the child cancelled,
+  # and the run failed again with "parent_cancelled", for ever.
+  for key <- [nil, "order-7"] do
+    test "a run that timed out waiting for its child can be retried (key: #{inspect(key)})" do
+      run = order(%{}, workflow: "audit4_order_within_the_hour", key: unquote(key))
+      assert run.status == :waiting
+
+      run = timed_out(run)
+      assert %{status: :failed, error: %{"type" => "timeout"}} = run
+      assert [%{status: :cancelled}] = children(run)
+
+      {:ok, _} = Durable.retry(run.id)
+      run = drain(run)
+
+      assert run.status == :waiting, "retried, it ended #{run.status}: #{inspect(run.error)}"
+      assert [%{status: :waiting} = charge] = children(run)
+
+      :ok = Durable.send_event(charge.id, "bank_confirmed", %{})
+      run = drain(run)
+      assert run.status == :completed
+      assert run.context["payment"]["paid"]
+    end
+  end
+
+  test "a retry that is refused leaves the cancelled child as it was" do
+    run = timed_out(order(%{}, "audit4_order_within_the_hour"))
     {:ok, _} = Durable.retry(run.id)
-    run = drain(run)
 
-    assert run.status == :waiting, "retried, it ended #{run.status}: #{inspect(run.error)}"
-    assert [%{status: :waiting}] = children(run)
+    assert Durable.retry(run.id) == {:error, :not_failed}
+    assert [%{status: :pending}] = children(run)
   end
 
   # executor.ex:2747 (stop_block_on_failure/4) ends a fail-fast block only for
