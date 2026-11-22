@@ -19,13 +19,13 @@ export const EXAMPLES: { slug: string; heading: string; file: string; guide?: st
           wait: {
             says: 'a manager has to approve the expense',
             actions: [
-              { label: 'Approve', value: ':approved', call: '`Durable.provide_input(id, "manager", :approved)`' },
-              { label: 'Reject', value: ':rejected', call: '`Durable.provide_input(id, "manager", :rejected)`' },
-              { label: 'Let 3 days pass', value: ':auto_rejected', call: 'Nobody answered in 3 days, so `wait_for_approval` returned `:auto_rejected`.' },
+              { label: 'Approve', value: '"approved"', call: '`Durable.provide_input(id, "manager", %{"approved" => true})`' },
+              { label: 'Reject', value: '"rejected"', call: '`Durable.provide_input(id, "manager", %{"approved" => false})`' },
+              { label: 'Let 3 days pass', value: '"auto_rejected"', call: 'Nobody answered in 3 days, so `wait_for_approval` returned its `timeout_value`, `:no_answer`.' },
             ],
           },
         },
-        { branch: 'decision', clauses: { ':approved': [{ step: 'process', ms: 900 }], _: [{ step: 'notify_rejection', ms: 700 }] } },
+        { branch: 'decision', clauses: { '"approved"': [{ step: 'process', ms: 900 }], _: [{ step: 'notify_rejection', ms: 700 }] } },
       ],
     },
   },
@@ -98,7 +98,7 @@ export const EXAMPLES: { slug: string; heading: string; file: string; guide?: st
             actions: [
               { label: 'Send payment.success', value: '"payment.success"', call: 'Your webhook called `Durable.send_event(id, "payment.success", %{transaction_id: "txn_123"})`.' },
               { label: 'Send payment.failed', value: '"payment.failed"', call: 'Your webhook called `Durable.send_event(id, "payment.failed", %{})`.' },
-              { label: 'Let 7 days pass', value: '"payment.expired"', call: 'No event in 7 days, so `wait_for_any` returned the timeout value.' },
+              { label: 'Let 7 days pass', value: '"payment.expired"', call: 'No event in 7 days, so `wait_for_any` returned its `timeout_value`, `{"payment.expired", nil}`.' },
             ],
           },
         },
