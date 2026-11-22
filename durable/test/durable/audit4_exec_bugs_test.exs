@@ -1,7 +1,7 @@
 defmodule Durable.Audit4ExecBugsTest do
   @moduledoc """
-  Audit 4, executor: what breaks today. Each test fails without its `:skip`,
-  and the line above the tag says why.
+  Audit 4, executor: what the audit found broken. A test still tagged `:skip`
+  fails without it, and the line above the tag says why.
   """
   use Durable.DataCase, async: false
 
@@ -115,6 +115,21 @@ defmodule Durable.Audit4ExecBugsTest do
         {:ok, _id} = start_workflow(Audit4ExecBugCharge, %{"total" => 40})
         {:ok, order}
       end)
+    end
+
+    # The card is charged while the stock is counted.
+    workflow "audit4_order_counted" do
+      parallel :prepare do
+        step(:charge, fn _order ->
+          with {:ok, payment} <- call_workflow(Audit4ExecBugCharge, %{"total" => 40}) do
+            {:ok, %{payment: payment}}
+          end
+        end)
+
+        step(:count_stock, fn _order ->
+          if Audit4ExecBugSeen.get(:stock_out), do: {:fail, "out of stock"}, else: {:ok, %{}}
+        end)
+      end
     end
 
     # The courier is asked for a quote while the warehouse waits for a picker.
@@ -305,20 +320,30 @@ defmodule Durable.Audit4ExecBugsTest do
   end
 
   describe "a child workflow with a timeout:" do
-    # orchestration.ex:251 (create_child_execution/4) builds the child's row
-    # without `deadline_at`, so the child's own `timeout:` never applies.
-    # Executor.create_execution/5 sets it with `deadline(workflow_def, scheduled_at)`.
-    @tag :skip
     test "gets its deadline when call_workflow starts it" do
       run = order(%{}, "audit4_order_paid")
       assert [%{workflow_name: "audit4_charge", deadline_at: %DateTime{}}] = children(run)
     end
 
-    # The same row, started by start_workflow/3.
-    @tag :skip
     test "gets its deadline when start_workflow starts it" do
       run = order(%{}, "audit4_order_with_receipt")
       assert [%{workflow_name: "audit4_charge", deadline_at: %DateTime{}}] = children(run)
+    end
+
+    # The block that stopped has no timeout, and the charge its lane called has an hour.
+    test "gets all of it again, and not its caller's, when a retry puts it back" do
+      Audit4ExecBugSeen.put(:stock_out, true)
+      run = order(%{}, "audit4_order_counted")
+      assert run.status == :failed
+
+      Audit4ExecBugSeen.put(:stock_out, false)
+      {:ok, _} = Durable.retry(run.id)
+      assert drain(run).status == :waiting
+
+      lane = Enum.find(children(run), &(&1.current_step == "prepare__charge"))
+      assert lane.deadline_at == nil
+      assert [%{status: :waiting, deadline_at: %DateTime{} = deadline}] = children(lane)
+      assert_in_delta DateTime.diff(deadline, DateTime.utc_now()), 3600, 60
     end
   end
 

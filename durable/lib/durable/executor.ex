@@ -647,17 +647,24 @@ defmodule Durable.Executor do
 
     for {_id, context} <- blocks, do: reopen_children(config, context, retry_attrs)
 
+    put_back_called(config, Enum.map(steps, &elem(&1, 0)), retry_attrs)
+  end
+
+  # A child workflow has its own `timeout:`, and gets all of that again.
+  defp put_back_called(config, parent_ids, retry_attrs) do
     called =
       Repo.all(
         config,
         from(c in WorkflowExecution,
-          where: c.parent_workflow_id in ^Enum.map(steps, &elem(&1, 0)),
-          where: c.status == :cancelled and c.error["message"] == "parent_cancelled",
-          select: {c.id, c.context}
+          where: c.parent_workflow_id in ^parent_ids,
+          where: c.status == :cancelled and c.error["message"] == "parent_cancelled"
         )
       )
 
-    put_back(config, called, retry_attrs)
+    for child <- called do
+      attrs = Keyword.put(retry_attrs, :deadline_at, retried_deadline(child))
+      put_back(config, [{child.id, child.context}], attrs)
+    end
   end
 
   defp reopen_group(config, group_id, %{stopped: stopped, finished: finished, now: now}) do

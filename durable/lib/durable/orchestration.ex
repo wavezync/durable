@@ -258,7 +258,8 @@ defmodule Durable.Orchestration do
       context: %{},
       parent_workflow_id: parent_id,
       root_workflow_id: Map.get(Durable.Telemetry.run_meta(), :root_workflow_id, parent_id),
-      trigger: :parent
+      trigger: :parent,
+      deadline_at: Executor.deadline(workflow_def, nil)
     }
 
     {:ok, execution} =
