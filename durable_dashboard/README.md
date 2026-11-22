@@ -67,8 +67,7 @@ end
 ```
 
 The macro emits the dashboard's pipelines, asset routes, and live routes
-inline in your router. It must live at the **top level** — not inside a
-`scope` or `pipe_through` block, since it defines its own pipelines.
+inline in your router. Inside a `scope` it mounts under the scope's path.
 
 ### Options
 

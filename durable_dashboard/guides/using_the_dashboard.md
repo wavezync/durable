@@ -9,8 +9,7 @@ This guide covers setup, what each page is for, and how to do the common jobs.
 
 ## Set it up
 
-Add the package, then mount it at the top level of your router, outside any
-`scope` or `pipe_through`:
+Add the package, then mount it in your router:
 
 ```elixir
 # mix.exs

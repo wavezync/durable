@@ -35,9 +35,13 @@ defmodule DurableDashboard.Live.Audit4RouterTest do
     |> Enum.filter(&String.starts_with?(&1, "/"))
   end
 
+  # Inside a `scope` the pages are under the scope's path, but the dashboard
+  # used to be told only the path it was given: its links and its stylesheet
+  # pointed outside the mount.
   for {router, base} <- [
         {Audit4Dash.RootRouter, ""},
-        {Audit4Dash.NestedRouter, "/admin/ops/durable"}
+        {Audit4Dash.NestedRouter, "/admin/ops/durable"},
+        {Audit4Dash.ScopedRouter, "/admin/durable"}
       ] do
     test "mounted at #{inspect(base)}: every page renders and links stay inside", %{conn: conn} do
       base = unquote(base)

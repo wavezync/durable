@@ -95,6 +95,17 @@ defmodule Audit4Dash.Bugs do
   end
 end
 
+defmodule Audit4Dash.ScopedRouter do
+  @moduledoc false
+  use Phoenix.Router
+  import Phoenix.LiveView.Router
+  import DurableDashboard.Router
+
+  scope "/admin" do
+    dashboard_routes("/durable", resolver: DurableDashboard.TestResolver)
+  end
+end
+
 defmodule Audit4Dash.Endpoint do
   @moduledoc false
   use Phoenix.Endpoint, otp_app: :durable_dashboard

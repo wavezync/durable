@@ -16,8 +16,7 @@ defmodule DurableDashboard.Router do
 
   ## Usage
 
-  One line. Add this at the **top level** of your router (not inside a
-  `scope` or `pipe_through` block — the macro defines its own pipelines):
+  One line in your router:
 
       defmodule MyAppWeb.Router do
         use MyAppWeb, :router
@@ -31,6 +30,9 @@ defmodule DurableDashboard.Router do
 
       import DurableDashboard.Router
       dashboard_routes "/dashboard", durable: MyApp.Durable
+
+  Inside a `scope`, the dashboard mounts under the scope's path and its links
+  follow.
 
   This emits two pipelines (`:durable_dashboard_browser` and
   `:durable_dashboard_assets`) and two scopes:
@@ -100,6 +102,9 @@ defmodule DurableDashboard.Router do
         plug :accepts, ["html", "json", "css", "js", "woff2", "woff", "ttf", "map"]
       end
 
+      # Where the pages really are: under any `scope` this is called in.
+      durable_dashboard_base = Phoenix.Router.scoped_path(__MODULE__, unquote(prefix))
+
       scope path: unquote(prefix), alias: false, as: false do
         pipe_through :durable_dashboard_assets
         forward "/__assets__", DurableDashboard.AssetServer
@@ -119,7 +124,7 @@ defmodule DurableDashboard.Router do
              [
                %{
                  durable: unquote(durable),
-                 base_path: unquote(prefix),
+                 base_path: durable_dashboard_base,
                  live_socket_path: unquote(live_socket_path)
                },
                unquote(resolver)
