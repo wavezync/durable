@@ -64,6 +64,27 @@ defmodule DurableDashboard.Live.Audit4RouterTest do
         refute Enum.any?(links, &String.contains?(&1, "//")), "#{path}: #{inspect(links)}"
       end
 
+      # The stylesheet and the script come from the mount's own asset route.
+      # (Mounted at "/", they were asked for at "//__assets__/app.css", which
+      # a browser reads as the host "__assets__": the page had no styles and
+      # no script.)
+      document =
+        conn
+        |> get(if(base == "", do: "/", else: base))
+        |> html_response(200)
+        |> LazyHTML.from_document()
+
+      assets =
+        Enum.filter(
+          LazyHTML.attribute(LazyHTML.query(document, "link[rel=stylesheet]"), "href") ++
+            LazyHTML.attribute(LazyHTML.query(document, "script[src]"), "src"),
+          &String.starts_with?(&1, "/")
+        )
+
+      assert length(assets) == 2
+      assert Enum.all?(assets, &String.starts_with?(&1, base <> "/__assets__/")), inspect(assets)
+      for asset <- assets, do: assert(get(conn, asset).status == 200)
+
       # Navigation and an action work from the mount, not just the first render.
       {:ok, view, _html} = live(conn, if(base == "", do: "/", else: base))
       view |> with_target("#command-palette") |> render_hook("palette:open", %{})

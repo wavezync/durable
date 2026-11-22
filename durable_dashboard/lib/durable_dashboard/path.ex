@@ -73,6 +73,10 @@ defmodule DurableDashboard.Path do
   @spec settings(String.t()) :: String.t()
   def settings(base_path), do: prefix(base_path, "/settings")
 
+  @doc "A file on the mount's asset route (`/__assets__`)."
+  @spec asset(String.t() | nil, String.t()) :: String.t()
+  def asset(base_path, file), do: prefix(base_path, "/__assets__/#{file}")
+
   defp prefix(base_path, suffix) do
     base = String.trim_trailing(base_path || "", "/")
     normalize(base <> suffix)

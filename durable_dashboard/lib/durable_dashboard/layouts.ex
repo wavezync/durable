@@ -135,9 +135,11 @@ defmodule DurableDashboard.Layouts do
     """
   end
 
+  # Through `Path`, so a mount at "/" asks for "/__assets__/…": "//__assets__/…"
+  # is another host to a browser.
   defp asset_path(assigns, file) do
-    base = get_in(assigns, [:config, :base_path]) || ""
-    "#{base}/__assets__/#{file}?vsn=#{asset_digest()}"
+    DurableDashboard.Path.asset(get_in(assigns, [:config, :base_path]), file) <>
+      "?vsn=#{asset_digest()}"
   end
 
   # Content digest of the built bundle. Assets are served immutable for a
