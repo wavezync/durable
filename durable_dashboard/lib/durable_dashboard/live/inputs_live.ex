@@ -22,6 +22,7 @@ defmodule DurableDashboard.Live.InputsLive do
   alias DurableDashboard.Access
   alias DurableDashboard.Components.Charts
   alias DurableDashboard.Components.Core
+  alias DurableDashboard.Format
   alias DurableDashboard.Layouts
   alias DurableDashboard.Path, as: DPath
 
@@ -540,21 +541,19 @@ defmodule DurableDashboard.Live.InputsLive do
       <.request_field input={@input} />
       <p class="text-xs font-medium">{if @input.input_type == :single_choice, do: "Pick one", else: "Pick any"}</p>
       <label
-        :for={choice <- @input.fields || []}
+        :for={choice <- options(@input.fields)}
         class="flex cursor-pointer items-center gap-3 rounded-md border border-border px-3 py-2.5 hover:bg-accent has-[:checked]:border-primary has-[:checked]:bg-primary/5"
       >
         <input
-          id={"#{@input.id}-#{choice["value"]}"}
+          id={"#{@input.id}-#{choice.value}"}
           type={if @input.input_type == :single_choice, do: "radio", else: "checkbox"}
           name={if @input.input_type == :single_choice, do: "choice", else: "choices[]"}
-          value={choice["value"]}
+          value={choice.value}
           class="accent-[var(--primary)]"
         />
         <span class="flex flex-col leading-tight">
-          <span class="text-[13px] font-medium">{choice["label"] || choice["value"]}</span>
-          <span :if={choice["hint"] || choice["description"]} class="text-xs text-muted-foreground">
-            {choice["hint"] || choice["description"]}
-          </span>
+          <span class="text-[13px] font-medium">{choice.label}</span>
+          <span :if={choice.hint} class="text-xs text-muted-foreground">{choice.hint}</span>
         </span>
       </label>
       <div class="mt-1 flex justify-end">
@@ -613,7 +612,7 @@ defmodule DurableDashboard.Live.InputsLive do
     ~H"""
     <select id={@id} name={"fields[#{@field["name"]}]"} required={@field["required"]} class={field_class()}>
       <option value="">Choose…</option>
-      <option :for={opt <- @field["options"] || []} value={opt}>{opt}</option>
+      <option :for={opt <- options(@field["options"])} value={opt.value}>{opt.label}</option>
     </select>
     """
   end
@@ -804,7 +803,7 @@ defmodule DurableDashboard.Live.InputsLive do
 
   defp relative(at) do
     seconds = DateTime.diff(at, DateTime.utc_now())
-    if seconds <= 0, do: "now", else: "in " <> DurableDashboard.Format.ms(seconds * 1_000)
+    if seconds <= 0, do: "now", else: "in " <> Format.ms(seconds * 1_000)
   end
 
   # Timeout values are stored wrapped so atoms and scalars survive JSONB.
@@ -834,6 +833,23 @@ defmodule DurableDashboard.Live.InputsLive do
   defp fact_value(v) when is_binary(v), do: v
   defp fact_value(v) when is_number(v) or is_boolean(v), do: to_string(v)
   defp fact_value(v), do: Jason.encode!(v)
+
+  # A choice, or a select field's option, as `%{value, label, hint}`. A
+  # workflow gives either `%{value:, label:}` maps or bare values.
+  defp options(list) when is_list(list), do: Enum.map(list, &option/1)
+  defp options(_none), do: []
+
+  defp option(%{} = option) do
+    value = Format.text(option["value"])
+
+    %{
+      value: value,
+      label: Format.text(option["label"]) || value,
+      hint: Format.text(option["hint"] || option["description"])
+    }
+  end
+
+  defp option(value), do: %{value: Format.text(value), label: Format.text(value), hint: nil}
 
   defp field_label(field), do: field["label"] || to_string(field["name"])
 

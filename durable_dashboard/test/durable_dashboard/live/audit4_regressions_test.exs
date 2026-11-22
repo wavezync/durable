@@ -287,4 +287,44 @@ defmodule DurableDashboard.Live.Audit4RegressionsTest do
     assert crashes([{id, fn -> {:ok, _view, _html} = live(conn, dash("/executions/#{id}")) end}]) ==
              []
   end
+
+  # A form field's `options:` given as `%{value:, label:}` maps (the shape
+  # `wait_for_choice/2` documents for its choices) was put straight into
+  # `<option value={opt}>{opt}</option>`, which raises for a map: while that
+  # request was pending the whole Inbox was down, all three tabs, for everyone.
+  test "a select field whose options are value/label maps doesn't take the Inbox down",
+       %{conn: conn} do
+    {:ok, _id} =
+      Durable.Executor.start_workflow(Audit4Dash.Bugs, %{},
+        workflow: "audit4_select_form",
+        inline: true
+      )
+
+    assert crashes(
+             for path <- ~w(/inputs /inputs?tab=events /inputs?tab=sleep) do
+               {path, fn -> {:ok, _view, _html} = live(conn, dash(path)) end}
+             end
+           ) == []
+
+    {:ok, view, _html} = live(conn, dash("/inputs"))
+    assert has_element?(view, ~s(select option[value="mbp"]), "MacBook Pro")
+    assert has_element?(view, ~s(select option[value="x1"]), "ThinkPad")
+  end
+
+  test "choices and options given as bare values, or as something odd, still render",
+       %{conn: conn} do
+    run = Fixtures.run!(Fixtures.Approvals)
+
+    for {type, fields} <- [
+          {:single_choice, [%{"value" => %{"a" => 1}}, %{"label" => 3}, %{}]},
+          {:form,
+           [%{"name" => "size", "type" => "select", "options" => ["s", 2, %{"label" => "L"}]}]}
+        ] do
+      repo().update_all(from(p in PendingInput, where: p.workflow_id == ^run),
+        set: [input_type: type, fields: fields]
+      )
+
+      assert crash(fn -> {:ok, _view, _html} = live(conn, dash("/inputs")) end) == nil
+    end
+  end
 end

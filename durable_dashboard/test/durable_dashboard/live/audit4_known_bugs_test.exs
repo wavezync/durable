@@ -38,26 +38,6 @@ defmodule DurableDashboard.Live.Audit4KnownBugsTest do
 
   defp crashes(cases), do: for({label, fun} <- cases, reason = crash(fun), do: {label, reason})
 
-  # A form field's `options:` given as `%{value:, label:}` maps — the shape
-  # `wait_for_choice/2` documents for its choices — is interpolated straight
-  # into `<option value={opt}>{opt}</option>` (inputs_live.ex:568), which
-  # raises Protocol.UndefinedError (Phoenix.HTML.Safe for Map). While that
-  # request is pending the whole Inbox is down, all three tabs, for everyone.
-  test "a select field whose options are value/label maps doesn't take the Inbox down",
-       %{conn: conn} do
-    {:ok, _id} =
-      Durable.Executor.start_workflow(Audit4Dash.Bugs, %{},
-        workflow: "audit4_select_form",
-        inline: true
-      )
-
-    assert crashes(
-             for path <- ~w(/inputs /inputs?tab=events /inputs?tab=sleep) do
-               {path, fn -> {:ok, _view, _html} = live(conn, dash(path)) end}
-             end
-           ) == []
-  end
-
   # "decide" is the approval form's event, but `handle_event("decide", …)`
   # (inputs_live.ex:90) never checks the selected request is an approval: sent
   # at a form request it completes it with `%{"approved" => true}`, skipping
