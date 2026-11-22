@@ -217,7 +217,7 @@ defmodule Durable.Scheduler do
 
   defp execute_schedule(schedule, config) do
     # Parse the module from the stored string
-    module = parse_module(schedule.workflow_module)
+    module = API.parse_module(schedule.workflow_module)
 
     case module do
       {:ok, mod} ->
@@ -282,24 +282,6 @@ defmodule Durable.Scheduler do
           "[Durable.Scheduler] Failed to record failure for #{schedule.name}: " <>
             inspect(cs.errors)
         )
-    end
-  end
-
-  defp parse_module(module_string) do
-    # Handle both "Elixir.MyModule" and "MyModule" formats
-    module_name =
-      if String.starts_with?(module_string, "Elixir.") do
-        module_string
-      else
-        "Elixir." <> module_string
-      end
-
-    try do
-      module = String.to_existing_atom(module_name)
-      if Code.ensure_loaded?(module), do: {:ok, module}, else: {:error, :module_not_found}
-    rescue
-      ArgumentError ->
-        {:error, :module_not_found}
     end
   end
 

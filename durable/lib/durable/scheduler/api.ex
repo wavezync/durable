@@ -298,12 +298,8 @@ defmodule Durable.Scheduler.API do
   def trigger_schedule(name, opts \\ []) do
     durable_name = Keyword.get(opts, :durable, Durable)
 
-    with {:ok, schedule} <- get_schedule(name, durable: durable_name) do
-      module =
-        String.to_existing_atom(
-          "Elixir." <> String.trim_leading(schedule.workflow_module, "Elixir.")
-        )
-
+    with {:ok, schedule} <- get_schedule(name, durable: durable_name),
+         {:ok, module} <- parse_module(schedule.workflow_module) do
       input = Keyword.get(opts, :input, schedule.input)
 
       Durable.Executor.start_workflow(module, input,
@@ -314,6 +310,28 @@ defmodule Durable.Scheduler.API do
         trigger: :schedule,
         trigger_ref: schedule.name
       )
+    end
+  end
+
+  @doc false
+  # A schedule's workflow, if this node has its code: in a rolling deploy, or
+  # on a node that runs other queues, it may not.
+  @spec parse_module(String.t()) :: {:ok, module()} | {:error, :module_not_found}
+  def parse_module(module_string) do
+    # Handle both "Elixir.MyModule" and "MyModule" formats
+    module_name =
+      if String.starts_with?(module_string, "Elixir.") do
+        module_string
+      else
+        "Elixir." <> module_string
+      end
+
+    try do
+      module = String.to_existing_atom(module_name)
+      if Code.ensure_loaded?(module), do: {:ok, module}, else: {:error, :module_not_found}
+    rescue
+      ArgumentError ->
+        {:error, :module_not_found}
     end
   end
 

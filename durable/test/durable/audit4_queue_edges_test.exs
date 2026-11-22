@@ -114,10 +114,6 @@ defmodule Durable.Audit4QueueEdgesTest do
   end
 
   describe "trigger_schedule/2" do
-    # BUG: raises ArgumentError instead of returning an error. API.trigger_schedule/2
-    # (scheduler/api.ex:303) calls String.to_existing_atom/1 on the stored module
-    # name, which the scheduler's own check guards (scheduler.ex:292) and this doesn't.
-    @tag :skip
     test "for a schedule whose module isn't on this node is an error, not a raise" do
       {:ok, schedule} = Durable.schedule(Audit4QueueEdgeRow, "0 9 * * *", name: "elsewhere")
 
@@ -125,7 +121,7 @@ defmodule Durable.Audit4QueueEdgesTest do
       |> Ecto.Changeset.change(workflow_module: "Audit4Queue.OnAnotherNode")
       |> TestRepo.update!()
 
-      assert {:error, _reason} = Durable.trigger_schedule("elsewhere")
+      assert {:error, :module_not_found} = Durable.trigger_schedule("elsewhere")
       assert runs() == []
 
       assert %ScheduledWorkflow{enabled: true} =
