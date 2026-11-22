@@ -299,7 +299,7 @@ defmodule Durable.Fuzz.Audit4ApiWaitsTest do
       boolean(),
       constant(nil),
       string(:utf8, max_length: 8),
-      member_of([:ok, :error, :"a b", 2 ** 80, -0.0, 1.0e300, "", "\u{10FFFF}"])
+      member_of([:ok, :error, :"a b", 2 ** 80, -0.0, 1.0e300, 1000.0, -2.0e6, "", "\u{10FFFF}"])
     ])
   end
 
@@ -331,8 +331,8 @@ defmodule Durable.Fuzz.Audit4ApiWaitsTest do
 
   defp through_json(value), do: value |> Jason.encode!() |> Jason.decode!()
 
-  # Equal, but for a number's type: jsonb hands a whole float of a million or
-  # more back as an integer (a skipped test in audit4_api_waits_test.exs).
+  # Equal, a number's type included. Only a zero's sign is lost: jsonb has one
+  # zero.
   defp same?(a, b) when is_map(a) and is_map(b) do
     Map.keys(a) == Map.keys(b) and Enum.all?(a, fn {key, value} -> same?(value, b[key]) end)
   end
@@ -340,9 +340,8 @@ defmodule Durable.Fuzz.Audit4ApiWaitsTest do
   defp same?(a, b) when is_list(a) and is_list(b),
     do: length(a) == length(b) and a |> Enum.zip(b) |> Enum.all?(fn {x, y} -> same?(x, y) end)
 
-  # Read as text: dividing a big integer by 1 can land one float away.
-  defp same?(a, b) when is_float(a) and is_integer(b), do: a == String.to_float("#{b}.0")
-  defp same?(a, b), do: a == b
+  defp same?(a, b) when is_float(a) and is_float(b), do: a == b
+  defp same?(a, b), do: a === b
 
   defp come_back(id, way) when way in [:event, :any] do
     :ok = Durable.send_event(id, "audit4_api_answer", "x")

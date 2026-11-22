@@ -128,6 +128,29 @@ defmodule Durable.Audit4ApiWaitsTest do
     end
   end
 
+  defmodule Audit4ApiFloatsEverywhere do
+    use Durable
+    use Durable.Wait
+
+    alias Durable.Audit4ApiWaitsTest, as: T
+
+    workflow "audit4_api_floats_everywhere" do
+      step(:make, fn data -> {:ok, Map.put(data, "made", T.floats())} end)
+
+      step(:wait, fn data ->
+        event = wait_for_event("go")
+        input = wait_for_input("ask")
+
+        {:ok,
+         Map.put(data, "seen", %{
+           "made" => T.all_floats?(data["made"]),
+           "event" => T.all_floats?(event),
+           "input" => T.all_floats?(input)
+         })}
+      end)
+    end
+  end
+
   defmodule Audit4ApiWaitsAny do
     use Durable
     use Durable.Wait
@@ -151,6 +174,18 @@ defmodule Durable.Audit4ApiWaitsTest do
   def timeout_value("zero"), do: 0
   def timeout_value("text"), do: "No reason provided"
   def timeout_value("map"), do: %{"approved" => false, "n" => 1.5}
+
+  # Whole floats, which a JSON encoder writes without a fraction digit.
+  def floats do
+    %{
+      "list" => [1000.0, 2.0e6, 1.0e16, -2_000_000.0, 1.0e300, 3.0, 0.5],
+      "nested" => %{"deep" => [%{"total" => 1.0e16}, [-2_000_000.0]]}
+    }
+  end
+
+  def all_floats?(%{} = map), do: map |> Map.values() |> all_floats?()
+  def all_floats?(list) when is_list(list), do: Enum.all?(list, &all_floats?/1)
+  def all_floats?(leaf), do: is_float(leaf)
 
   # What the step got back, in a form that survives the context's trip to JSON.
   def describe(got), do: inspect(got)
@@ -314,12 +349,9 @@ defmodule Durable.Audit4ApiWaitsTest do
   end
 
   describe "a step's data across a wait" do
-    # Jason writes a whole float of 1.0e6 or more as "2.0e6", jsonb keeps no
-    # fraction digits for a number given that way and prints 2000000, and Jason
-    # reads that back as an integer. Anything saved (save_data_as_context/5,
-    # executor.ex:2436; release/4, executor.ex:3472) is affected, so the step
-    # after a wait can crash on `Float.round(data["total"], 2)`.
-    @tag :skip
+    # Jason writes a whole float as "2.0e6", jsonb keeps no fraction digits for
+    # a number given that way and prints 2000000, and Jason reads that back as
+    # an integer. Durable.Storage.JsonMap writes it as 2000000.0.
     test "a float is still a float" do
       waiting = run_workflow(Audit4ApiKeepsFloats, %{})
       assert Durable.send_event(waiting.id, "go", %{}) == :ok
@@ -327,6 +359,35 @@ defmodule Durable.Audit4ApiWaitsTest do
 
       assert finished.status == :completed
       assert finished.context["floats"] == [true, true, true, true]
+    end
+
+    test "a float is a float in step results, events and inputs, read back from the database" do
+      waiting = run_workflow(Audit4ApiFloatsEverywhere, %{"start" => floats()})
+      assert Durable.send_event(waiting.id, "go", floats()) == :ok
+      waiting = drain(waiting)
+      assert Durable.provide_input(waiting.id, "ask", floats()) == :ok
+      finished = drain(waiting)
+
+      assert finished.status == :completed
+      assert finished.context["seen"] == %{"made" => true, "event" => true, "input" => true}
+
+      # Every stored copy, as Postgres gives it back.
+      assert TestRepo.get!(WorkflowExecution, finished.id).input["start"] === floats()
+      assert finished.context["made"] === floats()
+      assert [%{payload: payload}] = TestRepo.all(PendingEvent)
+      assert payload === floats()
+      assert [%{response: response}] = TestRepo.all(PendingInput)
+      assert response === floats()
+
+      outputs =
+        for %{output: %{"made" => _} = output} <- Durable.Testing.steps(finished), do: output
+
+      assert outputs != []
+
+      assert Enum.all?(
+               outputs,
+               &(Map.take(&1, ["made", "start"]) === %{"made" => floats(), "start" => floats()})
+             )
     end
 
     test "numbers keep their value, whatever their size" do

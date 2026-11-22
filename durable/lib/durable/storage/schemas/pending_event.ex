@@ -44,7 +44,7 @@ defmodule Durable.Storage.Schemas.PendingEvent do
       default: :pending
     )
 
-    field(:payload, :map)
+    field(:payload, Durable.Storage.JsonMap)
     field(:timeout_at, :utc_datetime_usec)
     field(:timeout_value, :map)
 

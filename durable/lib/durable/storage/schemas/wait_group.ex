@@ -43,7 +43,7 @@ defmodule Durable.Storage.Schemas.WaitGroup do
     )
 
     field(:event_names, {:array, :string})
-    field(:received_events, :map, default: %{})
+    field(:received_events, Durable.Storage.JsonMap, default: %{})
 
     field(:status, Ecto.Enum,
       values: [:pending, :completed, :timeout, :cancelled],

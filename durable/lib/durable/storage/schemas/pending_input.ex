@@ -57,11 +57,11 @@ defmodule Durable.Storage.Schemas.PendingInput do
       default: :pending
     )
 
-    field(:response, :map)
+    field(:response, Durable.Storage.JsonMap)
     field(:timeout_at, :utc_datetime_usec)
     field(:timeout_value, :map)
     field(:on_timeout, Ecto.Enum, values: [:resume, :fail], default: :resume)
-    field(:metadata, :map)
+    field(:metadata, Durable.Storage.JsonMap)
     field(:completed_at, :utc_datetime_usec)
 
     # For parallel/foreach context

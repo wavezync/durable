@@ -76,8 +76,8 @@ defmodule Durable.Storage.Schemas.WorkflowExecution do
 
     field(:queue, :string, default: "default")
     field(:priority, :integer, default: 0)
-    field(:input, :map, default: %{})
-    field(:context, :map, default: %{})
+    field(:input, Durable.Storage.JsonMap, default: %{})
+    field(:context, Durable.Storage.JsonMap, default: %{})
     field(:current_step, :string)
     field(:error, :map)
     field(:parent_workflow_id, :binary_id)
