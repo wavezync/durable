@@ -46,6 +46,24 @@ defmodule Audit4QueueTwoSteps do
   end
 end
 
+defmodule Audit4QueueSeesData do
+  @moduledoc false
+  use Durable
+  alias Durable.IntegrationProbe, as: Probe
+
+  workflow "audit4_queue_sees_data" do
+    step(:first, fn data ->
+      Probe.note(:first)
+      {:ok, Map.put(data, :total, data["order"] * 3)}
+    end)
+
+    step(:second, fn data ->
+      Probe.put(:second_got, data)
+      {:ok, data}
+    end)
+  end
+end
+
 defmodule Audit4QueueSlowUndo do
   @moduledoc false
   use Durable
@@ -218,11 +236,8 @@ defmodule Durable.Integration.Audit4QueueRecoveryTest do
   end
 
   describe "a task killed after its step's row was written, before the run saved the result" do
-    # NEEDS A DECISION: the step runs a second time, though its row says
-    # :completed and holds its output. A run that comes back goes by its own
-    # saved context (Executor.close_and_requeue/3, executor.ex:3369) and never
-    # looks at the row. At-least-once allows it, but the row could spare it.
-    @tag :skip
+    # The run that comes back takes the result from the row. The attempt ended
+    # once, in the process that was killed, so its end isn't sent again.
     test "doesn't run the step again" do
       kill_at!([:durable, :step, :stop], :first)
       start_durable!(%{default: 1})
@@ -230,9 +245,69 @@ defmodule Durable.Integration.Audit4QueueRecoveryTest do
       {:ok, id} = Durable.start(Audit4QueueTwoSteps, %{})
       await_status(id, :completed)
 
-      assert Probe.hits(:killed) == 2
+      assert Probe.hits(:killed) == 1
       assert Probe.hits(:first) == 1
       assert [_one] = for(row <- step_rows(id), row.step_name == "first", do: row)
+    end
+
+    # The task's worker, and so its heartbeat: what a node that dies leaves.
+    def kill_worker_once(_event, _measurements, %{step: :first}, _config) do
+      if Probe.note(:killed) == 1, do: Process.exit(hd(Process.get(:"$ancestors")), :kill)
+    end
+
+    def kill_worker_once(_event, _measurements, _meta, _config), do: :ok
+
+    test "doesn't run the step again when the stale sweep is what brings the run back" do
+      handler = "audit4-queue-kill-worker-#{System.unique_integer([:positive])}"
+      :telemetry.attach(handler, [:durable, :step, :stop], &__MODULE__.kill_worker_once/4, nil)
+      on_exit(fn -> :telemetry.detach(handler) end)
+      start_durable!(%{default: 1})
+
+      {:ok, id} = Durable.start(Audit4QueueTwoSteps, %{"order" => 7})
+      assert_eventually(fn -> Probe.hits(:killed) == 1 end)
+      assert_eventually(fn -> :sys.get_state(@poller).workers == %{} end)
+      assert %{status: :running, current_step: "first"} = get(id)
+
+      stale!(id)
+      {:ok, 1} = Postgres.recover_stale_locks(Config.get(Durable), 300)
+      run = await_status(id, :completed)
+
+      assert {Probe.hits(:first), Probe.hits(:second)} == {1, 1}
+      assert [_one] = for(row <- step_rows(id), row.step_name == "first", do: row)
+      assert %{"order" => 7, "first" => "done"} = run.context
+    end
+
+    test "gives the next step what the step returned, with the input's keys as they were" do
+      kill_at!([:durable, :step, :stop], :first)
+      start_durable!(%{default: 1})
+
+      {:ok, id} = Durable.start(Audit4QueueSeesData, %{"order" => 7})
+      await_status(id, :completed)
+
+      assert Probe.hits(:first) == 1
+      assert %{"order" => 7, total: 21} = Probe.fetch(:second_got)
+    end
+
+    test "runs the step again for a run retried since: the row is from before the retry" do
+      kill_at!([:durable, :step, :stop], :first)
+      config = start_idle!()
+      {:ok, id} = Durable.start(Audit4QueueTwoSteps, %{})
+
+      [job] = Postgres.fetch_jobs(config, "default", 1, "node-a")
+      {:ok, worker} = Worker.start_link(job: job, config: config, poller_pid: self())
+      assert_receive {:job_complete, ^worker, ^id, :waiting, _ms}, 5_000
+      assert %{status: :pending, current_step: "first"} = get(id)
+
+      # Failed where it stood, as three such losses in a row would leave it.
+      {1, _} =
+        IntegrationRepo.update_all(
+          from(w in WorkflowExecution, where: w.id == ^id),
+          set: [status: :failed]
+        )
+
+      {:ok, ^id} = Durable.retry(id)
+      assert {:ok, %{status: :completed}} = Durable.Executor.execute_workflow(id, config)
+      assert Probe.hits(:first) == 2
     end
 
     test "still finishes the run, with every step's result" do

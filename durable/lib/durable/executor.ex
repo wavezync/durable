@@ -1525,7 +1525,8 @@ defmodule Durable.Executor do
     # Update current step
     {:ok, exec} = update_current_step(config, execution, step.name)
 
-    case StepRunner.execute(step, data, exec.id, config, exec.deadline_at) do
+    case finished_before_lost(config, execution, step, data, workflow_def) ||
+           StepRunner.execute(step, data, exec.id, config, exec.deadline_at) do
       {:ok, new_data} ->
         # Save data as context and continue to next step
         # save_data_as_context merges orchestration keys from process dict
@@ -1554,6 +1555,52 @@ defmodule Durable.Executor do
 
       stopped ->
         step_stopped(stopped, exec, data, workflow_def, config)
+    end
+  end
+
+  # A run back at the step it was at may have finished it already: its worker
+  # was lost after the step's row was written and before the run saved the
+  # result. The row has the result, so the body doesn't run again. Read only
+  # for the step a run comes back to, never for the ones it goes on to.
+  #
+  # Keys the step was given as strings stay strings, and the rest are read as
+  # any stored key is (restore_keys/1). What the step put in the context and
+  # didn't return was never stored, and is gone with the worker.
+  #
+  # ponytail: a step that jumps (a decision, a `{:goto, _, _}`) and a step in
+  # an unnamed branch still run again. Read their rows too if that matters.
+  defp finished_before_lost(config, %{current_step: current} = run, step, data, workflow_def) do
+    with true <- current == Atom.to_string(step.name) and step.type != :decision,
+         %{} = output <- output_of_lost_attempt(config, run) do
+      Process.put(:durable_context, data)
+
+      {:ok,
+       output
+       |> Map.put(@string_keys, string_key_names(data))
+       |> restore_keys()
+       |> restore_lane_keys(workflow_def)}
+    else
+      _not_finished -> nil
+    end
+  end
+
+  # Only the run's newest row can be the one: a wait, a retry or a jump back
+  # leaves a newer one. One from before `Durable.retry/2` isn't it either.
+  defp output_of_lost_attempt(config, %{id: id, current_step: step, retried_at: retried_at}) do
+    newest =
+      from(s in StepExecution,
+        where: s.workflow_id == ^id and s.is_compensation == false,
+        order_by: [desc: s.inserted_at],
+        limit: 1
+      )
+
+    with %{status: :completed, step_name: ^step, output: %{} = output} = row <-
+           Repo.one(config, newest),
+         false <- is_map_key(output, "decision_type"),
+         true <- is_nil(retried_at) or DateTime.after?(row.inserted_at, retried_at) do
+      output
+    else
+      _not_it -> nil
     end
   end
 
