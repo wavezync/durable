@@ -1605,11 +1605,14 @@ defmodule Durable.Executor do
   end
 
   # A step that didn't finish: it waits, failed, cancelled the run or is parked.
-  defp step_stopped({wait_type, opts}, exec, data, _workflow_def, config)
+  defp step_stopped({wait_type, opts}, exec, data, workflow_def, config)
        when wait_type in [:sleep, :wait_for_event, :wait_for_input, :wait_for_any, :wait_for_all] do
     # Save current data before waiting
     {:ok, exec} = save_data_as_context(config, exec, data, :keep)
     handle_wait_result(config, exec, wait_type, opts)
+  rescue
+    error ->
+      wait_not_recorded(exec, caught_error(:error, error, __STACKTRACE__), workflow_def, config)
   end
 
   defp step_stopped({:call_workflow, opts}, exec, data, _workflow_def, config) do
@@ -1625,6 +1628,34 @@ defmodule Durable.Executor do
 
   defp step_stopped({:park, delay_ms}, exec, _data, _workflow_def, config),
     do: park(config, exec, delay_ms)
+
+  # The step asked for a wait that couldn't be written: a sleep to a time no
+  # timestamp holds, a timeout that isn't a number, a prompt JSON can't take.
+  # Raised from here it reached whoever ran the executor, and inline that is
+  # the caller, with the run left :running. It is the step's failure. The row
+  # says :waiting for a wait that doesn't exist, so it is closed as failed; its
+  # end event went out when the step suspended.
+  defp wait_not_recorded(exec, error, workflow_def, config) do
+    now = DateTime.utc_now()
+
+    suspended =
+      from(s in StepExecution,
+        where:
+          s.workflow_id == ^exec.id and s.step_name == ^exec.current_step and
+            s.status == :waiting,
+        order_by: [desc: s.inserted_at],
+        limit: 1,
+        select: s.id
+      )
+
+    Repo.update_all(
+      config,
+      from(s in StepExecution, where: s.id in subquery(suspended)),
+      set: [status: :failed, error: storable_error(error), completed_at: now, updated_at: now]
+    )
+
+    handle_step_failure(exec, error, workflow_def, config)
+  end
 
   defp handle_decision_result(
          exec,

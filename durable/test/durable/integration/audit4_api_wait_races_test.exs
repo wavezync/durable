@@ -408,6 +408,12 @@ defmodule Durable.Integration.Audit4ApiWaitRacesTest do
         assert is_binary(run.error["message"])
         assert run.locked_by == nil
 
+        # The step that asked for the wait isn't left :waiting on a wait that
+        # was never written. (Data too deep to save isn't a wait: the worker
+        # closes that attempt.)
+        waiting = from(s in StepExecution, where: s.workflow_id == ^bad and s.status == :waiting)
+        assert IntegrationRepo.all(waiting) == []
+
         good = waiting(Audit4ApiAsks)
         assert Durable.provide_input(good, "answer", "fine") == :ok
         assert await_status(good, :completed).context["got"] == "fine"

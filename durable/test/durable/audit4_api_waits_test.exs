@@ -31,6 +31,39 @@ defmodule Durable.Audit4ApiWaitsTest do
     end
   end
 
+  defmodule Audit4ApiBadWaits do
+    use Durable
+    use Durable.Wait
+
+    workflow "audit4_api_bad_waits_inline" do
+      step(:first, fn data -> {:ok, data} end)
+
+      step(:wait, fn data ->
+        case data["kind"] do
+          "sleep_too_long" -> sleep(10 ** 30)
+          "sleep_before_time" -> sleep(-(10 ** 15))
+          "timeout_float" -> wait_for_event("x", timeout: 1.5)
+          "timeout_too_long" -> wait_for_input("x", timeout: 10 ** 30)
+          "any_too_long" -> wait_for_any(["x", "y"], timeout: 10 ** 30)
+          "input_unstorable" -> wait_for_input("x", metadata: %{at: {1, 2}})
+        end
+
+        {:ok, data}
+      end)
+    end
+  end
+
+  defmodule Audit4ApiBadWaitUndone do
+    use Durable
+    use Durable.Wait
+
+    workflow "audit4_api_bad_wait_undone", on_failure: :rollback do
+      step(:hold, [compensate: :release], fn data -> {:ok, data} end)
+      step(:wait, fn _data -> sleep(10 ** 30) end)
+      compensate(:release, fn data -> {:ok, data} end)
+    end
+  end
+
   defmodule Audit4ApiThreeWaits do
     use Durable
     use Durable.Wait
@@ -361,6 +394,48 @@ defmodule Durable.Audit4ApiWaitsTest do
         assert failed.status == :failed
         assert failed.error["type"] == "FunctionClauseError"
       end
+    end
+  end
+
+  describe "a wait the engine can't record, run inline" do
+    # The step asked for a wait and its row says :waiting; then the wait can't
+    # be written (a time no timestamp holds, a timeout that isn't a number).
+    # That is the step's failure: the caller gets a failed run, not a raise and
+    # a run left :running with a step still :waiting.
+    for kind <- [
+          "sleep_too_long",
+          "sleep_before_time",
+          "timeout_float",
+          "timeout_too_long",
+          "any_too_long",
+          "input_unstorable"
+        ] do
+      test "#{kind} fails the run and closes the step" do
+        run = run_workflow(Audit4ApiBadWaits, %{"kind" => unquote(kind)})
+
+        assert run.status == :failed
+        assert is_binary(run.error["type"])
+        assert is_binary(run.error["message"])
+        assert run.locked_by == nil
+
+        assert Enum.map(steps(run), &{&1.step_name, &1.status}) ==
+                 [{"first", :completed}, {"wait", :failed}]
+
+        assert %{error: %{"type" => type}} = assert_step(run, :wait, :failed)
+        assert type == run.error["type"]
+        assert TestRepo.all(PendingInput) == []
+        assert TestRepo.all(PendingEvent) == []
+      end
+    end
+
+    test "a failed wait is the workflow's failure: its compensations run" do
+      run = run_workflow(Audit4ApiBadWaitUndone, %{})
+
+      assert run.status == :compensated
+      assert run.context["undone"] == nil
+
+      assert [%{"step" => "hold", "result" => %{"status" => "completed"}}] =
+               run.compensation_results
     end
   end
 
