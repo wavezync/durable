@@ -135,17 +135,4 @@ defmodule DurableDashboard.Live.Audit4KnownBugsTest do
              end
              """)
   end
-
-  # `AssetServer` is `Plug.Static` and nothing else (asset_server.ex:21): for
-  # a file that isn't there it returns the conn unsent, and it sits behind a
-  # `forward`, so no later route answers either. Under Bandit/Cowboy an unsent
-  # conn is a Plug.Conn.NotSentError — a 500 in the host's logs for every stale
-  # asset URL — where a 404 belongs. (The 500 is those adapters' contract; only
-  # the unsent conn is checked here.)
-  test "a missing asset is a 404", %{conn: conn} do
-    conn = get(conn, dash("/__assets__/no-such-file.js"))
-
-    assert conn.state == :sent
-    assert conn.status == 404
-  end
 end

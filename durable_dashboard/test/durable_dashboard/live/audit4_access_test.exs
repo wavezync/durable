@@ -242,12 +242,11 @@ defmodule DurableDashboard.Live.Audit4AccessTest do
         assert_raise Plug.Static.InvalidPathError, fn -> get(conn, dash(path)) end
       end
 
-      # Nothing is served for these (that they aren't answered with a 404 is
-      # pinned in audit4_known_bugs_test.exs).
+      # Nothing is served for these.
       for path <- ~w(/__assets__/....//....//mix.exs /__assets__/nope.js /__assets__/) do
         conn = get(conn, dash(path))
-        refute conn.status == 200
-        assert conn.resp_body in [nil, ""]
+        assert conn.status == 404
+        assert conn.resp_body == ""
       end
     end
   end

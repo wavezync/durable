@@ -373,4 +373,16 @@ defmodule DurableDashboard.Live.Audit4RegressionsTest do
              end
            ) == []
   end
+
+  # `AssetServer` was `Plug.Static` and nothing else: for a file that isn't
+  # there it returned the conn unsent, and it sits behind a `forward`, so no
+  # later route answered either. Under Bandit/Cowboy an unsent conn is a
+  # Plug.Conn.NotSentError, a 500 in the host's logs for every stale asset URL.
+  test "a missing asset is a 404", %{conn: conn} do
+    conn = get(conn, dash("/__assets__/no-such-file.js"))
+
+    assert conn.state == :sent
+    assert conn.status == 404
+    assert get(conn, dash("/__assets__/app.js")).status == 200
+  end
 end
