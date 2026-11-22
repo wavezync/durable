@@ -3273,9 +3273,27 @@ defmodule Durable.Executor do
       |> cas_update!(config)
 
     case build_compensation_stack(execution.id, workflow_def, config) do
-      [] when was == "cancelled" -> back_to_cancelled(config, execution, error)
-      [] -> mark_failed(config, execution, error)
+      [] -> nothing_to_undo(config, execution, error, was)
       stack -> run_compensations(execution, error, stack, workflow_def, config)
+    end
+  end
+
+  defp nothing_to_undo(config, execution, error, was) do
+    undone =
+      from(s in StepExecution,
+        where: s.workflow_id == ^execution.id and s.is_compensation and s.status == :completed
+      )
+
+    cond do
+      # Every undo completed before the rollback lost its worker: it ends here.
+      Repo.aggregate(config, undone, :count) > 0 ->
+        run_compensations(execution, error, [], nil, config)
+
+      was == "cancelled" ->
+        back_to_cancelled(config, execution, error)
+
+      true ->
+        mark_failed(config, execution, error)
     end
   end
 
@@ -3295,12 +3313,16 @@ defmodule Durable.Executor do
 
   # Builds the compensation stack from completed steps in reverse order
   defp build_compensation_stack(workflow_id, workflow_def, config) do
-    # Get completed non-compensation steps
+    # Get completed non-compensation steps, less the ones already undone: a
+    # rollback that lost its worker part-way is asked for again, or handed to
+    # another node, and an undo that completed must not run twice.
     query =
       from(s in StepExecution,
+        as: :step,
         where: s.workflow_id == ^workflow_id,
         where: s.status == :completed,
         where: s.is_compensation == false,
+        where: not exists(undone_since(workflow_id)),
         order_by: [desc: s.completed_at],
         select: s.step_name
       )
@@ -3313,6 +3335,15 @@ defmodule Durable.Executor do
     completed_steps
     |> Enum.map(&String.to_atom/1)
     |> Enum.flat_map(&find_step_compensation(&1, workflow_def))
+  end
+
+  # A completed undo of the step in the outer query, no older than the step.
+  defp undone_since(workflow_id) do
+    from(u in StepExecution,
+      where: u.workflow_id == ^workflow_id and u.is_compensation and u.status == :completed,
+      where: u.compensation_for == parent_as(:step).step_name,
+      where: u.completed_at >= parent_as(:step).completed_at
+    )
   end
 
   defp find_step_compensation(step_name, workflow_def) do

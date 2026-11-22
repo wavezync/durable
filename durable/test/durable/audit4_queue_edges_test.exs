@@ -7,6 +7,17 @@ defmodule Audit4QueueEdgeRow do
   end
 end
 
+defmodule Audit4QueueEdgeUndo do
+  @moduledoc false
+  use Durable
+
+  workflow "audit4_queue_edge_undo" do
+    step(:save, [compensate: :unsave], fn data -> {:ok, data} end)
+    step(:charge, fn _data -> {:fail, "declined"} end)
+    compensate(:unsave, fn data -> {:ok, data} end)
+  end
+end
+
 defmodule Audit4QueueEdgeChild do
   @moduledoc false
   use Durable
@@ -126,6 +137,33 @@ defmodule Durable.Audit4QueueEdgesTest do
 
       assert %ScheduledWorkflow{enabled: true} =
                TestRepo.get_by!(ScheduledWorkflow, name: "elsewhere")
+    end
+  end
+
+  describe "rollback_plan/1" do
+    defp undo_row!(run, completed_at) do
+      TestRepo.insert!(%Durable.Storage.Schemas.StepExecution{
+        workflow_id: run,
+        step_name: "compensate_unsave",
+        step_type: "compensation",
+        status: :completed,
+        is_compensation: true,
+        compensation_for: "save",
+        completed_at: completed_at
+      })
+    end
+
+    test "leaves out a step whose undo completed, unless the step completed again since" do
+      {:ok, id} = Durable.start(Audit4QueueEdgeUndo, %{})
+      {:error, _declined} = Executor.execute_workflow(id, Config.get(Durable))
+      assert Durable.rollback_plan(id) == [save: :unsave]
+
+      before = undo_row!(id, DateTime.add(DateTime.utc_now(), -3_600, :second))
+      assert Durable.rollback_plan(id) == [save: :unsave]
+
+      TestRepo.delete!(before)
+      undo_row!(id, DateTime.utc_now())
+      assert Durable.rollback_plan(id) == []
     end
   end
 
