@@ -38,26 +38,6 @@ defmodule DurableDashboard.Live.Audit4KnownBugsTest do
 
   defp crashes(cases), do: for({label, fun} <- cases, reason = crash(fun), do: {label, reason})
 
-  # QueuesLive (queues_live.ex:54) and TelemetryLive (telemetry_live.ex:189)
-  # define `handle_info/2` for their own timer message only, with no catch-all,
-  # so any other message is a FunctionClauseError and the page dies. Every
-  # other page has `def handle_info(_msg, socket)`. Nothing in the dashboard
-  # sends them one today (InboxBadge halts the two input events), but a host
-  # `on_mount` hook that subscribes to anything will.
-  test "Queues and Telemetry ignore a message they didn't ask for", %{conn: conn} do
-    assert crashes(
-             for page <- ~w(/queues /telemetry),
-                 message <- [:anything, {:durable_event, :workflow_started, %{}}] do
-               {{page, message},
-                fn ->
-                  {:ok, view, _html} = live(conn, dash(page))
-                  send(view.pid, message)
-                  render(view)
-                end}
-             end
-           ) == []
-  end
-
   # Query params are read as strings without a check: a list or map
   # (`?q[]=a`) reaches String functions and raises FunctionClauseError
   # (executions_live.ex:936 parse_query, keys_live.ex:387); a page number past

@@ -196,6 +196,9 @@ defmodule DurableDashboard.Live.TelemetryLive do
      )}
   end
 
+  # A host's `on_mount` hook may subscribe the page to anything.
+  def handle_info(_msg, socket), do: {:noreply, socket}
+
   @impl true
   def terminate(_reason, _socket), do: :telemetry.detach(handler_id(self()))
 

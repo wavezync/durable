@@ -53,6 +53,9 @@ defmodule DurableDashboard.Live.QueuesLive do
   @impl true
   def handle_info(:refresh, socket), do: {:noreply, load(socket)}
 
+  # A host's `on_mount` hook may subscribe the page to anything.
+  def handle_info(_msg, socket), do: {:noreply, socket}
+
   @impl true
   def handle_event("toggle", %{"queue" => queue}, socket) do
     durable = socket.assigns.durable

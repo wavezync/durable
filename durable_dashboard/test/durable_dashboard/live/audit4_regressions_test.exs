@@ -349,4 +349,28 @@ defmodule DurableDashboard.Live.Audit4RegressionsTest do
     assert input_of(id).response == nil
     assert Fixtures.get_run!(id).status == :waiting
   end
+
+  # QueuesLive and TelemetryLive handled their own timer message only, with
+  # no catch-all, so any other message was a FunctionClauseError and the page
+  # died. Nothing in the dashboard sends them one, but a host `on_mount` hook
+  # that subscribes to anything will.
+  test "every page ignores a message it didn't ask for", %{conn: conn} do
+    run = Fixtures.run!(Fixtures.Payments)
+
+    pages =
+      ~w(/ /executions /executions/#{run} /workflows /workflows/process_payment /inputs /keys
+         /queues /schedules /telemetry /settings)
+
+    assert crashes(
+             for page <- pages,
+                 message <- [:anything, {:durable_event, :workflow_started, %{}}, {:refresh}] do
+               {{page, message},
+                fn ->
+                  {:ok, view, _html} = live(conn, dash(page))
+                  send(view.pid, message)
+                  render(view)
+                end}
+             end
+           ) == []
+  end
 end
