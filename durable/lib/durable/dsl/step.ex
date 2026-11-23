@@ -608,18 +608,19 @@ defmodule Durable.DSL.Step do
   defp matchable?({:-, _, [int]}), do: is_integer(int)
   defp matchable?(literal), do: is_atom(literal) or is_binary(literal) or is_integer(literal)
 
+  # The steps are registered in the order they run, clause by clause: a jump
+  # ahead in a clause is a jump forward.
   defp process_branch_clauses(clauses, branch_id, env) do
-    {clause_data, all_steps} =
+    clause_data =
       clauses
       |> Enum.with_index()
-      |> Enum.map_reduce([], fn {{pattern, body}, idx}, acc_steps ->
+      |> Enum.map(fn {{pattern, body}, idx} ->
         clause_name = pattern_to_clause_name(pattern)
         steps = extract_steps_from_body(body, branch_id, clause_name, env)
-        step_names = Enum.map(steps, fn {name, _, _} -> name end)
-        {{pattern, idx, step_names, steps}, steps ++ acc_steps}
+        {pattern, idx, Enum.map(steps, fn {name, _, _} -> name end), steps}
       end)
 
-    {clause_data, Enum.reverse(all_steps)}
+    {clause_data, Enum.flat_map(clause_data, &elem(&1, 3))}
   end
 
   defp extract_steps_from_body(body, branch_id, clause_name, env) do
