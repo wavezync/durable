@@ -33,7 +33,7 @@ defmodule PhoenixDemo.Workflows.ArticleSyncWorkflow do
     end
 
     step :index_update, fn data ->
-      if update = data[:update] || data["update"] do
+      if update = data["update"] do
         Logger.info("[ArticleSync] Re-indexing article #{data["id"]} at rev #{update["rev"]}")
       end
 

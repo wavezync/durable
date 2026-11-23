@@ -32,9 +32,9 @@ defmodule PhoenixDemo.Workflows.ContentModerationWorkflow do
     parallel :scans,
       into: fn _ctx, results ->
         scores = %{
-          "toxicity" => extract_score(results, :toxicity_scan),
-          "nsfw" => extract_score(results, :nsfw_scan),
-          "spam" => extract_score(results, :spam_scan)
+          "toxicity" => extract_score(results, "toxicity_scan"),
+          "nsfw" => extract_score(results, "nsfw_scan"),
+          "spam" => extract_score(results, "spam_scan")
         }
 
         max_score =
@@ -72,12 +72,12 @@ defmodule PhoenixDemo.Workflows.ContentModerationWorkflow do
              max = get_context(:max_score) || 0
 
              cond do
-               max > 0.85 -> :high
-               max > 0.4 -> :medium
-               true -> :low
+               max > 0.85 -> "high"
+               max > 0.4 -> "medium"
+               true -> "low"
              end
            end do
-      :high ->
+      "high" ->
         step :auto_remove, fn _data ->
           content_id = get_context(:content_id)
           Logger.info("[Mod] Auto-removed #{content_id} (high score)")
@@ -90,7 +90,7 @@ defmodule PhoenixDemo.Workflows.ContentModerationWorkflow do
            }}
         end
 
-      :medium ->
+      "medium" ->
         step :request_human_review, fn data ->
           content_id = get_context(:content_id)
 
@@ -127,7 +127,7 @@ defmodule PhoenixDemo.Workflows.ContentModerationWorkflow do
            }}
         end
 
-      :low ->
+      "low" ->
         step :auto_approve, fn _data ->
           content_id = get_context(:content_id)
           Logger.info("[Mod] Auto-approved #{content_id} (low score)")
@@ -144,7 +144,8 @@ defmodule PhoenixDemo.Workflows.ContentModerationWorkflow do
 
   defp extract_score(results, key) do
     case Map.get(results, key) do
-      # A lane hands back what it stored, so its keys are strings.
+      # Lanes are keyed by name as strings, and a lane hands back what it
+      # stored, so its keys are strings too.
       {:ok, %{"score" => s}} -> s
       _ -> 0
     end
