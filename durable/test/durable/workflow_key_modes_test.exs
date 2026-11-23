@@ -44,6 +44,16 @@ defmodule Durable.WorkflowKeyModesTest do
     end
   end
 
+  defmodule QuickDebounce do
+    @moduledoc false
+    use Durable
+
+    # A timeout shorter than the period: the run never waits past it.
+    workflow "keyed_quick_debounce", debounce: [period: 60_000, timeout: 300] do
+      step :work, fn data -> {:ok, data} end
+    end
+  end
+
   setup do
     %{config: Config.get(Durable)}
   end
@@ -211,6 +221,14 @@ defmodule Durable.WorkflowKeyModesTest do
       {:ok, ^id} = Durable.start(Debounced, %{"rev" => 2}, key: "d:3")
 
       assert DateTime.diff(reload(id).scheduled_at, long_ago, :millisecond) == 300_000
+    end
+
+    test "caps the first start's wait at timeout too (issue #48)" do
+      before = DateTime.utc_now()
+      {:ok, id} = Durable.start(QuickDebounce, %{}, key: "d:6")
+
+      wait = DateTime.diff(reload(id).scheduled_at, before, :millisecond)
+      assert wait >= 300 and wait < 1_000
     end
 
     test "once a worker claimed the run, a duplicate is a plain duplicate" do

@@ -323,7 +323,7 @@ defmodule Durable.Telemetry do
         stacktrace = __STACKTRACE__
         # With the connection gone the attempt is still open, and whoever closes it
         # sends the end event.
-        unless Durable.Repo.connection_lost?(reason) do
+        unless Durable.Repo.transient?(reason) do
           details = %{kind: kind, reason: reason, stacktrace: stacktrace}
           :telemetry.execute(prefix ++ [:exception], elapsed(started), Map.merge(meta, details))
         end

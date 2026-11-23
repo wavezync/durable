@@ -30,7 +30,8 @@ defmodule Durable.Queue.Poller do
     :node_id,
     :workers,
     :paused,
-    :timer_ref
+    :timer_ref,
+    backlog?: false
   ]
 
   @type t :: %__MODULE__{
@@ -42,7 +43,8 @@ defmodule Durable.Queue.Poller do
           node_id: String.t(),
           workers: %{pid() => %{ref: reference(), job_id: String.t(), token: String.t() | nil}},
           paused: boolean(),
-          timer_ref: reference() | nil
+          timer_ref: reference() | nil,
+          backlog?: boolean()
         }
 
   @default_concurrency 10
@@ -219,6 +221,8 @@ defmodule Durable.Queue.Poller do
     )
 
     state = handle_job_completion(state, worker)
+    # A backlog is claimed as slots free up, not a poll_interval at a time.
+    state = if state.backlog? and not state.paused, do: poll_and_process(state), else: state
     {:noreply, state}
   end
 
@@ -268,6 +272,9 @@ defmodule Durable.Queue.Poller do
     end
   end
 
+  # There may be more to claim (a backlog) while the last poll filled every
+  # slot it asked for, or found none free. A worker that finishes then polls
+  # again; a poll that comes back short ends it, as it ends a burst of wakes.
   defp poll_and_process(state) do
     available_slots = state.concurrency - map_size(state.workers)
 
@@ -276,9 +283,9 @@ defmodule Durable.Queue.Poller do
 
       emit_poll_telemetry(state.queue_name, length(jobs), available_slots)
 
-      Enum.reduce(jobs, state, &start_worker/2)
+      Enum.reduce(jobs, %{state | backlog?: length(jobs) == available_slots}, &start_worker/2)
     else
-      state
+      %{state | backlog?: true}
     end
   end
 

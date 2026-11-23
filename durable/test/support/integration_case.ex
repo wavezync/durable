@@ -190,6 +190,28 @@ defmodule Durable.IntegrationCase do
       end)
   end
 
+  @doc """
+  Runs `body` (PL/pgSQL) before each update of a `durable.<table>` row for
+  which `condition` holds, until the test ends: to make the database refuse a
+  write (`RAISE EXCEPTION ...`) or slow one down (`PERFORM pg_sleep(...)`).
+  """
+  def before_update!(name, table, condition, body) do
+    IntegrationRepo.query!("""
+    CREATE OR REPLACE FUNCTION durable.#{name}() RETURNS trigger AS $$
+    BEGIN #{body}; RETURN NEW; END $$ LANGUAGE plpgsql
+    """)
+
+    IntegrationRepo.query!("""
+    CREATE TRIGGER #{name} BEFORE UPDATE ON durable.#{table}
+    FOR EACH ROW WHEN (#{condition}) EXECUTE FUNCTION durable.#{name}()
+    """)
+
+    ExUnit.Callbacks.on_exit(fn ->
+      IntegrationRepo.query!("DROP TRIGGER IF EXISTS #{name} ON durable.#{table}")
+      IntegrationRepo.query!("DROP FUNCTION IF EXISTS durable.#{name}()")
+    end)
+  end
+
   @doc "Kills a node the way a crash would: no shutdown, no clean-up."
   def crash_node!(node) do
     Node.monitor(node, true)

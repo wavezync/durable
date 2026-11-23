@@ -209,7 +209,7 @@ defmodule Durable.Scheduler do
     execute_schedule(schedule, config)
   rescue
     error ->
-      if Durable.Repo.connection_lost?(error),
+      if Durable.Repo.transient?(error),
         do: reraise(error, __STACKTRACE__),
         else: record_failure(schedule, config, Exception.message(error))
   end

@@ -204,7 +204,7 @@ defmodule Durable.Queue.Worker do
     end
   rescue
     error ->
-      if Durable.Repo.connection_lost?(error),
+      if Durable.Repo.transient?(error),
         do: release_after_lost_connection(job, config, error),
         else: crashed(job, error, __STACKTRACE__)
   catch
@@ -220,7 +220,8 @@ defmodule Durable.Queue.Worker do
   # Says nothing about the step, so the run goes back rather than failing.
   defp release_after_lost_connection(job, config, error) do
     Logger.error(
-      "Lost the database connection running job #{job.id}: #{Exception.message(error)}"
+      "Lost the database connection, or it gave up on a statement, running job " <>
+        "#{job.id}: #{Exception.message(error)}"
     )
 
     safely(:fenced, fn -> Durable.Executor.connection_lost(job, error, config) end)

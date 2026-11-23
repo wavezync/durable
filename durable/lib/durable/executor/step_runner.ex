@@ -319,22 +319,43 @@ defmodule Durable.Executor.StepRunner do
   # failed attempt, so it must not advance the retry counter. Each genuine retry
   # writes exactly one `:failed` row, so `failed + 1` is the next attempt.
   #
-  # A `worker_lost` row is counted apart (`lost`), against @max_lost_workers.
+  # A `worker_lost` row is counted apart (`lost`), against @max_lost_workers,
+  # and only in a row: an attempt that ended any other way since (it snoozed,
+  # waited, failed) starts the count again, so a step that polls for days
+  # isn't failed by three outages over its life.
   defp attempts_used(config, workflow_id, step_name) do
-    # Only failures since the last Durable.retry/2 count: an operator retry
+    # Only attempts since the last Durable.retry/2 count: an operator retry
     # hands the step a fresh max_attempts budget.
-    Repo.one(
-      config,
+    rows =
       from(s in StepExecution,
         join: w in WorkflowExecution,
         on: w.id == s.workflow_id,
-        where:
-          s.workflow_id == ^workflow_id and s.step_name == ^step_name and s.status == :failed,
-        where: is_nil(w.retried_at) or s.inserted_at > w.retried_at,
+        where: s.workflow_id == ^workflow_id and s.step_name == ^step_name,
+        where: is_nil(w.retried_at) or s.inserted_at > w.retried_at
+      )
+
+    since =
+      Repo.one(
+        config,
+        from(s in rows,
+          where:
+            s.status != :failed or fragment("?->>'type' IS DISTINCT FROM 'worker_lost'", s.error),
+          select: max(s.inserted_at)
+        )
+      ) || DateTime.from_unix!(0, :microsecond)
+
+    Repo.one(
+      config,
+      from(s in rows,
+        where: s.status == :failed,
         select: %{
           failed:
             filter(count(s.id), fragment("?->>'type' IS DISTINCT FROM 'worker_lost'", s.error)),
-          lost: filter(count(s.id), fragment("?->>'type' = 'worker_lost'", s.error))
+          lost:
+            filter(
+              count(s.id),
+              fragment("?->>'type' = 'worker_lost'", s.error) and s.inserted_at > ^since
+            )
         }
       )
     )

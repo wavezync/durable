@@ -218,8 +218,9 @@ PgBouncer in transaction mode. A PgBouncer older than 1.24 needs `prepare:
 - **Poll less once you have a PubSub.** Every queue on every node runs a claim
   each `poll_interval`, 1 second by default, even when idle. A PubSub wakes pollers
   when a run starts or resumes, so a longer interval only delays work that comes
-  due later: sleeps, retries, snoozes and delayed starts. Between nodes, this needs
-  your cluster connected.
+  due later: sleeps, retries, snoozes and delayed starts. A backlog doesn't wait
+  for it either: while there's more to claim, each worker that finishes claims
+  the next run. Between nodes, this needs your cluster connected.
 - **A deep backlog doesn't slow claiming.** A claim took under a millisecond at
   100 ready runs and at 500,000.
 - **Workers-only and web-only nodes work.** `queue_enabled: false` lets a node
@@ -272,8 +273,10 @@ finishes it: the undo that was cut short runs again, and the ones that completed
 don't.
 
 To start before the signal arrives, call `Durable.drain()`, for example from a
-Kubernetes `preStop` hook. For app-wide cleanup of your own, use OTP's
-`prep_stop/1`. Durable reports each drain as `[:durable, :node, :drain, :stop]`.
+Kubernetes `preStop` hook. The grace period counts from the first drain, so the
+stop that follows waits only for what's left of it. For app-wide cleanup of your
+own, use OTP's `prep_stop/1`. Durable reports each drain as
+`[:durable, :node, :drain, :stop]`.
 
 A node that crashes or gets `kill -9` has no warning. Its runs stay locked until
 the lock goes stale, 300 seconds by default, and a sweep that runs every 60 seconds

@@ -668,6 +668,10 @@ defmodule Durable.Executor do
         :pending
       end
 
+    # A waiting run's `scheduled_at` is a sleep's end: it waits on its lanes.
+    key_attrs =
+      if status == :waiting, do: Keyword.delete(key_attrs, :scheduled_at), else: key_attrs
+
     parent
     |> Ecto.Changeset.change([status: status] ++ retry_attrs ++ key_attrs)
     |> still_holding(parent)
@@ -1385,8 +1389,13 @@ defmodule Durable.Executor do
             "(held by #{String.slice(holder_id, 0, 8)})"
         )
 
-      {:error, _reason} = error ->
-        error
+      {:error, :superseded} = superseded ->
+        superseded
+
+      # The key's lock timed out or deadlocked, which says nothing about the
+      # run: failed, its start's input would never run. It waits again.
+      {:error, _reason} ->
+        wait_behind(config, execution, execution.runs_after_id)
     end
   end
 
@@ -3828,11 +3837,12 @@ defmodule Durable.Executor do
   defp notice_for(child), do: {:failed, child.error}
 
   @doc false
-  # The connection went while recording this attempt, which says nothing about
-  # the step. Like a lost worker it uses no attempt, and the run goes back on its
+  # The connection went while recording this attempt, or the database gave up
+  # on the write (`Durable.Repo.transient?/1`), which says nothing about the
+  # step. Like a lost worker it uses no attempt, and the run goes back on its
   # queue. If the database is still away, the stale-lock sweep does this later.
   # A rollback goes back to be rolled back, as a stopping node hands one back.
-  @spec connection_lost(map(), Exception.t(), Config.t()) :: :waiting | :fenced
+  @spec connection_lost(map(), Exception.t(), Config.t()) :: :waiting | :fenced | {:error, map()}
   def connection_lost(job, exception, %Config{} = config) do
     {:ok, run} = load_execution(config, job.id)
 
@@ -3841,10 +3851,18 @@ defmodule Durable.Executor do
       else: :fenced
   end
 
+  # Lost outside an attempt (saving a step that finished, say) there is no
+  # attempt to count, and a write the database gives up on every time would
+  # go round for ever: the third loss in a row there fails the run, as a lost
+  # worker's does.
   defp release_after_lost_connection(config, run, exception) do
     error = %{type: "worker_lost", message: Exception.message(exception)}
     closed = StepRunner.close_attempts(config, [run.id], :failed, error)
-    outcome = requeue(config, run, nil, back_to_undo(run))
+
+    outcome =
+      if closed == [] and run.status == :running and lost_too_often?(config, run),
+        do: {:error, error},
+        else: requeue(config, run, nil, back_to_undo(run))
 
     retry =
       if outcome == :waiting,
@@ -3898,7 +3916,7 @@ defmodule Durable.Executor do
       cond do
         run.status != :running -> {:error, error}
         closed != [] -> requeue(config, run, delay)
-        lost_in_a_row(config, run) >= @losses_allowed -> {:error, error}
+        lost_too_often?(config, run) -> {:error, error}
         true -> requeue(config, run, nil)
       end
 
@@ -3908,8 +3926,14 @@ defmodule Durable.Executor do
     outcome
   end
 
-  # Records this loss and counts the run's latest losses at the step it is at,
-  # since it was last retried. A loss at another step in between starts again.
+  @doc false
+  # Records a loss of the run's worker outside a step, and whether it's the
+  # third in a row at the step the run is at, since it was last retried. A loss
+  # at another step in between starts the count again. The stale sweep counts
+  # a node lost between two steps here too.
+  @spec lost_too_often?(Config.t(), WorkflowExecution.t()) :: boolean()
+  def lost_too_often?(config, run), do: lost_in_a_row(config, run) >= @losses_allowed
+
   defp lost_in_a_row(config, run) do
     Activity.record(config, "worker_lost",
       workflow_id: run.id,

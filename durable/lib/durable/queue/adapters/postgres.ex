@@ -24,6 +24,10 @@ defmodule Durable.Queue.Adapters.Postgres do
   @utc_now "(NOW() AT TIME ZONE 'UTC')"
   @utc_clock "(clock_timestamp() AT TIME ZONE 'UTC')"
 
+  # What a run put back on its queue is set to, and what is read of it.
+  @release [status: :pending, locked_by: nil, locked_at: nil, lock_token: nil]
+  @released [:id, :queue, :current_step, :retried_at, :inserted_at, :parent_workflow_id]
+
   @impl true
   def fetch_jobs(%Config{} = config, queue, limit, node_id)
       when is_binary(queue) and limit > 0 do
@@ -68,11 +72,19 @@ defmodule Durable.Queue.Adapters.Postgres do
         AND NOT EXISTS (
           SELECT 1 FROM #{prefix}.queues q WHERE q.name = $1 AND q.paused_at IS NOT NULL
         )
-        -- A run_again run waits until the run it's behind has ended.
+        -- A run_again run waits until the run it's behind has ended, and a
+        -- step it was cancelled in has stopped (`Keys.settles_at/2`). A run
+        -- never waits behind itself.
         AND NOT EXISTS (
           SELECT 1 FROM #{prefix}.workflow_executions h
-          WHERE h.id = w.runs_after_id
-            AND h.status IN ('pending', 'running', 'waiting', 'compensating')
+          WHERE h.id = w.runs_after_id AND h.id <> w.id
+            AND (h.status IN ('pending', 'running', 'waiting', 'compensating')
+              OR (h.status = 'cancelled'
+                AND h.completed_at > #{@utc_now} - INTERVAL '#{config.heartbeat_interval} milliseconds'
+                AND EXISTS (
+                  SELECT 1 FROM #{prefix}.step_executions s
+                  WHERE s.workflow_id = h.id AND s.status IN ('running', 'cancelled')
+                )))
         )
       ORDER BY w.priority DESC, COALESCE(w.scheduled_at, w.inserted_at) ASC, w.inserted_at ASC
       LIMIT $2
@@ -173,35 +185,43 @@ defmodule Durable.Queue.Adapters.Postgres do
     end
   end
 
-  # One conditional UPDATE: a cancel or a takeover that lands after the row was
-  # read wins, and this writes nothing.
+  # A conditional UPDATE: a cancel or a takeover that lands after the row was
+  # read wins, and this writes nothing. The run, its open attempt and the
+  # activity are written in one transaction: nothing sweeps a failed run, so an
+  # attempt left `running` on one would stay so.
   defp fail_unrecorded(config, execution, error, lock_token) do
     now = DateTime.utc_now()
 
-    {_count, failed} =
-      fail_runs(
-        config,
-        from(w in still_claimed(execution.id, lock_token),
-          where: w.status in [:running, :compensating]
-        ),
-        error,
-        completed_at: now,
-        updated_at: now,
-        # On a failed run this is when to roll it back (the timeout sweep),
-        # and what a retry's backoff or a delayed start left there isn't.
-        scheduled_at: nil,
-        locked_by: nil,
-        locked_at: nil,
-        lock_token: nil
-      )
+    {:ok, failed} =
+      Repo.transaction(config, fn ->
+        {_count, failed} =
+          fail_runs(
+            config,
+            from(w in still_claimed(execution.id, lock_token),
+              where: w.status in [:running, :compensating]
+            ),
+            error,
+            completed_at: now,
+            updated_at: now,
+            # On a failed run this is when to roll it back (the timeout sweep),
+            # and what a retry's backoff or a delayed start left there isn't.
+            scheduled_at: nil,
+            locked_by: nil,
+            locked_at: nil,
+            lock_token: nil
+          )
 
-    for run <- failed do
-      # What raised has reported this attempt's end already, as an :exception.
-      StepRunner.close_attempts(config, [run.id], :failed, error)
-      if execution.status == :compensating, do: rollback_interrupted(config, run, error)
-      # The executor never got to tell a parent waiting on this run.
-      Executor.maybe_notify_parent(config, run, :failed, run.error)
-    end
+        # What raised has reported this attempt's end already, as an :exception.
+        StepRunner.close_attempts(config, Enum.map(failed, & &1.id), :failed, error)
+
+        if execution.status == :compensating,
+          do: Enum.each(failed, &rollback_interrupted(config, &1, error))
+
+        failed
+      end)
+
+    # The executor never got to tell a parent waiting on this run.
+    for run <- failed, do: Executor.maybe_notify_parent(config, run, :failed, run.error)
 
     :ok
   end
@@ -306,7 +326,7 @@ defmodule Durable.Queue.Adapters.Postgres do
         where: w.status == :running,
         where: not is_nil(w.locked_by),
         where: w.locked_at < ^cutoff,
-        select: w.id
+        select: struct(w, ^@released)
       )
 
     # The step may be fine: an outage or a frozen VM takes every lock at once.
@@ -317,9 +337,44 @@ defmodule Durable.Queue.Adapters.Postgres do
       message: "the worker running this attempt stopped responding"
     }
 
-    release_runs(config, query, :failed, error, &StepRunner.retry_after_lost(config, &1))
+    with {:ok, runs} <-
+           release_runs(config, query, :failed, error,
+             retry: &StepRunner.retry_after_lost(config, &1),
+             count_losses: true
+           ),
+         do: {:ok, length(runs)}
   rescue
     e -> {:error, Exception.message(e)}
+  end
+
+  # A run lost between two steps (its node died saving a step's result, say)
+  # has no attempt to count. Each loss counts at the step it's at, as a worker
+  # that outlives its task counts one (`Executor.lost_too_often?/2`), and the
+  # third in a row fails the run, so one that takes its node down every time
+  # can't go round for ever. In the transaction that puts it back, before a
+  # poller can claim it.
+  defp fail_looping(config, runs, closed) do
+    in_a_step = MapSet.new(closed, & &1.workflow_id)
+
+    case for(r <- runs, r.id not in in_a_step, Executor.lost_too_often?(config, r), do: r.id) do
+      [] ->
+        []
+
+      ids ->
+        now = DateTime.utc_now()
+
+        error = %{
+          type: "worker_lost",
+          message: "the run lost its worker three times in a row at the same step"
+        }
+
+        query = from(w in WorkflowExecution, where: w.id in ^ids)
+
+        {_count, failed} =
+          fail_runs(config, query, error, completed_at: now, updated_at: now, scheduled_at: nil)
+
+        failed
+    end
   end
 
   @impl true
@@ -327,7 +382,7 @@ defmodule Durable.Queue.Adapters.Postgres do
     running =
       from(w in WorkflowExecution,
         where: w.status == :running and w.locked_by == ^node_id,
-        select: w.id
+        select: struct(w, ^@released)
       )
 
     # A run being rolled back goes back to be rolled back, not to run: with
@@ -336,7 +391,7 @@ defmodule Durable.Queue.Adapters.Postgres do
     compensating =
       from(w in WorkflowExecution,
         where: w.status == :compensating and w.locked_by == ^node_id,
-        select: w.id,
+        select: struct(w, ^@released),
         update: [
           set: [
             engine_state:
@@ -354,29 +409,64 @@ defmodule Durable.Queue.Adapters.Postgres do
 
     with {:ok, runs} <- release_runs(config, running, :snoozed, stopped),
          {:ok, rollbacks} <- release_runs(config, compensating, :snoozed, stopped),
-         do: {:ok, runs + rollbacks}
+         do: {:ok, length(runs) + length(rollbacks)}
   rescue
     e -> {:error, Exception.message(e)}
   end
 
   # Back to :pending with the lock cleared, and the attempts those runs had
   # in flight closed with them. Clearing the fencing token means the next claim
-  # stamps a fresh one, and the old worker's can never match again.
-  defp release_runs(config, query, step_status, error, retry \\ fn _row -> nil end) do
+  # stamps a fresh one, and the old worker's can never match again. The runs
+  # it handled. `count_losses:` fails the runs that are lost too often.
+  defp release_runs(config, query, step_status, error, opts \\ []) do
     result =
       Repo.transaction(config, fn ->
-        {count, ids} =
-          Repo.update_all(config, query,
-            set: [status: :pending, locked_by: nil, locked_at: nil, lock_token: nil]
-          )
+        {_count, runs} =
+          Repo.update_all(config, where(query, [w], is_nil(w.runs_after_id)), set: @release)
 
-        {count, StepRunner.close_attempts(config, ids, step_status, error)}
+        closed = StepRunner.close_attempts(config, Enum.map(runs, & &1.id), step_status, error)
+        failed = if opts[:count_losses], do: fail_looping(config, runs, closed), else: []
+        {runs, closed, failed}
       end)
 
-    with {:ok, {count, closed}} <- result do
-      StepRunner.report_closed(config, closed, step_status, error, retry)
-      {:ok, count}
+    with {:ok, {runs, closed, failed}} <- result do
+      StepRunner.report_closed(
+        config,
+        closed,
+        step_status,
+        error,
+        opts[:retry] || fn _ -> nil end
+      )
+
+      for run <- failed, do: Executor.maybe_notify_parent(config, run, :failed, run.error)
+      {:ok, runs ++ release_waiters(config, query)}
     end
+  end
+
+  # A run_again run claimed before it took its key (it has no attempt yet)
+  # goes back to wait for it. One run waits per key: if a newer start waits
+  # there already, that one has the newer input and this one is cancelled, as
+  # `Executor.wait_behind/3` does. One by one, so a run that can't go back
+  # holds up none of the others.
+  defp release_waiters(config, query) do
+    waiting = query |> exclude(:update) |> where([w], not is_nil(w.runs_after_id))
+
+    for run <- Repo.all(config, waiting),
+        released_waiter?(config, where(query, [w], w.id == ^run.id), run.id),
+        do: run
+  end
+
+  defp released_waiter?(config, query, id) do
+    {count, _} = Repo.update_all(config, query, set: @release)
+    count == 1
+  rescue
+    error in Postgrex.Error ->
+      if error.postgres.code != :unique_violation, do: reraise(error, __STACKTRACE__)
+
+      _ =
+        Executor.cancel_workflow(id, "a newer start is waiting for the key", durable: config.name)
+
+      false
   end
 
   @impl true
