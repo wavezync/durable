@@ -296,9 +296,9 @@ defmodule Durable.Fuzz.Audit6WaitsLoadTest do
   defp seen_by(%{status: :cancelled}), do: "cancelled"
   defp seen_by(row), do: {:row, row && row.status}
 
-  # Every answer a caller was told was taken is on a wait's row, once. A late
-  # event for a group that already has its answer is told :ok and taken by
-  # nothing; it is counted apart.
+  # Every answer a caller was told was taken is on one wait's row. A retried
+  # wait_for_all has it on the new wait's too, and an event under another name
+  # of a wait_for_any that has its answer is told :ok and taken by nothing.
   defp answers_on_rows(log, ids) do
     inputs =
       IntegrationRepo.all(
@@ -320,9 +320,9 @@ defmodule Durable.Fuzz.Audit6WaitsLoadTest do
 
     for %{kind: kind, result: :ok, buffer: false} = op <- log,
         kind in [:input, :event],
-        Map.get(taken, op.uid, 0) != 1,
-        op.name not in ["a", "b", "c", "d"] do
-      {:answer_not_on_one_row, op, Map.get(taken, op.uid, 0)}
+        rows = Map.get(taken, op.uid, 0),
+        (op.name in ["ask", "ev"] and rows != 1) or (op.name in ["c", "d"] and rows == 0) do
+      {:answer_not_on_its_row, op, rows}
     end
   end
 
