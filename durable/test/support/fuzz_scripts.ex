@@ -85,7 +85,7 @@ defmodule Durable.FuzzScripts do
   defp outcome(_action), do: :done
 
   # `:halt` is a workflow that leaves a failed run as it failed.
-  defp model(script, on_failure) do
+  def model(script, on_failure) do
     {done, reached, stop} =
       Enum.reduce_while(@steps, {[], [], nil}, fn step, {done, reached, nil} ->
         case outcome(script.steps[step]) do

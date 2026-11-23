@@ -936,9 +936,13 @@ defmodule Durable.Executor do
         do: where(as_read, [w], w.lock_token == ^left),
         else: where(as_read, [w], is_nil(w.lock_token))
 
+    # Not the node's own id: a node that stops hands back its workers' runs
+    # (`release_node_jobs/2`), and nothing stops a caller. Handed back, the run
+    # went to another node while the caller still ran its step. A caller that
+    # dies is found by the stale sweep, as before.
     claim = [
       status: :running,
-      locked_by: config.node_id,
+      locked_by: "#{config.node_id}/inline",
       locked_at: now,
       lock_token: Ecto.UUID.generate(),
       updated_at: now
