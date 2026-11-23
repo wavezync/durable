@@ -518,7 +518,10 @@ defmodule Durable.Executor.StepRunner do
   @cancel_scopes [:run, :workflow, :root]
 
   defp step_outcome({:ok, data}) when is_run_data(data), do: %{result: :ok}
-  defp step_outcome({:goto, _target, _data}), do: %{result: :ok}
+
+  defp step_outcome({:goto, target, data}) when is_atom(target) and is_run_data(data),
+    do: %{result: :ok}
+
   defp step_outcome({:throw, {kind, _opts}}) when kind in @suspending, do: %{result: :suspended}
   defp step_outcome({:error, error}), do: %{result: :error, error: error_summary(error)}
   defp step_outcome({:fail, error}), do: %{result: :error, error: error_summary(error)}
@@ -573,7 +576,7 @@ defmodule Durable.Executor.StepRunner do
 
   # Handle decision with goto
   defp handle_result({:goto, target, new_data}, ctx)
-       when is_atom(target) and is_map(new_data) do
+       when is_atom(target) and is_run_data(new_data) do
     new_data = EngineState.strip(new_data)
 
     %{step_exec: step_exec, logs: logs, duration_ms: duration_ms, config: config} = ctx
