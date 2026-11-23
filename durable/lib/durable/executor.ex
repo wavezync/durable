@@ -427,9 +427,11 @@ defmodule Durable.Executor do
   def rollback_workflow(workflow_id, opts \\ []) do
     config = Config.get(Keyword.get(opts, :durable, Durable))
 
+    # Not before a run stopped under it can no longer finish a step (rule 15):
+    # asked for as a block fails, its other lanes' steps may still be landing.
     with {:ok, execution} <- load_execution(config, workflow_id),
          :ok <- ensure_retryable(execution.status),
-         {:ok, queued} <- queue_rollback(config, execution) do
+         {:ok, queued} <- queue_rollback(config, execution, settles_at(config, execution)) do
       DurablePubSub.wake(config, queued)
       {:ok, workflow_id}
     end
@@ -462,7 +464,7 @@ defmodule Durable.Executor do
     end
   end
 
-  defp queue_rollback(config, execution, at \\ nil, lock \\ [locked_by: nil, locked_at: nil]) do
+  defp queue_rollback(config, execution, at, lock \\ [locked_by: nil, locked_at: nil]) do
     execution
     |> Ecto.Changeset.change(
       [
@@ -550,13 +552,52 @@ defmodule Durable.Executor do
   defp reopen(changeset, config, retry_attrs, opts \\ []) do
     {:ok, result} =
       Repo.transaction(config, fn ->
+        lock_for_retry(config, changeset.data)
+
         with {:ok, retried} = ok <- cas_update(changeset, config, opts) do
+          wait_again_in_block(config, retried)
           put_back_called(config, [retried.id], retry_attrs)
           ok
         end
       end)
 
     result
+  end
+
+  # A lane's block takes its notices, and a retry of the block puts its lanes
+  # back, under the block's row. A lane retried by its own id takes that row
+  # first too (rule 2), then its own: in the other order the two retries
+  # deadlock, or the block's puts back a lane this one has a worker running.
+  defp lock_for_retry(config, run) do
+    ids = if parallel_branch?(run), do: [run.parent_workflow_id, run.id], else: [run.id]
+
+    for id <- ids,
+        do: Repo.one(config, from(w in WorkflowExecution, where: w.id == ^id, lock: "FOR UPDATE"))
+  end
+
+  # A lane retried by its own id while its block still waits is waited for
+  # again: its failure, already counted, isn't its answer. Counted, the block
+  # went on without it when the other lanes finished, and it ran on after.
+  defp wait_again_in_block(config, lane) do
+    event = "__parallel_done:#{lane.id}"
+
+    waiting =
+      parallel_branch?(lane) &&
+        Repo.one(
+          config,
+          from(e in PendingEvent,
+            join: g in WaitGroup,
+            on: g.id == e.wait_group_id,
+            where: e.workflow_id == ^lane.parent_workflow_id and e.event_name == ^event,
+            where: g.status == :pending,
+            select: g.id,
+            limit: 1
+          )
+        )
+
+    if waiting,
+      do:
+        reopen_group(config, waiting, %{stopped: [event], finished: [], now: DateTime.utc_now()})
   end
 
   # Reopens a run that holds its key, only if it still does: a start may be
@@ -650,8 +691,9 @@ defmodule Durable.Executor do
   defp reopen_parallel_block(config, parent, retry_attrs) do
     # The run's row first (rule 2): a lane's notice takes it before it touches
     # the group, and the two would deadlock, or the notice would read a lane
-    # this is putting back as still failed.
-    Repo.one(config, from(w in WorkflowExecution, where: w.id == ^parent.id, lock: "FOR UPDATE"))
+    # this is putting back as still failed. If the run is a lane, its block's
+    # row before that.
+    lock_for_retry(config, parent)
 
     key_attrs =
       case Keys.retake(config, parent, definition_or_nil(parent)) do
@@ -3530,6 +3572,11 @@ defmodule Durable.Executor do
   # ponytail: a stopped run that was waiting, with no worker, makes the undo
   # wait as well. Record whether a worker had it when it was stopped if that
   # wait matters.
+  #
+  # A run under one that was stopped, and still going, hasn't been told yet:
+  # the cancel passes down after the commit that stopped its parent, and can
+  # be lost with whoever was passing it, for the sweep to finish
+  # (`close_out_lost/2`). The undo waits for it as well, a heartbeat at a time.
   defp settles_at(config, execution) do
     beat = config.heartbeat_interval
     since = DateTime.add(DateTime.utc_now(), -beat, :millisecond)
@@ -3542,8 +3589,29 @@ defmodule Durable.Executor do
         select: max(w.completed_at)
       )
 
-    with %DateTime{} = last <- Repo.one(config, stopped),
+    with nil <- not_yet_stopped(config, execution),
+         %DateTime{} = last <- Repo.one(config, stopped),
          do: DateTime.add(last, beat, :millisecond)
+  end
+
+  # A heartbeat from now if a run under a cancelled one in this run's tree is
+  # still going, as the sweep finds them: not one queued to be undone (rule
+  # 17), nor one retried since.
+  defp not_yet_stopped(config, execution) do
+    root = execution.root_workflow_id || execution.id
+
+    going =
+      from(c in WorkflowExecution,
+        join: p in WorkflowExecution,
+        on: p.id == c.parent_workflow_id,
+        where: c.root_workflow_id == ^root and c.id != ^execution.id,
+        where: p.status == :cancelled and c.status in [:pending, :running, :waiting],
+        where: not EngineState.marked?(c, ^@rollback),
+        where: is_nil(c.retried_at) or c.retried_at < p.completed_at
+      )
+
+    if Repo.aggregate(config, going, :count) > 0,
+      do: DateTime.add(DateTime.utc_now(), config.heartbeat_interval, :millisecond)
   end
 
   # Back on its queue to be undone at `at`, as `queue_rollback/3` leaves a run
@@ -3575,6 +3643,30 @@ defmodule Durable.Executor do
 
   # `rollback_workflow/2` asked: undo the run, keeping the error it failed with.
   defp roll_back(execution, workflow_def, config) do
+    # Queued a heartbeat after what was stopped then, but something under it
+    # may not have been stopped yet. Back on its queue, marker and all, if so.
+    case not_yet_stopped(config, execution) do
+      nil -> roll_back_now(execution, workflow_def, config)
+      at -> undo_at(config, execution, at)
+    end
+  end
+
+  defp undo_at(config, execution, at) do
+    {:ok, parked} =
+      execution
+      |> Ecto.Changeset.change(
+        status: :pending,
+        scheduled_at: at,
+        locked_by: nil,
+        locked_at: nil,
+        lock_token: nil
+      )
+      |> cas_update!(config)
+
+    {:waiting, parked}
+  end
+
+  defp roll_back_now(execution, workflow_def, config) do
     {%{"error" => error, "status" => was}, engine_state} =
       Map.pop(execution.engine_state, @rollback)
 
@@ -3694,12 +3786,7 @@ defmodule Durable.Executor do
       |> without_key(execution)
       |> cas_update!(config)
 
-    # A run that failed as it resumed (a parallel failure, its deadline, a
-    # timed-out input) hasn't run a step in this process, so its data isn't here.
-    data =
-      if Context.context() == %{},
-        do: config |> stored(exec.id) |> data_of(),
-        else: Context.context()
+    data = if Context.context() == %{}, do: undo_data(config, exec.id), else: Context.context()
 
     # A compensation is handed its data as a step is: as it is stored.
     Process.put(:durable_context, data |> stored() |> restore_lane_keys(workflow_def))
@@ -3735,6 +3822,27 @@ defmodule Durable.Executor do
 
     maybe_notify_parent(config, finished, :failed, original_error)
     {:error, original_error}
+  end
+
+  # A run that failed as it resumed (a parallel failure, its deadline, a
+  # timed-out input), or is undone by a claim of its own, hasn't run a step in
+  # this process, so its data isn't here: it is what the run last saved, or its
+  # input if it never saved. A step that finished after a cancel with
+  # `rollback: true` is undone too, and the cancel fenced its save: its result
+  # is on its row (`lost_attempt/2`), and goes over the rest, less what it
+  # deleted, as when a run comes back for it (`finished_before_lost/5`).
+  defp undo_data(config, workflow_id) do
+    run = stored(config, workflow_id)
+    data = if saved?(run), do: data_of(run), else: EngineState.strip(run.input || %{})
+
+    case lost_attempt(config, run) do
+      %{id: row_id, output: output} ->
+        dropped = Map.get(run.engine_state, EngineState.dropped_key(row_id), [])
+        data |> Map.drop(dropped) |> Map.merge(EngineState.strip(output))
+
+      nil ->
+        data
+    end
   end
 
   defp format_compensation_result({:ok, _output}), do: %{status: "completed"}
@@ -3827,7 +3935,17 @@ defmodule Durable.Executor do
         )
       end
 
-    [with_runs_under | with_waits]
+    # An attempt its worker began as the run was cancelled is written after
+    # the cancel closed what the run had open. Its worker closes it as it
+    # stops; lost with its node, nobody else would.
+    with_attempt =
+      from(w in cancelled,
+        join: s in StepExecution,
+        on: s.workflow_id == w.id,
+        where: s.status == :running
+      )
+
+    [with_runs_under, with_attempt | with_waits]
     |> Enum.flat_map(&Repo.all(config, &1))
     |> Enum.uniq_by(& &1.id)
     |> Enum.each(&close_out_cancelled(config, &1))
