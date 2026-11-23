@@ -4,6 +4,50 @@ All notable changes to this package. Versions follow [Semantic
 Versioning](https://semver.org); entries come from [Conventional
 Commits](https://www.conventionalcommits.org).
 
+## [2.0.0](https://github.com/wavezync/durable/compare/durable_dashboard-v1.3.0...durable_dashboard-v2.0.0) - 2026-11-23
+
+### Features
+
+- Show failed claims and schedules removed from code ([9c91a1d](https://github.com/wavezync/durable/commit/9c91a1d1b14487b4690a706e96eb92c896232b30))
+- Draw named branches and lanes in the graph ([d888b33](https://github.com/wavezync/durable/commit/d888b33b68731e3ebb4d0bf2b5fadbd1190c12d7))
+- Optional lanes in a named parallel block ([f4939f4](https://github.com/wavezync/durable/commit/f4939f4264af3306d987b10dc01a35a30ef6c428))
+- **Breaking:** A failed run is left as it failed; rollback is asked for ([0196dac](https://github.com/wavezync/durable/commit/0196dac964046275175353a8b84b64d2c0c2682f))
+- Roll back a failed run from its page ([bd36478](https://github.com/wavezync/durable/commit/bd364788d474e6d109eb3bc79695df61dcb10eb9))
+- Cancel and roll back; a failed run says when it rolls back by itself ([a877b96](https://github.com/wavezync/durable/commit/a877b9695db840220453d75efd67f3523f006e4a))
+- Mount one dashboard per Durable instance with :as ([acf5f66](https://github.com/wavezync/durable/commit/acf5f6645d975e066a8ddbc8e3686375da772eb5))
+- **Breaking:** Needs Durable 2.0 ([bace632](https://github.com/wavezync/durable/commit/bace6321d1e8cc418148ca22d511a99d20beb7e4))
+
+### Bug fixes
+
+- Handle every log level and hide run details from log labels ([fc48a90](https://github.com/wavezync/durable/commit/fc48a90c8edd1b99fd3244244d2a39f22bb54d57))
+- Read step frames that carry their workflow ([ea73443](https://github.com/wavezync/durable/commit/ea734439da69ce16867f42a4f10f1c35f8cecd48))
+- Named blocks in block statuses, the structure map and family views ([f3e6914](https://github.com/wavezync/durable/commit/f3e6914b0fa5ffad0da80805b35a3f850dac7514))
+- Cancel crashed on a dashboard for a named Durable instance ([b06fc23](https://github.com/wavezync/durable/commit/b06fc234096ec747616aaafd4c46e0cd52a3e08b))
+- An Inbox answer could land on a request the operator never saw ([1a7dda5](https://github.com/wavezync/durable/commit/1a7dda57e6ea49bd1338d25266d60f2d8754d8b6))
+- An error whose message isn't text took down the Runs list and the run page ([7c5b4f1](https://github.com/wavezync/durable/commit/7c5b4f18db1df2ed502067c3571b3b5167d7f3b6))
+- A form select with value/label options took the whole Inbox down ([e9ca69f](https://github.com/wavezync/durable/commit/e9ca69fd75e96fe3043f2a3c86bb719ad10d76d8))
+- Approve pushed at a form request answered it without its checks ([a2a7f36](https://github.com/wavezync/durable/commit/a2a7f361fbb2f0430499106266dfc1a58224e968))
+- Queues and Telemetry died on any message they didn't schedule ([c1ed3fb](https://github.com/wavezync/durable/commit/c1ed3fb26750158dcb22517076eff728dbfc2b8e))
+- A missing asset was left unanswered instead of a 404 ([16a2659](https://github.com/wavezync/durable/commit/16a265976b1b2e9b8def3ff20e1d902ddd41d82b))
+- Malformed query params gave 500s ([7828cc5](https://github.com/wavezync/durable/commit/7828cc55548cf1d4156db5c97b4d2a7e28ec7d4a))
+- An event for something that isn't there crashed the page ([912de7d](https://github.com/wavezync/durable/commit/912de7d1aa656deb549e616e807581dbf462f430))
+- A dashboard mounted at / loaded no styles or scripts ([bbf9d75](https://github.com/wavezync/durable/commit/bbf9d7579ff4018910ac9a924a0a6dff9689dbfd))
+- A dashboard mounted inside a scope linked outside it ([5c425be](https://github.com/wavezync/durable/commit/5c425bef6f2391a5e3a22e0c7cde94e4b807df17))
+- Runs that are each other's parent hung the run page ([480d083](https://github.com/wavezync/durable/commit/480d083d8139bdbfebd96b2934a09001a28bd50d))
+- A run three levels down had no steps on its own page ([3aac512](https://github.com/wavezync/durable/commit/3aac512e124b4fd6e2705f0e8528fe5c6181f5cd))
+- A cancelled run whose replaced_by isn't a run id crashed its page ([3ee1b43](https://github.com/wavezync/durable/commit/3ee1b43e7c142550798a94cd6ed2ab8828803674))
+- The Overview crashed on a workflow event whose payload isn't a map ([9c49e82](https://github.com/wavezync/durable/commit/9c49e82d88ff7be62d1d36f9ce7213bc9d8d5271))
+
+### Refactoring
+
+- The pages call the engine's read functions in their new forms ([271dca3](https://github.com/wavezync/durable/commit/271dca3bb7fa8900ca767860c3b4ec2e969512a8))
+- Engine state has its own column, out of the run's context ([3fce50f](https://github.com/wavezync/durable/commit/3fce50f52a0a03ba28dbf549b55e2165af3fdccb))
+
+### Documentation
+
+- Architecture notes for the new options; versioning decisions in the plan ([3b2bdb9](https://github.com/wavezync/durable/commit/3b2bdb904744885ec3be33e790130e9c4bb52fc2))
+- Install 2.0, upgrade with the engine, :as in the guide, and what the Inbox does when a request changed ([31acc49](https://github.com/wavezync/durable/commit/31acc49648dd48c553a217a369d1f6a950653d5c))
+
 ## [1.3.0](https://github.com/wavezync/durable/compare/durable_dashboard-v1.2.2...durable_dashboard-v1.3.0) - 2026-11-09
 
 ### Features
