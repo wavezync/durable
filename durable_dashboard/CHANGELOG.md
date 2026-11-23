@@ -4,6 +4,13 @@ All notable changes to this package. Versions follow [Semantic
 Versioning](https://semver.org); entries come from [Conventional
 Commits](https://www.conventionalcommits.org).
 
+## [2.0.1](https://github.com/wavezync/durable/compare/durable_dashboard-v2.0.0...durable_dashboard-v2.0.1) - 2026-11-23
+
+### Bug fixes
+
+- A lane's page offers no Rerun, and points to its block's run ([4073cc1](https://github.com/wavezync/durable/commit/4073cc1c41a2e45602075a959366cff4a509f5f0))
+- Show a rollback cut short by a lost worker in the operations feed ([f96443b](https://github.com/wavezync/durable/commit/f96443b14e61046ab47b2c0f121966a452221f67))
+
 ## [2.0.0](https://github.com/wavezync/durable/compare/durable_dashboard-v1.3.0...durable_dashboard-v2.0.0) - 2026-11-23
 
 ### Features
