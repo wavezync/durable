@@ -22,7 +22,7 @@ defmodule Durable.Fuzz.Audit6KeysFuzzTest do
   @moduletag :capture_log
   @moduletag timeout: :infinity
 
-  @runs String.to_integer(System.get_env("FUZZ_RUNS", "50"))
+  @runs String.to_integer(System.get_env("FUZZ_RUNS", "60"))
   @open [:pending, :running, :waiting, :compensating]
   @settle_ms 20_000
 
@@ -61,15 +61,15 @@ defmodule Durable.Fuzz.Audit6KeysFuzzTest do
        )},
       {2, tuple({constant(:burst), key, integer(2..6)})},
       {1, tuple({constant(:start_many), list_of(key, min_length: 1, max_length: 5), where()})},
-      {1, tuple({constant(:release), key, run})},
+      {2, tuple({constant(:release), key, run})},
       {2, tuple({constant(:cancel), key, run})},
       {1, tuple({constant(:cancel_undo), key, run})},
       {2, tuple({constant(:retry), key, run})},
-      {2, tuple({constant(:retry_when_idle), key, run})},
+      {3, tuple({constant(:retry_when_idle), key, run})},
       {1, tuple({constant(:rollback), key, run})},
-      {2, tuple({constant(:kill_task), key})},
+      {3, tuple({constant(:kill_task), key})},
       {1, tuple({constant(:kill_worker), key})},
-      {1, tuple({constant(:kill_claimed), key, member_of([:task, :worker])})},
+      {3, tuple({constant(:kill_claimed), key, member_of([:task, :worker])})},
       {1, constant(:recover)},
       {4, tuple({constant(:wait), integer(0..80)})}
     ])
@@ -419,7 +419,12 @@ defmodule Durable.Fuzz.Audit6KeysFuzzTest do
       handed_off: Enum.count(activity, &match?({"key_handed_off", _}, &1)),
       retaken: Enum.count(activity, &match?({"key_retaken", _}, &1)),
       retried: Enum.count(records, &match?({:retry, _, {:ok, _}}, &1)),
-      rolled_back: Enum.count(records, &match?({:rollback, _, {:ok, _}}, &1)),
+      # Queued to be undone, so the key went (`Executor.without_key/2`).
+      undone:
+        Enum.count(
+          records,
+          &(match?({:rollback, _, {:ok, _}}, &1) or match?({:cancel_undo, _, :ok}, &1))
+        ),
       cancelled: Enum.count(records, &match?({:cancel, _, :ok}, &1)),
       killed: Enum.count(records, &match?({kill, _} when kill in [:kill_task, :kill_worker], &1)),
       killed_claimed: Enum.count(records, &match?({:kill_claimed, _, true}, &1)),
