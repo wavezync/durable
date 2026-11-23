@@ -435,9 +435,17 @@ defmodule Durable.Executor.StepRunner do
   end
 
   # The step's own `timeout:` or what's left until the run's deadline,
-  # whichever is shorter; nil when neither applies.
+  # whichever is shorter; nil when neither applies. What's left is rounded up
+  # to the millisecond: rounded down, the step was stopped before the deadline,
+  # and a run not yet past it retried the step in place of failing.
   defp time_limit(step, deadline) do
-    left = deadline && max(DateTime.diff(deadline, DateTime.utc_now(), :millisecond), 0)
+    left =
+      deadline &&
+        deadline
+        |> DateTime.diff(DateTime.utc_now(), :microsecond)
+        |> Kernel./(1000)
+        |> ceil()
+        |> max(0)
 
     [{step.opts[:timeout], :step}, {left, :run}]
     |> Enum.filter(&elem(&1, 0))
@@ -735,8 +743,30 @@ defmodule Durable.Executor.StepRunner do
 
   defp handle_step_success(config, _step, step_exec, new_data, logs, duration_ms) do
     output = Map.merge(put_in_body(), new_data)
+
+    record_deleted(config, step_exec, deleted_in_body())
     {:ok, _} = complete_step_execution(config, step_exec, output, logs, duration_ms)
     {:ok, new_data}
+  end
+
+  # Written before the row is completed: a completed row whose body deleted
+  # something always has its keys on the run. Lost in between, the row isn't
+  # completed and the step runs again as another row, which these don't name.
+  # Not fenced, as `Orchestration.record_child/3` isn't: it only names a row
+  # that exists, and is read for no other.
+  defp record_deleted(_config, _step_exec, []), do: :ok
+
+  defp record_deleted(config, step_exec, keys) do
+    dropped = %{EngineState.dropped_key(step_exec.id) => keys}
+
+    Repo.update_all(
+      config,
+      from(w in WorkflowExecution,
+        where: w.id == ^step_exec.workflow_id,
+        update: [set: [engine_state: fragment("? || ?", w.engine_state, type(^dropped, :map))]]
+      ),
+      []
+    )
   end
 
   # What the body put in the context without returning it is part of its
@@ -747,6 +777,14 @@ defmodule Durable.Executor.StepRunner do
 
     Process.get(:durable_context, %{})
     |> Map.reject(fn {key, value} -> match?(%{^key => ^value}, before) end)
+  end
+
+  # And what it took out of the context, which the output can't say: the keys
+  # it was handed that the context no longer has. They go in the run's engine
+  # state, since the output is the user's data.
+  defp deleted_in_body do
+    before = Process.get(:durable_context_before, %{})
+    Map.keys(before) -- Map.keys(Process.get(:durable_context, %{}))
   end
 
   defp get_max_attempts(%Step{opts: opts}) do

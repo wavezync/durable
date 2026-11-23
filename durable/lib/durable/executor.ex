@@ -1639,14 +1639,15 @@ defmodule Durable.Executor do
   # The row has the step's data, not what its body added to the engine's
   # state; a child it started is on the run's row already (`record_child/3`).
   #
-  # ponytail: nor what the body took out of the context (`delete_context/1`):
-  # a key the step dropped comes back from the data it was handed. Record the
-  # dropped keys on the row if that matters (a test tagged :skip in
-  # integration/audit5_exec_test.exs shows it).
+  # What the body took out of the context (`delete_context/1`) is in the run's
+  # engine state, under that row's id (`StepRunner.record_deleted/3`): left in
+  # the data the step was handed, a key it deleted would be saved again. One
+  # it also returned or put back is in the output, and stays.
   defp finished_before_lost(config, %{current_step: current} = run, step, data, workflow_def) do
     with true <- current == Atom.to_string(step.name) and step.type != :decision,
-         %{} = output <- output_of_lost_attempt(config, run) do
-      Process.put(:durable_context, data)
+         %{id: row_id, output: output} <- lost_attempt(config, run) do
+      dropped = Map.get(run.engine_state, EngineState.dropped_key(row_id), [])
+      Process.put(:durable_context, Map.drop(data, dropped))
 
       {:ok,
        output
@@ -1659,7 +1660,7 @@ defmodule Durable.Executor do
 
   # Only the run's newest row can be the one: a wait, a retry or a jump back
   # leaves a newer one. One from before `Durable.retry/2` isn't it either.
-  defp output_of_lost_attempt(config, %{id: id, current_step: step, retried_at: retried_at}) do
+  defp lost_attempt(config, %{id: id, current_step: step, retried_at: retried_at}) do
     newest =
       from(s in StepExecution,
         where: s.workflow_id == ^id and s.is_compensation == false,
@@ -1671,7 +1672,7 @@ defmodule Durable.Executor do
            Repo.one(config, newest),
          false <- jumped?(output),
          true <- is_nil(retried_at) or DateTime.after?(row.inserted_at, retried_at) do
-      output
+      row
     else
       _not_it -> nil
     end
@@ -2710,6 +2711,9 @@ defmodule Durable.Executor do
     engine_state =
       execution.engine_state
       |> finish_wait_markers(markers)
+      # What an attempt deleted is in this save, or was never to be. A run
+      # that came back for its result loaded it with the rest of its state.
+      |> EngineState.without_dropped()
       |> record_saved(merged)
 
     engine_state =

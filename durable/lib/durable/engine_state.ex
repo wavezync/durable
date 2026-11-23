@@ -28,7 +28,23 @@ defmodule Durable.EngineState do
   )
 
   # Followed by a ref or a run's id.
-  @prefixes ~w(__child: __child_done: __fire_forget: __parallel_done:)
+  @prefixes ~w(__child: __child_done: __fire_forget: __parallel_done: __dropped:)
+
+  # Followed by an attempt's row id: the keys that attempt's body deleted from
+  # the context, written just before its row is completed. Read only by a run
+  # that takes that row's result (`Executor.finished_before_lost/5`), and gone
+  # at the next save. Named by the row, so one attempt's never stands in for,
+  # or overwrites, another's.
+  @dropped "__dropped:"
+
+  @doc "The name the keys an attempt deleted are kept under."
+  @spec dropped_key(String.t()) :: String.t()
+  def dropped_key(row_id), do: @dropped <> row_id
+
+  @doc "The state without what any attempt deleted."
+  @spec without_dropped(map()) :: map()
+  def without_dropped(state),
+    do: Map.reject(state, fn {key, _value} -> String.starts_with?(key, @dropped) end)
 
   # What a resume leaves for the step that waited, to read through the wait
   # itself. They don't outlast the step.
