@@ -77,7 +77,8 @@ defmodule Durable.Integration.Audit4QueueRacesTest do
         {:ok, {:ok, 0}} ->
           assert run.() == %{status: :running, lock_token: job.lock_token, locked_by: "node-a"}
 
-        {{:error, :not_found}, {:ok, 1}} ->
+        # The claim is gone, so the worker stops its step.
+        {{:error, :fenced}, {:ok, 1}} ->
           assert run.() == %{status: :pending, lock_token: nil, locked_by: nil}
 
         both ->

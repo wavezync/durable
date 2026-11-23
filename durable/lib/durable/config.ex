@@ -217,15 +217,22 @@ defmodule Durable.Config do
   # One id per running instance: the Erlang node name when distributed, else
   # the hostname plus a per-boot suffix. Pollers stamp it into `locked_by`,
   # and the node registry keys its heartbeat row on it.
-  defp node_id do
-    if node() == :nonode@nohost do
-      {:ok, host} = :inet.gethostname()
-      # Random: System.unique_integer/1 starts from the same place on every
-      # boot, so two VMs on one host got one id, and one's shutdown handed back
-      # the other's running runs.
-      "#{host}-#{Base.encode16(:crypto.strong_rand_bytes(4), case: :lower)}"
-    else
-      Atom.to_string(node())
+  defp node_id(name) do
+    cond do
+      node() == :nonode@nohost ->
+        {:ok, host} = :inet.gethostname()
+        # Random: System.unique_integer/1 starts from the same place on every
+        # boot, so two VMs on one host got one id, and one's shutdown handed
+        # back the other's running runs.
+        "#{host}-#{Base.encode16(:crypto.strong_rand_bytes(4), case: :lower)}"
+
+      name == Durable ->
+        Atom.to_string(node())
+
+      # Two instances on one node share its name, and one's shutdown handed
+      # back the other's running runs.
+      true ->
+        "#{node()}/#{inspect(name)}"
     end
   end
 
@@ -246,7 +253,7 @@ defmodule Durable.Config do
     case NimbleOptions.validate(opts, @schema) do
       {:ok, validated} ->
         validated = resolve_pubsub(validated)
-        {:ok, %{struct(__MODULE__, validated) | node_id: node_id()}}
+        {:ok, %{struct(__MODULE__, validated) | node_id: node_id(validated[:name])}}
 
       {:error, %NimbleOptions.ValidationError{}} = error ->
         error

@@ -222,14 +222,15 @@ defmodule Durable.Queue.Worker do
      }}
   end
 
-  # We've been fenced: stale-lock recovery released our claim and another worker
-  # re-claimed it. Abort the in-flight Task so we don't run the workflow to
-  # completion a second time (and stomp the new owner). Report `:fenced` to the
-  # poller so it cleans us up WITHOUT acking/nacking the row.
+  # We've been fenced: our claim was released (stale-lock recovery, a cancel
+  # that queued the run's undo) or another worker re-claimed it. Abort the
+  # in-flight Task so we don't run the workflow a second time (and stomp the
+  # new owner). Report `:fenced` to the poller so it cleans us up WITHOUT
+  # acking/nacking the row.
   defp self_fence(state) do
     Logger.error(
-      "[Durable] worker for job #{state.job.id} was fenced (lock reclaimed by another " <>
-        "worker after stale-lock recovery) — aborting to avoid a duplicate execution"
+      "[Durable] worker for job #{state.job.id} was fenced (its claim was released or " <>
+        "taken by another worker) — aborting to avoid a duplicate execution"
     )
 
     duration_ms = stop_task(state)

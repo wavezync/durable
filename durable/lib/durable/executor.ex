@@ -3537,11 +3537,12 @@ defmodule Durable.Executor do
   # The connection went while recording this attempt, which says nothing about
   # the step. Like a lost worker it uses no attempt, and the run goes back on its
   # queue. If the database is still away, the stale-lock sweep does this later.
+  # A rollback goes back to be rolled back, as a stopping node hands one back.
   @spec connection_lost(map(), Exception.t(), Config.t()) :: :waiting | :fenced
   def connection_lost(job, exception, %Config{} = config) do
     {:ok, run} = load_execution(config, job.id)
 
-    if run.lock_token == job[:lock_token] and run.status == :running,
+    if run.lock_token == job[:lock_token] and run.status in [:running, :compensating],
       do: release_after_lost_connection(config, run, exception),
       else: :fenced
   end
@@ -3549,7 +3550,7 @@ defmodule Durable.Executor do
   defp release_after_lost_connection(config, run, exception) do
     error = %{type: "worker_lost", message: Exception.message(exception)}
     closed = StepRunner.close_attempts(config, [run.id], :failed, error)
-    outcome = requeue(config, run, nil)
+    outcome = requeue(config, run, nil, back_to_undo(run))
 
     retry =
       if outcome == :waiting,
@@ -3630,15 +3631,26 @@ defmodule Durable.Executor do
     |> length()
   end
 
+  # A run being rolled back goes back with its marker, or the next claim would
+  # run its steps (rule 19). Its error has been on the row since it began.
+  defp back_to_undo(%{status: :compensating} = run) do
+    marker = %{"error" => run.error || %{}, "status" => "failed"}
+    [engine_state: Map.put(run.engine_state, @rollback, marker)]
+  end
+
+  defp back_to_undo(_run), do: []
+
   # The context stays as it was last saved: the attempt that died changed nothing.
-  defp requeue(config, run, delay) do
+  defp requeue(config, run, delay, changes \\ []) do
     run
     |> Ecto.Changeset.change(
-      status: :pending,
-      scheduled_at: requeue_at(run, delay),
-      locked_by: nil,
-      locked_at: nil,
-      lock_token: nil
+      [
+        status: :pending,
+        scheduled_at: requeue_at(run, delay),
+        locked_by: nil,
+        locked_at: nil,
+        lock_token: nil
+      ] ++ changes
     )
     |> cas_update(config)
     |> case do
