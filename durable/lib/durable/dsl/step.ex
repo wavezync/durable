@@ -122,6 +122,19 @@ defmodule Durable.DSL.Step do
     build_step(name, opts, body_fn, __CALLER__)
   end
 
+  defmacro step(name, _opts, _body), do: body_must_be_fn!(:step, name, __CALLER__)
+
+  # `step :name do ... end` and the like: the body takes the run's data, so
+  # it is written as a function.
+  defp body_must_be_fn!(kind, name, caller) do
+    raise CompileError,
+      file: caller.file,
+      line: caller.line,
+      description:
+        "#{kind} #{Macro.to_string(name)} needs its body as a function: " <>
+          "`#{kind} #{Macro.to_string(name)}, fn data -> ... end`"
+  end
+
   defp build_step(name, opts, body_fn, caller) do
     normalized_opts = normalize_step_opts(opts, name, caller)
     func_name = body_name(caller, :step_body, name)
@@ -314,6 +327,8 @@ defmodule Durable.DSL.Step do
     build_decision(name, opts, body_fn, __CALLER__)
   end
 
+  defmacro decision(name, _opts, _body), do: body_must_be_fn!(:decision, name, __CALLER__)
+
   defp build_decision(name, opts, body_fn, caller) do
     # Walk the body AST for `{:goto, atom, _}` patterns so the dashboard
     # can render the conditional branches in the workflow graph. Best-
@@ -390,6 +405,8 @@ defmodule Durable.DSL.Step do
   defmacro compensate(name, opts, {:fn, _, _} = body_fn) when is_list(opts) do
     build_compensate(name, opts, body_fn, __CALLER__)
   end
+
+  defmacro compensate(name, _opts, _body), do: body_must_be_fn!(:compensate, name, __CALLER__)
 
   defp build_compensate(name, opts, body_fn, caller) do
     warn_unknown_opts(opts, [:retry, :timeout], "compensate #{inspect(name)}", caller)

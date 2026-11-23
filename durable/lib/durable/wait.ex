@@ -508,7 +508,7 @@ defmodule Durable.Wait do
       )
 
   """
-  @spec wait_for_approval(String.t(), keyword()) :: :approved | :rejected | term()
+  @spec wait_for_approval(String.t(), keyword()) :: term()
   def wait_for_approval(input_name, opts \\ []) do
     wait_for_input(input_name, Keyword.put(opts, :type, :approval))
   end

@@ -137,7 +137,7 @@ Each of these was learned from a real bug. Breaking one brings it back.
 7. **Don't make atoms from stored text.** Use `Context.known_key/1`. Atoms are never freed.
 8. **A wake is only a hint.** Losing one must cost no more than the next poll.
 9. **Whoever ends a run tells its parent.** A sweep or a worker that fails a run in the executor's place calls `Executor.maybe_notify_parent/4`, or the parent waits forever.
-10. **A context save records its key shapes** (`save_data_as_context/5`, `release/4`), in `engine_state` and in the same write as the context they describe, and `restore_keys/2` reads them, so a step sees the same data however the run got back to it.
+10. **A context save records its key shapes** (`save_data_as_context/5`, `release/4`), in `engine_state` and in the same write as the context they describe, and `restore_keys/2` reads them, so a step sees the same data however the run got back to it. A name the data has under both shapes (`:id` beside `"id"`) is stored once, as the string; the atom's value goes in the record (`__atom_twins__`) and is put back with it.
 
 ## Tests
 
