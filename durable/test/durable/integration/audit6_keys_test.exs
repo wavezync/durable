@@ -21,6 +21,11 @@ defmodule Durable.Integration.Audit6KeysTest do
   # the key's lock (another start in it, say), so the claimed run has to wait
   # for the lock. The start must not jump the queue: the guide's "one run
   # waits, with the newest input" means the newest input runs last.
+  setup do
+    start_supervised!(K.Ledger)
+    :ok
+  end
+
   test "a run_again start while the waiting run is claimed runs after it, not before" do
     start_durable!(%{default: 4})
     key = "account:7"
@@ -45,6 +50,6 @@ defmodule Durable.Integration.Audit6KeysTest do
     for id <- Enum.uniq([waiting, last]), do: await_status(id, :completed)
 
     assert K.ran(key) == [1, 2, 3]
-    assert Probe.peak({:key, key}) == 1
+    assert K.overlaps(key) == []
   end
 end
