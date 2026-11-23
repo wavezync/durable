@@ -171,7 +171,7 @@ defmodule Durable.Keys do
     result =
       Repo.transaction(config, fn ->
         lock_key(config, ctx.entry)
-        claim(ctx, @rounds, nil)
+        unheld_waiting(ctx) || claim(ctx, @rounds, nil)
       end)
 
     with {:ok, claimed} <- result, do: finish(ctx, claimed)
@@ -368,22 +368,40 @@ defmodule Durable.Keys do
     end
   end
 
+  # The run waiting for the key (run_again), if no worker has it yet.
+  defp waiting(entry) do
+    from(w in WorkflowExecution,
+      where:
+        w.workflow_module == ^entry.workflow_module and
+          w.workflow_name == ^entry.workflow_name and w.key == ^entry.key and
+          not is_nil(w.runs_after_id) and w.status == :pending and is_nil(w.locked_by)
+    )
+  end
+
   defp refresh_waiting(%{config: config, entry: entry}) do
     {_, ids} =
-      Repo.update_all(
-        config,
-        from(w in WorkflowExecution,
-          where:
-            w.workflow_module == ^entry.workflow_module and
-              w.workflow_name == ^entry.workflow_name and w.key == ^entry.key and
-              not is_nil(w.runs_after_id) and w.status == :pending and is_nil(w.locked_by),
-          select: w.id
-        ),
+      Repo.update_all(config, from(w in waiting(entry), select: w.id),
         set: [input: entry.input, updated_at: DateTime.utc_now()]
       )
 
     List.first(ids)
   end
+
+  # run_again with nobody holding the key: its holder let it go to be rolled
+  # back (`Executor.without_key/2`), or was pruned. A run still waiting takes
+  # the newer input, as it would behind a holder: a new holder would run
+  # first, and leave the older input to run last.
+  defp unheld_waiting(%{mode: :run_again} = ctx) do
+    with nil <- holder(ctx.config, ctx.entry),
+         %WorkflowExecution{} = waiter <- Repo.one(ctx.config, waiting(ctx.entry)),
+         id when is_binary(id) <- refresh_waiting(ctx) do
+      {:waiting_refreshed, id, waiter}
+    else
+      _ -> nil
+    end
+  end
+
+  defp unheld_waiting(_ctx), do: nil
 
   # Gives the newer input to a debounced run that hasn't been claimed, and
   # pushes its start back by `period`, but not past `timeout` after the first

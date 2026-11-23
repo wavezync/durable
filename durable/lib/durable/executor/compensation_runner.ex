@@ -88,7 +88,7 @@ defmodule Durable.Executor.CompensationRunner do
 
     result =
       try do
-        compensation |> Compensation.execute(Context.context()) |> outcome()
+        compensation |> run_body(Context.context()) |> outcome()
       catch
         kind, reason -> {:error, Durable.Executor.caught_error(kind, reason, __STACKTRACE__)}
       end
@@ -131,6 +131,51 @@ defmodule Durable.Executor.CompensationRunner do
         {:error, error}
     end
   end
+
+  # `timeout:` is per attempt, as a step's is. The body runs in a task with a
+  # copy of this process's dictionary (context, log capture), which it hands
+  # back, and is killed when the time passes: that attempt has failed.
+  defp run_body(%Compensation{opts: %{timeout: ms}} = compensation, data) when is_integer(ms) do
+    dict = Process.get()
+
+    task =
+      Task.async(fn ->
+        put_dict(dict)
+        Durable.LogCapture.mark_step_body()
+
+        try do
+          {:done, Compensation.execute(compensation, data), Process.get()}
+        catch
+          kind, reason -> {:raised, kind, reason, __STACKTRACE__}
+        end
+      end)
+
+    case Task.yield(task, ms) || Task.shutdown(task, :brutal_kill) do
+      {:ok, {:done, result, dict}} ->
+        put_dict(dict)
+        result
+
+      {:ok, {:raised, kind, reason, stacktrace}} ->
+        :erlang.raise(kind, reason, stacktrace)
+
+      {:exit, reason} ->
+        exit(reason)
+
+      nil ->
+        message =
+          "compensation #{compensation.name} passed its " <>
+            "#{Durable.Executor.format_timeout(ms)} timeout"
+
+        {:error, %{type: "timeout", message: message}}
+    end
+  end
+
+  defp run_body(compensation, data), do: Compensation.execute(compensation, data)
+
+  @task_keys [:"$ancestors", :"$callers", :"$initial_call"]
+
+  defp put_dict(dict),
+    do: for({key, value} <- dict, key not in @task_keys, do: Process.put(key, value))
 
   # A rollback that reports an error didn't happen. As in a step, {:error, _}
   # retries and {:fail, _} gives up now; any other return counts as done.
