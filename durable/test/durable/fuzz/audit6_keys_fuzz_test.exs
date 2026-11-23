@@ -442,6 +442,7 @@ defmodule Durable.Fuzz.Audit6KeysFuzzTest do
 
     check all(
             nkeys <- integer(1..3),
+            closing <- member_of([:run_again, :cancel_existing]),
             ops <- list_of(op(), min_length: 5, max_length: 30),
             max_runs: @runs,
             max_shrinking_steps: 0
@@ -462,11 +463,13 @@ defmodule Durable.Fuzz.Audit6KeysFuzzTest do
 
       records = records ++ Enum.flat_map(background, &Task.await(&1, 60_000))
 
-      # The last start of every key: its input runs last.
+      # The last start of every key, in a mode where the newest input wins:
+      # its input runs last.
       finals =
         Map.new(keys, fn key ->
           v = System.unique_integer([:positive])
-          {key, {v, Durable.start(workflow(key), %{"key" => key, "v" => v}, key: key)}}
+          input = %{"key" => key, "v" => v}
+          {key, {v, Durable.start(workflow(key), input, key: key, on_duplicate: closing)}}
         end)
 
       sweep_errors = settle(ctx, System.monotonic_time(:millisecond) + @settle_ms)
