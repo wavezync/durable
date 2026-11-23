@@ -455,6 +455,9 @@ defmodule Durable.Fuzz.Audit6BlocksChaosTest do
     end
   end
 
+  defp lost_worker?(hits),
+    do: Enum.any?(hits, fn {how, _} -> how in [:kill_task, :kill_worker, :crash_node] end)
+
   defp quiesce do
     assert_eventually(
       fn -> Enum.all?(@queues, &(Manager.status(Durable, &1).active_jobs == 0)) end,
@@ -758,6 +761,16 @@ defmodule Durable.Fuzz.Audit6BlocksChaosTest do
       for queue <- @queues, do: Durable.resume_queue(queue)
       drive(Enum.map(runs, & &1.id))
       quiesce()
+
+      # What a lost worker left is swept once it's a second old (`sweep_all/0`
+      # counts that as stale): an attempt a cancel couldn't close, say. The
+      # runs can all have ended before then.
+      if Enum.any?(Map.values(touched), &lost_worker?/1) do
+        Process.sleep(1_100)
+        sweep_all()
+        drive(Enum.map(runs, & &1.id))
+        quiesce()
+      end
 
       # Whatever node is left goes, with nothing of the case's still to run.
       with peer when peer != nil <- Probe.fetch_or(:peer, nil) do

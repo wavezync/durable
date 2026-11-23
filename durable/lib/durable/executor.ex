@@ -3682,10 +3682,12 @@ defmodule Durable.Executor do
     # The marker goes in the write that takes the run out of :running. A
     # worker lost after it then leaves a run that failed while compensating,
     # not one the next claim carries on with, a cancelled run's steps and all.
+    # Its error goes with it (rule 19): a run queued to be undone may have it
+    # only in the marker, and a sweep that fails it keeps what is on the row.
     {:ok, execution} =
       execution
       |> WorkflowExecution.compensating_changeset()
-      |> Ecto.Changeset.change(engine_state: engine_state)
+      |> Ecto.Changeset.change(engine_state: engine_state, error: error)
       |> cas_update!(config)
 
     # A cancel left open the step its worker had (cancel_run/3). That worker

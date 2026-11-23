@@ -53,6 +53,28 @@ defmodule Issue48Booking do
   end
 end
 
+defmodule Issue48Claim do
+  @moduledoc false
+  use Durable
+
+  # The policy lookup fails while the assessor is still being booked, so the
+  # undo waits for the assessor's lane to stop (rule 15) before it begins.
+  workflow "i48_claim", on_failure: :rollback do
+    step :open_claim, [compensate: :close_claim], fn claim -> {:ok, claim} end
+
+    parallel :checks do
+      step :policy, fn _claim -> {:error, "no such policy"} end
+
+      step :assessor, fn claim ->
+        Process.sleep(5_000)
+        {:ok, claim}
+      end
+    end
+
+    compensate :close_claim, fn claim -> {:ok, claim} end
+  end
+end
+
 defmodule Issue48MonthlyReport do
   @moduledoc false
   use Durable
@@ -542,6 +564,49 @@ defmodule Durable.Integration.Issue48Test do
       assert {:ok, _} = Durable.Queue.Adapters.Postgres.recover_stale_locks(config, 1)
       await_status(id, :compensated)
       assert Probe.hits(:released) == 1
+    end
+  end
+
+  describe "a rollback whose worker is lost as it begins" do
+    # The undo of a run that failed with a lane still stopping goes back on its
+    # queue with its error in the marker only. The write that made it
+    # `compensating` took the marker out and left the error off the row, so a
+    # sweep that then failed it gave it its own error instead (rule 19).
+    setup do
+      handler = "i48-lose-undo-#{System.unique_integer([:positive])}"
+
+      :telemetry.attach(
+        handler,
+        [:durable, :integration_repo, :query],
+        fn _event, _measure, meta, _config ->
+          if meta.source == "workflow_executions" and "compensating" in meta.params and
+               not Probe.set?(:undo_lost) do
+            :ok = Probe.set(:undo_lost)
+            [worker | _] = Process.get(:"$callers")
+            Process.exit(worker, :kill)
+            Process.exit(self(), :kill)
+          end
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler) end)
+    end
+
+    test "keeps the error it failed with" do
+      start_durable!(%{default: 4}, heartbeat_interval: 300)
+      {:ok, id} = Durable.start(Issue48Claim, %{"claim" => 1})
+
+      assert_eventually(fn -> Probe.set?(:undo_lost) end, 10_000)
+      assert %{status: :compensating} = get(id)
+
+      Process.sleep(1_200)
+      config = Durable.Config.get(Durable)
+      assert {:ok, _} = Durable.Queue.Adapters.Postgres.recover_zombie_workflows(config, 1)
+
+      run = await_status(id, :failed)
+      refute run.error["type"] == "zombie_detected", inspect(run.error)
+      assert inspect(run.error) =~ "no such policy"
     end
   end
 
