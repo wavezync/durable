@@ -123,7 +123,7 @@ workflow "payment_flow" do
   end
 
   step :process_result, fn ctx ->
-    case ctx.payment_result do
+    case ctx["payment_result"] do
       "timeout" -> handle_timeout()
       %{"status" => "success"} -> handle_success()
       _ -> handle_failure()
@@ -171,9 +171,9 @@ workflow "order_status" do
   end
 
   step :handle_result, fn ctx ->
-    case ctx.result_event do
-      "success" -> process_success(ctx.result_data)
-      "failure" -> process_failure(ctx.result_data)
+    case ctx["result_event"] do
+      "success" -> process_success(ctx["result_data"])
+      "failure" -> process_failure(ctx["result_data"])
       "cancelled" -> process_cancellation()
       "timeout" -> process_timeout()
     end
@@ -184,7 +184,7 @@ end
 
 ### `wait_for_all/2` - All Events Required
 
-Wait for all specified events. Returns `%{event_name => payload}`. A name is an atom key if your code mentions that atom, and a string key otherwise.
+Wait for all specified events. Returns `%{event_name => payload}`, with each event's name as a string key.
 
 ```elixir
 workflow "multi_approval" do
@@ -197,7 +197,7 @@ workflow "multi_approval" do
   end
 
   step :process_approvals, fn ctx ->
-    case ctx.approvals do
+    case ctx["approvals"] do
       "timeout" ->
         handle_incomplete_approvals()
       %{} = all_approvals ->
@@ -269,7 +269,7 @@ workflow "approval_flow" do
   end
 
   step :process_decision, fn ctx ->
-    status = case ctx.approval do
+    status = case ctx["approval"] do
       "auto_rejected" -> "rejected_timeout"
       %{"approved" => true} -> "approved"
       _ -> "rejected"
@@ -441,7 +441,7 @@ workflow "expense_approval" do
   end
 
   step :finance_review, fn ctx ->
-    if ctx["amount"] > 5000 and ctx.manager_approved do
+    if ctx["amount"] > 5000 and ctx["manager_approved"] do
       answer = wait_for_approval("finance_approval",
         timeout: days(3)
       )
@@ -452,7 +452,7 @@ workflow "expense_approval" do
   end
 
   step :finalize, fn ctx ->
-    if ctx.manager_approved and ctx.finance_approved do
+    if ctx["manager_approved"] and ctx["finance_approved"] do
       Expenses.approve(ctx["expense_id"])
     else
       Expenses.reject(ctx["expense_id"])
@@ -483,9 +483,9 @@ workflow "order_fulfillment" do
   end
 
   step :handle_delivery, fn ctx ->
-    case ctx.delivery_status do
+    case ctx["delivery_status"] do
       "lost_package" ->
-        Support.create_ticket("Lost package", ctx.shipment_id)
+        Support.create_ticket("Lost package", ctx["shipment_id"])
       %{"status" => "delivered"} ->
         Orders.mark_complete(ctx["order_id"])
       _ ->
@@ -521,13 +521,13 @@ workflow "subscription_renewal" do
   end
 
   step :wait_for_reminder_time, fn ctx ->
-    {:ok, expires_at, _offset} = DateTime.from_iso8601(ctx.expires_at)
+    {:ok, expires_at, _offset} = DateTime.from_iso8601(ctx["expires_at"])
     schedule_at(DateTime.add(expires_at, -7, :day))  # 7 days before
     {:ok, ctx}
   end
 
   step :send_reminder, fn ctx ->
-    Mailer.send_renewal_reminder(ctx.user_email)
+    Mailer.send_renewal_reminder(ctx["user_email"])
     {:ok, ctx}
   end
 
@@ -540,7 +540,7 @@ workflow "subscription_renewal" do
   end
 
   step :handle_result, fn ctx ->
-    case ctx.renewal_result do
+    case ctx["renewal_result"] do
       "not_renewed" ->
         Subscriptions.expire(ctx["subscription_id"])
       _ ->
@@ -569,11 +569,11 @@ workflow "contract_approval" do
   end
 
   step :finalize, fn ctx ->
-    status = case ctx.approval_results do
-      "incomplete" -> :timed_out
+    status = case ctx["approval_results"] do
+      "incomplete" -> "timed_out"
       approvals ->
         all_approved = Enum.all?(approvals, fn {_, v} -> v["approved"] end)
-        if all_approved, do: :approved, else: :rejected
+        if all_approved, do: "approved", else: "rejected"
     end
     {:ok, assign(ctx, :status, status)}
   end
@@ -596,7 +596,7 @@ workflow "payment_with_timeout" do
   end
 
   step :handle_result, fn ctx ->
-    case ctx.result_event do
+    case ctx["result_event"] do
       "payment_received" -> complete_order()
       "user_cancelled" -> refund_if_needed()
       "fraud_detected" -> flag_for_review()
@@ -654,7 +654,7 @@ step :prepare_and_wait, fn ctx ->
 end
 ```
 
-A step sees the same data however the run got back to it, after a wait, a retry, a snooze, a queue move or a crash: a top-level key that was a string is still a string, so a first step reading its input with `ctx["id"]` reads it the same way on both passes, and a key that was an atom is still an atom. What a wait adds, the answer under its name, is an atom if your code mentions that atom anywhere and a string otherwise, so read a generated key like `"item_123"` with `ctx["item_123"]`.
+A step sees the same data however the run got to it, straight from the last step or after a wait, a retry, a snooze, a queue move or a crash: as it is stored, with string keys at every depth. `prepared_at` above is read as `ctx["prepared_at"]`, and holds ISO 8601 text. What a wait adds, the answer under its name, has a string key too.
 
 ### Use Convenience Wrappers
 

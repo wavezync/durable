@@ -591,7 +591,7 @@ defmodule Durable.Integration.FailurePathsTest do
     end
   end
 
-  defmodule KeepsAtomKeys do
+  defmodule WritesAtomKeys do
     use Durable
     use Durable.Helpers
     use Durable.Wait
@@ -601,13 +601,13 @@ defmodule Durable.Integration.FailurePathsTest do
       step :first, fn d -> {:ok, assign(d, :total, 7)} end
 
       step :second, fn d ->
-        Probe.note({:second, d.total})
+        Probe.note({:second, d["total"]})
         sleep(20)
         {:ok, d}
       end
 
       step :third, fn d ->
-        Probe.note({:third, d.total, d["id"]})
+        Probe.note({:third, d["total"], d["id"]})
         {:ok, d}
       end
     end
@@ -1184,7 +1184,7 @@ defmodule Durable.Integration.FailurePathsTest do
     end
   end
 
-  describe "#7 a run's data keeps its shape" do
+  describe "#7 a run's data has string keys" do
     defp wake_until_done(id) do
       assert_eventually(fn ->
         SleepWaker.wake_now(Durable)
@@ -1233,10 +1233,10 @@ defmodule Durable.Integration.FailurePathsTest do
       assert Enum.sort(labels()) == [{:branch, 42}, {:second, 42}]
     end
 
-    test "with atom keys staying atoms, next to string ones" do
+    test "with a key written as an atom read as a string, like the rest" do
       start_durable!(%{default: 1})
 
-      {:ok, id} = Durable.start(KeepsAtomKeys, %{"id" => 42})
+      {:ok, id} = Durable.start(WritesAtomKeys, %{"id" => 42})
       wake_until_done(id)
 
       assert labels() == [{:second, 7}, {:second, 7}, {:third, 7, 42}]
@@ -1262,10 +1262,10 @@ defmodule Durable.Integration.FailurePathsTest do
       assert execution.context == %{"id" => 42}
     end
 
-    test "and a run parked before the upgrade still resumes as it did" do
+    test "and a run parked before the upgrade resumes with string keys too" do
       start_durable!(%{default: 1})
 
-      {:ok, id} = Durable.start(KeepsAtomKeys, %{"id" => 42})
+      {:ok, id} = Durable.start(WritesAtomKeys, %{"id" => 42})
       assert_eventually(fn -> get(id).status == :waiting end)
 
       {1, _} =
@@ -1279,7 +1279,7 @@ defmodule Durable.Integration.FailurePathsTest do
         )
 
       wake_until_done(id)
-      assert {:third, 7, nil} in labels()
+      assert {:third, 7, 42} in labels()
     end
   end
 

@@ -34,6 +34,14 @@ defmodule Durable.Context do
   A step still returns `{:ok, data}`. What it put in the context is kept
   beside what it returns.
 
+  ## Keys
+
+  The context's keys are strings, as they are stored. A key may be named with
+  an atom or a string: `put_context(:total, 10)` and `put_context("total", 10)`
+  write the same key, `get_context(:total)` and `get_context("total")` read it,
+  and `context()["total"]` is where it is. The same holds for `input/0`, and
+  for the data a step is handed.
+
   ## Context Storage
 
   During execution, context is stored in the process dictionary for fast access.
@@ -95,7 +103,7 @@ defmodule Durable.Context do
   ## Examples
 
       ctx = context()
-      # => %{order_id: 123, items: [...]}
+      # => %{"order_id" => 123, "items" => [...]}
 
   """
   @spec context() :: map()
@@ -309,10 +317,10 @@ defmodule Durable.Context do
   ## Examples
 
       step :charge, [retry: [max_attempts: 5]], fn ctx ->
-        case Payments.charge(ctx.order) do
+        case Payments.charge(ctx["order"]) do
           {:ok, _} = ok -> ok
           {:error, reason} ->
-            if last_attempt?(), do: Orders.mark_payment_failed(ctx.order)
+            if last_attempt?(), do: Orders.mark_payment_failed(ctx["order"])
             {:error, reason}
         end
       end
@@ -409,9 +417,9 @@ defmodule Durable.Context do
   # Internal functions for executor use
 
   @doc false
-  # A key restored from JSON becomes an atom only if that atom already exists, as
-  # any key the code reads as `data.foo` does. One atom per distinct key is never
-  # freed, and enough of them crash the VM.
+  # A stored name of the code's own (a step, a lane, a compensation) as the atom
+  # the code wrote. Never for the user's data, whose keys stay strings; and only
+  # an atom that exists, since one atom per distinct name is never freed.
   @spec known_key(String.t()) :: atom() | String.t()
   def known_key(key) do
     String.to_existing_atom(key)
@@ -495,21 +503,10 @@ defmodule Durable.Context do
 
   @doc false
   def restore_context(context_map, input, workflow_id) do
-    # JSON turned atom keys into strings; turn back the ones the code knows.
-    atomized_context = atomize_keys(context_map || %{})
-    Process.put(@context_key, atomized_context)
+    Process.put(@context_key, context_map || %{})
     Process.put(@input_key, input)
     Process.put(@workflow_id_key, workflow_id)
     :ok
-  end
-
-  # Keys the code knows become atoms again (for context restored from database)
-  # Only converts top-level keys, nested maps keep their original keys
-  defp atomize_keys(map) when is_map(map) do
-    Map.new(map, fn
-      {key, value} when is_binary(key) -> {known_key(key), value}
-      {key, value} -> {key, value}
-    end)
   end
 
   @doc false
@@ -565,25 +562,10 @@ defmodule Durable.Context do
 
   # Helper functions
 
-  # Normalize keys to atoms for consistency
-  # (JSON encoding converts atoms to strings, so we normalize back)
-  defp normalize_key(key) when is_atom(key), do: key
-  defp normalize_key(key) when is_binary(key), do: known_key(key)
+  # The context's keys are strings, as they are stored. A key may be named
+  # with an atom.
+  defp stored_key(_context, key), do: to_string(key)
 
-  # The key as this context holds it. Data keeps its shape across a run, so a
-  # key can be a string here though the code knows the atom, or the other way
-  # round. A key that isn't there yet takes the normal form.
-  defp stored_key(context, key) do
-    normalized = normalize_key(key)
-    other = if is_atom(normalized), do: Atom.to_string(normalized), else: key
-
-    if Map.has_key?(context, normalized) or not Map.has_key?(context, other),
-      do: normalized,
-      else: other
-  end
-
-  # A map's keys as the context holds them, as put_context/2 would write each.
-  # Merged raw, `count:` lands beside a stored "count", and the old one wins.
   defp as_stored(context, map), do: Map.new(map, fn {k, v} -> {stored_key(context, k), v} end)
 
   defp deep_merge(left, right) do

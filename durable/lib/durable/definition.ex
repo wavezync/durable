@@ -13,7 +13,8 @@ defmodule Durable.Definition do
     ## Pipeline Model
 
     Steps use a pure pipeline model where data flows from step to step:
-    - Each step receives one argument: the data from the previous step
+    - Each step receives one argument: the data from the previous step, as it
+      is stored, with string keys at every depth
     - First step receives the workflow input
     - Each step returns `{:ok, data}` or `{:error, reason}`
 
@@ -76,7 +77,7 @@ defmodule Durable.Definition do
     Compensation functions receive the current data and return `{:ok, data}`:
 
         compensate :cancel_flight, fn data ->
-          FlightAPI.cancel(data.flight_booking_id)
+          FlightAPI.cancel(data["flight_booking_id"])
           {:ok, data}
         end
     """

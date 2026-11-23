@@ -38,19 +38,19 @@ defmodule Durable.NamedBlocksTest do
           pass()
 
         :review ->
-          step :ask, fn order -> {:ok, assign(order, :seen, order.seen ++ ["ask"])} end
+          step :ask, fn order -> {:ok, assign(order, :seen, order["seen"] ++ ["ask"])} end
 
           step :record, [retry: [max_attempts: 2, base: 1]], fn order ->
             with {:ok, order} <- Flaky.once(order),
-                 do: {:ok, assign(order, :seen, order.seen ++ ["record"])}
+                 do: {:ok, assign(order, :seen, order["seen"] ++ ["record"])}
           end
 
         :blocked ->
-          step :ask, fn order -> {:ok, assign(order, :seen, order.seen ++ ["blocked"])} end
+          step :ask, fn order -> {:ok, assign(order, :seen, order["seen"] ++ ["blocked"])} end
           step :stop, fn _order -> {:cancel, "blocked by risk check"} end
       end
 
-      step :charge, fn order -> {:ok, assign(order, :seen, order.seen ++ ["charge"])} end
+      step :charge, fn order -> {:ok, assign(order, :seen, order["seen"] ++ ["charge"])} end
     end
   end
 
@@ -67,22 +67,22 @@ defmodule Durable.NamedBlocksTest do
             :up ->
               step :work, [retry: [max_attempts: 2, base: 1]], fn data ->
                 with {:ok, data} <- Flaky.once(data),
-                     do: {:ok, assign(data, :seen, data.seen ++ ["up"])}
+                     do: {:ok, assign(data, :seen, data["seen"] ++ ["up"])}
               end
 
-              step :more, fn data -> {:ok, assign(data, :seen, data.seen ++ ["more"])} end
+              step :more, fn data -> {:ok, assign(data, :seen, data["seen"] ++ ["more"])} end
 
             :down ->
-              step :work, fn data -> {:ok, assign(data, :seen, data.seen ++ ["down"])} end
+              step :work, fn data -> {:ok, assign(data, :seen, data["seen"] ++ ["down"])} end
           end
 
-          step :after, fn data -> {:ok, assign(data, :seen, data.seen ++ ["after"])} end
+          step :after, fn data -> {:ok, assign(data, :seen, data["seen"] ++ ["after"])} end
 
         :right ->
           step :work, fn data -> {:ok, assign(data, :seen, ["right"])} end
       end
 
-      step :last, fn data -> {:ok, assign(data, :seen, data.seen ++ ["last"])} end
+      step :last, fn data -> {:ok, assign(data, :seen, data["seen"] ++ ["last"])} end
     end
   end
 
@@ -122,7 +122,8 @@ defmodule Durable.NamedBlocksTest do
 
       step :close, [retry: [max_attempts: 2, base: 1]], fn order ->
         with {:ok, order} <- Flaky.once(order) do
-          %{fulfil: %{shipment: shipment, paperwork: paperwork, points: points}} = order
+          %{"fulfil" => %{"shipment" => shipment, "paperwork" => paperwork, "points" => points}} =
+            order
 
           {:ok, assign(order, :summary, [shipment["by"], paperwork["invoice"], points["points"]])}
         end
@@ -338,7 +339,7 @@ defmodule Durable.NamedBlocksTest do
     end
 
     def note(data, step) do
-      Map.update(data, :plumbing, %{step => in_data(data)}, &Map.put(&1, step, in_data(data)))
+      Map.update(data, "plumbing", %{step => in_data(data)}, &Map.put(&1, step, in_data(data)))
     end
   end
 
@@ -365,7 +366,7 @@ defmodule Durable.NamedBlocksTest do
             step :y, fn data -> {:ok, Plumbing.note(data, "y")} end
           end
 
-          step :a3, fn %{inner: %{x: x, y: _}} = data ->
+          step :a3, fn %{"inner" => %{"x" => x, "y" => _}} = data ->
             {:ok, data |> Plumbing.note("a3") |> assign(:from_x, x["x2_runs"])}
           end
         end
@@ -380,7 +381,7 @@ defmodule Durable.NamedBlocksTest do
         end
       end
 
-      step :done, fn %{outer: %{a: a, b: _}} = data ->
+      step :done, fn %{"outer" => %{"a" => a, "b" => _}} = data ->
         {:ok, data |> Plumbing.note("done") |> assign(:from_x, a["from_x"])}
       end
     end
@@ -393,7 +394,7 @@ defmodule Durable.NamedBlocksTest do
     workflow "merges" do
       parallel :both,
         into: fn data, results ->
-          {:ok, a} = results.a
+          {:ok, a} = results["a"]
           {:ok, Map.merge(data, a)}
         end do
         lane :a do

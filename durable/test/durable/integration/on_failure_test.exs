@@ -65,7 +65,7 @@ defmodule Durable.Integration.OnFailureTest do
 
     workflow "of_referee" do
       parallel :checks do
-        step :credit, fn application -> {:ok, Map.put(application, :score, 700)} end
+        step :credit, fn application -> {:ok, Map.put(application, "score", 700)} end
 
         lane :referee, optional: true, timeout: 300 do
           step :ask, fn application ->

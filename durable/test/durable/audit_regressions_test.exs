@@ -120,7 +120,7 @@ defmodule Durable.AuditRegressionsTest do
          Map.put(
            data,
            "seen",
-           data[:sides] |> Map.keys() |> Enum.map(&to_string/1) |> Enum.sort()
+           data["sides"] |> Map.keys() |> Enum.map(&to_string/1) |> Enum.sort()
          )}
       end
     end

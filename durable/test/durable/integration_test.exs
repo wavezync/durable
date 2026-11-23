@@ -421,7 +421,7 @@ defmodule OrderProcessingWorkflow do
     end
 
     # Branch based on order type
-    branch on: fn data -> data.order_type end do
+    branch on: fn data -> data["order_type"] end do
       "physical" ->
         step :process_physical, fn data ->
           data =
@@ -445,7 +445,7 @@ defmodule OrderProcessingWorkflow do
 
     # Batch processing using Enum.map (replaces foreach)
     step :process_items, fn data ->
-      items_processed = Enum.map(data.line_items, fn item -> item["name"] end)
+      items_processed = Enum.map(data["line_items"], fn item -> item["name"] end)
       {:ok, assign(data, :items_processed, items_processed)}
     end
 
@@ -501,7 +501,7 @@ defmodule DocumentApprovalWorkflow do
 
     # Decision - auto-approve low value, otherwise continue
     decision :check_auto_approve, fn data ->
-      if data[:amount] < 1000 do
+      if data["amount"] < 1000 do
         {:goto, :finalize, data}
       else
         {:ok, data}
@@ -533,13 +533,13 @@ defmodule DocumentApprovalWorkflow do
 
     step :set_approval, fn data ->
       # Access original input saved by first step
-      original = data[:original_input] || %{}
+      original = data["original_input"] || %{}
       result = original["approval_result"] || "approved"
       {:ok, assign(data, :approval_result, result)}
     end
 
     # Branch based on approval result
-    branch on: fn data -> data.approval_result end do
+    branch on: fn data -> data["approval_result"] end do
       "approved" ->
         step :process_approved, fn data ->
           {:ok, assign(data, :approval_processed, "approved")}
@@ -558,8 +558,8 @@ defmodule DocumentApprovalWorkflow do
 
     # Batch processing to update items (only updates if approved)
     step :update_items, fn data ->
-      if data[:approval_processed] == "approved" do
-        items_updated = Enum.map(data.affected_items, fn item -> item end)
+      if data["approval_processed"] == "approved" do
+        items_updated = Enum.map(data["affected_items"], fn item -> item end)
         {:ok, assign(data, :items_updated, items_updated)}
       else
         {:ok, data}
@@ -593,14 +593,14 @@ defmodule BatchMigrationWorkflow do
 
     # Batch processing using Enum.map (replaces foreach)
     step :process_batches, fn data ->
-      migrated_ids = Enum.map(data.batches, fn batch -> batch["id"] end)
+      migrated_ids = Enum.map(data["batches"], fn batch -> batch["id"] end)
       {:ok, assign(data, :migrated_ids, migrated_ids)}
     end
 
     # Decision based on migration results
     # If empty, jump to finalize (skipping parallel and mark_success)
     decision :check_results, fn data ->
-      ids = data[:migrated_ids] || []
+      ids = data["migrated_ids"] || []
 
       if ids != [] do
         {:ok, data}
@@ -645,7 +645,7 @@ defmodule BatchMigrationWorkflow do
     step :finalize, fn data ->
       # If status not set yet, it means we jumped here (empty path)
       data =
-        if Map.has_key?(data, :migration_status) do
+        if Map.has_key?(data, "migration_status") do
           data
         else
           assign(data, :migration_status, "empty")

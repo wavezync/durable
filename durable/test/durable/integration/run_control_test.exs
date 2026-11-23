@@ -351,7 +351,7 @@ defmodule Durable.Integration.RunControlTest do
       end
 
       compensate :unbook, fn data ->
-        Probe.put(:undone_with, data["booking"] || data[:booking])
+        Probe.put(:undone_with, data["booking"])
         {:ok, data}
       end
     end
@@ -370,7 +370,7 @@ defmodule Durable.Integration.RunControlTest do
       end
 
       compensate :unbook, fn data ->
-        Probe.put(:undone_with, data["booking"] || data[:booking])
+        Probe.put(:undone_with, data["booking"])
         {:ok, data}
       end
     end
@@ -384,7 +384,7 @@ defmodule Durable.Integration.RunControlTest do
       step :charge, [queue: :nobody], fn data -> {:ok, data} end
 
       compensate :unbook, fn data ->
-        Probe.put(:undone_with, data["booking"] || data[:booking])
+        Probe.put(:undone_with, data["booking"])
         {:ok, data}
       end
     end
@@ -560,9 +560,7 @@ defmodule Durable.Integration.RunControlTest do
       step :call, fn data ->
         unless Probe.set?(:parent_released), do: Holds.parent_row(workflow_id())
 
-        case call_workflow(String.to_existing_atom(data[:child] || data["child"]), %{},
-               ref: :child
-             ) do
+        case call_workflow(String.to_existing_atom(data["child"]), %{}, ref: :child) do
           {:ok, _} -> {:ok, assign(data, :child_ok, true)}
           {:error, error} -> {:ok, assign(data, :child_error, error)}
         end
@@ -577,9 +575,7 @@ defmodule Durable.Integration.RunControlTest do
 
     workflow "rc_calls_child" do
       step :call, fn data ->
-        case call_workflow(String.to_existing_atom(data[:child] || data["child"]), %{},
-               ref: :child
-             ) do
+        case call_workflow(String.to_existing_atom(data["child"]), %{}, ref: :child) do
           {:ok, _} -> {:ok, assign(data, :child_ok, true)}
           {:error, error} -> {:ok, assign(data, :child_error, error)}
         end

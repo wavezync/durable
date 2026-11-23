@@ -40,10 +40,10 @@ defmodule Durable.LaneOptionsTest do
         end
       end
 
-      step :decide, fn %{lookups: lookups} = application -> decide(application, lookups) end
+      step :decide, fn %{"lookups" => lookups} = application -> decide(application, lookups) end
 
       # The run stops here and is picked up again from what was stored.
-      step :sign, fn %{lookups: lookups} = application ->
+      step :sign, fn %{"lookups" => lookups} = application ->
         wait_for_input("signature")
         Seen.note({:sign, lookups})
         {:ok, application}
@@ -68,7 +68,7 @@ defmodule Durable.LaneOptionsTest do
         end
       end
 
-      step :decide, fn %{lookups: lookups} = application -> decide(application, lookups) end
+      step :decide, fn %{"lookups" => lookups} = application -> decide(application, lookups) end
     end
 
     workflow "needed_lane_times_out" do
@@ -82,7 +82,7 @@ defmodule Durable.LaneOptionsTest do
         end
       end
 
-      step :decide, fn %{lookups: lookups} = application -> decide(application, lookups) end
+      step :decide, fn %{"lookups" => lookups} = application -> decide(application, lookups) end
     end
 
     workflow "lane_waits" do
@@ -97,7 +97,7 @@ defmodule Durable.LaneOptionsTest do
         end
       end
 
-      step :decide, fn %{lookups: lookups} = application -> decide(application, lookups) end
+      step :decide, fn %{"lookups" => lookups} = application -> decide(application, lookups) end
     end
   end
 
@@ -121,18 +121,18 @@ defmodule Durable.LaneOptionsTest do
 
       assert run.status == :waiting
 
-      assert [{:decide, %{credit: %{"score" => 710}, device: %{"trust" => "unknown"}}}] =
+      assert [{:decide, %{"credit" => %{"score" => 710}, "device" => %{"trust" => "unknown"}}}] =
                Seen.all()
 
       # The same after the run is read back from the database.
       :ok = Durable.provide_input(run.id, "signature", %{})
       assert drain(run).status == :completed
-      assert {:sign, %{device: %{"trust" => "unknown"}}} = List.last(Seen.all())
+      assert {:sign, %{"device" => %{"trust" => "unknown"}}} = List.last(Seen.all())
     end
 
     test "is not used when the lane finishes" do
       run_workflow(Loan, %{}, workflow: "device_default")
-      assert [{:decide, %{device: %{"trust" => "high"}}}] = Seen.all()
+      assert [{:decide, %{"device" => %{"trust" => "high"}}}] = Seen.all()
     end
 
     test "needs optional: true" do
@@ -163,7 +163,7 @@ defmodule Durable.LaneOptionsTest do
       # Five attempts of 40ms don't fit in 60ms, and the next step never starts.
       assert Enum.count(Seen.all(), &(&1 == :find_profiles)) in 1..2
       assert :rate not in Seen.all()
-      assert {:decide, %{social: %{"profiles" => 0}}} = List.last(Seen.all())
+      assert {:decide, %{"social" => %{"profiles" => 0}}} = List.last(Seen.all())
 
       social =
         Enum.find(lanes_of(run), &(&1.engine_state["__parallel_step"] == "lookups__social"))
@@ -191,7 +191,7 @@ defmodule Durable.LaneOptionsTest do
       assert DateTime.diff(lane.deadline_at, DateTime.utc_now(), :millisecond) in 0..30
 
       assert drain(run).status == :completed
-      assert {:decide, %{employer: %{"employed" => true}}} = List.last(Seen.all())
+      assert {:decide, %{"employer" => %{"employed" => true}}} = List.last(Seen.all())
     end
 
     test "ends a lane that is waiting, and names the lane" do
@@ -211,7 +211,7 @@ defmodule Durable.LaneOptionsTest do
       :sys.get_state(TimeoutWorker.worker_name(Durable))
 
       assert drain(run).status == :completed
-      assert {:decide, %{reference: nil}} = List.last(Seen.all())
+      assert {:decide, %{"reference" => nil}} = List.last(Seen.all())
 
       lane = Durable.TestRepo.get!(WorkflowExecution, lane.id)
 

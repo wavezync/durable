@@ -49,7 +49,7 @@ end
 It takes the same options as `Durable.start/3`, such as `workflow:` to pick
 a workflow in a module that defines several.
 
-Context and input are stored as JSON, so read them with string keys. The
+Context and input have string keys, as the workflow's own steps see them. The
 context is the workflow's data only: none of the engine's own keys are in it.
 
 Every helper that takes a run also takes its id. An id that names no run fails

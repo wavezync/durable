@@ -197,11 +197,7 @@ defmodule Durable.Wait do
   defp answered({:ok, _stored, :timeout}, opts), do: Keyword.get(opts, :timeout_value)
   defp answered({:ok, value, _status}, _opts), do: value
 
-  # A key is in the context as an atom or a string, depending on whether the
-  # atom existed when the run came back.
-  defp fetch_key(context, name) do
-    with :error <- Map.fetch(context, Context.known_key(name)), do: Map.fetch(context, name)
-  end
+  defp fetch_key(context, name), do: Map.fetch(context, name)
 
   # Whether the wait was cancelled is the engine's to say: its state for the
   # run, never a key of the step's data.
@@ -275,6 +271,8 @@ defmodule Durable.Wait do
   Waits for an external event.
 
   The workflow will be suspended until the event is received or timeout occurs.
+  Returns the event's payload as it is stored: a map sent as `%{amount: 99}`
+  comes back as `%{"amount" => 99}`.
 
   ## Options
 
@@ -367,7 +365,7 @@ defmodule Durable.Wait do
     # Check if we're resuming with event data already in context
     context = Process.get(:durable_context, %{})
 
-    # Find first matching event in context (convert string names to atoms)
+    # Find first matching event in context
     case Enum.find(event_names, &(answer(context, &1, PendingEvent) != :error)) do
       nil ->
         wait = {:wait_for_any, Keyword.merge(opts, event_names: event_names, wait_type: :any)}
@@ -419,7 +417,7 @@ defmodule Durable.Wait do
     else
       event_names
       |> Enum.zip(answers)
-      |> Map.new(fn {name, {:ok, data, _status}} -> {Context.known_key(name), data} end)
+      |> Map.new(fn {name, {:ok, data, _status}} -> {name, data} end)
     end
   end
 
@@ -582,7 +580,7 @@ defmodule Durable.Wait do
   @doc """
   Waits for form submission.
 
-  Returns a map of field values.
+  Returns a map of field values, keyed by field name as a string.
 
   ## Options
 
@@ -603,7 +601,7 @@ defmodule Durable.Wait do
         ],
         timeout: days(7)
       )
-      # => %{laptop: "MacBook Pro", monitor: "27-inch", notes: "..."}
+      # => %{"laptop" => "MacBook Pro", "monitor" => "27-inch", "notes" => "..."}
 
   """
   @spec wait_for_form(String.t(), keyword()) :: map() | term()

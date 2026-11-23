@@ -11,12 +11,12 @@ defmodule Durable.Orchestration do
 
       defmodule MyApp.OrderWorkflow do
         use Durable
-        use Durable.Context
+        use Durable.Helpers
         use Durable.Orchestration
 
         workflow "process_order" do
           step :charge_payment, fn data ->
-            case call_workflow(MyApp.PaymentWorkflow, %{"amount" => data.total},
+            case call_workflow(MyApp.PaymentWorkflow, %{"amount" => data["total"]},
                    timeout: hours(1)) do
               {:ok, result} ->
                 {:ok, assign(data, :payment_id, result["payment_id"])}
@@ -27,7 +27,7 @@ defmodule Durable.Orchestration do
 
           step :send_email, fn data ->
             {:ok, email_wf_id} = start_workflow(MyApp.EmailWorkflow,
-              %{"to" => data.email}, ref: :confirmation)
+              %{"to" => data["email"]}, ref: :confirmation)
             {:ok, assign(data, :email_workflow_id, email_wf_id)}
           end
         end

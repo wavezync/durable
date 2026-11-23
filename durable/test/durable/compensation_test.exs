@@ -136,7 +136,7 @@ defmodule Durable.CompensationTest do
       step :charge, fn _data -> {:fail, "card declined"} end
 
       compensate :unbook, fn data ->
-        Durable.CompensationTest.returned(data[:returns] || data["returns"], data)
+        Durable.CompensationTest.returned(data["returns"], data)
       end
     end
   end
@@ -152,10 +152,10 @@ defmodule Durable.CompensationTest do
         tries = Process.get(:undo_tries, 0) + 1
         Process.put(:undo_tries, tries)
 
-        if tries > (data[:fail_times] || data["fail_times"]) do
+        if tries > data["fail_times"] do
           {:ok, data}
         else
-          Durable.CompensationTest.returned(data[:returns] || data["returns"], data)
+          Durable.CompensationTest.returned(data["returns"], data)
         end
       end
     end
@@ -180,7 +180,7 @@ defmodule Durable.CompensationTest do
 
     workflow "step_returns_error", on_failure: :rollback do
       step :charge, fn data ->
-        Durable.CompensationTest.returned(data[:returns] || data["returns"], data)
+        Durable.CompensationTest.returned(data["returns"], data)
       end
     end
   end

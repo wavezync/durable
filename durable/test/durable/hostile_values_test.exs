@@ -17,7 +17,7 @@ defmodule Durable.HostileValuesTest do
 
     workflow "hostile_returns" do
       step :a, fn data ->
-        Durable.HostileValuesTest.returned(data[:what] || data["what"])
+        Durable.HostileValuesTest.returned(data["what"])
       end
     end
   end
@@ -245,7 +245,7 @@ defmodule Durable.HostileValuesTest do
 
     workflow "hostile_waits_by_name" do
       step :a, fn data ->
-        wait_for_event(data[:name] || data["name"])
+        wait_for_event(data["name"])
         {:ok, data}
       end
     end

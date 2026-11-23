@@ -54,7 +54,7 @@ defmodule Audit4QueueSeesData do
   workflow "audit4_queue_sees_data" do
     step :first, fn data ->
       Probe.note(:first)
-      {:ok, Map.put(data, :total, data["order"] * 3)}
+      {:ok, Map.put(data, "total", data["order"] * 3)}
     end
 
     step :second, fn data ->
@@ -325,7 +325,7 @@ defmodule Durable.Integration.Audit4QueueRecoveryTest do
       assert %{"order" => 7, "first" => "done"} = run.context
     end
 
-    test "gives the next step what the step returned, with the input's keys as they were" do
+    test "gives the next step what the step returned, with string keys" do
       kill_at!([:durable, :step, :stop], :first)
       start_durable!(%{default: 1})
 
@@ -333,7 +333,7 @@ defmodule Durable.Integration.Audit4QueueRecoveryTest do
       await_status(id, :completed)
 
       assert Probe.hits(:first) == 1
-      assert %{"order" => 7, total: 21} = Probe.fetch(:second_got)
+      assert %{"order" => 7, "total" => 21} = Probe.fetch(:second_got)
     end
 
     test "gives the next step what the step put in the context without returning it" do

@@ -71,24 +71,24 @@ defmodule Durable.Integration.Audit4EngineStateMigrationTest do
     workflow "migrated_order" do
       step :receive_order, fn order ->
         Seen.hit(:received)
-        {:ok, Map.put(order, :received, true)}
+        {:ok, Map.put(order, "received", true)}
       end
 
       step :await_payment, fn order ->
         payment = wait_for_event("payment_received")
         Seen.hit(:paid)
-        {:ok, Map.put(order, :paid, payment["amount"])}
+        {:ok, Map.put(order, "paid", payment["amount"])}
       end
 
       step :ship, fn order ->
         Seen.hit(:shipped)
-        {:ok, Map.put(order, :shipped, true)}
+        {:ok, Map.put(order, "shipped", true)}
       end
     end
 
     # A loan is checked against two bureaus at once, each of which answers later.
     workflow "migrated_loan" do
-      step :receive_application, fn loan -> {:ok, Map.put(loan, :received, true)} end
+      step :receive_application, fn loan -> {:ok, Map.put(loan, "received", true)} end
 
       parallel :checks do
         step :credit, fn _loan ->
@@ -104,7 +104,7 @@ defmodule Durable.Integration.Audit4EngineStateMigrationTest do
 
       step :decide, fn loan ->
         Seen.hit(:decided)
-        {:ok, Map.put(loan, :approved, loan.checks.credit["score"] > 600)}
+        {:ok, Map.put(loan, "approved", loan["checks"]["credit"]["score"] > 600)}
       end
     end
 
@@ -112,7 +112,7 @@ defmodule Durable.Integration.Audit4EngineStateMigrationTest do
     workflow "migrated_trip" do
       step :book_flight, [compensate: :cancel_flight], fn trip ->
         Seen.hit(:booked)
-        {:ok, Map.put(trip, :flight, "FL-123")}
+        {:ok, Map.put(trip, "flight", "FL-123")}
       end
 
       step :charge, fn _trip ->
@@ -121,7 +121,7 @@ defmodule Durable.Integration.Audit4EngineStateMigrationTest do
       end
 
       compensate :cancel_flight, fn trip ->
-        Seen.hit({:cancelled, trip.flight})
+        Seen.hit({:cancelled, trip["flight"]})
         {:ok, trip}
       end
     end
@@ -323,7 +323,7 @@ defmodule Durable.Integration.Audit4EngineStateMigrationTest do
 
       old = through_the_migration([run.id])
 
-      assert %{"__string_keys__" => ["order_id"], "order_id" => 7, "received" => true} =
+      assert %{"__string_keys__" => ["order_id", "received"], "order_id" => 7, "received" => true} =
                old[run.id]
 
       :ok = Durable.send_event(run.id, "payment_received", %{"amount" => 40})
@@ -407,7 +407,7 @@ defmodule Durable.Integration.Audit4EngineStateMigrationTest do
 
       adopted = get(run.id)
       assert adopted.engine_state["v"] == 1
-      assert adopted.engine_state["__string_keys__"] == ["order_id"]
+      assert adopted.engine_state["__string_keys__"] == ["order_id", "received"]
       refute Enum.any?(Map.keys(adopted.context), &EngineState.key?/1)
 
       # Put there now, a marker is the user's data, and nothing reads it.

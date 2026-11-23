@@ -11,6 +11,12 @@ defmodule Durable.Helpers do
 
   This imports all helper functions into your workflow module.
 
+  ## Keys
+
+  A workflow's data has string keys at every depth, as it is stored. Each
+  helper takes a key as an atom or a string and reads or writes the string:
+  `assign(data, :status, "paid")` sets `data["status"]`.
+
   ## Examples
 
       step :process, fn data ->
@@ -55,7 +61,7 @@ defmodule Durable.Helpers do
   """
   @spec assign(map(), atom() | String.t(), term()) :: map()
   def assign(data, key, value) when is_map(data) and (is_atom(key) or is_binary(key)) do
-    Map.put(data, key, value)
+    Map.put(data, to_string(key), value)
   end
 
   @doc """
@@ -68,7 +74,7 @@ defmodule Durable.Helpers do
   """
   @spec assign(map(), map()) :: map()
   def assign(data, map) when is_map(data) and is_map(map) do
-    Map.merge(data, map)
+    Map.merge(data, Map.new(map, fn {key, value} -> {to_string(key), value} end))
   end
 
   @doc """
@@ -84,7 +90,7 @@ defmodule Durable.Helpers do
   """
   @spec update(map(), atom() | String.t(), term(), (term() -> term())) :: map()
   def update(data, key, default, fun) when is_map(data) and is_function(fun, 1) do
-    Map.update(data, key, default, fun)
+    Map.update(data, to_string(key), default, fun)
   end
 
   @doc """
@@ -99,7 +105,7 @@ defmodule Durable.Helpers do
   """
   @spec update(map(), atom() | String.t(), (term() -> term())) :: map()
   def update(data, key, fun) when is_map(data) and is_function(fun, 1) do
-    Map.update!(data, key, fun)
+    Map.update!(data, to_string(key), fun)
   end
 
   @doc """
@@ -144,7 +150,7 @@ defmodule Durable.Helpers do
   """
   @spec delete(map(), atom() | String.t()) :: map()
   def delete(data, key) when is_map(data) do
-    Map.delete(data, key)
+    Map.delete(data, to_string(key))
   end
 
   @doc """
@@ -159,7 +165,7 @@ defmodule Durable.Helpers do
   """
   @spec has_key?(map(), atom() | String.t()) :: boolean()
   def has_key?(data, key) when is_map(data) do
-    Map.has_key?(data, key)
+    Map.has_key?(data, to_string(key))
   end
 
   @doc """
@@ -174,7 +180,7 @@ defmodule Durable.Helpers do
   """
   @spec get(map(), atom() | String.t()) :: term()
   def get(data, key) when is_map(data) do
-    Map.get(data, key)
+    Map.get(data, to_string(key))
   end
 
   @doc """
@@ -187,6 +193,6 @@ defmodule Durable.Helpers do
   """
   @spec get(map(), atom() | String.t(), term()) :: term()
   def get(data, key, default) when is_map(data) do
-    Map.get(data, key, default)
+    Map.get(data, to_string(key), default)
   end
 end

@@ -18,11 +18,11 @@ defmodule Durable.ContextTest do
   # Context Key Handling Tests
   # ============================================================================
 
-  describe "a key held in the other shape" do
+  describe "a key named with an atom or a string" do
     alias Durable.Context
 
     setup do
-      Process.put(:durable_context, %{"id" => 42, name: "ada"})
+      Process.put(:durable_context, %{"id" => 42, "name" => "ada"})
       on_exit(fn -> Process.delete(:durable_context) end)
     end
 
@@ -36,20 +36,19 @@ defmodule Durable.ContextTest do
       assert Context.get_context(:nope, :default) == :default
     end
 
-    test "is written and deleted where it is, not beside itself" do
+    test "is written and deleted under the string, never beside it" do
       Context.put_context(:id, 43)
-      assert Context.context() == %{"id" => 43, name: "ada"}
+      assert Context.context() == %{"id" => 43, "name" => "ada"}
 
       Context.delete_context(:id)
-      assert Context.context() == %{name: "ada"}
+      assert Context.context() == %{"name" => "ada"}
     end
 
-    test "a new key takes the usual form" do
-      Context.put_context("name_of_a_key_the_code_knows", 1)
-      assert Context.context()["name_of_a_key_the_code_knows"] == 1
-
-      Context.put_context(:fresh_atom_key, 2)
-      assert Context.context()[:fresh_atom_key] == 2
+    test "a new key is a string however it was named" do
+      Context.put_context(:fresh_key, 2)
+      Context.put_context(%{another: 3})
+      assert Context.context()["fresh_key"] == 2
+      assert Context.context()["another"] == 3
     end
   end
 
@@ -246,7 +245,7 @@ defmodule MixedKeyInputWorkflow do
   workflow "mixed_key_input" do
     step :process, fn data ->
       # Try to access the key - either atom or string version
-      result = data[:key] || data["key"]
+      result = data["key"]
       {:ok, assign(data, :result, result)}
     end
   end
@@ -259,7 +258,7 @@ defmodule NestedContextWorkflow do
   workflow "nested_context" do
     step :extract, fn data ->
       # Access nested data
-      user = data["user"] || data[:user]
+      user = data["user"]
       profile = user["profile"] || user[:profile]
       name = profile["name"] || profile[:name]
       age = profile["age"] || profile[:age]
@@ -281,7 +280,7 @@ defmodule DeepNestedContextWorkflow do
   workflow "deep_nested_context" do
     step :extract, fn data ->
       # Navigate through 5 levels
-      l1 = data["level1"] || data[:level1]
+      l1 = data["level1"]
       l2 = l1["level2"] || l1[:level2]
       l3 = l2["level3"] || l2[:level3]
       l4 = l3["level4"] || l3[:level4]

@@ -17,11 +17,11 @@ defmodule MyApp.ProcessArticle do
   # Process each article once. Try again only if the last attempt failed.
   workflow "process_article", reuse: :after_failure do
     step :fetch, fn %{"id" => id} = article ->
-      {:ok, Map.put(article, :body, MyApp.CMS.get_article!(id).body)}
+      {:ok, Map.put(article, "body", MyApp.CMS.get_article!(id).body)}
     end
 
     step :summarize, fn article ->
-      MyApp.Summaries.write(article["id"], article.body)
+      MyApp.Summaries.write(article["id"], article["body"])
       {:ok, article}
     end
   end
@@ -202,11 +202,11 @@ In Oban this takes a job that finishes, checks for new work and snoozes to go ag
 ```elixir
 workflow "process_article", reuse: :after_failure do
   step :fetch, fn %{"id" => id} = article ->
-    {:ok, Map.put(article, :body, MyApp.CMS.get_article!(id).body)}
+    {:ok, Map.put(article, "body", MyApp.CMS.get_article!(id).body)}
   end
 
   step :publish, fn article ->
-    MyApp.Feeds.publish(article["id"], article.body)
+    MyApp.Feeds.publish(article["id"], article["body"])
     {:ok, article}
   end
 

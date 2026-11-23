@@ -19,14 +19,14 @@ defmodule Durable.BlockIdsTest do
         step :b, fn data -> {:ok, BODY} end
       end
 
-      branch on: fn data -> data[:kind] end do
+      branch on: fn data -> data["kind"] end do
         :x -> step :on_x, fn data -> {:ok, BODY} end
         _ -> step :otherwise, fn data -> {:ok, data} end
       end
     end
 
     workflow "twin" do
-      branch on: fn data -> data[:kind] end do
+      branch on: fn data -> data["kind"] end do
         :x -> step :on_x, fn data -> {:ok, data} end
         _ -> step :otherwise, fn data -> {:ok, data} end
       end

@@ -50,7 +50,7 @@ defmodule Durable.ParkTest do
     workflow "retries_in_branch" do
       step :start, fn data -> {:ok, assign(data, :path, "a")} end
 
-      branch on: fn data -> data[:path] || data["path"] end do
+      branch on: fn data -> data["path"] end do
         "a" ->
           step :a1, [retry: [max_attempts: 2, backoff: :constant, base: 1]], fn data ->
             if attempt() == 1, do: {:error, :down}, else: {:ok, assign(data, :a1, true)}

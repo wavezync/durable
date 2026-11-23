@@ -1492,7 +1492,7 @@ defmodule ContextPreservationWorkflow do
     step :wait_and_check, fn data ->
       result = wait_for_event("continue")
       # These should still be accessible after resume
-      before = data[:before_wait]
+      before = data["before_wait"]
 
       data =
         data
@@ -1523,7 +1523,7 @@ defmodule MultiStepResumeWorkflow do
       data =
         data
         |> assign(:step3, true)
-        |> assign(:final, data[:step1] && data[:wait_result])
+        |> assign(:final, data["step1"] && data["wait_result"])
 
       {:ok, data}
     end
@@ -1547,8 +1547,8 @@ defmodule SequentialWaitsWorkflow do
     end
 
     step :combine, fn data ->
-      r1 = data[:result1]
-      r2 = data[:result2]
+      r1 = data["result1"]
+      r2 = data["result2"]
       {:ok, assign(data, :combined, %{first: r1, second: r2})}
     end
   end

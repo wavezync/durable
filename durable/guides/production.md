@@ -301,7 +301,7 @@ step :charge_card, [retry: [max_attempts: 3]], fn trip ->
   # charges once and returns the first result to the rest.
   key = "#{Durable.Context.workflow_id()}:charge_card"
   {:ok, charge} = Payments.charge(trip["card"], trip["total"], idempotency_key: key)
-  {:ok, Map.put(trip, :charge_id, charge.id)}
+  {:ok, assign(trip, :charge_id, charge.id)}
 end
 ```
 
@@ -423,7 +423,7 @@ against nothing:
   `wait_for_event` and `wait_for_input` used to return the stored copy, so
   `:auto_rejected` came back as `"auto_rejected"` and a tuple as a list. Match
   on the atom or the tuple in the step that waits. Once the value is in the
-  context it is JSON again, so a later step still sees a string.
+  context it is JSON again, so a later step sees a string.
 - **`wait_for_any` and `wait_for_all` return a `timeout_value` of `nil` or
   `false`.** They used to drop it.
 - **An event kept with `buffer: true` reaches `wait_for_any` and
@@ -476,6 +476,33 @@ against nothing:
   before a node runs it. A misspelt name returns `:ok` and pauses nothing.
 - **`Durable.Testing` helpers fail the assertion** for an id that names no
   run. They used to raise `BadMapError`.
+
+#### From 2.0.0 to 2.0.1
+
+No migration. One thing changes in workflow
+code: **a workflow's data has string keys in every step, at every depth.**
+Every step, `branch`, `decision`, `into:` function and compensation is handed
+its data as it is stored. Up to 2.0.0 a key a step added as an atom was an
+atom in later steps, and what was inside it could change shape when the run
+was loaded again.
+
+- Read with a string key or a helper: `data.total` becomes `data["total"]` or
+  `get(data, :total)`. `data.total` raises `KeyError`.
+- Match string keys: `fn %{lookups: %{credit: credit}} = data ->` becomes
+  `fn %{"lookups" => %{"credit" => credit}} = data ->`. The same goes for the
+  lanes an `into:` function is given: `%{"credit" => {:ok, credit}}`.
+- Compare a stored value with a string: `data["status"] == "approved"`, not
+  `:approved`. An atom a step returned is stored as its text.
+- Update with a helper or a string key: `assign(data, :total, 1)` sets
+  `data["total"]`. `%{data | total: 1}` raises.
+
+A step can still return a map written with atom keys, and `get_context/1`,
+`put_context/2` and the helpers still take a key as an atom. Runs in flight
+carry on: their stored context always had string keys.
+
+Deploy it as you did 2.0: stop the old nodes, then start the new ones. A 2.0.0
+node that claims a run a 2.0.1 node saved hands its steps string keys too, and
+that node still has the workflow code that reads atoms.
 
 ### Change a workflow with runs in flight
 

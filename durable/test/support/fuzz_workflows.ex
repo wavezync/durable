@@ -484,8 +484,12 @@ defmodule Durable.FuzzWorkflows do
   end
 
   defp pairs_handed(step, block, lanes, data) do
-    results = Map.get(data, block, %{})
-    handed = for lane <- lanes, Map.has_key?(results, lane), do: {lane, came_as(results[lane])}
+    results = Map.get(data, to_string(block), %{})
+
+    handed =
+      for lane <- lanes,
+          Map.has_key?(results, to_string(lane)),
+          do: {lane, came_as(results[to_string(lane)])}
 
     if map_size(results) == length(lanes) and length(handed) == length(lanes) and
          :unknown not in Keyword.values(handed),
@@ -505,9 +509,9 @@ defmodule Durable.FuzzWorkflows do
   defp produced?(output), do: is_map(output) and case_of(output) == nil and output["trail"] != nil
 
   defp lanes_handed(step, block, lanes, data) do
-    case data do
-      %{^block => %{} = results} when map_size(results) == length(lanes) ->
-        if Enum.all?(lanes, &produced?(results[&1])),
+    case data[to_string(block)] do
+      %{} = results when map_size(results) == length(lanes) ->
+        if Enum.all?(lanes, &produced?(results[to_string(&1)])),
           do: :ok,
           else: {:fail, "#{step} got #{inspect(Map.keys(results))} under #{block}"}
 
@@ -517,7 +521,7 @@ defmodule Durable.FuzzWorkflows do
   end
 
   defp trail(data, step) do
-    so_far = data[:trail] || data["trail"] || []
+    so_far = data["trail"] || []
     data |> Map.delete("trail") |> Map.put(:trail, so_far ++ [to_string(step)])
   end
 
@@ -567,12 +571,12 @@ defmodule Durable.FuzzWorkflows do
   end
 
   def keyed(data) do
-    key = data[:fuzz_key] || data["fuzz_key"]
-    n = data[:n] || data["n"]
+    key = data["fuzz_key"]
+    n = data["n"]
 
     Probe.inside([{:key, key}], fn ->
       Probe.note({:key_ran, key, n})
-      Process.sleep(data[:ms] || data["ms"])
+      Process.sleep(data["ms"])
     end)
 
     {:ok, data}
@@ -661,7 +665,7 @@ defmodule Durable.FuzzWorkflows do
   defp misbehave(:linked), do: Task.await(Task.async(fn -> raise "boom" end))
   defp misbehave(:killed), do: Process.exit(self(), :kill)
 
-  def case_of(data), do: data[:case] || data["case"]
+  def case_of(data), do: data["case"]
 
   def act(data) do
     {surface, term} = Probe.fetch(case_of(data))
