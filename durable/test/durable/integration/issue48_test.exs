@@ -164,6 +164,7 @@ defmodule Durable.Integration.Issue48Test do
   use Durable.IntegrationCase, async: false
 
   alias Durable.Keys
+  alias Durable.Queue.Adapters.Postgres
   alias Durable.Queue.Poller
   alias Durable.Queue.StaleJobRecovery
 
@@ -561,7 +562,7 @@ defmodule Durable.Integration.Issue48Test do
       # let go of, not only the runs still `running`. The claim's own check
       # waits for `stale_lock_timeout`.
       config = Durable.Config.get(Durable)
-      assert {:ok, _} = Durable.Queue.Adapters.Postgres.recover_stale_locks(config, 1)
+      assert {:ok, _} = Postgres.recover_stale_locks(config, 1)
       await_status(id, :compensated)
       assert Probe.hits(:released) == 1
     end
@@ -602,7 +603,7 @@ defmodule Durable.Integration.Issue48Test do
 
       Process.sleep(1_200)
       config = Durable.Config.get(Durable)
-      assert {:ok, _} = Durable.Queue.Adapters.Postgres.recover_zombie_workflows(config, 1)
+      assert {:ok, _} = Postgres.recover_zombie_workflows(config, 1)
 
       run = await_status(id, :failed)
       refute run.error["type"] == "zombie_detected", inspect(run.error)
