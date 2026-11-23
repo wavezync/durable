@@ -17,6 +17,15 @@ defmodule Durable.Audit5WaitsTest do
 
   @moduletag :capture_log
 
+  # A partner's courier collects the order; it has an hour to say it will.
+  defmodule Audit5WaitsCourier do
+    use Durable
+
+    workflow "audit5_waits_courier", timeout: hours(1) do
+      step :book_courier, fn order -> {:ok, order} end
+    end
+  end
+
   # A deposit and then the balance: the payment provider's webhook sends the
   # same event for both.
   defmodule Audit5WaitsInstallments do
@@ -320,6 +329,59 @@ defmodule Durable.Audit5WaitsTest do
         finished = drain(run)
         assert {finished.status, finished.context["got"]} == {:completed, "nobody"}
       end
+    end
+  end
+
+  describe "runs a sweep can never handle" do
+    test "don't keep a run that came due after them from being handled" do
+      start_supervised!(
+        {TimeoutWorker, config: Config.get(Durable), interval: 3_600_000, batch_size: 2}
+      )
+
+      # Another node, alive, polls `default`; nothing polls `partner`.
+      now = DateTime.utc_now()
+
+      Durable.TestRepo.insert!(%Durable.Storage.Schemas.Node{
+        id: "warehouse-node",
+        queues: ["default"],
+        version: "2.0.1",
+        started_at: now,
+        heartbeat_at: now
+      })
+
+      # Past their deadlines on `partner`, of a workflow no node has: no node
+      # can fail them, so they stay due until their code comes back.
+      a_minute_ago = DateTime.add(now, -60, :second)
+
+      retired =
+        for order <- 1..3 do
+          Durable.TestRepo.insert!(%WorkflowExecution{
+            workflow_module: "Elixir.Audit5WaitsRetiredCheckout",
+            workflow_name: "retired_checkout",
+            status: :pending,
+            queue: "partner",
+            input: %{"order" => order},
+            context: %{"order" => order},
+            engine_state: %{"v" => 1},
+            deadline_at: a_minute_ago
+          })
+        end
+
+      # A run this node has the code for, past its deadline a little later.
+      {:ok, late} = Durable.start(Audit5WaitsCourier, %{"order" => 42}, queue: :partner)
+
+      Durable.TestRepo.update_all(from(w in WorkflowExecution, where: w.id == ^late),
+        set: [deadline_at: DateTime.add(now, -30, :second)]
+      )
+
+      time_out_waits()
+
+      assert %{queue: "default", home_queue: "partner"} =
+               Durable.TestRepo.get!(WorkflowExecution, late),
+             "the run due after the stuck ones wasn't handed to a polled queue"
+
+      for run <- retired,
+          do: assert(Durable.TestRepo.get!(WorkflowExecution, run.id).queue == "partner")
     end
   end
 
