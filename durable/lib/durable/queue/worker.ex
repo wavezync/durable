@@ -23,13 +23,23 @@ defmodule Durable.Queue.Worker do
   alias Durable.Executor.StepRunner
   alias Durable.Queue.Adapter
 
-  defstruct [:job, :config, :poller_pid, :started_at, :task_ref, :task_pid, :heartbeat_timer]
+  defstruct [
+    :job,
+    :config,
+    :poller_pid,
+    :started_at,
+    :beat_at,
+    :task_ref,
+    :task_pid,
+    :heartbeat_timer
+  ]
 
   @type t :: %__MODULE__{
           job: map(),
           config: Config.t(),
           poller_pid: pid(),
           started_at: integer(),
+          beat_at: integer(),
           task_ref: reference() | nil,
           task_pid: pid() | nil,
           heartbeat_timer: reference() | nil
@@ -73,11 +83,15 @@ defmodule Durable.Queue.Worker do
     config = Keyword.fetch!(opts, :config)
     poller_pid = Keyword.fetch!(opts, :poller_pid)
 
+    now = System.monotonic_time(:millisecond)
+
     state = %__MODULE__{
       job: job,
       config: config,
       poller_pid: poller_pid,
-      started_at: System.monotonic_time(:millisecond),
+      started_at: now,
+      # The claim is the first refresh of the lock.
+      beat_at: now,
       task_ref: nil,
       heartbeat_timer: nil
     }
@@ -101,6 +115,7 @@ defmodule Durable.Queue.Worker do
     # Refresh the lock, passing the per-claim fencing token so a heartbeat can
     # tell whether we've been fenced out by stale-lock recovery + reclaim.
     adapter = Adapter.default_adapter()
+    sent = System.monotonic_time(:millisecond)
 
     case adapter.heartbeat(state.config, state.job.id, state.job[:lock_token]) do
       {:error, :fenced} ->
@@ -112,13 +127,18 @@ defmodule Durable.Queue.Worker do
       :ok ->
         emit_heartbeat_telemetry(state.job)
         timer = schedule_heartbeat(state.config.heartbeat_interval)
-        {:noreply, %{state | heartbeat_timer: timer}}
+        {:noreply, %{state | heartbeat_timer: timer, beat_at: sent}}
 
       {:error, reason} ->
         Logger.warning("Heartbeat failed for job #{state.job.id}: #{inspect(reason)}")
         emit_heartbeat_telemetry(state.job)
-        timer = schedule_heartbeat(state.config.heartbeat_interval)
-        {:noreply, %{state | heartbeat_timer: timer}}
+
+        if lease_lost?(state) do
+          self_fence(state)
+        else
+          timer = schedule_heartbeat(state.config.heartbeat_interval)
+          {:noreply, %{state | heartbeat_timer: timer}}
+        end
     end
   end
 
@@ -247,8 +267,9 @@ defmodule Durable.Queue.Worker do
   # acking/nacking the row.
   defp self_fence(state) do
     Logger.error(
-      "[Durable] worker for job #{state.job.id} was fenced (its claim was released or " <>
-        "taken by another worker) — aborting to avoid a duplicate execution"
+      "[Durable] worker for job #{state.job.id} was fenced (its claim was released, " <>
+        "taken by another worker, or couldn't be refreshed in time) — aborting to avoid " <>
+        "a duplicate execution"
     )
 
     duration_ms = stop_task(state)
@@ -267,6 +288,16 @@ defmodule Durable.Queue.Worker do
     send(state.poller_pid, {:job_complete, self(), state.job.id, :fenced, duration_ms})
 
     {:stop, :normal, %{state | heartbeat_timer: nil}}
+  end
+
+  # The lock was last refreshed at `beat_at`, and the stale sweep may hand the
+  # run to another node once it's `stale_lock_timeout` old. A worker that
+  # can't reach the database can't hear of that, so it stops its step a
+  # heartbeat before then: past it, the step would run on beside its next
+  # attempt. A pool that refuses for a few seconds is nowhere near it.
+  defp lease_lost?(%{config: config, beat_at: beat_at}) do
+    lease_ms = config.stale_lock_timeout * 1_000 - config.heartbeat_interval
+    System.monotonic_time(:millisecond) - beat_at >= lease_ms
   end
 
   # Cancelled while its step ran. The cancel already settled the run, so this
