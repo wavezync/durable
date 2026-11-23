@@ -768,6 +768,9 @@ defmodule Durable.Executor do
 
     with {:ok, execution} <- load_execution(config, workflow_id),
          true <- execution.status not in [:pending, :running, :waiting] || {:error, :not_finished},
+         # A lane is part of its block's run. Started on its own it would be
+         # the whole workflow again, from its first step, on the block's data.
+         true <- not parallel_branch?(execution) || {:error, :lane},
          {:ok, _definition} <- get_workflow_definition_from_execution(execution) do
       start_workflow(
         String.to_existing_atom(execution.workflow_module),
@@ -1583,6 +1586,11 @@ defmodule Durable.Executor do
   # engine's state. A `start_workflow` in a step lost this way isn't started
   # again, but the run no longer knows its child by its `ref:`. Keep the body's
   # additions on the step's row if a later step calls the same ref.
+  #
+  # ponytail: nor what the body took out of the context (`delete_context/1`):
+  # a key the step dropped comes back from the data it was handed. Record the
+  # dropped keys on the row if that matters (a test tagged :skip in
+  # integration/audit5_exec_test.exs shows it).
   defp finished_before_lost(config, %{current_step: current} = run, step, data, workflow_def) do
     with true <- current == Atom.to_string(step.name) and step.type != :decision,
          %{} = output <- output_of_lost_attempt(config, run) do
@@ -1609,13 +1617,18 @@ defmodule Durable.Executor do
 
     with %{status: :completed, step_name: ^step, output: %{} = output} = row <-
            Repo.one(config, newest),
-         false <- is_map_key(output, "decision_type"),
+         false <- jumped?(output),
          true <- is_nil(retried_at) or DateTime.after?(row.inserted_at, retried_at) do
       output
     else
       _not_it -> nil
     end
   end
+
+  # The row of a step that jumped holds the jump and its data, and nothing
+  # else. A step's own data can have a `decision_type` key.
+  defp jumped?(output),
+    do: map_size(output) == 3 and match?(%{"decision_type" => _, "target_step" => _}, output)
 
   # A step that didn't finish: it waits, failed, cancelled the run or is parked.
   defp step_stopped({wait_type, opts}, exec, data, workflow_def, config)
@@ -1633,8 +1646,18 @@ defmodule Durable.Executor do
     handle_call_workflow(config, exec, opts)
   end
 
-  defp step_stopped({:error, error}, exec, _data, workflow_def, config),
-    do: handle_step_failure(exec, error, workflow_def, config)
+  # What the body added to the engine's state (a child it started under a
+  # `ref:`) is written first, forced as a save's is: the failure leaves the
+  # row's as it was, and a retry has to find that child, not start another.
+  defp step_stopped({:error, error}, exec, _data, workflow_def, config) do
+    {:ok, exec} =
+      exec
+      |> Ecto.Changeset.change()
+      |> Ecto.Changeset.force_change(:engine_state, exec.engine_state)
+      |> cas_update!(config)
+
+    handle_step_failure(exec, error, workflow_def, config)
+  end
 
   defp step_stopped({:cancel, reason, scope}, exec, _data, _workflow_def, config),
     do: cancel_from_step(config, exec, reason, scope)
@@ -2020,8 +2043,8 @@ defmodule Durable.Executor do
         {:ok, exec} = save_data_as_context(config, exec, data, :keep)
         handle_call_workflow(config, exec, opts)
 
-      {:error, error} ->
-        handle_step_failure(exec, error, workflow_def, config)
+      {:error, _error} = failed ->
+        step_stopped(failed, exec, data, workflow_def, config)
 
       {:cancel, reason, scope} ->
         cancel_from_step(config, exec, reason, scope)
@@ -2640,10 +2663,17 @@ defmodule Durable.Executor do
 
     # Forced: what the row holds is what this save worked out, whatever the
     # struct in hand had.
-    execution
-    |> Ecto.Changeset.change(context: merged)
-    |> Ecto.Changeset.force_change(:engine_state, engine_state)
-    |> cas_update!(config)
+    saved =
+      execution
+      |> Ecto.Changeset.change(context: merged)
+      |> Ecto.Changeset.force_change(:engine_state, engine_state)
+      |> cas_update!(config)
+
+    # The process's context is now the run's, until the next step begins: a
+    # run that fails before then (its deadline, a branch's `on:`) hands its
+    # compensations what was saved, not what the last step was handed.
+    Process.put(:durable_context, merged)
+    saved
   end
 
   # What a save hands the next step in the same pass: the context it wrote,
@@ -2819,7 +2849,7 @@ defmodule Durable.Executor do
   def sanitize_for_json(term), do: inspect(term)
 
   defp sanitize_json_key(k) when is_binary(k), do: storable_string(k)
-  defp sanitize_json_key(k) when is_atom(k), do: Atom.to_string(k)
+  defp sanitize_json_key(k) when is_atom(k), do: k |> Atom.to_string() |> storable_string()
   defp sanitize_json_key(k), do: inspect(k)
 
   # jsonb can't hold a NUL, and JSON can't hold bytes that aren't UTF-8.

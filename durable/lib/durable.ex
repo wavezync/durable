@@ -503,6 +503,9 @@ defmodule Durable do
   `{:error, {:key_taken, holder_id}}` when the key is held. Under
   `reuse: :never`, `release_key/2` first.
 
+  A lane of a parallel block is part of its block's run, not a workflow of
+  its own, and is refused with `{:error, :lane}`: rerun the block's run.
+
   ## Options
 
   - `:input` - Input for the new run (default: the original run's input)
