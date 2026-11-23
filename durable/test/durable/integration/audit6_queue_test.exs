@@ -38,6 +38,19 @@ defmodule Audit6QueueReport do
   end
 end
 
+defmodule Audit6QueueReceipt do
+  @moduledoc false
+  use Durable
+  alias Durable.IntegrationProbe, as: Probe
+
+  workflow "audit6_queue_receipt" do
+    step :email_receipt, fn order ->
+      Probe.note({:receipt, order["n"]})
+      {:ok, order}
+    end
+  end
+end
+
 defmodule Audit6QueueTrip do
   @moduledoc false
   use Durable
@@ -123,6 +136,30 @@ defmodule Durable.Integration.Audit6QueueTest do
 
       # The seat is released while the card is still being charged.
       assert Probe.peak(:seat_and_card) == 1
+    end
+  end
+
+  describe "a claim that takes a run 2.0 wrote with a bare value for its input" do
+    # 2.0 stored a child's date or decimal input as it was, not in a map. The
+    # schema reads such a row (`JsonMap.load/1`); the claim has to as well.
+    test "still starts the runs claimed with it" do
+      start_durable!(%{default: 4})
+      :ok = Durable.pause_queue(:default)
+
+      {:ok, legacy} = Durable.start(Audit6QueueExport, %{"customer" => "c-1"})
+
+      # Set by hand: no writer today stores a bare value.
+      IntegrationRepo.query!(
+        "UPDATE durable.workflow_executions SET input = '\"2026-11-23\"'::jsonb WHERE id = $1",
+        [Ecto.UUID.dump!(legacy)]
+      )
+
+      ids = for n <- 1..3, do: elem(Durable.start(Audit6QueueReceipt, %{"n" => n}), 1)
+      :ok = Durable.resume_queue(:default)
+
+      for id <- ids, do: await_status(id, :completed)
+      :ok = Probe.set(:upload_done)
+      assert await_status(legacy, :completed).input == %{"value" => "2026-11-23"}
     end
   end
 

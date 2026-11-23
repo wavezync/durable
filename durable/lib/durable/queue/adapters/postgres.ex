@@ -684,7 +684,11 @@ defmodule Durable.Queue.Adapters.Postgres do
 
   defp decode_uuid(uuid) when is_binary(uuid), do: uuid
 
+  # Postgrex has decoded the jsonb already. A bare value is one 2.0 wrote where
+  # a map goes, read as the schema reads it (`JsonMap.load/1`): raising here,
+  # after the claim had committed, left every run it took with it locked and
+  # without a worker until `stale_lock_timeout`, and then took them again.
   defp decode_json(nil), do: %{}
   defp decode_json(value) when is_map(value), do: value
-  defp decode_json(value) when is_binary(value), do: Jason.decode!(value)
+  defp decode_json(value), do: %{"value" => value}
 end
