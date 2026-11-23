@@ -157,7 +157,7 @@ defmodule Durable.SchedulerTest do
         )
 
       # Input is stored as-is (atom keys preserved in schedule record)
-      assert schedule.input == %{key: "value"}
+      assert schedule.input == %{"key" => "value"}
     end
 
     test "creates schedule with queue" do
@@ -853,7 +853,8 @@ defmodule Durable.SchedulerTest do
           input: complex_input
         )
 
-      assert schedule.input == complex_input
+      # As it is stored: the schedule that comes back is the row.
+      assert schedule.input == complex_input |> Jason.encode!() |> Jason.decode!()
     end
 
     test "schedule with cron every minute" do

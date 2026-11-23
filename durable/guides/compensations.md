@@ -28,7 +28,7 @@ defmodule MyApp.BookTripWorkflow do
 
     # Step 3: Charge payment (no compensation needed - it's the last step)
     step :charge_payment, [retry: [max_attempts: 3]], fn ctx ->
-      case PaymentService.charge(ctx.total) do
+      case PaymentService.charge(ctx["total"]) do
         {:ok, receipt} -> {:ok, assign(ctx, :receipt, receipt)}
         # The customer isn't paying: release the seat and the room now.
         {:error, :declined} -> {:rollback, "card declined"}
@@ -39,12 +39,12 @@ defmodule MyApp.BookTripWorkflow do
 
     # Compensation handlers
     compensate :cancel_flight, fn ctx ->
-      FlightAPI.cancel(ctx.flight_id)
+      FlightAPI.cancel(ctx["flight_id"])
       {:ok, ctx}
     end
 
     compensate :cancel_hotel, fn ctx ->
-      HotelAPI.cancel(ctx.hotel_id)
+      HotelAPI.cancel(ctx["hotel_id"])
       {:ok, ctx}
     end
   end
@@ -174,7 +174,7 @@ Compensations may run multiple times (retries, manual recovery). Design them to 
 
 ```elixir
 compensate :cancel_booking, fn ctx ->
-  booking_id = ctx.booking_id
+  booking_id = ctx["booking_id"]
 
   # Check if already cancelled before cancelling
   case BookingAPI.get(booking_id) do
@@ -191,12 +191,12 @@ Always store resource IDs in data so compensations can find them:
 
 ```elixir
 step :create_resource, [compensate: :delete_resource], fn ctx ->
-  resource = ExternalAPI.create(ctx.params)
+  resource = ExternalAPI.create(ctx["params"])
   {:ok, assign(ctx, :resource_id, resource.id)}  # Store for compensation
 end
 
 compensate :delete_resource, fn ctx ->
-  ExternalAPI.delete(ctx.resource_id)
+  ExternalAPI.delete(ctx["resource_id"])
   {:ok, ctx}
 end
 ```
@@ -299,22 +299,22 @@ defmodule MyApp.ProcessOrderWorkflow do
 
     step :send_confirmation, fn ctx ->
       Email.send_order_confirmation(ctx["customer_email"], %{
-        shipment_id: ctx.shipment_id,
-        charge_id: ctx.charge_id
+        shipment_id: ctx["shipment_id"],
+        charge_id: ctx["charge_id"]
       })
       {:ok, ctx}
     end
 
     # Compensations
     compensate :release_inventory, fn ctx ->
-      Enum.each(ctx.reservation_ids, fn id ->
+      Enum.each(ctx["reservation_ids"], fn id ->
         Inventory.release(id)
       end)
       {:ok, ctx}
     end
 
     compensate :refund_customer, fn ctx ->
-      Payments.refund(ctx.charge_id)
+      Payments.refund(ctx["charge_id"])
       {:ok, ctx}
     end
   end

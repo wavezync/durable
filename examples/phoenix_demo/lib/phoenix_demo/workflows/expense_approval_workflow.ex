@@ -145,7 +145,7 @@ defmodule PhoenixDemo.Workflows.ExpenseApprovalWorkflow do
       employee = get_context(:employee)
       amount = get_context(:amount)
       category = get_context(:category)
-      approved = data[:approved] == true
+      approved = data["approved"] == true
       path = get_context(:approval_path)
 
       status = if approved, do: "recorded", else: "denied"
@@ -166,10 +166,8 @@ defmodule PhoenixDemo.Workflows.ExpenseApprovalWorkflow do
     end
   end
 
-  defp approved?(:approved), do: true
   defp approved?("approved"), do: true
   defp approved?(%{"approved" => true}), do: true
   defp approved?(%{"value" => true}), do: true
-  defp approved?(%{"value" => :approved}), do: true
   defp approved?(_), do: false
 end

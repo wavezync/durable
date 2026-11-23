@@ -67,7 +67,7 @@ defmodule MyApp.DocumentProcessor do
 
     # AI classification with automatic retry
     step :classify, [retry: [max_attempts: 3, backoff: :exponential]], fn ctx ->
-      content = ctx.content
+      content = ctx["content"]
 
       doc_type = ReqLLM.generate_text!(
         "anthropic:claude-sonnet-4-20250514",
@@ -78,11 +78,10 @@ defmodule MyApp.DocumentProcessor do
     end
 
     # Conditional branching - only ONE path executes.
-    # The data is stored as JSON, so match on strings, not atoms.
-    branch on: fn ctx -> ctx.doc_type end do
+    branch on: fn ctx -> ctx["doc_type"] end do
       "invoice" ->
         step :extract_invoice, [retry: [max_attempts: 3]], fn ctx ->
-          content = ctx.content
+          content = ctx["content"]
 
           {:ok, extracted} = ReqLLM.generate_object(
             "anthropic:claude-sonnet-4-20250514",
@@ -99,15 +98,15 @@ defmodule MyApp.DocumentProcessor do
         end
 
         step :validate_invoice, fn ctx ->
-          # The extracted fields are a map inside the data: read by string key.
-          extracted = ctx.extracted
+          # Keys are strings at every depth
+          extracted = ctx["extracted"]
           calculated = Enum.sum(Enum.map(extracted["line_items"], & &1["amount"]))
           {:ok, assign(ctx, :valid, abs(calculated - extracted["total"]) < 0.01)}
         end
 
       "contract" ->
         step :extract_contract, [retry: [max_attempts: 3]], fn ctx ->
-          content = ctx.content
+          content = ctx["content"]
 
           {:ok, extracted} = ReqLLM.generate_object(
             "anthropic:claude-sonnet-4-20250514",
@@ -131,9 +130,9 @@ defmodule MyApp.DocumentProcessor do
     # Runs after any branch completes
     step :store, fn ctx ->
       DocumentStore.update(ctx["doc_id"], %{
-        doc_type: ctx.doc_type,
-        extracted_data: Map.get(ctx, :extracted, %{}),
-        needs_review: Map.get(ctx, :needs_review, false)
+        doc_type: ctx["doc_type"],
+        extracted_data: get(ctx, :extracted, %{}),
+        needs_review: get(ctx, :needs_review, false)
       })
 
       {:ok, ctx}
@@ -151,7 +150,7 @@ end
 
 ```elixir
 step :ai_call, [retry: [max_attempts: 3, backoff: :exponential]], fn ctx ->
-  result = ReqLLM.generate_text!("anthropic:claude-sonnet-4-20250514", ctx.prompt)
+  result = ReqLLM.generate_text!("anthropic:claude-sonnet-4-20250514", ctx["prompt"])
   {:ok, assign(ctx, :result, result)}
 end
 ```
@@ -160,7 +159,7 @@ end
 
 ```elixir
 step :extract, fn ctx ->
-  case ReqLLM.generate_object(model, ctx.prompt, schema: schema) do
+  case ReqLLM.generate_object(model, ctx["prompt"], schema: schema) do
     {:ok, extracted} -> {:ok, assign(ctx, :data, extracted)}
     {:error, _} -> raise "Invalid response"  # Triggers retry
   end
@@ -173,7 +172,7 @@ end
 use Durable.Wait
 
 step :review, fn ctx ->
-  if ctx.confidence < 0.8 do
+  if ctx["confidence"] < 0.8 do
     result = wait_for_input("human_review", timeout: hours(24))
     {:ok, assign(ctx, :human_verified, result)}
   else
@@ -185,7 +184,7 @@ end
 ### Branch on AI Classification
 
 ```elixir
-branch on: fn ctx -> ctx.category end do
+branch on: fn ctx -> ctx["category"] end do
   "billing" ->
     step :handle_billing, fn ctx -> {:ok, ctx} end
   "technical" ->

@@ -278,7 +278,7 @@ defmodule GotoTestWorkflow do
     end
 
     decision :check_amount, fn data ->
-      if data[:amount] > 1000 do
+      if data["amount"] > 1000 do
         {:goto, :manager_approval, data}
       else
         {:goto, :auto_approve, data}
@@ -426,9 +426,9 @@ defmodule DecisionWithContextTestWorkflow do
     end
 
     decision :branch, fn data ->
-      threshold = data[:threshold]
+      threshold = data["threshold"]
 
-      if data[:value] > threshold do
+      if data["value"] > threshold do
         data = assign(data, :branch_taken, "high")
         {:goto, :high_path, data}
       else
@@ -457,7 +457,7 @@ defmodule DecisionChainTestWorkflow do
     end
 
     decision :first_decision, fn data ->
-      if data[:level] > 5 do
+      if data["level"] > 5 do
         {:goto, :second_decision, data}
       else
         {:goto, :low_level, data}
@@ -469,7 +469,7 @@ defmodule DecisionChainTestWorkflow do
     end
 
     decision :second_decision, fn data ->
-      if data[:level] > 10 do
+      if data["level"] > 10 do
         {:goto, :very_high, data}
       else
         {:goto, :medium, data}

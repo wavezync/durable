@@ -24,7 +24,7 @@ defmodule Durable.StepQueueTest do
       end
 
       step :ocr, [queue: "ocr"], fn data ->
-        {:ok, assign(data, :text, "#{data.file} from #{data["url"]}")}
+        {:ok, assign(data, :text, "#{data["file"]} from #{data["url"]}")}
       end
 
       step :save, fn data -> {:ok, assign(data, :saved, true)} end
@@ -247,7 +247,7 @@ defmodule Durable.StepQueueTest do
       end
 
       step :second, [queue: :llm], fn data ->
-        {:ok, assign(data, :seen, [get_context(:written), data[:returned], input()])}
+        {:ok, assign(data, :seen, [get_context(:written), data["returned"], input()])}
       end
     end
   end
@@ -264,7 +264,7 @@ defmodule Durable.StepQueueTest do
       end
 
       step :second, fn data ->
-        {:ok, assign(data, :seen, [get_context(:written), data[:returned], input()])}
+        {:ok, assign(data, :seen, [get_context(:written), data["returned"], input()])}
       end
     end
   end

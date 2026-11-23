@@ -23,15 +23,15 @@ workflow "loan_application" do
     end
   end
 
-  step :decide, fn %{lookups: %{credit: credit, fraud: fraud, sanctions: sanctions}} = application ->
-    {:ok, Map.put(application, :outcome, outcome(credit["score"], fraud["risk"], sanctions["listed"]))}
+  step :decide, fn %{"lookups" => %{"credit" => credit, "fraud" => fraud, "sanctions" => sanctions}} = application ->
+    {:ok, assign(application, :outcome, outcome(credit["score"], fraud["risk"], sanctions["listed"]))}
   end
 end
 ```
 
 - **A lane is its own run.** It retries, sleeps, waits and moves queues like any run, and comes back to the step it stopped at. It holds steps, named branches and named parallel blocks. A `step` written straight in the block is a lane of one step, named after it.
 - **Every lane starts from the same data** and sees nothing another lane does.
-- **The next step gets what each lane produced under the block's name**, by lane name: `%{lookups: %{credit: %{"score" => 712}, fraud: ..., sanctions: ...}}`. That is the block's collect step; you don't write one. What a lane produced is every key its steps added or changed. The data it was started with is left out, so a large application isn't copied once per lane. A lane's output has been stored, so the keys inside it are strings. A lane can't hand back that it removed a key.
+- **The next step gets what each lane produced under the block's name**, by lane name: `%{"lookups" => %{"credit" => %{"score" => 712}, "fraud" => ..., "sanctions" => ...}}`. That is the block's collect step; you don't write one. What a lane produced is every key its steps added or changed. The data it was started with is left out, so a large application isn't copied once per lane. Like all of a run's data, the block's name, the lane names and the keys inside a lane's output are strings. A lane can't hand back that it removed a key.
 - **A lane that fails fails the block** and stops the other lanes. That is `on_error: :fail_fast`, the default. A lane that is cancelled, by its own step or by an operator, ends the block the same way.
 - **`Durable.retry/1` on the failed run** puts the lanes that didn't finish back to work where they stopped, including a lane inside a lane and a child workflow a lane was waiting for (`call_workflow`). Lanes that finished aren't run again. A lane stopped in the middle of a step is told at its worker's next heartbeat; retry before that and the step can run once more beside the one still finishing, so keep steps in a lane safe to repeat, as lookups are.
 - **Steps are stored under the block and the lane**, as `lookups__sanctions__query`.
@@ -49,13 +49,13 @@ parallel :lookups, on_error: :collect do
   step :sanctions, fn application -> ... end
 end
 
-step :decide, fn %{lookups: lookups} = application ->
+step :decide, fn %{"lookups" => lookups} = application ->
   case lookups do
-    %{credit: {:ok, credit}, fraud: {:ok, fraud}, sanctions: {:ok, %{"listed" => false}}} ->
-      {:ok, Map.put(application, :outcome, outcome(credit["score"], fraud["risk"]))}
+    %{"credit" => {:ok, credit}, "fraud" => {:ok, fraud}, "sanctions" => {:ok, %{"listed" => false}}} ->
+      {:ok, assign(application, :outcome, outcome(credit["score"], fraud["risk"]))}
 
-    %{sanctions: {:error, _down}} ->
-      {:ok, Map.put(application, :outcome, "manual_review")}
+    %{"sanctions" => {:error, _down}} ->
+      {:ok, assign(application, :outcome, "manual_review")}
 
     _ ->
       {:fail, "lookups failed"}
@@ -63,7 +63,7 @@ step :decide, fn %{lookups: lookups} = application ->
 end
 ```
 
-The step sees the same pairs however the run got back to it. In the stored run a pair is a two-item list, `["ok", data]` or `["error", reason]`.
+These pairs are the one thing a step doesn't see as it is stored: in the stored run a pair is a two-item list, `["ok", data]` or `["error", reason]`.
 
 ### A lane the block can do without
 
@@ -81,7 +81,7 @@ parallel :lookups do
   end
 end
 
-step :decide, fn %{lookups: %{credit: credit, device: device, social: social}} = application ->
+step :decide, fn %{"lookups" => %{"credit" => credit, "device" => device, "social" => social}} = application ->
   # device and social are nil if their lookup failed
   ...
 end
@@ -95,7 +95,7 @@ Give the lane a `default:` and the next step gets that in place of `nil`:
 step :device, [optional: true, default: %{trust: "unknown"}], fn application -> ... end
 ```
 
-Like a lane's own output the default has been stored, so the step reads `device["trust"]`. The step can no longer tell a device rated unknown from a lookup that failed; only the lane's run shows that.
+Like a lane's own output the default has string keys, so the step reads `device["trust"]`. The step can no longer tell a device rated unknown from a lookup that failed; only the lane's run shows that.
 
 ### A time limit on a lane
 
@@ -116,13 +116,13 @@ Past its limit the lane fails with a `"timeout"` error, like any failed lane: he
 
 ## `into:`
 
-`into:` takes a function that gets the data from before the block and every lane's `{:ok, output}` or `{:error, reason}`, and returns what the run carries on with: `{:ok, data}`, `{:error, reason}` or `{:goto, step, data}`. Every lane runs to its end, and nothing is put under the block's name.
+`into:` takes a function that gets the data from before the block and every lane's `{:ok, output}` or `{:error, reason}`, by lane name as a string, and returns what the run carries on with: `{:ok, data}`, `{:error, reason}` or `{:goto, step, data}`. Every lane runs to its end, and nothing is put under the block's name.
 
 ```elixir
 parallel :lookups, into: fn application, lanes ->
   case lanes do
-    %{credit: {:ok, credit}, fraud: {:ok, fraud}} ->
-      {:ok, Map.put(application, :outcome, outcome(credit["score"], fraud["risk"]))}
+    %{"credit" => {:ok, credit}, "fraud" => {:ok, fraud}} ->
+      {:ok, assign(application, :outcome, outcome(credit["score"], fraud["risk"]))}
 
     _ ->
       {:goto, :manual_review, application}
@@ -187,7 +187,7 @@ Before 1.6 a block could be written with no name, `parallel do`. That form is go
 | Before | Now |
 |---|---|
 | `parallel do` | `parallel :lookups do` |
-| `parallel_results()`, `parallel_result(:credit)`, the `__results__` key | the next step's data: `%{lookups: %{credit: ...}}` |
+| `parallel_results()`, `parallel_result(:credit)`, the `__results__` key | the next step's data: `%{"lookups" => %{"credit" => ...}}` |
 | `on_error: :complete_all` | `on_error: :collect` |
 | `step :credit, returns: :score` | name the step for what it returns |
 | a step returned its whole data | a lane hands back the keys it added or changed, with string keys |

@@ -368,7 +368,7 @@ defmodule SimpleBranchTestWorkflow do
       {:ok, assign(data, :doc_type, doc_type)}
     end
 
-    branch on: fn data -> data.doc_type end do
+    branch on: fn data -> data["doc_type"] end do
       :invoice ->
         step :process_invoice, fn data ->
           {:ok, assign(data, :processed_as, "invoice")}
@@ -396,7 +396,7 @@ defmodule BranchWithDefaultWorkflow do
       {:ok, assign(data, :doc_type, doc_type)}
     end
 
-    branch on: fn data -> data.doc_type end do
+    branch on: fn data -> data["doc_type"] end do
       :invoice ->
         step :process_invoice, fn data ->
           {:ok, assign(data, :processed_as, "invoice")}
@@ -424,7 +424,7 @@ defmodule MultiStepBranchWorkflow do
       {:ok, assign(data, :doc_type, doc_type)}
     end
 
-    branch on: fn data -> data.doc_type end do
+    branch on: fn data -> data["doc_type"] end do
       :invoice ->
         step :extract_invoice, fn data ->
           {:ok, assign(data, :step_1, "extracted")}
@@ -455,7 +455,7 @@ defmodule ContextBranchWorkflow do
       {:ok, assign(data, :amount, data["amount"])}
     end
 
-    branch on: fn data -> data.amount > 1000 end do
+    branch on: fn data -> data["amount"] > 1000 end do
       true ->
         step :manager_approval, fn data ->
           {:ok, assign(data, :approval_type, "manager")}
@@ -483,7 +483,7 @@ defmodule StringConditionBranchWorkflow do
       {:ok, assign(data, :category, data["category"])}
     end
 
-    branch on: fn data -> data.category end do
+    branch on: fn data -> data["category"] end do
       "electronics" ->
         step :process_electronics, fn data ->
           {:ok, assign(data, :processed_as, "electronics")}
@@ -517,7 +517,7 @@ defmodule IntegerConditionBranchWorkflow do
       {:ok, assign(data, :priority, data["priority"])}
     end
 
-    branch on: fn data -> data.priority end do
+    branch on: fn data -> data["priority"] end do
       1 ->
         step :high_priority, fn data ->
           {:ok, assign(data, :processed_as, "high")}
@@ -554,7 +554,7 @@ defmodule BooleanConditionBranchWorkflow do
       {:ok, assign(data, :enabled, data["enabled"])}
     end
 
-    branch on: fn data -> data.enabled end do
+    branch on: fn data -> data["enabled"] end do
       true ->
         step :process_enabled, fn data ->
           {:ok, assign(data, :processed_as, "enabled")}
@@ -581,7 +581,7 @@ defmodule NilConditionBranchWorkflow do
       {:ok, assign(data, :value, data["value"])}
     end
 
-    branch on: fn data -> data.value end do
+    branch on: fn data -> data["value"] end do
       nil ->
         step :handle_nil, fn data ->
           {:ok, assign(data, :processed_as, "nil_handled")}

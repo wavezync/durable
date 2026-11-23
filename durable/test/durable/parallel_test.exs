@@ -577,13 +577,13 @@ defmodule ResultsAccessWorkflow do
     step :process_results, fn data ->
       # What a lane added has been stored, so its own keys are strings
       data =
-        case data.tasks.task_a do
+        case data["tasks"]["task_a"] do
           %{"value_a" => 42} -> assign(data, :processed_task_a, true)
           _ -> data
         end
 
       data =
-        case data.tasks.task_b do
+        case data["tasks"]["task_b"] do
           %{"value_b" => 99} -> assign(data, :processed_task_b, true)
           _ -> data
         end
@@ -629,7 +629,7 @@ defmodule IntoOkWorkflow do
 
     parallel :charge,
       into: fn ctx, results ->
-        case {results[:payment], results[:delivery]} do
+        case {results["payment"], results["delivery"]} do
           {{:ok, payment}, {:ok, delivery}} ->
             new_ctx =
               ctx
@@ -668,7 +668,7 @@ defmodule IntoErrorWorkflow do
 
     parallel :charge,
       into: fn _ctx, results ->
-        case {results[:payment], results[:delivery]} do
+        case {results["payment"], results["delivery"]} do
           {{:ok, _}, {:ok, _}} ->
             {:error, "Both succeeded but we expected failure"}
 
@@ -702,7 +702,7 @@ defmodule IntoGotoWorkflow do
 
     parallel :charge,
       into: fn ctx, results ->
-        case results[:delivery] do
+        case results["delivery"] do
           {:error, _} ->
             {:goto, :handle_backorder, ctx}
 

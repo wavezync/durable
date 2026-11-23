@@ -45,13 +45,13 @@ defmodule Durable do
         use Durable.Helpers
 
         workflow "process_order", timeout: hours(2) do
-          # The input's keys are strings, and stay strings in every step
+          # A workflow's data has string keys in every step
           step :validate, fn order ->
             {:ok, assign(order, :order_id, order["id"])}
           end
 
           step :charge, [retry: [max_attempts: 3, backoff: :exponential]], fn data ->
-            receipt = PaymentService.charge(data.order_id)
+            receipt = PaymentService.charge(data["order_id"])
             {:ok, assign(data, :receipt, receipt)}
           end
         end

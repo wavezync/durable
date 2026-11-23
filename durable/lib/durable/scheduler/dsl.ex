@@ -15,7 +15,7 @@ defmodule Durable.Scheduler.DSL do
           end
 
           step :generate, fn data ->
-            {:ok, Map.put(data, :report, Reports.build(data.sales))}
+            {:ok, Map.put(data, "report", Reports.build(data["sales"]))}
           end
         end
       end

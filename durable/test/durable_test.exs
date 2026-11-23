@@ -13,7 +13,7 @@ defmodule DurableTest do
           end
 
           step :second, fn data ->
-            value = data[:value]
+            value = data["value"]
             {:ok, assign(data, :result, value + 1)}
           end
         end

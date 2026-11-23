@@ -38,7 +38,7 @@ defmodule Durable.Executor.ErrorSanitizationTest do
 
     test "walks maps recursively" do
       input = %{status: {:ok, "done"}, count: 5}
-      assert Executor.sanitize_for_json(input) == %{status: [:ok, "done"], count: 5}
+      assert Executor.sanitize_for_json(input) == %{"status" => [:ok, "done"], "count" => 5}
     end
 
     test "walks lists recursively" do

@@ -445,9 +445,9 @@ defmodule Durable.Integration.AuditRegressionsTest do
 
         workflow "a_either" do
           if Mix.env() == :prod do
-            step(:work, fn data -> {:ok, Map.put(data, :env, :prod)} end)
+            step(:work, fn data -> {:ok, Map.put(data, "env", :prod)} end)
           else
-            step(:work, fn data -> {:ok, Map.put(data, :env, :other)} end)
+            step(:work, fn data -> {:ok, Map.put(data, "env", :other)} end)
           end
 
           step(:after, fn data -> {:ok, data} end)
@@ -458,7 +458,7 @@ defmodule Durable.Integration.AuditRegressionsTest do
       [{module, _}] = Code.compile_string(code)
       {:ok, definition} = module.__workflow_definition__("a_either")
       assert Enum.map(definition.steps, & &1.name) == [:work, :after]
-      assert {:ok, %{env: :other}} = hd(definition.steps).body_fn.(%{})
+      assert {:ok, %{"env" => :other}} = hd(definition.steps).body_fn.(%{})
     end
   end
 

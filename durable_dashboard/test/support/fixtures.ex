@@ -23,9 +23,6 @@ defmodule DurableDashboard.Fixtures do
 
   import Ecto.Query
 
-  @doc false
-  def knob(data, key), do: Map.get(data, key) || Map.get(data, String.to_atom(key))
-
   defmodule Payments do
     @moduledoc false
     use Durable
@@ -34,7 +31,7 @@ defmodule DurableDashboard.Fixtures do
       step :validate, fn data -> {:ok, data} end
 
       step :authorize, fn data ->
-        if DurableDashboard.Fixtures.knob(data, "decline"),
+        if data["decline"],
           do: raise(ArgumentError, "card declined"),
           else: {:ok, Map.put(data, "auth_code", "AUTH-1")}
       end
@@ -51,7 +48,7 @@ defmodule DurableDashboard.Fixtures do
       end
 
       step :charge, fn data ->
-        if DurableDashboard.Fixtures.knob(data, "decline"),
+        if data["decline"],
           do: {:error, %{reason: "payment_failed"}},
           else: {:ok, data}
       end
@@ -147,9 +144,9 @@ defmodule DurableDashboard.Fixtures do
         step :nsfw_scan, fn data -> {:ok, Map.put(data, "nsfw", 0.2)} end
       end
 
-      branch on: fn _data -> :low end do
-        :high -> step :remove, fn data -> {:ok, data} end
-        :low -> step :approve, fn data -> {:ok, data} end
+      branch on: fn _data -> "low" end do
+        "high" -> step :remove, fn data -> {:ok, data} end
+        "low" -> step :approve, fn data -> {:ok, data} end
       end
     end
   end
@@ -186,11 +183,9 @@ defmodule DurableDashboard.Fixtures do
     use Durable
 
     workflow "charge_with_retries" do
-      step(
-        :charge_card,
-        [retry: [max_attempts: 5, backoff: :constant, base: :timer.hours(1)]],
-        fn _data -> {:error, %{reason: "gateway timeout"}} end
-      )
+      step :charge_card,
+           [retry: [max_attempts: 5, backoff: :constant, base: :timer.hours(1)]],
+           fn _data -> {:error, %{reason: "gateway timeout"}} end
     end
   end
 

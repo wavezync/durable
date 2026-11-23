@@ -78,7 +78,7 @@ defmodule Durable.Integration.ChildrenAndSchedulesRegressionsTest do
     alias Durable.IntegrationProbe, as: Probe
 
     workflow "r_collides" do
-      step :first, fn data -> {:ok, Map.put(data, :approved, false)} end
+      step :first, fn data -> {:ok, Map.put(data, "approved", false)} end
 
       step :w, fn data ->
         Probe.note(:body)

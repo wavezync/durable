@@ -11,6 +11,30 @@ defmodule Durable.Helpers do
 
   This imports all helper functions into your workflow module.
 
+  ## Keys
+
+  A workflow's data has string keys at every depth, as it is stored. Each
+  helper takes a key as an atom or a string and reads or writes the string:
+  `assign(data, :status, "paid")` sets `data["status"]`.
+
+  ## Best practice
+
+  Read and write a workflow's data through these helpers. They let a step name
+  its keys with atoms, as Elixir code usually does, over data that is stored
+  with strings:
+
+      step :charge, fn order ->
+        total = get(order, :total)                  # order["total"]
+        city = get(order, [:customer, :city])       # order["customer"]["city"]
+        {:ok, assign(order, :charged, total)}       # sets order["charged"]
+      end
+
+  `order.total`, `order[:total]` and `%{total: total} = order` don't read the
+  data: its keys are strings. `Map.put(order, :total, 1)` in the middle of a
+  step leaves `:total` beside the stored `"total"` until the step returns, so
+  a later `get(order, :total)` in that step still reads the old one;
+  `assign/3` writes the string and has no such gap.
+
   ## Examples
 
       step :process, fn data ->
@@ -55,7 +79,7 @@ defmodule Durable.Helpers do
   """
   @spec assign(map(), atom() | String.t(), term()) :: map()
   def assign(data, key, value) when is_map(data) and (is_atom(key) or is_binary(key)) do
-    Map.put(data, key, value)
+    Map.put(data, to_string(key), value)
   end
 
   @doc """
@@ -68,7 +92,7 @@ defmodule Durable.Helpers do
   """
   @spec assign(map(), map()) :: map()
   def assign(data, map) when is_map(data) and is_map(map) do
-    Map.merge(data, map)
+    Map.merge(data, Map.new(map, fn {key, value} -> {to_string(key), value} end))
   end
 
   @doc """
@@ -84,7 +108,7 @@ defmodule Durable.Helpers do
   """
   @spec update(map(), atom() | String.t(), term(), (term() -> term())) :: map()
   def update(data, key, default, fun) when is_map(data) and is_function(fun, 1) do
-    Map.update(data, key, default, fun)
+    Map.update(data, to_string(key), default, fun)
   end
 
   @doc """
@@ -99,7 +123,7 @@ defmodule Durable.Helpers do
   """
   @spec update(map(), atom() | String.t(), (term() -> term())) :: map()
   def update(data, key, fun) when is_map(data) and is_function(fun, 1) do
-    Map.update!(data, key, fun)
+    Map.update!(data, to_string(key), fun)
   end
 
   @doc """
@@ -115,7 +139,7 @@ defmodule Durable.Helpers do
   """
   @spec append(map(), atom() | String.t(), term()) :: map()
   def append(data, key, value) when is_map(data) do
-    update(data, key, [], fn list -> list ++ [value] end)
+    update(data, key, [value], fn list -> list ++ [value] end)
   end
 
   @doc """
@@ -131,7 +155,7 @@ defmodule Durable.Helpers do
   """
   @spec increment(map(), atom() | String.t(), number()) :: map()
   def increment(data, key, amount \\ 1) when is_map(data) and is_number(amount) do
-    update(data, key, 0, fn val -> val + amount end)
+    update(data, key, amount, fn val -> val + amount end)
   end
 
   @doc """
@@ -144,7 +168,7 @@ defmodule Durable.Helpers do
   """
   @spec delete(map(), atom() | String.t()) :: map()
   def delete(data, key) when is_map(data) do
-    Map.delete(data, key)
+    Map.delete(data, to_string(key))
   end
 
   @doc """
@@ -159,7 +183,7 @@ defmodule Durable.Helpers do
   """
   @spec has_key?(map(), atom() | String.t()) :: boolean()
   def has_key?(data, key) when is_map(data) do
-    Map.has_key?(data, key)
+    Map.has_key?(data, to_string(key))
   end
 
   @doc """
@@ -171,11 +195,13 @@ defmodule Durable.Helpers do
 
       order_id = get(data, :order_id)
 
+  A list is a path into the maps inside the data:
+
+      total = get(data, [:invoice, :total])
+
   """
-  @spec get(map(), atom() | String.t()) :: term()
-  def get(data, key) when is_map(data) do
-    Map.get(data, key)
-  end
+  @spec get(map(), atom() | String.t() | [atom() | String.t()]) :: term()
+  def get(data, key) when is_map(data), do: get(data, key, nil)
 
   @doc """
   Gets a value from the data with a default.
@@ -185,8 +211,15 @@ defmodule Durable.Helpers do
       count = get(data, :retry_count, 0)
 
   """
-  @spec get(map(), atom() | String.t(), term()) :: term()
+  @spec get(map(), atom() | String.t() | [atom() | String.t()], term()) :: term()
+  def get(data, path, default) when is_map(data) and is_list(path) do
+    case get_in(data, Enum.map(path, &to_string/1)) do
+      nil -> default
+      value -> value
+    end
+  end
+
   def get(data, key, default) when is_map(data) do
-    Map.get(data, key, default)
+    Map.get(data, to_string(key), default)
   end
 end

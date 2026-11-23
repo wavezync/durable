@@ -17,12 +17,12 @@ defmodule Durable.IntegrationWorkflows do
 
       step :ocr, [queue: :ocr], fn data ->
         Probe.here(:ocr)
-        {:ok, assign(data, :text, "text of #{data.file}")}
+        {:ok, assign(data, :text, "text of #{data["file"]}")}
       end
 
       step :summarize, [queue: :llm], fn data ->
         Probe.here(:summarize)
-        {:ok, assign(data, :summary, "summary of #{data.text}")}
+        {:ok, assign(data, :summary, "summary of #{data["text"]}")}
       end
 
       step :save, fn data ->
@@ -384,7 +384,7 @@ defmodule Durable.IntegrationWorkflows do
         {:ok, assign(data, :path, "a")}
       end
 
-      branch on: fn data -> data[:path] || data["path"] end do
+      branch on: fn data -> data["path"] end do
         "a" ->
           step(
             :a1,

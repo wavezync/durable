@@ -120,13 +120,13 @@ defmodule Durable.NamedBlocksEdgesTest do
       end
 
       step :plain, fn loan ->
-        Seen.put(:plain, loan.lookups |> Map.keys() |> Enum.sort())
+        Seen.put(:plain, loan["lookups"] |> Map.keys() |> Enum.sort())
         {:ok, loan}
       end
 
       parallel :send do
         step :notify, fn loan ->
-          Seen.put(:later, loan.lookups |> Map.keys() |> Enum.sort())
+          Seen.put(:later, loan["lookups"] |> Map.keys() |> Enum.sort())
           {:ok, loan}
         end
       end
@@ -145,7 +145,7 @@ defmodule Durable.NamedBlocksEdgesTest do
 
         lane :sanctions do
           step :query, fn loan -> {:ok, assign(loan, :hits, [])} end
-          step :screen, fn loan -> {:ok, assign(loan, :listed, loan.hits != [])} end
+          step :screen, fn loan -> {:ok, assign(loan, :listed, loan["hits"] != [])} end
         end
       end
 
@@ -197,7 +197,7 @@ defmodule Durable.NamedBlocksEdgesTest do
     workflow "jumps" do
       parallel :lookups,
         into: fn loan, _results ->
-          {:goto, :approve, assign(loan, :joined, loan[:joined] || 1)}
+          {:goto, :approve, assign(loan, :joined, loan["joined"] || 1)}
         end do
         step :credit, fn loan -> {:ok, loan} end
       end
@@ -238,17 +238,17 @@ defmodule Durable.NamedBlocksEdgesTest do
       end
 
       step :decide, [retry: [max_attempts: 2, base: 1]], fn application ->
-        Seen.put({:decide, Logger.metadata()[:attempt]}, application.lookups)
+        Seen.put({:decide, Logger.metadata()[:attempt]}, application["lookups"])
 
         cond do
           application["decide_flaky"] && Logger.metadata()[:attempt] == 1 ->
             {:error, "first attempt"}
 
-          match?(%{sanctions: {:error, _}}, application.lookups) ->
+          match?(%{"sanctions" => {:error, _}}, application["lookups"]) ->
             {:ok, assign(application, :outcome, "manual_review")}
 
           true ->
-            {:ok, %{"score" => score}} = application.lookups.credit
+            {:ok, %{"score" => score}} = application["lookups"]["credit"]
 
             {:ok,
              assign(application, :outcome, if(score > 650, do: "approved", else: "declined"))}
@@ -288,7 +288,7 @@ defmodule Durable.NamedBlocksEdgesTest do
       end
 
       step :decide, [retry: [max_attempts: 2, base: 1]], fn application ->
-        Seen.put({:enrich, Logger.metadata()[:attempt]}, application.lookups)
+        Seen.put({:enrich, Logger.metadata()[:attempt]}, application["lookups"])
 
         if application["decide_flaky"] && Logger.metadata()[:attempt] == 1,
           do: {:error, "first attempt"},
@@ -303,7 +303,7 @@ defmodule Durable.NamedBlocksEdgesTest do
       end
 
       step :decide, fn application ->
-        Seen.put(:enrich_collect, application.lookups)
+        Seen.put(:enrich_collect, application["lookups"])
         {:ok, application}
       end
     end
@@ -380,8 +380,8 @@ defmodule Durable.NamedBlocksEdgesTest do
 
   test "a step of a later block finds an earlier block's lanes by name, as any step does" do
     assert run_workflow(Mixed, %{}).status == :completed
-    assert Seen.get(:plain) == [:credit, :fraud]
-    assert Seen.get(:later) == [:credit, :fraud]
+    assert Seen.get(:plain) == ["credit", "fraud"]
+    assert Seen.get(:later) == ["credit", "fraud"]
   end
 
   test "a decider runs on the run's own queue, not the one the step before it used" do
@@ -430,7 +430,11 @@ defmodule Durable.NamedBlocksEdgesTest do
       assert run.status == :completed
       assert run.context["outcome"] == "approved"
 
-      assert %{credit: {:ok, %{"score" => 710}}, fraud: {:ok, _}, sanctions: {:ok, sanctions}} =
+      assert %{
+               "credit" => {:ok, %{"score" => 710}},
+               "fraud" => {:ok, _},
+               "sanctions" => {:ok, sanctions}
+             } =
                Seen.get({:decide, 1})
 
       assert sanctions["listed"] == false
@@ -444,7 +448,7 @@ defmodule Durable.NamedBlocksEdgesTest do
       assert run.context["outcome"] == "manual_review"
       assert Seen.get(:fraud_ran)
 
-      assert %{credit: {:ok, _}, fraud: {:ok, _}, sanctions: {:error, reason}} =
+      assert %{"credit" => {:ok, _}, "fraud" => {:ok, _}, "sanctions" => {:error, reason}} =
                Seen.get({:decide, 1})
 
       assert reason["message"] =~ "sanctions API is down"
@@ -462,7 +466,7 @@ defmodule Durable.NamedBlocksEdgesTest do
 
       assert run.status == :completed
       assert Seen.get({:decide, 2}) == Seen.get({:decide, 1})
-      assert %{sanctions: {:error, _}, credit: {:ok, _}} = Seen.get({:decide, 2})
+      assert %{"sanctions" => {:error, _}, "credit" => {:ok, _}} = Seen.get({:decide, 2})
     end
 
     test "only :fail_fast and :collect are ways for a named block to take a failure" do
@@ -489,7 +493,9 @@ defmodule Durable.NamedBlocksEdgesTest do
         run_workflow(Enrich, %{"device_down" => true, "social_down" => true}, workflow: "enrich")
 
       assert run.status == :completed
-      assert %{credit: %{"score" => 710}, device: nil, social: nil} = Seen.get({:enrich, 1})
+
+      assert %{"credit" => %{"score" => 710}, "device" => nil, "social" => nil} =
+               Seen.get({:enrich, 1})
 
       # Why it failed is on the lane's own run.
       failed = Enum.filter(lanes(run), &(&1.status == :failed))
@@ -503,7 +509,7 @@ defmodule Durable.NamedBlocksEdgesTest do
 
       assert run.status == :completed
 
-      assert %{device: %{"device" => "known"}, social: %{"rated" => true}} =
+      assert %{"device" => %{"device" => "known"}, "social" => %{"rated" => true}} =
                Seen.get({:enrich, 1})
     end
 
@@ -520,7 +526,7 @@ defmodule Durable.NamedBlocksEdgesTest do
       run = run_workflow(Enrich, input, workflow: "enrich")
 
       assert run.status == :completed
-      assert %{device: nil, credit: %{}} = Seen.get({:enrich, 2})
+      assert %{"device" => nil, "credit" => %{}} = Seen.get({:enrich, 2})
       assert Seen.get({:enrich, 2}) == Seen.get({:enrich, 1})
     end
 
@@ -529,7 +535,7 @@ defmodule Durable.NamedBlocksEdgesTest do
 
       assert run.status == :completed
 
-      assert %{credit: {:ok, _}, device: {:error, %{"message" => "device check is down"}}} =
+      assert %{"credit" => {:ok, _}, "device" => {:error, %{"message" => "device check is down"}}} =
                Seen.get(:enrich_collect)
     end
 
@@ -561,11 +567,11 @@ defmodule Durable.NamedBlocksEdgesTest do
       assert run.status == :completed
 
       assert %{
-               credit: %{"score" => 710},
-               fraud: %{"risk" => 0.02},
-               address: %{},
-               sanctions: %{"hits" => [], "listed" => false}
-             } == Seen.get(:loan).lookups
+               "credit" => %{"score" => 710},
+               "fraud" => %{"risk" => 0.02},
+               "address" => %{},
+               "sanctions" => %{"hits" => [], "listed" => false}
+             } == Seen.get(:loan)["lookups"]
 
       # One copy of the statements in the stored run, not one per lane.
       assert byte_size(Jason.encode!(run.context)) < 2_000
@@ -574,15 +580,18 @@ defmodule Durable.NamedBlocksEdgesTest do
     test "leaves out an earlier block's lanes, so blocks don't pile up copies" do
       run_workflow(Outputs, %{"statements" => "many"}, workflow: "loan")
 
-      assert %{north: {:ok, %{"rate" => 6.1}}, south: {:error, %{"message" => "no answer"}}} =
-               Seen.get(:loan).quotes
+      assert %{
+               "north" => {:ok, %{"rate" => 6.1}},
+               "south" => {:error, %{"message" => "no answer"}}
+             } =
+               Seen.get(:loan)["quotes"]
 
-      assert {:ok, %{"rate" => 6.1}} == Seen.get(:loan).quotes.north
+      assert {:ok, %{"rate" => 6.1}} == Seen.get(:loan)["quotes"]["north"]
     end
 
     test "is what into: is handed too" do
       run_workflow(Outputs, %{"statements" => "many"}, workflow: "loan_into")
-      assert Seen.get(:loan_into) == %{credit: {:ok, %{"score" => 710}}}
+      assert Seen.get(:loan_into) == %{"credit" => {:ok, %{"score" => 710}}}
     end
   end
 

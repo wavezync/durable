@@ -13,12 +13,12 @@ const code = `workflow "fix_issue", timeout: days(14) do
   end
 
   step :write_patch, [retry: [max_attempts: 3]], fn ctx ->
-    patch = ReqLLM.generate_text!(@model, ctx.plan)
+    patch = ReqLLM.generate_text!(@model, ctx["plan"])
     {:ok, assign(ctx, :patch, patch)}
   end
 
   step :run_tests, [retry: [max_attempts: 5]], fn ctx ->
-    {:ok, run} = CI.run(ctx["repo"], ctx.patch)
+    {:ok, run} = CI.run(ctx["repo"], ctx["patch"])
     {:ok, assign(ctx, :ci_url, run.url)}
   end
 
@@ -28,7 +28,7 @@ const code = `workflow "fix_issue", timeout: days(14) do
   end
 
   step :merge, fn ctx ->
-    GitHub.merge(ctx["repo"], ctx.patch)
+    GitHub.merge(ctx["repo"], ctx["patch"])
     {:ok, ctx}
   end
 end`;
@@ -143,10 +143,10 @@ const steps = [
     ],
     inspect: [
       [0, { steps: all('done', 'saved'), cost: '$0.42', crash: false }],
-      [100, { lines: ['plan'], inspect: { step: 'plan', input: '%{"issue" => "N+1 query in Orders.list/1"}', output: '%{plan: "Preload :items in the query…"}', took: '2.1s, attempt 1' } }],
-      [1300, { lines: ['write_patch'], inspect: { step: 'write_patch', input: '%{plan: "Preload :items…"}', output: '%{patch: "diff --git a/lib/orders.ex…"}', took: '6.4s, attempt 1' } }],
-      [2500, { lines: ['run_tests'], inspect: { step: 'run_tests', input: '%{"repo" => "acme/shop"}', output: '%{ci_url: "…/runs/8812"}', took: '3m 12s, attempt 3' } }],
-      [3700, { lines: ['await_review'], inspect: { step: 'await_review', input: '%{patch: "diff --git…"}', output: '%{decision: %{"approved" => true}}', took: '6d 4h waiting' } }],
+      [100, { lines: ['plan'], inspect: { step: 'plan', input: '%{"issue" => "N+1 query in Orders.list/1"}', output: '%{"plan" => "Preload :items in the query…"}', took: '2.1s, attempt 1' } }],
+      [1300, { lines: ['write_patch'], inspect: { step: 'write_patch', input: '%{"plan" => "Preload :items…"}', output: '%{"patch" => "diff --git a/lib/orders.ex…"}', took: '6.4s, attempt 1' } }],
+      [2500, { lines: ['run_tests'], inspect: { step: 'run_tests', input: '%{"repo" => "acme/shop"}', output: '%{"ci_url" => "…/runs/8812"}', took: '3m 12s, attempt 3' } }],
+      [3700, { lines: ['await_review'], inspect: { step: 'await_review', input: '%{"patch" => "diff --git…"}', output: '%{"decision" => %{"approved" => true}}', took: '6d 4h waiting' } }],
       [4900, { lines: ['merge'], inspect: { step: 'merge', input: '%{"repo" => "acme/shop"}', output: '%{}', took: '640ms, attempt 1' } }],
     ],
   };

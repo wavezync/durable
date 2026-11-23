@@ -83,7 +83,7 @@ defmodule MyWorkflow do
     end
 
     step :second, [retry: [max_attempts: 3, backoff: :exponential]], fn data ->
-      {:ok, assign(data, :seen, data.key)}
+      {:ok, assign(data, :seen, data["key"])}
     end
   end
 end
@@ -91,6 +91,13 @@ end
 
 The DSL is written without parentheses (`step :name, fn data -> ... end`), and
 a step returns `{:ok, data}` or one of the other results in `Durable.DSL.Step`.
+
+A workflow's data has string keys at every depth, in every step: it is handed
+over as it is stored. Read `get(data, :key)` (best practice: the `Durable.Helpers`
+take atom names, and `get(data, [:a, :b])` reads inside) or `data["key"]`, never
+`data.key`.
+A step may return atom keys, and the helpers take a key either way; an atom
+value is stored as its text (`:paid` is `"paid"`).
 
 ### Queue System
 
@@ -159,7 +166,7 @@ use Durable.DataCase, async: false
 
 All tables live in the `durable` PostgreSQL schema: `durable.workflow_executions`, `durable.step_executions`, `durable.pending_inputs`, `durable.scheduled_workflows`
 
-On `workflow_executions`, `context` is the user's data and `engine_state` is the engine's own (markers, key shapes, children). Never read a marker from `context` or write one there: see `Durable.EngineState` and ARCHITECTURE rules 22 to 24.
+On `workflow_executions`, `context` is the user's data and `engine_state` is the engine's own (markers, children). Never read a marker from `context` or write one there: see `Durable.EngineState` and ARCHITECTURE rules 22 to 24.
 
 Uses binary UUIDs as primary keys.
 

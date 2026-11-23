@@ -38,10 +38,39 @@ defmodule Durable.Audit4FollowUpTest do
       end
     end
 
-    # The user's id is copied under an atom key, as the old README did.
-    workflow "audit4_fu_shadow" do
+    # A step writes atoms, at depth and as values. Every step after it reads
+    # the same string-keyed data, however the run got to it.
+    workflow "audit4_fu_string_keys" do
       step :load_user, fn data ->
-        {:ok, Map.put(data, :user_id, data["user_id"])}
+        profile = %{plan: :pro, limits: %{seats: 3, ratio: 1.0}, tags: [%{name: :vip}]}
+        {:ok, Map.put(data, :profile, profile)}
+      end
+
+      step :same_pass, fn data ->
+        Seen.put(:same_pass, data)
+        {:ok, data}
+      end
+
+      parallel :lookups do
+        step :plan, fn data ->
+          Seen.put(:lane_plan, data)
+          {:ok, %{name: "pro"}}
+        end
+
+        step :region, fn data ->
+          Seen.put(:lane_region, data)
+          {:ok, %{name: "eu"}}
+        end
+      end
+
+      step :send_welcome, [retry: [max_attempts: 2, base: 0]], fn data ->
+        if Seen.get(:welcome_tried) == :nothing do
+          Seen.put(:welcome_tried, data)
+          {:error, "mail server busy"}
+        else
+          Seen.put(:welcome_retried, data)
+          {:ok, data}
+        end
       end
 
       step :await_confirmation, fn data ->
@@ -49,40 +78,47 @@ defmodule Durable.Audit4FollowUpTest do
         {:ok, data}
       end
 
-      step :send_welcome, fn data ->
-        Seen.put(:shadowed, {data[:user_id], data["user_id"]})
+      step :after_reload, fn data ->
+        Seen.put(:after_reload, data)
         {:ok, data}
       end
     end
 
-    # The same, read from the lanes of a block and after a step is retried.
-    workflow "audit4_fu_shadow_lanes" do
-      step :load_user, fn data ->
-        {:ok, Map.put(data, :user_id, data["user_id"])}
+    # What a step returns that JSON has no word for.
+    workflow "audit4_fu_values" do
+      step :write, fn data ->
+        {:ok,
+         Map.merge(data, %{
+           status: :approved,
+           pair: {:ok, 1},
+           at: ~U[2026-11-23 10:00:00Z],
+           range: 1..3
+         })}
       end
 
-      parallel :lookups do
-        step :plan, fn data ->
-          Seen.put(:lane_plan, {data[:user_id], data["user_id"]})
-          {:ok, %{name: "pro"}}
-        end
-
-        step :region, fn data ->
-          Seen.put(:lane_region, {data[:user_id], data["user_id"]})
-          {:ok, %{name: "eu"}}
-        end
+      step :same_pass, fn data ->
+        Seen.put(:values_same_pass, data)
+        {:ok, data}
       end
 
-      step :send_welcome, [retry: [max_attempts: 2, base: 0]], fn data ->
-        seen = {data[:user_id], data["user_id"]}
+      step :await_confirmation, fn data ->
+        wait_for_event("email_confirmed")
+        {:ok, data}
+      end
 
-        if Seen.get(:welcome_tried) == :nothing do
-          Seen.put(:welcome_tried, seen)
-          {:error, "mail server busy"}
-        else
-          Seen.put(:welcome_retried, seen)
-          {:ok, data}
-        end
+      step :after_reload, fn data ->
+        Seen.put(:values_after_reload, Map.delete(data, "email_confirmed"))
+        {:ok, data}
+      end
+    end
+
+    # A step writes an atom over a key the data already has as a string.
+    workflow "audit4_fu_overwrite" do
+      step :reprice, fn order -> {:ok, Map.put(order, :total, 99)} end
+
+      step :charge, fn order ->
+        Seen.put(:charged, order)
+        {:ok, order}
       end
     end
 
@@ -105,7 +141,7 @@ defmodule Durable.Audit4FollowUpTest do
         {:ok, doc}
       end
 
-      branch on: fn doc -> doc.kind end do
+      branch on: fn doc -> doc["kind"] end do
         :invoice ->
           step :book_invoice, fn doc -> {:ok, assign(doc, :routed, "invoice")} end
 
@@ -140,26 +176,69 @@ defmodule Durable.Audit4FollowUpTest do
     end
   end
 
-  describe "a key given as a string and added as an atom" do
-    test "is still there under both after the run is reloaded" do
-      run = run_workflow(Signup, %{"user_id" => "u-7"}, workflow: "audit4_fu_shadow")
-      assert run.status == :waiting
+  describe "a step's data" do
+    test "has string keys at every depth, the same in every step however the run got there" do
+      run = run_workflow(Signup, %{"user_id" => "u-7"}, workflow: "audit4_fu_string_keys")
+      run = drain(run)
+      assert run.status == :waiting, inspect(run.error)
 
       :ok = Durable.send_event(run.id, "email_confirmed", %{})
       assert drain(run).status == :completed
-      assert Seen.get(:shadowed) == {"u-7", "u-7"}
+
+      written = %{
+        "user_id" => "u-7",
+        "profile" => %{
+          "plan" => "pro",
+          "limits" => %{"seats" => 3, "ratio" => 1.0},
+          "tags" => [%{"name" => "vip"}]
+        }
+      }
+
+      joined =
+        Map.put(written, "lookups", %{
+          "plan" => %{"name" => "pro"},
+          "region" => %{"name" => "eu"}
+        })
+
+      # `===`: a float stays a float.
+      for seen <- [:same_pass, :lane_plan, :lane_region] do
+        assert {seen, Seen.get(seen)} === {seen, written}
+      end
+
+      for seen <- [:welcome_tried, :welcome_retried] do
+        assert {seen, Seen.get(seen)} === {seen, joined}
+      end
+
+      # The event's answer is in the data under its name.
+      assert Seen.get(:after_reload) === Map.put(joined, "email_confirmed", %{})
     end
   end
 
-  describe "a key under both shapes, in a block's lanes and in a retried step" do
-    test "is there under both in each" do
-      run = run_workflow(Signup, %{"user_id" => "u-7"}, workflow: "audit4_fu_shadow_lanes")
-      run = drain(run)
-      assert run.status == :completed, inspect(run.error)
+  describe "a value a step returns" do
+    test "is read as it is stored, the same in the next step and after a reload" do
+      run = run_workflow(Signup, %{}, workflow: "audit4_fu_values")
+      assert run.status == :waiting, inspect(run.error)
 
-      for seen <- [:lane_plan, :lane_region, :welcome_tried, :welcome_retried] do
-        assert {seen, Seen.get(seen)} == {seen, {"u-7", "u-7"}}
-      end
+      :ok = Durable.send_event(run.id, "email_confirmed", %{})
+      assert drain(run).status == :completed
+
+      assert %{
+               "status" => "approved",
+               "pair" => ["ok", 1],
+               "at" => "2026-11-23T10:00:00Z",
+               "range" => %{"first" => 1, "last" => 3, "step" => 1}
+             } = Seen.get(:values_same_pass)
+
+      assert Seen.get(:values_after_reload) === Seen.get(:values_same_pass)
+    end
+  end
+
+  describe "a key written as an atom over the stored string" do
+    test "is stored once, with what the step wrote" do
+      run = run_workflow(Signup, %{"total" => 12}, workflow: "audit4_fu_overwrite")
+      assert run.status == :completed
+      assert Seen.get(:charged) == %{"total" => 99}
+      assert run.context == %{"total" => 99}
     end
   end
 

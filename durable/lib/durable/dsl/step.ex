@@ -7,6 +7,46 @@ defmodule Durable.DSL.Step do
   Data flows from step to step. Each step receives the previous step's output
   and returns `{:ok, data}` or `{:error, reason}`.
 
+  ## A step's data
+
+  A step is handed its data as it is stored: string keys at every depth. That
+  is the same on every pass, whether the previous step just ran or the run was
+  reloaded after a wait, a sleep, a retry, a crash or a move to another node.
+  The same goes for a `decision`, a `branch`, an `into:` function and a
+  `compensate`. Durable never makes atoms out of data.
+
+      step :check, fn data ->
+        get(data, [:invoice, :total])   # Durable.Helpers: keys named by atoms
+        data["invoice"]["total"]
+        %{"invoice" => %{"total" => total}} = data
+        {:ok, data}
+      end
+
+  Reading and writing through `Durable.Helpers` (`get/2`, `assign/3` and the
+  rest) is the recommended way: a step names its keys with atoms and the
+  helpers use the string keys the data has.
+
+  What a step returns may be written with atom keys. It is stored with string
+  keys, and the next step reads strings:
+
+      step :first, fn input ->
+        {:ok, %{order_id: input["id"], status: :new}}
+      end
+
+      step :second, fn data ->
+        data["order_id"]   # the id
+        data["status"]     # "new"
+        {:ok, data}
+      end
+
+  Values are stored as JSON too. From the next step on, an atom is its text
+  (`:new` is `"new"`), a tuple is a list, a `DateTime` or `Date` is its
+  ISO 8601 string and a struct is a map.
+
+  To change data a step was handed, use `Durable.Helpers` or string keys:
+  `assign(data, :total, 10)` or `Map.put(data, "total", 10)`. `%{data | total: 10}`
+  raises, since the data has no `:total` key.
+
   ## Future work — `each/foreach` isolation (L-5)
 
   If/when this DSL gains an iteration primitive (e.g. `each/3` to run a step
@@ -22,12 +62,12 @@ defmodule Durable.DSL.Step do
         end
 
         step :calculate, fn data ->
-          total = data.items |> Enum.map(& &1["price"]) |> Enum.sum()
+          total = data["items"] |> Enum.map(& &1["price"]) |> Enum.sum()
           {:ok, assign(data, :total, total)}
         end
 
         step :charge, [retry: [max_attempts: 3]], fn data ->
-          {:ok, assign(data, :receipt, PaymentService.charge(data.total))}
+          {:ok, assign(data, :receipt, PaymentService.charge(data["total"]))}
         end
       end
 
@@ -76,8 +116,8 @@ defmodule Durable.DSL.Step do
   @doc """
   Defines a step within a workflow.
 
-  The step receives the previous step's output (or workflow input for the first step)
-  and returns one of:
+  The step receives the previous step's output (or workflow input for the first step),
+  with string keys at every depth, and returns one of:
 
   - `{:ok, data}` - Done; `data` goes to the next step
   - `{:error, reason}` - Failed; retried while attempts are left
@@ -309,7 +349,7 @@ defmodule Durable.DSL.Step do
   ## Examples
 
       decision :check_amount, fn data ->
-        if data.total > 1000 do
+        if data["total"] > 1000 do
           {:goto, :manual_review, data}
         else
           {:ok, data}
@@ -391,7 +431,7 @@ defmodule Durable.DSL.Step do
   ## Examples
 
       compensate :cancel_flight, fn data ->
-        FlightAPI.cancel(data.flight_booking_id)
+        FlightAPI.cancel(data["flight_booking_id"])
         {:ok, data}
       end
 
@@ -446,7 +486,7 @@ defmodule Durable.DSL.Step do
 
   ## Examples
 
-      branch on: fn data -> data.type end do
+      branch on: fn data -> data["type"] end do
         "physical" ->
           step :ship, fn data -> {:ok, assign(data, :shipped, true)} end
         "digital" ->
@@ -686,7 +726,7 @@ defmodule Durable.DSL.Step do
     block_error!(
       __CALLER__,
       "a parallel block needs a name, as in `parallel :lookups do`. The step after it " <>
-        "gets each lane's result under that name: %{lookups: %{credit: ...}}"
+        "gets each lane's result under that name: %{\"lookups\" => %{\"credit\" => ...}}"
     )
   end
 
@@ -718,8 +758,8 @@ defmodule Durable.DSL.Step do
 
       branch :risk, [retry: [max_attempts: 3]], fn order ->
         cond do
-          order.risk < 40 -> {:clear, order}
-          order.risk < 80 -> {:review, order}
+          order["risk"] < 40 -> {:clear, order}
+          order["risk"] < 80 -> {:review, order}
           true -> {:blocked, order}
         end
       end do
@@ -759,7 +799,7 @@ defmodule Durable.DSL.Step do
         end
       end
 
-      step :close_order, fn %{fulfil: %{shipment: shipment, loyalty: loyalty}} = order ->
+      step :close_order, fn %{"fulfil" => %{"shipment" => shipment, "loyalty" => loyalty}} = order ->
         {:ok, order}
       end
 
@@ -768,13 +808,14 @@ defmodule Durable.DSL.Step do
   blocks; a `step` written straight in the block is a lane of one step. The
   step after the block gets the data from before it, with what each lane
   produced under the block's name: the keys its steps added or changed, not
-  the data it was started with. That has been stored, so its own keys are
-  strings.
+  the data it was started with. The block's name and each lane's name are
+  string keys, like the rest of the data: `order["fulfil"]["shipment"]`.
 
   A lane that fails fails the block and stops the others. Pass
   `on_error: :collect` to run every lane and hand the next step each one as
   `{:ok, data}` or `{:error, reason}`, or `:into` to decide for yourself: the
-  function gets every lane's `{:ok, data}` or `{:error, reason}` by lane name.
+  function gets the data and every lane's `{:ok, data}` or `{:error, reason}`
+  by lane name, a string: `fn order, %{"shipment" => {:ok, shipment}} -> ... end`.
 
   ## Lane options
 
@@ -784,8 +825,8 @@ defmodule Durable.DSL.Step do
   - `:optional` - `true` for a lane the block can do without: if it fails,
     the next step gets `nil` for it and the run goes on
   - `:default` - what the next step gets for an optional lane that failed,
-    in place of `nil`. Like a lane's own data it has been stored, so a map's
-    keys are strings
+    in place of `nil`. Like a lane's own data it is handed over as stored, so
+    a map's keys are strings
   - `:timeout` - on `lane` only: how long the whole lane may take, in
     milliseconds, its retries and waits included. Past it the lane fails with
     a `"timeout"` error, like any failed lane. A step's own `:timeout` limits

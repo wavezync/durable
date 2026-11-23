@@ -47,6 +47,16 @@ functions that read (`list_executions/1` and the rest) now return
 [Upgrade Durable](guides/production.md#upgrade-durable) before you deploy: it
 has the steps and everything else that changed.
 
+### Upgrading to 2.0.1
+
+A workflow's data now has string keys in every step, at every depth. Before, a
+key a step added as an atom was read as `data.total` in later steps. Change
+`data.total` to `data["total"]` or `get(data, :total)`, match
+`%{"total" => total}` instead of `%{total: total}`, and compare a stored value
+with a string (`data["status"] == "approved"`, not `:approved`). No migration,
+and runs in flight carry on. See
+[From 2.0.0 to 2.0.1](guides/production.md#from-200-to-201).
+
 ## Quick Start
 
 ### 1. Create Migration
@@ -101,12 +111,12 @@ defmodule MyApp.OrderWorkflow do
     end
 
     step :charge_payment, [retry: [max_attempts: 3, backoff: :exponential]], fn ctx ->
-      {:ok, charge} = PaymentService.charge(ctx.order_id, ctx.total)
+      {:ok, charge} = PaymentService.charge(ctx["order_id"], ctx["total"])
       {:ok, assign(ctx, :charge_id, charge.id)}
     end
 
     step :send_confirmation, fn ctx ->
-      EmailService.send_confirmation(ctx.order_id)
+      EmailService.send_confirmation(ctx["order_id"])
       {:ok, ctx}
     end
   end
@@ -116,15 +126,17 @@ end
 {:ok, id} = Durable.start(MyApp.OrderWorkflow, %{"id" => "order_123", "items" => items})
 ```
 
-A run's data is saved as JSON after every step, and a run is loaded again
-after a wait, a retry or a move to another node. So:
+A run's data is saved as JSON after every step, and every step is handed it
+as it is stored, whether the run went straight on or was loaded again after a
+wait, a retry or a move to another node. So:
 
-- The input's keys are strings: read them as `ctx["id"]` in every step.
-- A key a step adds as an atom (`assign(ctx, :total, total)`) is an atom in
-  later steps: `ctx.total`. If the data has the same name under both shapes
-  (`:id` beside `"id"`), both are kept, each with its own value.
-- Values come back as JSON holds them: a map inside the data has string keys,
-  an atom is a string, a `DateTime` is ISO 8601 text.
+- Keys are strings, at every depth: read them as `get(ctx, :id)` or
+  `ctx["id"]`. `ctx.id` and `%{id: id} = ctx` never match.
+- A step can return a map written with atom keys, and the helpers take a key
+  as an atom or a string: `assign(ctx, :total, total)` sets `ctx["total"]`.
+- Values come back as JSON holds them: an atom is a string (`:paid` is
+  `"paid"`), a tuple is a list, a `DateTime` is ISO 8601 text, a struct is a
+  map.
 
 ## Examples
 
@@ -158,7 +170,7 @@ defmodule MyApp.ExpenseApproval do
       {:ok, assign(ctx, :decision, decision)}
     end
 
-    branch on: fn ctx -> ctx.decision end do
+    branch on: fn ctx -> ctx["decision"] end do
       "approved" ->
         step :process, fn ctx ->
           Expenses.reimburse(ctx["employee_id"], ctx["amount"])
@@ -212,7 +224,7 @@ defmodule MyApp.DashboardBuilder do
     end
 
     # What each lane produced is under the block's name, by lane
-    step :render, fn %{lookups: %{user: user, orders: orders, notifications: notifs}} = ctx ->
+    step :render, fn %{"lookups" => %{"user" => user, "orders" => orders, "notifications" => notifs}} = ctx ->
       dashboard = Dashboard.build(user["profile"], orders["recent"], notifs["unread"])
       {:ok, assign(ctx, :dashboard, dashboard)}
     end
@@ -237,7 +249,7 @@ defmodule MyApp.BulkEmailer do
 
     step :send_emails, fn ctx ->
       results =
-        ctx.recipients
+        ctx["recipients"]
         |> Task.async_stream(
           fn recipient ->
             case Mailer.send_campaign(recipient, ctx["campaign_id"]) do
@@ -282,7 +294,7 @@ defmodule MyApp.TripBooking do
     end
 
     step :charge, fn ctx ->
-      total = ctx.flight_price + ctx.hotel_price
+      total = ctx["flight_price"] + ctx["hotel_price"]
 
       case Payments.charge(ctx["card"], total) do
         {:ok, _receipt} -> {:ok, assign(ctx, :charged, true)}
@@ -292,12 +304,12 @@ defmodule MyApp.TripBooking do
     end
 
     compensate :cancel_flight, fn ctx ->
-      Flights.cancel(ctx.flight_booking)
+      Flights.cancel(ctx["flight_booking"])
       {:ok, ctx}
     end
 
     compensate :cancel_hotel, fn ctx ->
-      Hotels.cancel(ctx.hotel_booking)
+      Hotels.cancel(ctx["hotel_booking"])
       {:ok, ctx}
     end
   end
@@ -322,8 +334,8 @@ defmodule MyApp.DailyReport do
     end
 
     step :distribute, fn ctx ->
-      Mailer.send_report(ctx.report, to: "team@company.com")
-      Slack.post_summary(ctx.report, channel: "#sales")
+      Mailer.send_report(ctx["report"], to: "team@company.com")
+      Slack.post_summary(ctx["report"], channel: "#sales")
       {:ok, ctx}
     end
   end
@@ -409,7 +421,7 @@ defmodule MyApp.PaymentFlow do
       {:ok, assign(ctx, :result, event)}
     end
 
-    branch on: fn ctx -> ctx.result end do
+    branch on: fn ctx -> ctx["result"] end do
       "payment.success" ->
         step :fulfill, fn ctx ->
           Orders.fulfill(ctx["order_id"])
@@ -433,9 +445,18 @@ Durable.send_event(workflow_id, "payment.success", %{transaction_id: "txn_123"})
 
 ### Helper Functions
 
+**Best practice: read and write a workflow's data through the helpers.** They
+take a key as an atom, the way Elixir code usually names one, and use the
+string key the data is stored with. `ctx.total` and `ctx[:total]` don't read
+it; `get(ctx, :total)` does, in every step.
+
 ```elixir
 use Durable.Helpers
 
+# A key is an atom or a string; the data's own keys are strings
+get(ctx, :key)              # Read a value: ctx["key"]
+get(ctx, [:user, :email])   # Read inside it: ctx["user"]["email"]
+get(ctx, :key, default)     # With a default
 assign(ctx, :key, value)    # Set a value
 assign(ctx, %{a: 1, b: 2})  # Merge multiple values
 update(ctx, :key, default, fn old -> new end)
@@ -470,14 +491,14 @@ end
 # call_workflow also works inside parallel blocks: each lane waits for its child
 parallel :fulfil do
   step :payment, fn data ->
-    case call_workflow(MyApp.PaymentWorkflow, %{"amount" => data.total}, ref: :pay) do
+    case call_workflow(MyApp.PaymentWorkflow, %{"amount" => data["total"]}, ref: :pay) do
       {:ok, result} -> {:ok, assign(data, :payment, result)}
       {:error, reason} -> {:error, reason}
     end
   end
 
   step :shipping, fn data ->
-    case call_workflow(MyApp.ShippingWorkflow, %{"id" => data.order_id}, ref: :ship) do
+    case call_workflow(MyApp.ShippingWorkflow, %{"id" => data["order_id"]}, ref: :ship) do
       {:ok, result} -> {:ok, assign(data, :shipping, result)}
       {:error, reason} -> {:error, reason}
     end
@@ -563,9 +584,9 @@ To wait and try again without using an attempt, snooze:
 
 ```elixir
 step :export, fn ctx ->
-  if Exports.running?(ctx.account_id),
+  if Exports.running?(ctx["account_id"]),
     do: {:snooze, seconds(60), "another export is running"},
-    else: {:ok, assign(ctx, :file, Exports.run(ctx.account_id))}
+    else: {:ok, assign(ctx, :file, Exports.run(ctx["account_id"]))}
 end
 ```
 
@@ -573,7 +594,7 @@ When retrying won't help, stop now:
 
 ```elixir
 step :download, [retry: [max_attempts: 5]], fn ctx ->
-  case Downloader.fetch(ctx.url) do
+  case Downloader.fetch(ctx["url"]) do
     {:ok, file} -> {:ok, assign(ctx, :file, file)}
     {:error, :gone} -> {:fail, "the file is gone"}     # fails now, no more retries
     {:error, :deleted} -> {:cancel, "record deleted"}  # cancelled now, like Durable.cancel/2

@@ -25,7 +25,7 @@ defmodule Durable.Integration.NamedBlocksTest do
           step :a2, fn data ->
             answer = wait_for_event("go")
             Probe.note(:a2)
-            {:ok, Map.put(data, :went, answer["with"])}
+            {:ok, Map.put(data, "went", answer["with"])}
           end
 
           step :a3, fn data ->
@@ -37,13 +37,13 @@ defmodule Durable.Integration.NamedBlocksTest do
         step :b, fn data ->
           answer = wait_for_input("ok")
           Probe.note(:b)
-          {:ok, Map.put(data, :said, answer["value"])}
+          {:ok, Map.put(data, "said", answer["value"])}
         end
       end
 
-      step :after, fn %{both: %{a: a, b: b}} = data ->
+      step :after, fn %{"both" => %{"a" => a, "b" => b}} = data ->
         Probe.note(:after)
-        {:ok, Map.put(data, :joined, [a["went"], b["said"]])}
+        {:ok, Map.put(data, "joined", [a["went"], b["said"]])}
       end
     end
   end

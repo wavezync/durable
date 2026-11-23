@@ -20,7 +20,7 @@ Start a child workflow and wait for its result. The parent suspends until the ch
 ```elixir
 workflow "order_pipeline" do
   step :charge, fn data ->
-    case call_workflow(MyApp.PaymentWorkflow, %{"amount" => data.total},
+    case call_workflow(MyApp.PaymentWorkflow, %{"amount" => data["total"]},
            timeout: hours(1)) do
       {:ok, result} ->
         {:ok, assign(data, :payment_id, result["payment_id"])}
@@ -72,7 +72,7 @@ Start a child workflow without waiting. Parent continues immediately.
 workflow "onboarding" do
   step :send_emails, fn data ->
     {:ok, welcome_id} = start_workflow(MyApp.EmailWorkflow,
-      %{"to" => data.email, "template" => "welcome"},
+      %{"to" => data["email"], "template" => "welcome"},
       ref: :welcome_email
     )
     {:ok, assign(data, :welcome_workflow_id, welcome_id)}
@@ -190,7 +190,7 @@ defmodule MyApp.OrderWorkflow do
   use Durable.Helpers
 
   workflow "process_order" do
-    # The input's keys are strings, and stay strings in every step
+    # The data's keys are strings in every step
     step :validate, fn order ->
       if order["total"] > 0,
         do: {:ok, assign(order, :order_id, order["id"])},
@@ -300,7 +300,7 @@ workflow "resilient_order" do
     end
   end
 
-  branch on: fn ctx -> ctx.payment_status end do
+  branch on: fn ctx -> ctx["payment_status"] end do
     "success" ->
       step :fulfill, fn data ->
         {:ok, assign(data, :fulfilled, true)}
@@ -339,7 +339,7 @@ workflow "enrich_order" do
   end
 
   # Each lane is {:ok, what it added} or {:error, reason}
-  step :process, fn %{enrich: %{customer: customer, inventory: inventory}} = data ->
+  step :process, fn %{"enrich" => %{"customer" => customer, "inventory" => inventory}} = data ->
     {:ok, assign(data, :ready, match?({{:ok, _}, {:ok, _}}, {customer, inventory}))}
   end
 end
