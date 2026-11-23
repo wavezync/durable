@@ -551,13 +551,52 @@ defmodule Durable.Executor do
   defp reopen(changeset, config, retry_attrs, opts \\ []) do
     {:ok, result} =
       Repo.transaction(config, fn ->
+        lock_for_retry(config, changeset.data)
+
         with {:ok, retried} = ok <- cas_update(changeset, config, opts) do
+          wait_again_in_block(config, retried)
           put_back_called(config, [retried.id], retry_attrs)
           ok
         end
       end)
 
     result
+  end
+
+  # A lane's block takes its notices, and a retry of the block puts its lanes
+  # back, under the block's row. A lane retried by its own id takes that row
+  # first too (rule 2), then its own: in the other order the two retries
+  # deadlock, or the block's puts back a lane this one has a worker running.
+  defp lock_for_retry(config, run) do
+    ids = if parallel_branch?(run), do: [run.parent_workflow_id, run.id], else: [run.id]
+
+    for id <- ids,
+        do: Repo.one(config, from(w in WorkflowExecution, where: w.id == ^id, lock: "FOR UPDATE"))
+  end
+
+  # A lane retried by its own id while its block still waits is waited for
+  # again: its failure, already counted, isn't its answer. Counted, the block
+  # went on without it when the other lanes finished, and it ran on after.
+  defp wait_again_in_block(config, lane) do
+    event = "__parallel_done:#{lane.id}"
+
+    waiting =
+      parallel_branch?(lane) &&
+        Repo.one(
+          config,
+          from(e in PendingEvent,
+            join: g in WaitGroup,
+            on: g.id == e.wait_group_id,
+            where: e.workflow_id == ^lane.parent_workflow_id and e.event_name == ^event,
+            where: g.status == :pending,
+            select: g.id,
+            limit: 1
+          )
+        )
+
+    if waiting,
+      do:
+        reopen_group(config, waiting, %{stopped: [event], finished: [], now: DateTime.utc_now()})
   end
 
   # Reopens a run that holds its key, only if it still does: a start may be
@@ -651,8 +690,9 @@ defmodule Durable.Executor do
   defp reopen_parallel_block(config, parent, retry_attrs) do
     # The run's row first (rule 2): a lane's notice takes it before it touches
     # the group, and the two would deadlock, or the notice would read a lane
-    # this is putting back as still failed.
-    Repo.one(config, from(w in WorkflowExecution, where: w.id == ^parent.id, lock: "FOR UPDATE"))
+    # this is putting back as still failed. If the run is a lane, its block's
+    # row before that.
+    lock_for_retry(config, parent)
 
     key_attrs =
       case Keys.retake(config, parent, definition_or_nil(parent)) do
