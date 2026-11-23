@@ -4168,6 +4168,7 @@ defmodule Durable.Executor do
         })
       end
 
+      keep_what_it_got(config, execution, event_names)
       wait_group
     end
 
@@ -4176,6 +4177,46 @@ defmodule Durable.Executor do
     DurablePubSub.broadcast_workflow(config, :workflow_waiting, workflow_event(execution))
 
     {:waiting, execution}
+  end
+
+  # A retried run waits again on a wait_for_all that hadn't got all its events,
+  # but the events it did get were taken: their senders were told so, and
+  # won't send them again. They are kept for the new wait, as of when that one
+  # began, so an event kept since is newer and wins. The wait that wasn't
+  # finished is the newest of the step's from before the retry.
+  # ponytail: a step that waits on the same names twice gets them back in its
+  # first wait only.
+  defp keep_what_it_got(_config, %{retried_at: nil}, _event_names), do: :ok
+
+  defp keep_what_it_got(config, execution, event_names) do
+    unfinished =
+      from(g in WaitGroup,
+        where: g.workflow_id == ^execution.id and g.step_name == ^execution.current_step,
+        where: g.event_names == ^event_names and g.status in [:timeout, :cancelled],
+        where: g.inserted_at < ^execution.retried_at,
+        order_by: [desc: g.inserted_at],
+        limit: 1
+      )
+
+    with %WaitGroup{received_events: received, inserted_at: began} <- Repo.one(config, unfinished) do
+      for {event_name, payload} <- received || %{} do
+        {:ok, _kept} =
+          Repo.insert(
+            %PendingEvent{
+              workflow_id: execution.id,
+              event_name: event_name,
+              step_name: "__buffered",
+              status: :buffered,
+              payload: %{"__payload__" => payload},
+              wait_type: :single,
+              inserted_at: began
+            },
+            config
+          )
+      end
+    end
+
+    :ok
   end
 
   # The column holds UTC at microsecond precision, and takes nothing else.

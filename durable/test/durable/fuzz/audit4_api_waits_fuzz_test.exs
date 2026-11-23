@@ -170,8 +170,7 @@ defmodule Durable.Fuzz.Audit4ApiWaitsTest do
   # kept for a later wait if nothing does.
   defp expect(model, {:kept_event, name}, n) do
     case expect(model, {:event, name}, n) do
-      {:ok, %{any: :done} = same} when same == model -> {:ok, keep(model, name, n)}
-      {:ok, %{all: :done} = same} when same == model -> {:ok, keep(model, name, n)}
+      {:ok, %{any: {:done, _name}} = same} when same == model -> {:ok, keep(model, name, n)}
       {:ok, delivered} -> {:ok, delivered}
       {{:error, :not_found}, model} -> {:ok, keep(model, name, n)}
     end
@@ -181,11 +180,13 @@ defmodule Durable.Fuzz.Audit4ApiWaitsTest do
     do: {:ok, answered(model, %{"n" => n})}
 
   defp expect(%{any: :open} = model, {:event, name}, n) when name in ["g_a", "g_b"],
-    do: {:ok, answered(%{model | any: :done}, {name, %{"n" => n}})}
+    do: {:ok, answered(%{model | any: {:done, name}}, {name, %{"n" => n}})}
 
-  # The sender can't know which event got there first.
-  defp expect(%{any: :done} = model, {:event, name}, _n) when name in ["g_a", "g_b"],
-    do: {:ok, model}
+  # The sender can't know which event got there first. A second event under
+  # the name that answered is one too many, as for any wait.
+  defp expect(%{any: {:done, answered}} = model, {:event, name}, _n)
+       when name in ["g_a", "g_b"] and name != answered,
+       do: {:ok, model}
 
   defp expect(%{all: {:open, got}} = model, {:event, name}, n) when name in ["g_c", "g_d"] do
     got = Map.put_new(got, name, %{"n" => n})
@@ -196,9 +197,6 @@ defmodule Durable.Fuzz.Audit4ApiWaitsTest do
       true -> {:ok, %{model | all: {:open, got}}}
     end
   end
-
-  defp expect(%{all: :done} = model, {:event, name}, _n) when name in ["g_c", "g_d"],
-    do: {:ok, model}
 
   defp expect(model, {:event, _name}, _n), do: {{:error, :not_found}, model}
 
@@ -280,7 +278,12 @@ defmodule Durable.Fuzz.Audit4ApiWaitsTest do
         %{model | status: :waiting, any: :open}
 
       name ->
-        step(answered(%{model | any: :done, kept: Map.delete(kept, name)}, {name, kept[name]}))
+        step(
+          answered(
+            %{model | any: {:done, name}, kept: Map.delete(kept, name)},
+            {name, kept[name]}
+          )
+        )
     end
   end
 
