@@ -332,24 +332,22 @@ defmodule Durable.Integration.Issue48Test do
       let_go(lock)
       await_status(holder, :completed)
 
-      # The key has moved on meanwhile: a new holder runs, and a newer edit
-      # waits behind it.
-      newer_holder = sync(3, hold: true)
-      assert_eventually(fn -> Probe.hits({:synced, 3}) == 1 end)
-      newer_waiter = sync(4)
-      assert %{status: :pending, runs_after_id: ^newer_holder} = get(newer_waiter)
+      # A newer edit waits behind the lost waiter, which was claimed first.
+      newer_waiter = sync(3)
+      assert %{status: :pending, runs_after_id: ^waiter} = get(newer_waiter)
 
       age_locks!([waiter, report])
       assert {:ok, _} = StaleJobRecovery.recover_now(Durable)
 
+      # Put back, the lost waiter would be a second run waiting for the key:
+      # the newer one has the newer input.
       assert %{status: :cancelled} = get(waiter)
       :ok = Probe.set(:report_data_ready)
       await_status(report, :completed)
 
-      :ok = Probe.set({:release, 3})
       await_status(newer_waiter, :completed)
       assert Probe.hits({:synced, 2}) == 0
-      assert Probe.hits({:synced, 4}) == 1
+      assert Probe.hits({:synced, 3}) == 1
     end
   end
 

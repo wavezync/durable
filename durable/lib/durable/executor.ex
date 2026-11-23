@@ -4103,6 +4103,7 @@ defmodule Durable.Executor do
         lock_token: nil
       ] ++ changes
     )
+    |> Ecto.Changeset.unique_constraint(:key, name: :workflow_executions_runs_after_index)
     |> cas_update(config)
     |> case do
       {:ok, requeued} ->
@@ -4110,7 +4111,14 @@ defmodule Durable.Executor do
         DurablePubSub.wake(config, requeued)
         :waiting
 
-      _superseded ->
+      # A run that waited for its key and was lost before it took it, with a
+      # newer start now waiting for the key (`Keys.join_waiter/4`): that one
+      # has the newer input, so this one stops, as in `wait_behind/3`.
+      {:error, %Ecto.Changeset{}} ->
+        _ = stop_waiting(config, run, "a newer start is waiting for the key")
+        :fenced
+
+      {:error, :superseded} ->
         :fenced
     end
   end

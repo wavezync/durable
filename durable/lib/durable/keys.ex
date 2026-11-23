@@ -164,20 +164,69 @@ defmodule Durable.Keys do
       reuse: reuse(workflow_def),
       mode: mode,
       debounce: debounce(workflow_def),
-      workflow_def: workflow_def
+      workflow_def: workflow_def,
+      retried: false,
+      key_lock: Keyword.get(opts, :key_lock, :wait)
     }
 
-    # One transaction so a release (or a replaced holder's cancel) and the
-    # insert that follows land together. Nothing in here raises on a taken
-    # key, and nothing rolls back, so a caller's own transaction stays usable.
+    attempt(ctx)
+  end
+
+  # One transaction so a release (or a replaced holder's cancel) and the
+  # insert that follows land together. Nothing in here raises on a taken
+  # key, and nothing rolls back, so a caller's own transaction stays usable.
+  defp attempt(ctx) do
     result =
-      Repo.transaction(config, fn ->
-        lock_key(config, ctx.entry, Keyword.get(opts, :key_lock, :wait))
-        unheld_waiting(ctx) || claim(ctx, @rounds, nil)
+      Repo.transaction(ctx.config, fn ->
+        lock_key(ctx.config, ctx.entry, ctx.key_lock)
+        ctx = after_undo_settled(ctx)
+        claimed = unheld_waiting(ctx) || claim(ctx, @rounds, nil)
+        {claimed, replace_waiting(ctx, claimed)}
       end)
 
-    with {:ok, claimed} <- result, do: finish(ctx, claimed)
+    with {:ok, {claimed, replaced}} <- result do
+      Enum.each(replaced, &Executor.after_cancel(ctx.config, &1))
+      finish(ctx, claimed)
+    end
   end
+
+  # `on_duplicate: :cancel_existing` starts over with the newest input. A run
+  # waiting for the key (run_again, not yet holding it) has an older one, and
+  # would run after the new run: it's replaced too. One a worker has claimed
+  # is fenced, as a cancel fences it.
+  defp replace_waiting(%{mode: :cancel_existing} = ctx, {:inserted, run, _moved}) do
+    now = DateTime.utc_now()
+
+    {_, replaced} =
+      Repo.update_all(
+        ctx.config,
+        from(w in WorkflowExecution,
+          where:
+            w.workflow_module == ^run.workflow_module and w.workflow_name == ^run.workflow_name and
+              w.key == ^run.key and not is_nil(w.runs_after_id) and not w.holds_key and
+              w.status in [:pending, :running],
+          select: w
+        ),
+        set: [
+          status: :cancelled,
+          error: %{
+            type: "cancelled",
+            message:
+              "Replaced by run #{String.slice(run.id, 0, 8)} (on_duplicate: :cancel_existing)",
+            replaced_by: run.id
+          },
+          completed_at: now,
+          updated_at: now,
+          locked_by: nil,
+          locked_at: nil,
+          lock_token: nil
+        ]
+      )
+
+    replaced
+  end
+
+  defp replace_waiting(_ctx, _claimed), do: []
 
   @doc false
   # What a key's advisory lock is named. Module as a string or an atom.
@@ -281,12 +330,11 @@ defmodule Durable.Keys do
   end
 
   # Under run_again a run may already be waiting behind this holder, about to
-  # be claimed. It takes the newer input: a new holder beside it would run
-  # first, and leave the older input to run last.
+  # take the key: it goes first (`join_waiter/4`).
   defp take_from_closed(ctx, holder, rounds, moved) do
-    case ctx.mode == :run_again && refresh_waiting(ctx) do
-      id when is_binary(id) ->
-        {:waiting_refreshed, id, holder}
+    case ctx.mode == :run_again && join_waiter(ctx, holder, rounds, moved) do
+      joined when is_tuple(joined) or joined == :contended ->
+        joined
 
       _no_waiter ->
         if release_closed(ctx.config, holder, ctx.reuse),
@@ -297,16 +345,39 @@ defmodule Durable.Keys do
 
   # The run that takes the key from a holder cancelled mid-step is due once
   # that step has stopped (`settles_at/2`).
-  defp after_settled(ctx, holder) do
-    case settles_at(ctx.config, holder) do
+  defp after_settled(ctx, holder), do: due_after(ctx, settles_at(ctx.config, holder))
+
+  # A run of the key cancelled with `rollback: true` let the key go at once,
+  # though its worker may still be running a step: the run keeps that
+  # worker's lock until it has stopped, and its undo is due a heartbeat after
+  # the cancel (`Executor.cancel_run/3`). A run that takes the key now is due
+  # no sooner than that undo.
+  defp after_undo_settled(%{entry: entry} = ctx) do
+    undo =
+      from(w in WorkflowExecution,
+        where:
+          w.workflow_module == ^entry.workflow_module and
+            w.workflow_name == ^entry.workflow_name and w.key == ^entry.key,
+        where: w.status == :pending and not is_nil(w.locked_by) and is_nil(w.lock_token),
+        where: EngineState.marked?(w, ^"__rollback__"),
+        select: max(w.scheduled_at)
+      )
+
+    case Repo.one(ctx.config, undo) do
+      %DateTime{} = at ->
+        if DateTime.after?(at, DateTime.utc_now()), do: due_after(ctx, at), else: ctx
+
       nil ->
         ctx
-
-      at ->
-        at = latest(ctx.entry[:scheduled_at], at)
-        deadline = Executor.deadline(ctx.workflow_def, at)
-        %{ctx | entry: %{ctx.entry | scheduled_at: at, deadline_at: deadline}}
     end
+  end
+
+  defp due_after(ctx, nil), do: ctx
+
+  defp due_after(ctx, at) do
+    at = latest(ctx.entry[:scheduled_at], at)
+    deadline = Executor.deadline(ctx.workflow_def, at)
+    %{ctx | entry: %{ctx.entry | scheduled_at: at, deadline_at: deadline}}
   end
 
   @doc false
@@ -336,6 +407,26 @@ defmodule Durable.Keys do
         limit: 1
       )
     ) == true
+  end
+
+  # run_again with a run waiting for the key: a new holder beside it would run
+  # first, and leave the older input to run last. One no worker has yet takes
+  # the newer input. One a worker has claimed has read its input, and is about
+  # to take the key: the newer input waits behind it. `about` is the run the
+  # activity is recorded on. nil when there's no such run.
+  defp join_waiter(ctx, about, rounds, moved) do
+    refreshed = about && refresh_waiting(ctx)
+
+    cond do
+      is_binary(refreshed) ->
+        {:waiting_refreshed, refreshed, about}
+
+      claimed = Repo.one(ctx.config, claimed_waiter(ctx.entry)) ->
+        run_after(ctx, claimed, rounds, moved)
+
+      true ->
+        nil
+    end
   end
 
   # run_again: a holder that hasn't started takes the newer input; one that's
@@ -438,6 +529,19 @@ defmodule Durable.Keys do
     )
   end
 
+  # A run that waited for the key (run_again), claimed by a worker that hasn't
+  # taken the key for it yet (`take_waiting/3`).
+  defp claimed_waiter(entry) do
+    from(w in WorkflowExecution,
+      where:
+        w.workflow_module == ^entry.workflow_module and
+          w.workflow_name == ^entry.workflow_name and w.key == ^entry.key and
+          not is_nil(w.runs_after_id) and w.status == :running,
+      order_by: [desc: w.inserted_at],
+      limit: 1
+    )
+  end
+
   defp refresh_waiting(%{config: config, entry: entry}) do
     {_, ids} =
       Repo.update_all(config, from(w in waiting(entry), select: w.id),
@@ -452,13 +556,8 @@ defmodule Durable.Keys do
   # the newer input, as it would behind a holder: a new holder would run
   # first, and leave the older input to run last.
   defp unheld_waiting(%{mode: :run_again} = ctx) do
-    with nil <- holder(ctx.config, ctx.entry),
-         %WorkflowExecution{} = waiter <- Repo.one(ctx.config, waiting(ctx.entry)),
-         id when is_binary(id) <- refresh_waiting(ctx) do
-      {:waiting_refreshed, id, waiter}
-    else
-      _ -> nil
-    end
+    if is_nil(holder(ctx.config, ctx.entry)),
+      do: join_waiter(ctx, Repo.one(ctx.config, waiting(ctx.entry)), @rounds, nil)
   end
 
   defp unheld_waiting(_ctx), do: nil
@@ -578,16 +677,26 @@ defmodule Durable.Keys do
   end
 
   defp answer(%{mode: {:send_event, name}} = ctx, holder) do
-    if holder.status in WorkflowExecution.open_statuses() and
-         Durable.Wait.send_event(holder.id, name, ctx.entry.input,
-           buffer: true,
-           durable: ctx.config.name
-         ) == :ok do
-      record_duplicate(ctx, holder, :send_event, %{event: name})
-      {:duplicate, holder.id, :use_existing}
-    else
-      record_duplicate(ctx, holder, :error)
-      {:duplicate, holder.id, :error}
+    sent =
+      holder.status in WorkflowExecution.open_statuses() and
+        Durable.Wait.send_event(holder.id, name, ctx.entry.input,
+          buffer: true,
+          durable: ctx.config.name
+        )
+
+    cond do
+      sent == :ok ->
+        record_duplicate(ctx, holder, :send_event, %{event: name})
+        {:duplicate, holder.id, :use_existing}
+
+      # It ended after it was read, outside the key's lock: the key may be
+      # free now, and then the start takes it. Asked once more.
+      sent == {:error, :finished} and not ctx.retried ->
+        attempt(%{ctx | retried: true})
+
+      true ->
+        record_duplicate(ctx, holder, :error)
+        {:duplicate, holder.id, :error}
     end
   end
 
