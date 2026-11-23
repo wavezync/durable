@@ -566,7 +566,8 @@ One run, one page — header, banner, facts, then a view switch.
   the run has a key, and the actions that fit the run's state: Cancel (live
   runs), Retry from step (failed), Roll back (a failed run with something to
   undo), Rerun and Rerun with edited input
-  (finished), Release key (a closed run that holds its key, when the
+  (finished, and not a lane: a lane runs as part of its block, so its page
+  says "A lane reruns with its block" and links the block's run), Release key (a closed run that holds its key, when the
   workflow's `reuse:` would otherwise keep it — releasing a key `reuse:`
   already lets go would change nothing, so the button isn't offered). Actions need
   operator access; errors render inline under the buttons (`role="alert"`).
