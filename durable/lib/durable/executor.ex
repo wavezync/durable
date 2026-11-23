@@ -426,9 +426,11 @@ defmodule Durable.Executor do
   def rollback_workflow(workflow_id, opts \\ []) do
     config = Config.get(Keyword.get(opts, :durable, Durable))
 
+    # Not before a run stopped under it can no longer finish a step (rule 15):
+    # asked for as a block fails, its other lanes' steps may still be landing.
     with {:ok, execution} <- load_execution(config, workflow_id),
          :ok <- ensure_retryable(execution.status),
-         {:ok, queued} <- queue_rollback(config, execution) do
+         {:ok, queued} <- queue_rollback(config, execution, settles_at(config, execution)) do
       DurablePubSub.wake(config, queued)
       {:ok, workflow_id}
     end
@@ -461,7 +463,7 @@ defmodule Durable.Executor do
     end
   end
 
-  defp queue_rollback(config, execution, at \\ nil) do
+  defp queue_rollback(config, execution, at) do
     execution
     |> Ecto.Changeset.change(
       status: :pending,
