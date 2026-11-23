@@ -153,17 +153,23 @@ defmodule Durable.Queue.Poller do
   def handle_call({:drain, timeout}, from, state) do
     state = %{state | paused: true}
 
-    if state.workers == %{} do
-      {:reply, :ok, state}
-    else
-      # Wait for jobs to complete
-      Process.send_after(
-        self(),
-        {:drain_check, from, timeout, System.monotonic_time(:millisecond)},
-        100
-      )
+    cond do
+      state.workers == %{} ->
+        {:reply, :ok, state}
 
-      {:noreply, state}
+      # No time to wait: a node with `shutdown_grace_period: 0` hands its runs
+      # back at once.
+      timeout <= 0 ->
+        {:reply, {:error, :timeout}, state}
+
+      true ->
+        Process.send_after(
+          self(),
+          {:drain_check, from, timeout, System.monotonic_time(:millisecond)},
+          100
+        )
+
+        {:noreply, state}
     end
   end
 
@@ -355,8 +361,15 @@ defmodule Durable.Queue.Poller do
   end
 
   defp schedule_poll(state, delay) do
-    if state.timer_ref do
-      Process.cancel_timer(state.timer_ref)
+    # A timer that has fired can't be cancelled: its :poll is in the mailbox
+    # already. Left there, it would start a second chain of polls beside the
+    # one scheduled here, and the queue would poll twice as often from then on.
+    if state.timer_ref && Process.cancel_timer(state.timer_ref) == false do
+      receive do
+        :poll -> :ok
+      after
+        0 -> :ok
+      end
     end
 
     timer_ref = Process.send_after(self(), :poll, delay)

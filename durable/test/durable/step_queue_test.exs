@@ -275,8 +275,8 @@ defmodule Durable.StepQueueTest do
 
   # One claim on `queue`, and whatever that claim runs. Returns the reloaded run.
   defp advance(id, queue) do
-    assert [%{id: ^id}] = claim(queue)
-    Executor.execute_workflow(id, Config.get(Durable))
+    assert [%{id: ^id, lock_token: token}] = claim(queue)
+    Executor.execute_workflow(id, Config.get(Durable), token)
     get(id)
   end
 
@@ -384,8 +384,8 @@ defmodule Durable.StepQueueTest do
     # step before the block ran on. Its own step's queue comes after.
     assert queues == ["default", "default"]
 
-    for %{id: lane} <- claim("default"),
-        do: Executor.execute_workflow(lane, Config.get(Durable))
+    for %{id: lane, lock_token: token} <- claim("default"),
+        do: Executor.execute_workflow(lane, Config.get(Durable), token)
 
     moved =
       TestRepo.all(

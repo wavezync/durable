@@ -8,6 +8,25 @@ defmodule Audit5QueueRestock do
   end
 end
 
+defmodule Audit5QueueLabel do
+  @moduledoc false
+  use Durable
+
+  alias Durable.Storage.Schemas.WorkflowExecution
+
+  # Keeps the row as the step saw it, for the test that runs it inline.
+  workflow "audit5_queue_label" do
+    step :print_label, fn parcel ->
+      Process.put(
+        :row_in_step,
+        Durable.TestRepo.get!(WorkflowExecution, Durable.Context.workflow_id())
+      )
+
+      {:ok, parcel}
+    end
+  end
+end
+
 defmodule Durable.Audit5QueueTest do
   @moduledoc "Audit 5: what a worker's heartbeat makes of a claim it no longer has."
   use Durable.DataCase, async: false
@@ -45,6 +64,35 @@ defmodule Durable.Audit5QueueTest do
 
       assert {:waiting, %{status: :pending}} = Executor.execute_workflow(id, config, token)
       assert Postgres.heartbeat(config, id, token) == {:error, :not_found}
+    end
+  end
+
+  describe "a caller that runs a run itself" do
+    # It ran with no lock: a poller could claim the run beside it, and the
+    # stale sweep never found it if the caller died.
+    test "claims it as a poller would, and lets go when the run ends" do
+      config = Config.get(Durable)
+      {:ok, id} = Durable.start(Audit5QueueLabel, %{"parcel" => 31}, inline: true)
+
+      in_step = Process.get(:row_in_step)
+      assert in_step.status == :running
+      assert in_step.locked_by == config.node_id
+      assert %DateTime{} = in_step.locked_at
+      assert is_binary(in_step.lock_token)
+
+      assert %{status: :completed, locked_by: nil, locked_at: nil} =
+               Durable.TestRepo.get!(WorkflowExecution, id)
+    end
+
+    test "doesn't run a run a worker has claimed" do
+      {config, id, token} = claim!(%{"order" => 9})
+
+      assert Executor.execute_workflow(id, config) == {:error, :superseded}
+
+      assert %{status: :running, locked_by: "node-a", lock_token: ^token} =
+               Durable.TestRepo.get!(WorkflowExecution, id)
+
+      assert Durable.TestRepo.aggregate(Durable.Storage.Schemas.StepExecution, :count) == 0
     end
   end
 

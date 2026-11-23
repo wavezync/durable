@@ -28,10 +28,11 @@ defmodule Durable.Config do
   * `:stale_lock_timeout` - Seconds before a lock is considered stale (default: `300`)
   * `:heartbeat_interval` - Milliseconds between worker heartbeats (default: `30_000`)
   * `:shutdown_grace_period` - Milliseconds a stopping node waits for its running
-    steps, with no new claims (default: `15_000`, `0` to not wait). Each run
-    finishes its current step, then goes back on its queue for another node.
-    Keep your platform's shutdown limit longer than this. A step still running
-    then is killed, and its run goes back on its queue
+    steps, with no new claims (default: `15_000`). Each run finishes its
+    current step, then goes back on its queue for another node. Keep your
+    platform's shutdown limit longer than this. A step still running then is
+    killed, and its run goes back on its queue. At `0` the node doesn't wait:
+    every run it has goes back on its queue at once
   * `:log_level` - Log level for Ecto queries, or `false` to disable (default: `false`)
 
   ## Examples
@@ -128,7 +129,9 @@ defmodule Durable.Config do
     shutdown_grace_period: [
       type: :non_neg_integer,
       default: 15_000,
-      doc: "Milliseconds a stopping node waits for its running steps"
+      doc:
+        "Milliseconds a stopping node waits for its running steps before it hands " <>
+          "their runs back; 0 hands them back at once"
     ],
     scheduled_modules: [
       type: {:list, :atom},

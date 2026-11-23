@@ -81,8 +81,8 @@ defmodule Durable.RunAgainTest do
     assert finish(holder).status == :completed
 
     # ...and claims it once the holder has ended. It takes the key.
-    assert [%{id: ^waiting}] = claim()
-    Executor.execute_workflow(waiting, Config.get(Durable))
+    assert [%{id: ^waiting, lock_token: token}] = claim()
+    Executor.execute_workflow(waiting, Config.get(Durable), token)
 
     run = get(waiting)
     assert {run.status, run.holds_key, run.runs_after_id} == {:waiting, true, nil}
