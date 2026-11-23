@@ -3920,7 +3920,17 @@ defmodule Durable.Executor do
         )
       end
 
-    [with_runs_under | with_waits]
+    # An attempt its worker began as the run was cancelled is written after
+    # the cancel closed what the run had open. Its worker closes it as it
+    # stops; lost with its node, nobody else would.
+    with_attempt =
+      from(w in cancelled,
+        join: s in StepExecution,
+        on: s.workflow_id == w.id,
+        where: s.status == :running
+      )
+
+    [with_runs_under, with_attempt | with_waits]
     |> Enum.flat_map(&Repo.all(config, &1))
     |> Enum.uniq_by(& &1.id)
     |> Enum.each(&close_out_cancelled(config, &1))

@@ -207,6 +207,23 @@ defmodule Audit6BlocksPickup do
   end
 end
 
+defmodule Audit6BlocksLabel do
+  @moduledoc false
+  use Durable
+  alias Durable.IntegrationProbe, as: Probe
+
+  # A label is printed, then the parcel weighed.
+  workflow "audit6_label" do
+    step :print, fn parcel -> {:ok, parcel} end
+
+    step :weigh, fn parcel ->
+      Probe.set(:weighing)
+      Probe.wait_for(:never)
+      {:ok, parcel}
+    end
+  end
+end
+
 defmodule Durable.Integration.Audit6BlocksTest do
   @moduledoc """
   Audit 6: parallel blocks, children and rollbacks with live pollers, raced
@@ -409,6 +426,46 @@ defmodule Durable.Integration.Audit6BlocksTest do
 
       assert Probe.fetch_or(unquote(undo), nil) == unquote(Macro.escape(wanted))
     end
+  end
+
+  # Holds a step's task as it counts the step's attempts: after the run moved
+  # to the step, before the attempt's row is written.
+  def hold_before_attempt(_event, _measurements, %{query: query, params: params}, _config) do
+    if query =~ "FILTER" and "weigh" in params and not Probe.set?(:held) do
+      Probe.set(:held)
+      Probe.wait_for(:cancelled)
+    end
+  end
+
+  # Cancelled as its worker began a step, the run's next attempt was written
+  # running after the cancel had closed what the run had open. The node then
+  # died in the step: nobody closed the row, and no sweep looks at a cancelled
+  # run's attempts. It stayed running for good.
+  test "an attempt begun as its run was cancelled, on a node that then died, is closed" do
+    handler = "audit6-hold-#{System.unique_integer([:positive])}"
+    event = [:durable, :integration_repo, :query]
+    :telemetry.attach(handler, event, &__MODULE__.hold_before_attempt/4, nil)
+    on_exit(fn -> :telemetry.detach(handler) end)
+    start_durable!(%{default: 2}, heartbeat_interval: 5_000)
+
+    {:ok, id} = Durable.start(Audit6BlocksLabel, %{})
+    assert_eventually(fn -> Probe.set?(:held) and get(id).current_step == "weigh" end)
+
+    :ok = Durable.cancel(id, "the order was withdrawn")
+    Probe.set(:cancelled)
+    assert_eventually(fn -> Probe.set?(:weighing) end)
+
+    [{_, worker, _, _}] = DynamicSupervisor.which_children(Durable.Queue.WorkerSupervisor.Default)
+    Process.exit(worker, :kill)
+
+    running = from(s in StepExecution, where: s.workflow_id == ^id and s.status == :running)
+    assert [%{step_name: "weigh"}] = IntegrationRepo.all(running)
+
+    Process.sleep(1_100)
+    Durable.Executor.close_out_lost(Durable.Config.get(Durable), 1)
+
+    assert IntegrationRepo.all(running) == []
+    assert get(id).status == :cancelled
   end
 
   # Kills the failing lane's process as it commits the stop of its block:
