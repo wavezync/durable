@@ -434,8 +434,12 @@ defmodule Durable.Fuzz.Audit4ApiWaitsTest do
     tree(json_leaf(), fn child ->
       one_of([
         list_of(child, max_length: 3),
-        # No name twice in one map, once as an atom and once as a string.
-        map_of(one_of([member_of(@names), member_of([:nested, :deeper])]), child, max_length: 3),
+        # No name twice in one map, once as an atom and once as a string. Two
+        # of the names are drawn often, so a map takes more tries to fill.
+        map_of(one_of([member_of(@names), member_of([:nested, :deeper])]), child,
+          max_length: 3,
+          max_tries: 100
+        ),
         tuple({child, child})
       ])
     end)

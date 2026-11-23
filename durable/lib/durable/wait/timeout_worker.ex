@@ -136,7 +136,9 @@ defmodule Durable.Wait.TimeoutWorker do
   # A waiting run past its deadline is resumed; the executor sees the deadline
   # before the step re-runs and fails the run (running its compensations).
   # Resume first, so an input answered at the same moment isn't marked timed
-  # out; only then close the waits it no longer needs.
+  # out; only then close the waits it no longer needs. In one transaction: a
+  # sweep lost in between left a wait open on a failed run, and its retry
+  # couldn't wait under that name again.
   defp process_expired_runs(config, now) do
     ids =
       Repo.all(
@@ -148,10 +150,12 @@ defmodule Durable.Wait.TimeoutWorker do
         )
       )
 
-    for id <- ids,
-        {:ok, _} <- [Executor.resume_workflow(id, %{}, durable: config.name)] do
-      close_waits(config, id, now)
-    end
+    for id <- ids, do: Repo.transaction(config, fn -> expire(config, id, now) end)
+  end
+
+  defp expire(config, id, now) do
+    with {:ok, _} <- Executor.resume_workflow(id, %{}, durable: config.name),
+         do: close_waits(config, id, now)
   end
 
   # A run past its deadline on a queue a live node polls is failed by the claim
@@ -419,10 +423,9 @@ defmodule Durable.Wait.TimeoutWorker do
     end)
   end
 
+  # The wait reads what it got, and that it timed out, from its own group.
   defp handle_wait_group_timeout(config, wait_group) do
-    resume_data = build_wait_group_resume_data(wait_group)
-
-    case atomic_resume_after_timeout(config, wait_group, resume_data) do
+    case atomic_resume_after_timeout(config, wait_group, {%{}, %{"__timeout__" => true}}) do
       {:ok, %{pending: {0, _}}} ->
         :ok
 
@@ -435,35 +438,6 @@ defmodule Durable.Wait.TimeoutWorker do
             "#{stage} → #{inspect(reason)}"
         )
     end
-  end
-
-  # Builds the resume context for a timed-out wait group.
-  #
-  # Bug M-4: include per-event status in the resume payload so user code
-  # can distinguish events that were :received from events that :timed_out.
-  defp build_wait_group_resume_data(wait_group) do
-    received = wait_group.received_events || %{}
-
-    per_event_status =
-      Map.new(wait_group.event_names || [], fn name ->
-        case Map.get(received, name) do
-          nil -> {name, %{"status" => "timeout", "value" => nil}}
-          payload -> {name, %{"status" => "received", "value" => payload}}
-        end
-      end)
-
-    fallback_result =
-      case wait_group.wait_type do
-        :any -> {:timeout, nil}
-        :all -> {:timeout, received}
-      end
-
-    {%{},
-     %{
-       "__wait_group_result__" => fallback_result,
-       "__wait_group_status__" => per_event_status,
-       "__timeout__" => true
-     }}
   end
 
   defp log_wait_group_timeout_success(wait_group) do

@@ -216,10 +216,7 @@ defmodule Durable.Scheduler do
   end
 
   defp execute_schedule(schedule, config) do
-    # Parse the module from the stored string
-    module = API.parse_module(schedule.workflow_module)
-
-    case module do
+    case workflow_code(schedule) do
       {:ok, mod} ->
         start_workflow(schedule, mod, config)
 
@@ -228,22 +225,28 @@ defmodule Durable.Scheduler do
     end
   end
 
+  # The schedule's module, if this node has it and the workflow in it: a
+  # deploy can add a workflow to a module the old nodes already have.
+  defp workflow_code(schedule) do
+    with {:ok, module} <- API.parse_module(schedule.workflow_module),
+         {:ok, _workflow} <- module.__workflow_definition__(schedule.workflow_name),
+         do: {:ok, module}
+  end
+
   # In a rolling deploy this node may just not have the code yet, so the fire
   # stays due for one that does. Once it's overdue by the grace period the code
   # isn't coming: record the failure, which moves the fire on and in time
-  # disables a schedule whose module is gone.
+  # disables a schedule whose workflow is gone.
   defp handle_missing_module(schedule, config, reason) do
+    code = "#{schedule.workflow_module} (#{schedule.workflow_name})"
+
     if DateTime.diff(DateTime.utc_now(), schedule.next_run_at) < @code_grace_seconds do
       Logger.warning(
-        "[Durable.Scheduler] #{schedule.name}: #{schedule.workflow_module} isn't on this node, " <>
+        "[Durable.Scheduler] #{schedule.name}: #{code} isn't on this node, " <>
           "leaving it for one that has it"
       )
     else
-      record_failure(
-        schedule,
-        config,
-        "Failed to load module #{schedule.workflow_module}: #{inspect(reason)}"
-      )
+      record_failure(schedule, config, "Failed to load #{code}: #{inspect(reason)}")
     end
   end
 

@@ -373,6 +373,8 @@ defmodule Durable.Executor.StepRunner do
     # the failed attempt's put_context/2 writes.
     Process.put(:durable_context, data)
     Process.put(:durable_context_before, data)
+    # Each wait counts its calls from the top of the body (`Durable.Wait`).
+    Process.delete(:durable_wait_calls)
 
     # The attempt's row, written once the span has begun. Its id names the span.
     step_exec = %StepExecution{
