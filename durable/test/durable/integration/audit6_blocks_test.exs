@@ -96,6 +96,37 @@ defmodule Audit6BlocksTrip do
   end
 end
 
+defmodule Audit6BlocksCarriers do
+  @moduledoc false
+  use Durable
+  use Durable.Helpers
+  alias Durable.IntegrationProbe, as: Probe
+
+  # Two carriers quote at once. Both are down until someone says they're back.
+  workflow "audit6_carriers" do
+    parallel :rates do
+      step :dhl, fn order ->
+        if Probe.set?(:carriers_up) do
+          Probe.inside([:dhl_quoting], fn -> Process.sleep(1_000) end)
+          {:ok, assign(order, :price, 12)}
+        else
+          {:fail, "DHL is down"}
+        end
+      end
+
+      # UPS takes longer to say it's down: DHL's failure stops it.
+      step :ups, fn order ->
+        if Probe.set?(:carriers_up) do
+          {:ok, assign(order, :price, 14)}
+        else
+          Process.sleep(300)
+          {:fail, "UPS is down"}
+        end
+      end
+    end
+  end
+end
+
 defmodule Durable.Integration.Audit6BlocksTest do
   @moduledoc """
   Audit 6: parallel blocks, children and rollbacks with live pollers, raced
@@ -157,6 +188,54 @@ defmodule Durable.Integration.Audit6BlocksTest do
     Probe.set(:dhl_go)
     await_status(id, :completed)
     assert Probe.fetch(:handed) == %{"dhl" => :ok, "ups" => :ok}
+  end
+
+  # Holds the block's retry, in its own process, as it reads which lanes to
+  # put back: the lane's retry lands in that window.
+  def pause_reading_lanes(_event, _measurements, %{query: query}, _config) do
+    if Process.get(:audit6_pause) && query =~ "!= 'completed'" && not (query =~ "count(") do
+      Process.delete(:audit6_pause)
+      Process.sleep(800)
+    end
+  end
+
+  # The block's retry read a lane as failed and then put it back, whatever it
+  # was by then. A retry of that lane by its own id in between had it claimed
+  # and running: put back with its claim cleared, it was claimed a second time
+  # and its step ran twice at once.
+  test "a lane retried by its own id while its block is retried runs once" do
+    start_durable!(%{default: 4}, heartbeat_interval: 2_000)
+
+    {:ok, id} = Durable.start(Audit6BlocksCarriers, %{})
+    await_status(id, :failed)
+    dhl = Enum.find(lanes(id), &(&1.engine_state["__parallel_step"] == "rates__dhl"))
+    assert dhl.status == :failed
+    Probe.set(:carriers_up)
+
+    :telemetry.attach(
+      "audit6-pause",
+      [:durable, :integration_repo, :query],
+      &__MODULE__.pause_reading_lanes/4,
+      nil
+    )
+
+    on_exit(fn -> :telemetry.detach("audit6-pause") end)
+
+    block =
+      Task.async(fn ->
+        Process.put(:audit6_pause, true)
+        Durable.retry(id)
+      end)
+
+    Process.sleep(200)
+    # Taken after the block's retry, the lane is back to work already.
+    Durable.retry(dhl.id)
+    assert {:ok, ^id} = Task.await(block)
+
+    await_status(id, :completed)
+
+    assert {Probe.peak(:dhl_quoting), Probe.hits(:dhl_quoting)} == {1, 1},
+           "DHL quoted #{Probe.hits(:dhl_quoting)} times, #{Probe.peak(:dhl_quoting)} at once"
   end
 
   # A cancel with `rollback: true` leaves the step its worker is running open:
