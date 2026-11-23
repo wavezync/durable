@@ -32,6 +32,27 @@ defmodule Issue48CloseAccount do
   end
 end
 
+defmodule Issue48Booking do
+  @moduledoc false
+  use Durable
+  alias Durable.IntegrationProbe, as: Probe
+
+  workflow "i48_booking" do
+    step :hold_seat, [compensate: :release_seat], fn trip -> {:ok, trip} end
+
+    step :charge_card, fn trip ->
+      Probe.note(:charging)
+      Probe.wait_for(:gateway_answered)
+      {:ok, trip}
+    end
+
+    compensate :release_seat, fn trip ->
+      Probe.note(:released)
+      {:ok, trip}
+    end
+  end
+end
+
 defmodule Issue48MonthlyReport do
   @moduledoc false
   use Durable
@@ -492,6 +513,35 @@ defmodule Durable.Integration.Issue48Test do
       Durable.Scheduler.check_schedules()
       Durable.Scheduler.status()
       assert [_] = fired("i48_keyed")
+    end
+  end
+
+  describe "a run cancelled with rollback: true whose worker is then lost" do
+    # The run keeps its worker's lock until the worker lets go, so its undo
+    # can't begin while the step runs. A lost worker never lets go: the stale
+    # sweep does, as it puts back the rest of what that worker held.
+    test "is undone once the sweep finds the lock stale" do
+      start_durable!(%{default: 2}, heartbeat_interval: 1_000)
+      {:ok, id} = Durable.start(Issue48Booking, %{"seat" => "4D"})
+      assert_eventually(fn -> Probe.hits(:charging) == 1 end)
+
+      # Lost first, so no worker of the run ever hears of the cancel.
+      kill_worker_of(id)
+      :ok = Durable.cancel(id, "traveller walked away", rollback: true)
+      assert %{status: :pending, lock_token: nil, locked_by: by} = get(id)
+      assert by != nil
+
+      # Past the heartbeat its undo was queued for, it still waits.
+      Process.sleep(1_500)
+      assert Probe.hits(:released) == 0
+
+      # A sweep that counts a second-old lock as stale: what it finds stale is
+      # let go of, not only the runs still `running`. The claim's own check
+      # waits for `stale_lock_timeout`.
+      config = Durable.Config.get(Durable)
+      assert {:ok, _} = Durable.Queue.Adapters.Postgres.recover_stale_locks(config, 1)
+      await_status(id, :compensated)
+      assert Probe.hits(:released) == 1
     end
   end
 

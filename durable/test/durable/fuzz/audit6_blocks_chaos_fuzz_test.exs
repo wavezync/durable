@@ -291,7 +291,7 @@ defmodule Durable.Fuzz.Audit6BlocksChaosTest do
       {2, tuple({constant(:kill_task), integer(0..30)})},
       {2, tuple({constant(:kill_worker), integer(0..30)})},
       {2, constant(:recover)},
-      {1, constant(:crash_node)},
+      {3, constant(:crash_node)},
       {2, tuple({constant(:expire), index, integer(0..8)})},
       {1, constant(:sweep)},
       {6, tuple({constant(:wait), integer(0..150)})}
@@ -305,7 +305,15 @@ defmodule Durable.Fuzz.Audit6BlocksChaosTest do
     do: hit(i, :cancel_rollback, Durable.cancel(at(runs, i), "chaos", rollback: true))
 
   defp apply_op({:retry, i}, runs), do: hit(i, :retry, Durable.retry(at(runs, i)))
-  defp apply_op({:rollback, i}, runs), do: hit(i, :rollback, Durable.rollback(at(runs, i)))
+  # A rollback lands only on a failed run: it goes for one if the batch has
+  # one now, or it would rarely land at all.
+  defp apply_op({:rollback, i}, runs) do
+    failed =
+      for {run, j} <- Enum.with_index(runs), get(run.id).status == :failed, do: j
+
+    j = if failed == [], do: i, else: Enum.at(failed, rem(i, length(failed)))
+    hit(j, :rollback, Durable.rollback(at(runs, j)))
+  end
 
   defp apply_op({:retry_lane, i, k}, runs) do
     case runs |> at(i) |> family() |> Enum.filter(&(&1.status == :failed)) |> tl_or_empty() do
@@ -716,7 +724,7 @@ defmodule Durable.Fuzz.Audit6BlocksChaosTest do
             workflows <-
               list_of(member_of(["fuzz_blocks_order", "fuzz_blocks_order_halt"]), length: @batch),
             ops <- list_of(tuple({integer(0..250), op()}), min_length: 4, max_length: 24),
-            second_node? <- frequency([{2, constant(false)}, {1, constant(true)}]),
+            second_node? <- boolean(),
             max_runs: @runs,
             max_shrinking_steps: 10
           ) do

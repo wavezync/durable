@@ -342,8 +342,10 @@ defmodule Durable.Queue.Adapters.Postgres do
            release_runs(config, query, :failed, error,
              retry: &StepRunner.retry_after_lost(config, &1),
              count_losses: true
-           ),
-         do: {:ok, length(runs)}
+           ) do
+      let_go_of_lost(config, cutoff)
+      {:ok, length(runs)}
+    end
   rescue
     e -> {:error, Exception.message(e)}
   end
@@ -399,6 +401,23 @@ defmodule Durable.Queue.Adapters.Postgres do
     :ok
   rescue
     _error -> :ok
+  end
+
+  # An undo a worker kept from being claimed (`Executor.cancel_run/3`), when
+  # that worker is lost: let go of with the rest of what it held.
+  defp let_go_of_lost(config, cutoff) do
+    {_count, runs} =
+      Repo.update_all(
+        config,
+        from(w in WorkflowExecution,
+          where: w.status == :pending and is_nil(w.lock_token) and not is_nil(w.locked_by),
+          where: w.locked_at < ^cutoff,
+          select: w
+        ),
+        set: [locked_by: nil, locked_at: nil]
+      )
+
+    for run <- runs, do: Durable.PubSub.wake(config, run)
   end
 
   @impl true
