@@ -1282,6 +1282,9 @@ defmodule Durable.Executor do
 
     error = %{type: "timeout", message: "#{passed} before #{step.name}"}
 
+    # Only its own deadline stops a run's children; any other failure leaves
+    # its start_workflow children running.
+    cancel_child_workflows(config, execution.id)
     fail_at(execution, step, error, workflow_def, config)
   end
 
@@ -1291,11 +1294,9 @@ defmodule Durable.Executor do
   defp resume_failure(%{engine_state: %{"__fail__" => error}}), do: error
   defp resume_failure(_execution), do: nil
 
-  # Fail the run at `step` the way a failed step would — so its compensations
-  # run — and stop any child runs it waited on.
+  # Fail the run at `step` the way a failed step would, so its compensations
+  # run.
   defp fail_at(execution, step, error, workflow_def, config) do
-    cancel_child_workflows(config, execution.id)
-
     {:ok, exec} =
       execution
       |> Ecto.Changeset.change(
@@ -1752,9 +1753,11 @@ defmodule Durable.Executor do
 
   # Commits a wait's rows and the run's :waiting status together, so whoever
   # answers the wait finds a run it can resume or finds no wait at all, never a
-  # wait on a run that's still :running. Returns the waiting run and what
-  # `insert_wait` returned.
-  defp enter_wait(config, execution, insert_wait) do
+  # wait on a run that's still :running. Events kept for the wait are handed to
+  # it in the same transaction: committed apart, a worker lost in between left
+  # the run waiting for an event it already had. Returns the waiting run and
+  # what `insert_wait` returned.
+  defp enter_wait(config, execution, insert_wait, kept_events \\ []) do
     {:ok, entered} =
       Repo.transaction(config, fn ->
         wait = insert_wait.()
@@ -1764,6 +1767,7 @@ defmodule Durable.Executor do
           |> Ecto.Changeset.change(status: :waiting, scheduled_at: nil)
           |> cas_update!(config)
 
+        Enum.each(kept_events, &Durable.Wait.deliver_buffered(config, execution.id, &1))
         {waiting, wait}
       end)
 
@@ -3755,13 +3759,12 @@ defmodule Durable.Executor do
       wait_type: :single
     }
 
-    {execution, _event} = enter_wait(config, execution, fn -> insert_event!(config, attrs) end)
-
-    DurablePubSub.broadcast_workflow(config, :workflow_waiting, workflow_event(execution))
-
     # An event sent before the run got here (`send_event(..., buffer: true)`,
     # a keyed start with `on_duplicate: {:send_event, name}`) resumes it now.
-    Durable.Wait.deliver_buffered(config, execution.id, event_name)
+    {execution, _event} =
+      enter_wait(config, execution, fn -> insert_event!(config, attrs) end, [event_name])
+
+    DurablePubSub.broadcast_workflow(config, :workflow_waiting, workflow_event(execution))
 
     {:waiting, execution}
   end
@@ -3818,34 +3821,33 @@ defmodule Durable.Executor do
       timeout_value: serialize_timeout_value(Keyword.get(opts, :timeout_value))
     }
 
-    {execution, _group} =
-      enter_wait(config, execution, fn ->
-        {:ok, wait_group} =
-          %WaitGroup{}
-          |> WaitGroup.changeset(group_attrs)
-          |> Repo.insert(config)
-
-        for event_name <- event_names do
-          insert_event!(config, %{
-            workflow_id: execution.id,
-            event_name: event_name,
-            step_name: execution.current_step,
-            wait_group_id: wait_group.id,
-            wait_type: wait_type,
-            timeout_at: timeout_at,
-            timeout_value: serialize_timeout_value(Keyword.get(opts, :timeout_value))
-          })
-        end
-
-        wait_group
-      end)
-
-    DurablePubSub.broadcast_workflow(config, :workflow_waiting, workflow_event(execution))
-
     # Events kept before the run got here are handed over now, as for
     # wait_for_event. Once a wait_for_any has its answer, the events kept for
     # its other names find no wait and stay kept.
-    Enum.each(event_names, &Durable.Wait.deliver_buffered(config, execution.id, &1))
+    insert_group = fn ->
+      {:ok, wait_group} =
+        %WaitGroup{}
+        |> WaitGroup.changeset(group_attrs)
+        |> Repo.insert(config)
+
+      for event_name <- event_names do
+        insert_event!(config, %{
+          workflow_id: execution.id,
+          event_name: event_name,
+          step_name: execution.current_step,
+          wait_group_id: wait_group.id,
+          wait_type: wait_type,
+          timeout_at: timeout_at,
+          timeout_value: serialize_timeout_value(Keyword.get(opts, :timeout_value))
+        })
+      end
+
+      wait_group
+    end
+
+    {execution, _group} = enter_wait(config, execution, insert_group, event_names)
+
+    DurablePubSub.broadcast_workflow(config, :workflow_waiting, workflow_event(execution))
 
     {:waiting, execution}
   end

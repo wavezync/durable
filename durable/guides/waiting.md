@@ -229,6 +229,8 @@ Durable.Wait.send_event(
 
 A wait takes one event. A second `send_event` under the same name, or one that arrives after the wait timed out, returns `{:error, :not_found}`, so two senders can't both be told they delivered it. An event under another name of a `wait_for_any` that already has its answer returns `:ok` and does nothing.
 
+Each wait gets its own answer, so a name can be waited for again: in a later step (a deposit and then the balance, both `"payment.succeeded"`), or in the same step after the first wait timed out (remind the approver, then ask again). A key in the run's data with the same name as a wait is never taken for its answer.
+
 ### Cancelling a Wait
 
 To end a wait without an answer, cancel it. The wait returns `{:cancelled, reason}` and the run carries on from there:
@@ -243,6 +245,8 @@ case wait_for_event("payment_confirmed", timeout: minutes(15), timeout_value: :t
   payment -> {:ok, assign(ctx, :payment, payment)}
 end
 ```
+
+Only the wait that was open is cancelled: a later wait in the same step waits for its own answer.
 
 A run that waits for the lanes of a `parallel` block, or for a `call_workflow` child, has no wait of its own. For such a run the call goes down: every lane or child under it that is waiting has its wait cancelled, and theirs in turn. The block or the call keeps waiting for them to finish. It returns `{:error, :not_waiting}` for a run that isn't waiting.
 

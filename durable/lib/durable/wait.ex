@@ -160,11 +160,12 @@ defmodule Durable.Wait do
   # The marker is keyed by step name (not by call site), so it survives
   # exactly until the user step finishes. Subsequent sleep steps get
   # their own marker written by the next wake.
+  #
+  # `cancel_wait/2` on a sleeping run leaves the same marker: a cancel of one
+  # of the step's other waits doesn't end its sleep.
   defp sleep_satisfied? do
     step = Process.get(:durable_current_step)
-
-    cancelled() != :none or
-      (step != nil and EngineState.current()["__sleep_satisfied__"] == Atom.to_string(step))
+    step != nil and EngineState.current()["__sleep_satisfied__"] == Atom.to_string(step)
   end
 
   # A wait under one of the engine's own names could never be answered: the
@@ -178,90 +179,117 @@ defmodule Durable.Wait do
     name
   end
 
-  # What a wait got, if it has been answered, and how its row ended. A nil
-  # payload is still an answer. The name can also just be a key in the run's own
-  # data, so it only counts once the wait has its row: before that, this is the
-  # wait's first pass.
-  defp answer(context, name, wait_table) do
-    with {:ok, value} <- fetch_key(context, name),
-         status when status != nil <- wait_status(wait_table, name) do
-      {:ok, value, status}
-    else
-      _not_answered -> :error
+  # A wait_for_event or wait_for_input: what its own row says it ended with, or
+  # it waits. A wait that timed out returns the call's own `:timeout_value`,
+  # exactly as written: the stored copy went through JSON, so an atom or a
+  # tuple wouldn't come back as one.
+  defp await(schema, name, opts, wait) do
+    case own_wait(single_waits(schema, name), {schema, name}, answered_status(schema)) do
+      [%{status: status} = row | later] when status in [:received, :completed] ->
+        answer_of(row, name, later)
+
+      [%{status: :timeout} | _] ->
+        Keyword.get(opts, :timeout_value)
+
+      [%{status: :cancelled} | _] ->
+        cancelled()
+
+      _not_answered ->
+        throw(wait)
     end
   end
 
-  # A wait that timed out returns the call's own `:timeout_value`, exactly as
-  # written. The stored copy went through JSON, so an atom or a tuple wouldn't
-  # come back as one.
-  defp answered({:ok, _stored, :timeout}, opts), do: Keyword.get(opts, :timeout_value)
-  defp answered({:ok, value, _status}, _opts), do: value
-
-  defp fetch_key(context, name), do: Map.fetch(context, name)
-
-  # Whether the wait was cancelled is the engine's to say: its state for the
-  # run, never a key of the step's data.
-  defp cancelled do
-    case Map.fetch(EngineState.current(), "__cancelled__") do
-      {:ok, reason} -> {:cancelled, reason}
-      :error -> :none
-    end
+  defp single_waits(PendingEvent, name) do
+    from(p in PendingEvent,
+      where: p.event_name == ^name and is_nil(p.wait_group_id) and p.status != :buffered
+    )
   end
 
-  defp wait_status(PendingEvent, name) do
-    wait_status(from(p in PendingEvent, where: p.event_name == ^name and p.status != :buffered))
-  end
+  defp single_waits(PendingInput, name), do: from(p in PendingInput, where: p.input_name == ^name)
 
-  defp wait_status(PendingInput, name) do
-    wait_status(from(p in PendingInput, where: p.input_name == ^name))
-  end
+  defp answered_status(PendingEvent), do: :received
+  defp answered_status(_input_or_group), do: :completed
 
-  # The status of the run's newest wait of that name, or nil if it has none.
-  # Outside a run (a unit test, say) there's no row to look for.
-  defp wait_status(query) do
-    case Context.workflow_id() do
-      nil ->
-        :no_run
+  # The answer is merged into the context under the wait's name, so the newest
+  # wait of that name finds it there. One the step asked again under the same
+  # name reads its row's copy.
+  # ponytail: that copy wraps an answer that isn't a map as %{"value" => v}, so
+  # an earlier answer of exactly %{"value" => v} reads as v. Store it unwrapped
+  # if a step ever gets two such answers under one name.
+  defp answer_of(_row, name, []), do: Map.get(Process.get(:durable_context, %{}), name)
+  defp answer_of(%PendingEvent{payload: payload}, _name, _later), do: unwrapped(payload)
+  defp answer_of(%PendingInput{response: response}, _name, _later), do: unwrapped(response)
 
-      id ->
-        config = Config.get(Process.get(:durable_instance, Durable))
+  defp unwrapped(%{"value" => value} = stored) when map_size(stored) == 1, do: value
+  defp unwrapped(stored), do: stored
 
-        Repo.one(
-          config,
-          from(p in query,
-            where: p.workflow_id == ^id,
-            order_by: [desc: p.inserted_at],
-            limit: 1,
-            select: p.status
-          )
+  # This call's own wait: the n-th the step has made for `key` (a name, or a
+  # group's names), n being how many times this pass of the step has asked for
+  # it. The step runs again from the top each time it resumes, so it asks in
+  # the same order every pass, and each call finds its own row, never an
+  # earlier wait's of the same name or a key of the same name in the run's data.
+  # A retried run keeps the answers its step already had, and asks again for
+  # the waits that timed out or were closed when the run failed (its deadline,
+  # `on_timeout: :fail`).
+  # Returns that row and the one after it, or [] outside a run.
+  defp own_wait(query, key, answered) do
+    calls = Process.get(:durable_wait_calls, %{})
+    n = Map.get(calls, key, 0)
+    Process.put(:durable_wait_calls, Map.put(calls, key, n + 1))
+
+    with id when id != nil <- Context.workflow_id(),
+         step when step != nil <- Process.get(:durable_current_step) do
+      Repo.all(
+        Config.get(Process.get(:durable_instance, Durable)),
+        from(p in query,
+          join: w in WorkflowExecution,
+          on: w.id == p.workflow_id,
+          where: p.workflow_id == ^id and p.step_name == ^to_string(step),
+          where: is_nil(w.retried_at) or p.inserted_at > w.retried_at or p.status == ^answered,
+          order_by: [asc: p.inserted_at],
+          offset: ^n,
+          limit: 2
         )
+      )
+    else
+      _outside_a_run -> []
     end
   end
 
-  # A group wait that timed out has no answer to return, only the code's own
-  # `:timeout_value`, or which events did arrive.
-  defp group_wait_over(opts, wait) do
-    with :none <- cancelled(),
-         :error <- Map.fetch(EngineState.current(), "__wait_group_result__") do
-      throw(wait)
-    else
-      {:cancelled, _reason} = cancelled -> cancelled
-      {:ok, result} -> group_timeout_value(opts, result)
+  # A wait whose own row was cancelled. Why is the engine's to say: its state
+  # for the run, never a key of the step's data.
+  defp cancelled, do: {:cancelled, EngineState.current()["__cancelled__"]}
+
+  # A wait_for_any or wait_for_all: what its own group got, or it waits.
+  defp await_group(names, opts, wait) do
+    groups = from(g in WaitGroup, where: g.event_names == ^names)
+
+    case own_wait(groups, {WaitGroup, names}, :completed) do
+      [%{status: :completed, wait_type: :any, received_events: received} | _] ->
+        name = Enum.find(names, &Map.has_key?(received, &1))
+        {name, received[name]}
+
+      [%{status: :completed, received_events: received} | _] ->
+        Map.take(received, names)
+
+      [%{status: :timeout} = group | _] ->
+        group_timeout_value(opts, group)
+
+      [%{status: :cancelled} | _] ->
+        cancelled()
+
+      _not_answered ->
+        throw(wait)
     end
   end
 
   # `timeout_value: nil` or `false` is a value like any other; only a call
   # without the option gets `{:timeout, received}`.
-  defp group_timeout_value(opts, result) do
-    case Keyword.fetch(opts, :timeout_value) do
-      {:ok, value} -> value
-      :error -> timed_out_group(result)
-    end
+  defp group_timeout_value(opts, group) do
+    Keyword.get_lazy(opts, :timeout_value, fn ->
+      {:timeout, if(group.wait_type == :all, do: group.received_events)}
+    end)
   end
-
-  # A tuple comes back from the database as a list.
-  defp timed_out_group(["timeout", received]), do: {:timeout, received}
-  defp timed_out_group(result), do: result
 
   # ============================================================================
   # Event Waiting
@@ -320,16 +348,8 @@ defmodule Durable.Wait do
   @spec wait_for_event(String.t(), keyword()) :: term()
   def wait_for_event(event_name, opts \\ []) do
     own_name!(event_name)
-    # Check if we're resuming with event data already in context
-    context = Process.get(:durable_context, %{})
-
-    with :none <- cancelled(),
-         :error <- answer(context, event_name, PendingEvent) do
-      throw({:wait_for_event, Keyword.put(opts, :event_name, event_name)})
-    else
-      {:ok, _value, _status} = answer -> answered(answer, opts)
-      {:cancelled, _reason} = cancelled -> cancelled
-    end
+    wait = {:wait_for_event, Keyword.put(opts, :event_name, event_name)}
+    await(PendingEvent, event_name, opts, wait)
   end
 
   @doc """
@@ -362,19 +382,8 @@ defmodule Durable.Wait do
   def wait_for_any(event_names, opts \\ []) when is_list(event_names) do
     # A name listed twice is one event to wait for.
     event_names = event_names |> Enum.uniq() |> Enum.map(&own_name!/1)
-    # Check if we're resuming with event data already in context
-    context = Process.get(:durable_context, %{})
-
-    # Find first matching event in context
-    case Enum.find(event_names, &(answer(context, &1, PendingEvent) != :error)) do
-      nil ->
-        wait = {:wait_for_any, Keyword.merge(opts, event_names: event_names, wait_type: :any)}
-        group_wait_over(opts, wait)
-
-      event_name ->
-        {:ok, data} = fetch_key(context, event_name)
-        {event_name, data}
-    end
+    wait = {:wait_for_any, Keyword.merge(opts, event_names: event_names, wait_type: :any)}
+    await_group(event_names, opts, wait)
   end
 
   @doc """
@@ -406,19 +415,8 @@ defmodule Durable.Wait do
   @spec wait_for_all([String.t()], keyword()) :: map()
   def wait_for_all(event_names, opts \\ []) when is_list(event_names) do
     event_names = event_names |> Enum.uniq() |> Enum.map(&own_name!/1)
-    # Check if we're resuming with all events already in context
-    context = Process.get(:durable_context, %{})
-    answers = Enum.map(event_names, &answer(context, &1, PendingEvent))
-
-    # Check if all events are in context
-    if :error in answers do
-      wait = {:wait_for_all, Keyword.merge(opts, event_names: event_names, wait_type: :all)}
-      group_wait_over(opts, wait)
-    else
-      event_names
-      |> Enum.zip(answers)
-      |> Map.new(fn {name, {:ok, data, _status}} -> {name, data} end)
-    end
+    wait = {:wait_for_all, Keyword.merge(opts, event_names: event_names, wait_type: :all)}
+    await_group(event_names, opts, wait)
   end
 
   # ============================================================================
@@ -461,16 +459,8 @@ defmodule Durable.Wait do
   @spec wait_for_input(String.t(), keyword()) :: term()
   def wait_for_input(input_name, opts \\ []) do
     own_name!(input_name)
-    # Check if we're resuming with input data already in context
-    context = Process.get(:durable_context, %{})
-
-    with :none <- cancelled(),
-         :error <- answer(context, input_name, PendingInput) do
-      throw({:wait_for_input, Keyword.put(opts, :input_name, input_name)})
-    else
-      {:ok, _value, _status} = answer -> answered(answer, opts)
-      {:cancelled, _reason} = cancelled -> cancelled
-    end
+    wait = {:wait_for_input, Keyword.put(opts, :input_name, input_name)}
+    await(PendingInput, input_name, opts, wait)
   end
 
   # ============================================================================
@@ -980,7 +970,7 @@ defmodule Durable.Wait do
       from(w in WorkflowExecution,
         where: w.id == ^workflow_id,
         lock: "FOR UPDATE",
-        select: struct(w, [:id, :status])
+        select: struct(w, [:id, :status, :scheduled_at, :current_step])
       )
     )
   end
@@ -1115,22 +1105,29 @@ defmodule Durable.Wait do
   end
 
   defp cancel_and_resume(config, workflow_id, reason, opts) do
-    lock_run(config, workflow_id)
+    run = lock_run(config, workflow_id)
 
     case awaited_runs(config, workflow_id) do
       [] ->
         :ok = cancel_pending_waits(config, workflow_id)
-        resume_cancelled(config, workflow_id, reason, opts)
+        resume_cancelled(config, run, reason, opts)
 
       children ->
         {:waits_on, children}
     end
   end
 
-  defp resume_cancelled(config, workflow_id, reason, opts) do
-    engine = [engine: %{"__cancelled__" => reason}]
+  # A sleeping run (the only waiting run with a `scheduled_at`) gets the
+  # marker the sleep waker would leave, so its sleep returns.
+  defp resume_cancelled(config, nil, _reason, _opts), do: config.repo.rollback(:not_found)
 
-    case Durable.Executor.resume_workflow(workflow_id, %{}, engine ++ opts) do
+  defp resume_cancelled(config, run, reason, opts) do
+    engine =
+      if run.scheduled_at,
+        do: %{"__cancelled__" => reason, "__sleep_satisfied__" => run.current_step},
+        else: %{"__cancelled__" => reason}
+
+    case Durable.Executor.resume_workflow(run.id, %{}, [engine: engine] ++ opts) do
       {:ok, resumed} -> resumed
       {:error, error} -> config.repo.rollback(error)
     end

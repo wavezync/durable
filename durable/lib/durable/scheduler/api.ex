@@ -478,7 +478,9 @@ defmodule Durable.Scheduler.API do
   @spec claim_fire(ScheduledWorkflow.t(), Config.t()) :: boolean()
   def claim_fire(%ScheduledWorkflow{} = schedule, %Config{} = config) do
     now = DateTime.utc_now()
-    {:ok, next_run} = compute_next_run(schedule.cron_expression, schedule.timezone)
+
+    {:ok, next_run} =
+      compute_next_run(schedule.cron_expression, schedule.timezone, schedule.next_run_at)
 
     {count, _} =
       Repo.update_all(
@@ -559,10 +561,23 @@ defmodule Durable.Scheduler.API do
     end
   end
 
-  defp compute_next_run(cron_expression, timezone) do
+  # `fired` is the fire being claimed. One claimed late, after the clocks went
+  # back, mustn't fire again when the wall clock shows its time a second time:
+  # the next comes after the wall time it fired for, as well as after now.
+  defp compute_next_run(cron_expression, timezone, fired \\ nil) do
     with {:ok, cron} <- CronParser.parse(cron_expression),
-         {:ok, now} <- get_local_time(timezone) do
-      next_fire(cron, now, timezone, DateTime.utc_now())
+         {:ok, now} <- get_local_time(timezone),
+         {:ok, from} <- after_fired(now, fired, timezone) do
+      next_fire(cron, from, timezone, DateTime.utc_now())
+    end
+  end
+
+  defp after_fired(local_now, nil, _timezone), do: {:ok, local_now}
+
+  defp after_fired(local_now, fired, timezone) do
+    with {:ok, local} <- zoned(fired, timezone) do
+      fired_minute_over = local |> DateTime.to_naive() |> NaiveDateTime.add(60)
+      {:ok, Enum.max([local_now, fired_minute_over], NaiveDateTime)}
     end
   end
 
@@ -612,6 +627,8 @@ defmodule Durable.Scheduler.API do
       upcoming -> shift_to_utc(upcoming, timezone)
     end
   end
+
+  defp zoned(utc, timezone) when timezone in ["UTC", "Etc/UTC"], do: {:ok, utc}
 
   defp zoned(utc, timezone) do
     case DateTime.shift_zone(utc, timezone) do
@@ -739,8 +756,13 @@ defmodule Durable.Scheduler.API do
     end
   end
 
+  # A schedule turned back on starts from its next time, as with
+  # enable_schedule/2: the one it had may have gone by while it was off.
   defp updated_timing(changes, schedule) do
-    if Keyword.has_key?(changes, :cron_expression) or Keyword.has_key?(changes, :timezone) do
+    turned_on? = changes[:enabled] == true and not schedule.enabled
+
+    if turned_on? or Keyword.has_key?(changes, :cron_expression) or
+         Keyword.has_key?(changes, :timezone) do
       cron = Keyword.get(changes, :cron_expression, schedule.cron_expression)
       timezone = Keyword.get(changes, :timezone, schedule.timezone)
 
