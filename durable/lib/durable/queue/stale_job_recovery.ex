@@ -91,6 +91,7 @@ defmodule Durable.Queue.StaleJobRecovery do
     end
 
     Durable.Executor.redeliver_lost_notices(config, config.stale_lock_timeout)
+    Durable.Executor.close_out_lost(config, config.stale_lock_timeout)
 
     # Preserve the return shape expected by `recover_now/1` callers.
     stale_result

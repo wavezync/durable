@@ -152,20 +152,15 @@ defmodule Durable.Orchestration do
 
       # Create child and continue (no throw)
       :error ->
-        {:ok, child_id} =
-          create_child_execution(module, input, {parent_id, fire_key}, [wake: true] ++ opts)
-
-        EngineState.put_current(fire_key, child_id)
-        record_call_child(child_id, :fire, ref)
-        {:ok, child_id}
+        create_child_execution(module, input, {parent_id, fire_key, :fire}, [wake: true] ++ opts)
     end
   end
 
-  # Records a step → child mapping in the parent's engine state so the
-  # dashboard can attach a drill-in chevron to the calling step. Mirrors the
-  # `__parallel_children` pattern used by parallel steps in
+  # The step → child mapping in the parent's engine state, with this child
+  # added, so the dashboard can attach a drill-in chevron to the calling step.
+  # Mirrors the `__parallel_children` pattern used by parallel steps in
   # `lib/durable/executor.ex`.
-  defp record_call_child(child_id, kind, ref) do
+  defp call_children(child_id, kind, ref) do
     step_name = Context.current_step()
 
     meta = %{
@@ -174,8 +169,7 @@ defmodule Durable.Orchestration do
       "ref" => to_string(ref)
     }
 
-    children = EngineState.current()["__call_children"] || %{}
-    EngineState.put_current("__call_children", Map.put(children, child_id, meta))
+    Map.put(EngineState.current()["__call_children"] || %{}, child_id, meta)
   end
 
   # ============================================================================
@@ -183,9 +177,7 @@ defmodule Durable.Orchestration do
   # ============================================================================
 
   defp create_and_wait(module, input, parent_id, child_key, opts) do
-    {:ok, child_id} = create_child_execution(module, input, {parent_id, child_key}, opts)
-    EngineState.put_current(child_key, child_id)
-    record_call_child(child_id, :call, Keyword.get(opts, :ref, module_to_ref(module)))
+    {:ok, child_id} = create_child_execution(module, input, {parent_id, child_key, :call}, opts)
 
     throw(
       {:call_workflow,
@@ -246,7 +238,7 @@ defmodule Durable.Orchestration do
   end
 
   # `key` is the name the parent knows the child by, in its engine state.
-  defp create_child_execution(module, input, {parent_id, key}, opts) do
+  defp create_child_execution(module, input, {parent_id, key, kind}, opts) do
     durable_name = Keyword.get(opts, :durable, Durable)
     config = Config.get(durable_name)
 
@@ -277,15 +269,22 @@ defmodule Durable.Orchestration do
 
     # The parent's row gets the child under `key` in the same transaction: a
     # parent lost between the two would start another child when its step
-    # ran again, and the first would run with nobody to know it.
-    {:ok, execution} =
+    # ran again, and the first would run with nobody to know it. Which step
+    # called it goes with it: the step that runs again finds its child, and
+    # doesn't record it a second time.
+    ref = Keyword.get(opts, :ref, module_to_ref(module))
+
+    {:ok, {execution, recorded}} =
       Repo.transaction(config, fn ->
         {:ok, child} =
           %WorkflowExecution{} |> WorkflowExecution.changeset(attrs) |> Repo.insert(config)
 
-        record_child(config, parent_id, %{key => child.id})
-        child
+        recorded = %{key => child.id, "__call_children" => call_children(child.id, kind, ref)}
+        record_child(config, parent_id, recorded)
+        {child, recorded}
       end)
+
+    for {name, value} <- recorded, do: EngineState.put_current(name, value)
 
     # A child its parent waits for is woken once the parent is listening.
     if Keyword.get(opts, :wake, false), do: DurablePubSub.wake(config, execution)
@@ -303,7 +302,8 @@ defmodule Durable.Orchestration do
   end
 
   # Added to what the row has, not written over it: the step's own save writes
-  # the whole state later, and has the child too.
+  # the whole state later, and has the child too. The step is the only writer
+  # of `__call_children`, so its process has all of it.
   defp record_child(_config, nil, _child), do: :ok
 
   defp record_child(config, parent_id, child) do

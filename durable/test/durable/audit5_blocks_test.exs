@@ -175,6 +175,55 @@ defmodule Audit5BlocksShipping do
   end
 end
 
+defmodule Audit5BlocksLoan do
+  @moduledoc false
+  use Durable
+  use Durable.Helpers
+  use Durable.Wait
+
+  # The applicant's credit score and a reference from the employer are asked
+  # for at once. The employer has ten minutes; the whole application has less.
+  workflow "audit5_blocks_application", timeout: 300 do
+    parallel :checks do
+      step :credit, fn application -> {:ok, assign(application, :score, 700)} end
+
+      lane :employer, timeout: minutes(10) do
+        step :ask_employer, fn application ->
+          wait_for_input("reference")
+          {:ok, application}
+        end
+      end
+    end
+  end
+
+  workflow "audit5_blocks_slow_employer", timeout: 200 do
+    parallel :checks do
+      step :credit, fn application -> {:ok, assign(application, :score, 700)} end
+
+      lane :employer, timeout: minutes(10) do
+        step :call_employer, fn application ->
+          Process.sleep(2_000)
+          {:ok, application}
+        end
+      end
+    end
+  end
+
+  # The application has no deadline; the employer has 50ms, and the decision
+  # is made without the reference if that's too short.
+  workflow "audit5_blocks_reference" do
+    parallel :checks do
+      step :credit, fn application -> {:ok, assign(application, :score, 700)} end
+
+      lane :employer, optional: true, timeout: 50 do
+        step :ask_employer, fn application -> {:ok, assign(application, :employed, true)} end
+      end
+    end
+
+    step :decide, fn application -> {:ok, application} end
+  end
+end
+
 defmodule Durable.Audit5BlocksTest do
   @moduledoc "Audit 5: parallel blocks, branches and child workflows."
   use Durable.DataCase, async: false
@@ -183,7 +232,8 @@ defmodule Durable.Audit5BlocksTest do
 
   alias Audit5BlocksSeen, as: Seen
   alias Durable.Config
-  alias Durable.Storage.Schemas.{PendingEvent, WorkflowExecution}
+  alias Durable.Executor
+  alias Durable.Storage.Schemas.{Node, PendingEvent, WorkflowExecution}
   alias Durable.TestRepo, as: Repo
   alias Durable.Wait.TimeoutWorker
 
@@ -296,6 +346,114 @@ defmodule Durable.Audit5BlocksTest do
 
     assert %{"crm" => {:ok, %{"tier" => "gold"}}, "billing" => {:error, _}} =
              Seen.get(:after_block)
+  end
+
+  defp lane(run, name) do
+    Enum.find(children(run), &String.ends_with?(&1.engine_state["__parallel_step"], name))
+  end
+
+  defp sweep do
+    start_supervised!({TimeoutWorker, config: Config.get(Durable), interval: 3_600_000})
+    TimeoutWorker.check_timeouts(Durable)
+    :sys.get_state(TimeoutWorker.worker_name(Durable))
+  end
+
+  defp a_node_polls!(queues) do
+    now = DateTime.utc_now()
+
+    Repo.insert!(%Node{
+      id: "elsewhere",
+      queues: queues,
+      version: "1",
+      started_at: now,
+      heartbeat_at: now
+    })
+  end
+
+  # A lane with a `timeout:` has the earlier of that and the run's deadline.
+  # Whichever it was, the error named the lane and its ten minutes.
+  test "a lane ended by the run's deadline, earlier than its own, is told so: before a step" do
+    run = run_workflow(Audit5BlocksLoan, %{}, workflow: "audit5_blocks_application")
+    employer = lane(run, "employer")
+    assert employer.deadline_at == run.deadline_at
+
+    Process.sleep(310)
+    sweep()
+    Executor.execute_workflow(employer.id, Config.get(Durable))
+
+    assert %{status: :failed, error: %{"type" => "timeout", "message" => message}} =
+             lane(run, "employer")
+
+    assert message == "the run passed its 300ms timeout before checks__employer__ask_employer"
+    assert %{status: :failed, error: %{"type" => "timeout"}} = drain(run)
+  end
+
+  test "a lane ended by the run's deadline, earlier than its own, is told so: during a step" do
+    run = run_workflow(Audit5BlocksLoan, %{}, workflow: "audit5_blocks_slow_employer")
+
+    assert %{status: :failed, error: %{"type" => "timeout", "message" => message}} =
+             lane(run, "employer")
+
+    assert message =~ "the run passed its"
+    assert run.status == :failed
+  end
+
+  # The sweep moves a run past its deadline off a queue no node polls, to be
+  # failed where one does, but left every lane: one with a `timeout:` of its
+  # own stayed, and its block, which has no deadline, waited for it for ever.
+  test "a lane past its own timeout on a queue no node polls is moved to one that is, and failed" do
+    config = Config.get(Durable)
+
+    {:ok, id} =
+      Durable.start(Audit5BlocksLoan, %{}, workflow: "audit5_blocks_reference", queue: "branch")
+
+    {:waiting, run} = Executor.execute_workflow(id, config)
+    a_node_polls!(["default"])
+    Process.sleep(60)
+    sweep()
+
+    assert %{status: :pending, queue: "default", home_queue: "branch"} = lane(run, "employer")
+    assert %{status: :pending, queue: "branch"} = lane(run, "credit")
+
+    run = drain(run)
+    assert %{status: :failed, error: %{"message" => message}} = lane(run, "employer")
+    assert message =~ "lane employer passed its 50ms timeout"
+    assert %{status: :completed, context: %{"checks" => %{"employer" => nil}}} = run
+  end
+
+  # Retried by its own id, a lane was given the workflow's timeout, from now,
+  # as if it were the run: here none, so the employer had for ever.
+  test "a lane retried by its own id has its own timeout again" do
+    {:ok, id} = Durable.start(Audit5BlocksLoan, %{}, workflow: "audit5_blocks_reference")
+    {:waiting, run} = Executor.execute_workflow(id, Config.get(Durable))
+    Process.sleep(60)
+    drain(run)
+    assert %{status: :failed, error: %{"type" => "timeout"}} = lane(run, "employer")
+
+    {:ok, _} = Durable.retry(lane(run, "employer").id)
+
+    assert %{status: :pending, deadline_at: %DateTime{} = deadline} = lane(run, "employer")
+    assert DateTime.diff(deadline, DateTime.utc_now(), :millisecond) in 0..50
+  end
+
+  # Its deadline is the run's: the run is the one moved, and it ends the lane.
+  test "a lane past the run's deadline on a queue no node polls is left to the run" do
+    config = Config.get(Durable)
+
+    {:ok, id} =
+      Durable.start(Audit5BlocksLoan, %{}, workflow: "audit5_blocks_application", queue: "branch")
+
+    {:waiting, run} = Executor.execute_workflow(id, config)
+    a_node_polls!(["default"])
+    Process.sleep(310)
+    sweep()
+
+    assert %{status: :pending, queue: "branch"} = lane(run, "employer")
+    assert %{status: :pending, queue: "default"} = Repo.get!(WorkflowExecution, id)
+
+    Executor.execute_workflow(id, config)
+    assert %{status: :failed, error: %{"type" => "timeout"}} = Repo.get!(WorkflowExecution, id)
+    assert %{status: :cancelled} = lane(run, "employer")
   end
 
   # A clause's steps were registered last to first, so the jump was refused
