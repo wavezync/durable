@@ -38,6 +38,32 @@ defmodule Audit6QueueReport do
   end
 end
 
+defmodule Audit6QueueTrip do
+  @moduledoc false
+  use Durable
+  alias Durable.IntegrationProbe, as: Probe
+
+  # The seat is released only once nothing can still charge for it.
+  workflow "audit6_queue_trip" do
+    step :hold_seat, [compensate: :release_seat], fn trip -> {:ok, trip} end
+
+    step :charge_card, fn trip ->
+      Probe.inside([:seat_and_card], fn ->
+        Probe.note(:charging)
+        Probe.wait_for(:gateway_answered)
+        Probe.note(:charged)
+      end)
+
+      {:ok, trip}
+    end
+
+    compensate :release_seat, fn trip ->
+      Probe.inside([:seat_and_card], fn -> Probe.note(:released) end)
+      {:ok, trip}
+    end
+  end
+end
+
 defmodule Durable.Integration.Audit6QueueTest do
   @moduledoc """
   Audit 6: the queue and recovery under load. Workers that can't reach the
@@ -73,6 +99,30 @@ defmodule Durable.Integration.Audit6QueueTest do
       for id <- ids do
         assert %{status: :pending, locked_by: nil} = get(id)
       end
+    end
+  end
+
+  describe "a run cancelled with rollback: true whose worker can't reach the database" do
+    # The undo waits one heartbeat for the worker to hear of the cancel. A
+    # worker whose heartbeats fail never hears, and its step goes on.
+    test "isn't undone while its step can still finish" do
+      start_on_own_repo!([], [])
+
+      {:ok, id} = Durable.start(Audit6QueueTrip, %{"seat" => "12A"})
+      assert_eventually(fn -> Probe.hits(:charging) == 1 end)
+      stop_supervised!(Audit6QueueRepo)
+
+      Durable.DataCase.start_supervised_durable!(
+        name: :audit6_node_b,
+        repo: IntegrationRepo,
+        queues: queue_opts(%{default: 1})
+      )
+
+      :ok = Durable.cancel(id, "traveller walked away", rollback: true, durable: :audit6_node_b)
+      Process.sleep(1_000)
+
+      # The seat is released while the card is still being charged.
+      assert Probe.peak(:seat_and_card) == 1
     end
   end
 
