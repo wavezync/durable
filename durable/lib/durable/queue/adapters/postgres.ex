@@ -575,6 +575,11 @@ defmodule Durable.Queue.Adapters.Postgres do
       %WorkflowExecution{status: :cancelled} ->
         {:error, :cancelled}
 
+      # Cancelled with `rollback: true`: back on its queue at once, to be
+      # undone once this worker has stopped (`Executor.cancel_run/3`).
+      %WorkflowExecution{status: :pending, engine_state: %{"__rollback__" => _}} ->
+        {:error, :cancelled}
+
       _ ->
         {:error, :not_found}
     end

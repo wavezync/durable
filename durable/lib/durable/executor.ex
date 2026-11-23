@@ -243,24 +243,42 @@ defmodule Durable.Executor do
     seen = opts[:rollback] && status_now(config, workflow_id)
     cancellable = if seen, do: where(cancellable, [w], w.status == ^seen), else: cancellable
 
-    case Repo.update_all(config, cancellable,
-           set: [
-             status: :cancelled,
-             error: error,
-             completed_at: now,
-             updated_at: now,
-             locked_by: nil,
-             locked_at: nil,
-             lock_token: nil
-           ]
-         ) do
+    set = [
+      status: :cancelled,
+      error: error,
+      completed_at: now,
+      updated_at: now,
+      locked_by: nil,
+      locked_at: nil,
+      lock_token: nil
+    ]
+
+    {:ok, cancelled} =
+      Repo.transaction(config, fn -> cancel_and_queue(config, cancellable, set, opts) end)
+
+    if cancelled do
+      # To be undone, the step a worker is running stays open: it may finish
+      # before the worker hears of the cancel, and then it is undone too. The
+      # worker closes it as it stops, or the undo if that worker is gone.
+      after_cancel(config, cancelled, seen != :running)
+      if opts[:rollback], do: undo_once_stopped(config, cancelled, seen)
+      :ok
+    else
+      not_cancelled(status_now(config, workflow_id), seen, {workflow_id, reason, opts})
+    end
+  end
+
+  # With `rollback: true` the run goes back on its queue to be undone in the
+  # transaction that cancels it. Seen cancelled and over in between, a run
+  # waiting behind its key would start before the undo.
+  defp cancel_and_queue(config, cancellable, set, opts) do
+    case Repo.update_all(config, cancellable, set: set) do
       {1, [cancelled]} ->
-        after_cancel(config, cancelled)
-        if opts[:rollback], do: roll_back_cancelled(config, cancelled, seen)
-        :ok
+        if opts[:rollback], do: queue_cancelled(config, cancelled)
+        cancelled
 
       {0, _} ->
-        not_cancelled(status_now(config, workflow_id), seen, {workflow_id, reason, opts})
+        nil
     end
   end
 
@@ -287,20 +305,36 @@ defmodule Durable.Executor do
 
   # `rollback: true`: the cancelled run goes back on its queue to be undone.
   # A worker that had it is told at its next heartbeat, and until then a step
-  # of its can still finish. The undo waits that long, so it sees that step.
+  # of its can still finish. The undo waits that long, so it sees that step,
+  # and as long while the cancel goes on to stop the runs under it.
   #
   # A run that never started has nothing to undo. Back on its queue it would
   # still be its key's holder, a run yet to come, to the next start.
-  defp roll_back_cancelled(_config, %{started_at: nil}, _seen), do: :ok
+  defp queue_cancelled(_config, %{started_at: nil}), do: :ok
 
-  defp roll_back_cancelled(config, cancelled, seen) do
-    at =
-      if seen == :running,
-        do: DateTime.add(DateTime.utc_now(), config.heartbeat_interval, :millisecond),
-        else: settles_at(config, cancelled)
+  defp queue_cancelled(config, cancelled) do
+    at = DateTime.add(DateTime.utc_now(), config.heartbeat_interval, :millisecond)
+    {:ok, _queued} = queue_rollback(config, cancelled, at)
+  end
 
-    with {:ok, queued} <- queue_rollback(config, cancelled, at),
-         do: DurablePubSub.wake(config, queued)
+  # Once the runs under it are stopped, a run nobody was running is undone a
+  # heartbeat after the last of them (settles_at/2), or now. One a worker had
+  # waits the heartbeat it was queued with.
+  defp undo_once_stopped(_config, _cancelled, :running), do: :ok
+  defp undo_once_stopped(_config, %{started_at: nil}, _seen), do: :ok
+
+  defp undo_once_stopped(config, cancelled, _seen) do
+    {_, queued} =
+      Repo.update_all(
+        config,
+        from(w in WorkflowExecution,
+          where: w.id == ^cancelled.id and w.status == :pending and is_nil(w.locked_by),
+          select: w
+        ),
+        set: [scheduled_at: settles_at(config, cancelled)]
+      )
+
+    for run <- queued, do: DurablePubSub.wake(config, run)
   end
 
   @doc """
@@ -369,6 +403,7 @@ defmodule Durable.Executor do
 
     with {:ok, execution} <- load_execution(config, workflow_id),
          :ok <- ensure_retryable(execution.status),
+         :ok <- nothing_undone(config, execution),
          {:ok, retried} <- reset_for_retry(config, execution) do
       DurablePubSub.broadcast_workflow(config, :workflow_retried, workflow_event(retried))
       DurablePubSub.wake(config, retried)
@@ -466,6 +501,14 @@ defmodule Durable.Executor do
     do: {:error, :rolled_back}
 
   defp ensure_retryable(_status), do: {:error, :not_failed}
+
+  # A rollback that lost its worker part-way leaves the run failed with some of
+  # it undone. Retried, it would carry on as if none of it was.
+  defp nothing_undone(config, execution) do
+    if Repo.aggregate(config, undone(execution.id), :count) > 0,
+      do: {:error, :rolled_back},
+      else: :ok
+  end
 
   defp reset_for_retry(config, execution) do
     retry_attrs = [
@@ -767,7 +810,9 @@ defmodule Durable.Executor do
     config = Config.get(durable)
 
     with {:ok, execution} <- load_execution(config, workflow_id),
-         true <- execution.status not in [:pending, :running, :waiting] || {:error, :not_finished},
+         # A run being rolled back is still going: its undo races the rerun.
+         true <-
+           execution.status not in WorkflowExecution.open_statuses() || {:error, :not_finished},
          # A lane is part of its block's run. Started on its own it would be
          # the whole workflow again, from its first step, on the block's data.
          true <- not parallel_branch?(execution) || {:error, :lane},
@@ -3178,17 +3223,17 @@ defmodule Durable.Executor do
 
   @doc false
   # What follows a cancel: tell subscribers, and cancel the run's children.
-  @spec after_cancel(Config.t(), WorkflowExecution.t()) :: :ok
-  def after_cancel(config, cancelled) do
-    close_out_cancelled(config, cancelled)
+  @spec after_cancel(Config.t(), WorkflowExecution.t(), boolean()) :: :ok
+  def after_cancel(config, cancelled, close_attempt \\ true) do
+    close_out_cancelled(config, cancelled, close_attempt)
     # A parent waiting on this run would otherwise wait forever.
     maybe_notify_parent(config, cancelled, :cancelled, cancelled.error)
     :ok
   end
 
-  defp close_out_cancelled(config, cancelled) do
+  defp close_out_cancelled(config, cancelled, close_attempt \\ true) do
     # Its node may be gone, leaving nobody else to close its attempt.
-    StepRunner.close_cancelled(config, cancelled.id)
+    if close_attempt, do: StepRunner.close_cancelled(config, cancelled.id)
     # Left open, an input would stay in the inbox with nobody waiting for it.
     :ok = Durable.Wait.cancel_pending_waits(config, cancelled.id)
     DurablePubSub.broadcast_workflow(config, :workflow_cancelled, workflow_event(cancelled))
@@ -3360,21 +3405,27 @@ defmodule Durable.Executor do
       |> Ecto.Changeset.change(engine_state: engine_state)
       |> cas_update!(config)
 
+    # A cancel left open the step its worker had (cancel_run/3). That worker
+    # has stopped by now, so what is still open was lost with its node.
+    StepRunner.close_cancelled(config, execution.id)
+
     case build_compensation_stack(execution.id, workflow_def, config) do
       [] -> nothing_to_undo(config, execution, error, was)
       stack -> run_compensations(execution, error, stack, workflow_def, config)
     end
   end
 
-  defp nothing_to_undo(config, execution, error, was) do
-    undone =
-      from(s in StepExecution,
-        where: s.workflow_id == ^execution.id and s.is_compensation and s.status == :completed
-      )
+  # The undos of a run that completed.
+  defp undone(workflow_id) do
+    from(s in StepExecution,
+      where: s.workflow_id == ^workflow_id and s.is_compensation and s.status == :completed
+    )
+  end
 
+  defp nothing_to_undo(config, execution, error, was) do
     cond do
       # Every undo completed before the rollback lost its worker: it ends here.
-      Repo.aggregate(config, undone, :count) > 0 ->
+      Repo.aggregate(config, undone(execution.id), :count) > 0 ->
         run_compensations(execution, error, [], nil, config)
 
       was == "cancelled" ->
@@ -3420,9 +3471,7 @@ defmodule Durable.Executor do
     completed_steps = config |> Repo.all(query) |> Enum.uniq()
 
     # Map to steps that have compensations
-    completed_steps
-    |> Enum.map(&String.to_atom/1)
-    |> Enum.flat_map(&find_step_compensation(&1, workflow_def))
+    Enum.flat_map(completed_steps, &find_step_compensation(&1, workflow_def))
   end
 
   # A completed undo of the step in the outer query, no older than the step.
@@ -3434,20 +3483,22 @@ defmodule Durable.Executor do
     )
   end
 
+  # A stored name is matched against the code's steps, never made an atom: a
+  # row from a deploy that had a step this one hasn't names nothing here.
   defp find_step_compensation(step_name, workflow_def) do
-    step_def = Enum.find(workflow_def.steps, &(&1.name == step_name))
-    get_compensation_for_step(step_name, step_def, workflow_def.compensations)
+    step_def = Enum.find(workflow_def.steps, &(Atom.to_string(&1.name) == step_name))
+    get_compensation_for_step(step_def, workflow_def.compensations)
   end
 
-  defp get_compensation_for_step(step_name, %{opts: %{compensate: comp_name}}, compensations)
+  defp get_compensation_for_step(%{name: name, opts: %{compensate: comp_name}}, compensations)
        when not is_nil(comp_name) do
     case Map.get(compensations, comp_name) do
       nil -> []
-      compensation -> [{step_name, compensation}]
+      compensation -> [{name, compensation}]
     end
   end
 
-  defp get_compensation_for_step(_step_name, _step_def, _compensations), do: []
+  defp get_compensation_for_step(_step_def, _compensations), do: []
 
   # Runs compensations in order and handles results
   defp run_compensations(execution, original_error, compensation_stack, workflow_def, config) do
