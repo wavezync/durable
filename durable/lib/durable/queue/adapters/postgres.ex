@@ -83,7 +83,8 @@ defmodule Durable.Queue.Adapters.Postgres do
                 AND h.completed_at > #{@utc_now} - INTERVAL '#{config.heartbeat_interval} milliseconds'
                 AND EXISTS (
                   SELECT 1 FROM #{prefix}.step_executions s
-                  WHERE s.workflow_id = h.id AND s.status IN ('running', 'cancelled')
+                  WHERE s.workflow_id = h.id AND (s.status = 'running'
+                    OR (s.status = 'cancelled' AND s.completed_at >= h.completed_at))
                 )))
         )
       ORDER BY w.priority DESC, COALESCE(w.scheduled_at, w.inserted_at) ASC, w.inserted_at ASC

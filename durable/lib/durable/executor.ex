@@ -312,7 +312,16 @@ defmodule Durable.Executor do
   #
   # A run that never started has nothing to undo. Back on its queue it would
   # still be its key's holder, a run yet to come, to the next start.
-  defp queue_cancelled(_config, %{started_at: nil}), do: :ok
+  # Claimed but not begun, it has no step for its undo to wait for either.
+  defp queue_cancelled(config, %{started_at: nil} = cancelled) do
+    if cancelled.locked_by do
+      Repo.update_all(config, from(w in WorkflowExecution, where: w.id == ^cancelled.id),
+        set: [locked_by: nil, locked_at: nil]
+      )
+    end
+
+    :ok
+  end
 
   defp queue_cancelled(config, cancelled) do
     at = DateTime.add(DateTime.utc_now(), config.heartbeat_interval, :millisecond)

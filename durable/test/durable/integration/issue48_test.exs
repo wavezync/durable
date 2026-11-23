@@ -20,6 +20,18 @@ defmodule Issue48AccountSync do
   end
 end
 
+defmodule Issue48CloseAccount do
+  @moduledoc false
+  use Durable
+
+  # A closed account has nothing to sync: the step cancels its own run.
+  workflow "i48_close_account", on_duplicate: :run_again do
+    step :sync, fn account ->
+      if account["closed"], do: {:cancel, "account closed"}, else: {:ok, account}
+    end
+  end
+end
+
 defmodule Issue48MonthlyReport do
   @moduledoc false
   use Durable
@@ -371,6 +383,18 @@ defmodule Durable.Integration.Issue48Test do
       await_status(next, :completed, 10_000)
 
       assert Probe.peak(:sync) == 1
+    end
+
+    test "doesn't hold up the key when its own step cancelled it" do
+      start_durable!(%{default: 1}, heartbeat_interval: 60_000)
+
+      {:ok, closed} = Durable.start(Issue48CloseAccount, %{"closed" => true}, key: "acct:3")
+      await_status(closed, :cancelled)
+
+      {:ok, next} = Durable.start(Issue48CloseAccount, %{"closed" => false}, key: "acct:3")
+      assert next != closed
+      assert %{scheduled_at: nil} = get(next)
+      await_status(next, :completed)
     end
 
     test "doesn't hold up the key when it was cancelled before its step began" do

@@ -183,12 +183,12 @@ defmodule Durable.Integration.ChildrenAndSchedulesRegressionsTest do
     {:ok, id} = Durable.start(Branched, %{})
     assert_eventually(fn -> Probe.hits(:slow) == 1 end)
 
-    [fast] =
-      IntegrationRepo.all(
-        from(w in WorkflowExecution,
-          where: w.parent_workflow_id == ^id and w.status == :completed
-        )
-      )
+    finished =
+      from(w in WorkflowExecution, where: w.parent_workflow_id == ^id and w.status == :completed)
+
+    # The fast branch may still be finishing on a busy machine.
+    assert_eventually(fn -> IntegrationRepo.aggregate(finished, :count) == 1 end)
+    [fast] = IntegrationRepo.all(finished)
 
     # An hour on.
     {1, _} =

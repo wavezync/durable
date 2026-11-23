@@ -318,18 +318,20 @@ defmodule Durable.Keys do
   @spec settles_at(Config.t(), WorkflowExecution.t()) :: DateTime.t() | nil
   def settles_at(config, %{status: :cancelled, completed_at: %DateTime{} = cancelled} = holder) do
     at = DateTime.add(cancelled, config.heartbeat_interval, :millisecond)
-    if DateTime.after?(at, DateTime.utc_now()) and stepping?(config, holder.id), do: at
+    if DateTime.after?(at, DateTime.utc_now()) and stepping?(config, holder.id, cancelled), do: at
   end
 
   def settles_at(_config, _holder), do: nil
 
-  # A step was running as it was cancelled (the cancel closed its row) or
-  # began after.
-  defp stepping?(config, id) do
+  # A step was running as it was cancelled (the cancel closed its row after
+  # it cancelled the run) or began after. A step that cancelled its own run
+  # closed its row before, and has finished.
+  defp stepping?(config, id, cancelled) do
     Repo.one(
       config,
       from(s in StepExecution,
-        where: s.workflow_id == ^id and s.status in [:running, :cancelled],
+        where: s.workflow_id == ^id,
+        where: s.status == :running or (s.status == :cancelled and s.completed_at >= ^cancelled),
         select: true,
         limit: 1
       )

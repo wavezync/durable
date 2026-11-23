@@ -106,10 +106,17 @@ defmodule Durable.Integration.RecoveryAndSchedulesRegressionsTest do
     on_exit(fn -> :telemetry.detach(handler) end)
   end
 
-  defp attempt_events do
+  # Every attempt's end, given a busy machine a moment to send it: whoever
+  # closes a row sends its end just after.
+  defp attempt_events(events \\ [], tries \\ 50) do
     Process.sleep(100)
-    events = drain_attempts([])
-    {for({:start, id} <- events, do: id), for({phase, id} <- events, phase != :start, do: id)}
+    events = drain_attempts(events)
+    starts = for {:start, id} <- events, do: id
+    ends = for {phase, id} <- events, phase != :start, do: id
+
+    if Enum.sort(starts) != Enum.sort(ends) and tries > 0,
+      do: attempt_events(events, tries - 1),
+      else: {starts, ends}
   end
 
   defp drain_attempts(acc) do
