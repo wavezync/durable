@@ -28,10 +28,11 @@ defmodule Durable.Config do
   * `:stale_lock_timeout` - Seconds before a lock is considered stale (default: `300`)
   * `:heartbeat_interval` - Milliseconds between worker heartbeats (default: `30_000`)
   * `:shutdown_grace_period` - Milliseconds a stopping node waits for its running
-    steps, with no new claims (default: `15_000`, `0` to not wait). Each run
-    finishes its current step, then goes back on its queue for another node.
-    Keep your platform's shutdown limit longer than this. A step still running
-    then is killed, and its run goes back on its queue
+    steps, with no new claims (default: `15_000`). Each run finishes its
+    current step, then goes back on its queue for another node. Keep your
+    platform's shutdown limit longer than this. A step still running then is
+    killed, and its run goes back on its queue. At `0` the node doesn't wait:
+    every run it has goes back on its queue at once
   * `:log_level` - Log level for Ecto queries, or `false` to disable (default: `false`)
 
   ## Examples
@@ -128,7 +129,9 @@ defmodule Durable.Config do
     shutdown_grace_period: [
       type: :non_neg_integer,
       default: 15_000,
-      doc: "Milliseconds a stopping node waits for its running steps"
+      doc:
+        "Milliseconds a stopping node waits for its running steps before it hands " <>
+          "their runs back; 0 hands them back at once"
     ],
     scheduled_modules: [
       type: {:list, :atom},
@@ -217,15 +220,22 @@ defmodule Durable.Config do
   # One id per running instance: the Erlang node name when distributed, else
   # the hostname plus a per-boot suffix. Pollers stamp it into `locked_by`,
   # and the node registry keys its heartbeat row on it.
-  defp node_id do
-    if node() == :nonode@nohost do
-      {:ok, host} = :inet.gethostname()
-      # Random: System.unique_integer/1 starts from the same place on every
-      # boot, so two VMs on one host got one id, and one's shutdown handed back
-      # the other's running runs.
-      "#{host}-#{Base.encode16(:crypto.strong_rand_bytes(4), case: :lower)}"
-    else
-      Atom.to_string(node())
+  defp node_id(name) do
+    cond do
+      node() == :nonode@nohost ->
+        {:ok, host} = :inet.gethostname()
+        # Random: System.unique_integer/1 starts from the same place on every
+        # boot, so two VMs on one host got one id, and one's shutdown handed
+        # back the other's running runs.
+        "#{host}-#{Base.encode16(:crypto.strong_rand_bytes(4), case: :lower)}"
+
+      name == Durable ->
+        Atom.to_string(node())
+
+      # Two instances on one node share its name, and one's shutdown handed
+      # back the other's running runs.
+      true ->
+        "#{node()}/#{inspect(name)}"
     end
   end
 
@@ -246,7 +256,7 @@ defmodule Durable.Config do
     case NimbleOptions.validate(opts, @schema) do
       {:ok, validated} ->
         validated = resolve_pubsub(validated)
-        {:ok, %{struct(__MODULE__, validated) | node_id: node_id()}}
+        {:ok, %{struct(__MODULE__, validated) | node_id: node_id(validated[:name])}}
 
       {:error, %NimbleOptions.ValidationError{}} = error ->
         error

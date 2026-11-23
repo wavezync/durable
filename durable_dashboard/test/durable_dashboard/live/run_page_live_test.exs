@@ -148,6 +148,24 @@ defmodule DurableDashboard.Live.RunPageLiveTest do
       assert html =~ String.slice(ids.completed, 0, 8)
     end
 
+    test "a lane offers no Rerun, and points to its block's run", %{conn: conn, ids: ids} do
+      lane_id =
+        Durable.Config.get(Durable).repo.one!(
+          from(w in Durable.Storage.Schemas.WorkflowExecution,
+            where: w.parent_workflow_id == ^ids.family,
+            limit: 1,
+            select: w.id
+          )
+        )
+
+      {:ok, view, html} = live(conn, dash("/executions/#{lane_id}"))
+
+      refute has_element?(view, "[phx-click=rerun]")
+      refute has_element?(view, "[phx-click=edit-input]")
+      assert html =~ "A lane reruns with its block"
+      assert has_element?(view, "a[href='#{dash("/executions/#{ids.family}")}']")
+    end
+
     test "Retry carries a failed run on from its failed step", %{conn: conn, ids: ids} do
       {:ok, view, _html} = live(conn, dash("/executions/#{ids.failed}"))
 

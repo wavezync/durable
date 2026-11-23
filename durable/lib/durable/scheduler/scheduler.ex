@@ -29,7 +29,6 @@ defmodule Durable.Scheduler do
 
   alias Durable.Repo
   alias Durable.Scheduler.API
-  alias Durable.Storage.Schemas.ScheduledWorkflow
 
   @default_interval 60_000
 
@@ -216,10 +215,7 @@ defmodule Durable.Scheduler do
   end
 
   defp execute_schedule(schedule, config) do
-    # Parse the module from the stored string
-    module = API.parse_module(schedule.workflow_module)
-
-    case module do
+    case workflow_code(schedule) do
       {:ok, mod} ->
         start_workflow(schedule, mod, config)
 
@@ -228,59 +224,58 @@ defmodule Durable.Scheduler do
     end
   end
 
+  # The schedule's module, if this node has it and the workflow in it: a
+  # deploy can add a workflow to a module the old nodes already have.
+  defp workflow_code(schedule) do
+    with {:ok, module} <- API.parse_module(schedule.workflow_module),
+         {:ok, _workflow} <- module.__workflow_definition__(schedule.workflow_name),
+         do: {:ok, module}
+  end
+
   # In a rolling deploy this node may just not have the code yet, so the fire
   # stays due for one that does. Once it's overdue by the grace period the code
   # isn't coming: record the failure, which moves the fire on and in time
-  # disables a schedule whose module is gone.
+  # disables a schedule whose workflow is gone.
   defp handle_missing_module(schedule, config, reason) do
+    code = "#{schedule.workflow_module} (#{schedule.workflow_name})"
+
     if DateTime.diff(DateTime.utc_now(), schedule.next_run_at) < @code_grace_seconds do
       Logger.warning(
-        "[Durable.Scheduler] #{schedule.name}: #{schedule.workflow_module} isn't on this node, " <>
+        "[Durable.Scheduler] #{schedule.name}: #{code} isn't on this node, " <>
           "leaving it for one that has it"
       )
     else
-      record_failure(
-        schedule,
-        config,
-        "Failed to load module #{schedule.workflow_module}: #{inspect(reason)}"
-      )
+      record_failure(schedule, config, "Failed to load #{code}: #{inspect(reason)}")
     end
   end
 
   defp record_failure(schedule, config, message) do
-    changeset =
-      ScheduledWorkflow.failure_changeset(schedule, message,
-        next_run_at: API.next_run_after_failure(schedule),
-        auto_disable_after: 5
-      )
+    case API.record_failure(schedule, message, config) do
+      nil ->
+        Logger.debug(
+          "[Durable.Scheduler] #{schedule.name}: the fire that failed was recorded by " <>
+            "another node, or the schedule has changed since"
+        )
 
-    case Repo.update(changeset, config) do
-      {:ok, updated} ->
-        if updated.auto_disabled_at do
-          Logger.error(
-            "[Durable.Scheduler] Auto-disabled #{schedule.name} after " <>
-              "#{updated.consecutive_failures} consecutive failures: #{message}"
-          )
+      %{auto_disabled_at: nil} = updated ->
+        Logger.warning(
+          "[Durable.Scheduler] Schedule #{schedule.name} failure " <>
+            "(#{updated.consecutive_failures}): #{message}"
+        )
 
-          Durable.Activity.record(config, "schedule_disabled",
-            queue: schedule.queue,
-            details: %{
-              schedule: schedule.name,
-              failures: updated.consecutive_failures,
-              error: message
-            }
-          )
-        else
-          Logger.warning(
-            "[Durable.Scheduler] Schedule #{schedule.name} failure " <>
-              "(#{updated.consecutive_failures}): #{message}"
-          )
-        end
-
-      {:error, cs} ->
+      updated ->
         Logger.error(
-          "[Durable.Scheduler] Failed to record failure for #{schedule.name}: " <>
-            inspect(cs.errors)
+          "[Durable.Scheduler] Auto-disabled #{schedule.name} after " <>
+            "#{updated.consecutive_failures} consecutive failures: #{message}"
+        )
+
+        Durable.Activity.record(config, "schedule_disabled",
+          queue: schedule.queue,
+          details: %{
+            schedule: schedule.name,
+            failures: updated.consecutive_failures,
+            error: message
+          }
         )
     end
   end

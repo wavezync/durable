@@ -171,7 +171,7 @@ defmodule Durable.Keys do
     result =
       Repo.transaction(config, fn ->
         lock_key(config, ctx.entry)
-        claim(ctx, @rounds, nil)
+        unheld_waiting(ctx) || claim(ctx, @rounds, nil)
       end)
 
     with {:ok, claimed} <- result, do: finish(ctx, claimed)
@@ -368,22 +368,40 @@ defmodule Durable.Keys do
     end
   end
 
+  # The run waiting for the key (run_again), if no worker has it yet.
+  defp waiting(entry) do
+    from(w in WorkflowExecution,
+      where:
+        w.workflow_module == ^entry.workflow_module and
+          w.workflow_name == ^entry.workflow_name and w.key == ^entry.key and
+          not is_nil(w.runs_after_id) and w.status == :pending and is_nil(w.locked_by)
+    )
+  end
+
   defp refresh_waiting(%{config: config, entry: entry}) do
     {_, ids} =
-      Repo.update_all(
-        config,
-        from(w in WorkflowExecution,
-          where:
-            w.workflow_module == ^entry.workflow_module and
-              w.workflow_name == ^entry.workflow_name and w.key == ^entry.key and
-              not is_nil(w.runs_after_id) and w.status == :pending and is_nil(w.locked_by),
-          select: w.id
-        ),
+      Repo.update_all(config, from(w in waiting(entry), select: w.id),
         set: [input: entry.input, updated_at: DateTime.utc_now()]
       )
 
     List.first(ids)
   end
+
+  # run_again with nobody holding the key: its holder let it go to be rolled
+  # back (`Executor.without_key/2`), or was pruned. A run still waiting takes
+  # the newer input, as it would behind a holder: a new holder would run
+  # first, and leave the older input to run last.
+  defp unheld_waiting(%{mode: :run_again} = ctx) do
+    with nil <- holder(ctx.config, ctx.entry),
+         %WorkflowExecution{} = waiter <- Repo.one(ctx.config, waiting(ctx.entry)),
+         id when is_binary(id) <- refresh_waiting(ctx) do
+      {:waiting_refreshed, id, waiter}
+    else
+      _ -> nil
+    end
+  end
+
+  defp unheld_waiting(_ctx), do: nil
 
   # Gives the newer input to a debounced run that hasn't been claimed, and
   # pushes its start back by `period`, but not past `timeout` after the first
@@ -626,20 +644,35 @@ defmodule Durable.Keys do
     end
   end
 
+  # Only as the claim that came for the key: the run was read before the key's
+  # lock was had, and cancelled while it waited for it, it would end up
+  # cancelled and holding the key.
   defp hold(config, run, workflow_def, from, rounds) do
-    run
-    |> Ecto.Changeset.change(
-      holds_key: true,
-      runs_after_id: nil,
-      deadline_at: Executor.deadline(workflow_def, DateTime.utc_now())
-    )
-    |> Ecto.Changeset.unique_constraint(:key, name: :workflow_executions_key_holder_index)
-    |> Repo.update(config, mode: :savepoint)
-    |> case do
-      {:ok, taken} -> {:ok, taken, from}
-      {:error, _} -> do_take_waiting(config, run, workflow_def, rounds - 1)
+    changeset =
+      run
+      |> Ecto.Changeset.change(
+        holds_key: true,
+        runs_after_id: nil,
+        deadline_at: Executor.deadline(workflow_def, DateTime.utc_now())
+      )
+      |> Ecto.Changeset.unique_constraint(:key, name: :workflow_executions_key_holder_index)
+
+    case Repo.update(%{changeset | filters: claim_of(run)}, config,
+           mode: :savepoint,
+           stale_error_field: :status
+         ) do
+      {:ok, taken} ->
+        {:ok, taken, from}
+
+      {:error, %{errors: errors}} ->
+        if match?({_, [stale: true]}, errors[:status]),
+          do: {:error, :superseded},
+          else: do_take_waiting(config, run, workflow_def, rounds - 1)
     end
   end
+
+  defp claim_of(%{status: status, lock_token: nil}), do: %{status: status}
+  defp claim_of(%{status: status, lock_token: token}), do: %{status: status, lock_token: token}
 
   @doc false
   # A retry of a run that lost its key takes it back by the start rules.
@@ -664,6 +697,12 @@ defmodule Durable.Keys do
     case holder(config, run) do
       nil ->
         {:ok, [holds_key: true]}
+
+      # The run itself: another retry took the key back for it while this one
+      # waited for the key's lock. Nothing to take, and the reopen that
+      # follows finds the run no longer failed.
+      %{id: id} when id == run.id ->
+        {:ok, []}
 
       holder ->
         cond do

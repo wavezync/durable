@@ -25,6 +25,10 @@ defmodule Durable.Wait.TimeoutWorker do
 
   @default_interval 60_000
 
+  # How many overdue rows a sweep reads at a time. After a long outage the
+  # backlog can be every wait there is.
+  @default_batch_size 500
+
   # ============================================================================
   # Client API
   # ============================================================================
@@ -36,14 +40,16 @@ defmodule Durable.Wait.TimeoutWorker do
 
   - `:config` - The Durable config (required)
   - `:interval` - Check interval in milliseconds (default: 60_000)
+  - `:batch_size` - Rows a sweep reads at a time (default: 500)
   """
   def start_link(opts) do
     config = Keyword.fetch!(opts, :config)
     interval = Keyword.get(opts, :interval, @default_interval)
+    batch_size = Keyword.get(opts, :batch_size, @default_batch_size)
 
     GenServer.start_link(
       __MODULE__,
-      %{config: config, interval: interval},
+      %{config: config, interval: interval, batch_size: batch_size},
       name: worker_name(config.name)
     )
   end
@@ -74,14 +80,14 @@ defmodule Durable.Wait.TimeoutWorker do
 
   @impl true
   def handle_info(:check_timeouts, state) do
-    do_check_timeouts(state.config)
+    do_check_timeouts(state)
     schedule_check(state.interval)
     {:noreply, state}
   end
 
   @impl true
   def handle_cast(:check_timeouts, state) do
-    do_check_timeouts(state.config)
+    do_check_timeouts(state)
     {:noreply, state}
   end
 
@@ -93,25 +99,25 @@ defmodule Durable.Wait.TimeoutWorker do
     Process.send_after(self(), :check_timeouts, interval)
   end
 
-  defp do_check_timeouts(config) do
+  defp do_check_timeouts(%{config: config, batch_size: batch_size}) do
     now = DateTime.utc_now()
 
     for sweep <- [
-          &process_timed_out_inputs/2,
-          &process_timed_out_events/2,
-          &process_timed_out_wait_groups/2,
-          &process_expired_runs/2,
-          &process_overdue_rollbacks/2,
-          &process_unpolled_runs/2
+          &process_timed_out_inputs/3,
+          &process_timed_out_events/3,
+          &process_timed_out_wait_groups/3,
+          &process_expired_runs/3,
+          &process_overdue_rollbacks/3,
+          &process_unpolled_runs/3
         ] do
-      run_sweep(sweep, config, now)
+      run_sweep(sweep, config, now, batch_size)
     end
   end
 
   # A row one sweep can't handle mustn't stop the others, or crash this process
   # over and over until it takes the node's Durable down with it.
-  defp run_sweep(sweep, config, now) do
-    sweep.(config, now)
+  defp run_sweep(sweep, config, now, batch_size) do
+    sweep.(config, now, batch_size)
   rescue
     error -> Logger.error("[Durable] timeout sweep failed: #{Exception.message(error)}")
   end
@@ -119,63 +125,52 @@ defmodule Durable.Wait.TimeoutWorker do
   # A failed run nobody retried or rolled back within its workflow's
   # `on_failure: [rollback_after: ms]` is rolled back, on a worker. Two nodes
   # sweeping at once ask twice, and the run's status lets one through.
-  defp process_overdue_rollbacks(config, now) do
-    ids =
-      Repo.all(
-        config,
-        from(w in WorkflowExecution,
-          where: w.status == :failed and w.scheduled_at <= ^now,
-          select: w.id,
-          limit: 500
-        )
-      )
+  defp process_overdue_rollbacks(config, now, batch_size) do
+    each_due(config, runs(:failed), :scheduled_at, now, batch_size, fn config, run ->
+      Executor.rollback_workflow(run.id, durable: config.name)
+    end)
+  end
 
-    Enum.each(ids, &Executor.rollback_workflow(&1, durable: config.name))
+  # The runs in `status`, read light: a sweep needs only what it pages by.
+  defp runs(status) do
+    from(w in WorkflowExecution,
+      where: w.status == ^status,
+      select: struct(w, [:id, :scheduled_at, :deadline_at])
+    )
   end
 
   # A waiting run past its deadline is resumed; the executor sees the deadline
   # before the step re-runs and fails the run (running its compensations).
   # Resume first, so an input answered at the same moment isn't marked timed
-  # out; only then close the waits it no longer needs.
-  defp process_expired_runs(config, now) do
-    ids =
-      Repo.all(
-        config,
-        from(w in WorkflowExecution,
-          where: w.status == :waiting and w.deadline_at <= ^now,
-          select: w.id,
-          limit: 500
-        )
-      )
+  # out; only then close the waits it no longer needs. In one transaction: a
+  # sweep lost in between left a wait open on a failed run, and its retry
+  # couldn't wait under that name again.
+  defp process_expired_runs(config, now, batch_size) do
+    each_due(config, runs(:waiting), :deadline_at, now, batch_size, fn config, run ->
+      Repo.transaction(config, fn -> expire(config, run.id, now) end)
+    end)
+  end
 
-    for id <- ids,
-        {:ok, _} <- [Executor.resume_workflow(id, %{}, durable: config.name)] do
-      close_waits(config, id, now)
-    end
+  defp expire(config, id, now) do
+    with {:ok, _} <- Executor.resume_workflow(id, %{}, durable: config.name),
+         do: close_waits(config, id, now)
   end
 
   # A run past its deadline on a queue a live node polls is failed by the claim
   # that reaches it, so a paused or backlogged queue keeps its limits. On any
   # other queue no claim is coming, so it moves to one where it is.
-  defp process_unpolled_runs(config, now) do
+  defp process_unpolled_runs(config, now, batch_size) do
     polled =
       for %{status: :alive, queues: queues} <- NodeRegistry.list(config),
           queue <- queues,
           uniq: true,
           do: queue
 
-    ids =
-      Repo.all(
-        config,
-        from(w in WorkflowExecution,
-          where: w.status == :pending and w.deadline_at <= ^now,
-          where: w.queue not in ^polled,
-          select: w.id,
-          limit: 500
-        )
-      )
+    unpolled = from(w in runs(:pending), where: w.queue not in ^polled)
 
-    Enum.each(ids, &expire_unpolled(config, &1, polled))
+    each_due(config, unpolled, :deadline_at, now, batch_size, fn config, run ->
+      expire_unpolled(config, run.id, polled)
+    end)
   end
 
   defp expire_unpolled(config, id, polled) do
@@ -197,23 +192,51 @@ defmodule Durable.Wait.TimeoutWorker do
     end
   end
 
-  defp process_timed_out_inputs(config, now) do
-    # Find pending inputs that have timed out
-    query =
-      from(p in PendingInput,
-        where:
-          p.status == :pending and
-            not is_nil(p.timeout_at) and
-            p.timeout_at <= ^now,
-        preload: [:workflow]
+  # The rows of `query` due by `field`, oldest first and a batch at a time,
+  # each handed to `handle`. A node back after a day finds everything it has
+  # overdue at once, and that is never one load. Each batch starts after the
+  # last row of the one before, so a row that couldn't be handled is passed
+  # by, for the next check, and the sweep ends: rows that never can be don't
+  # keep the rest waiting behind them.
+  defp each_due(config, query, field, now, batch_size, handle, last \\ nil) do
+    rows =
+      Repo.all(
+        config,
+        from(p in after_row(query, field, last),
+          where: field(p, ^field) <= ^now,
+          order_by: [asc: field(p, ^field), asc: p.id],
+          limit: ^batch_size
+        )
       )
 
-    timed_out = Repo.all(config, query)
+    Enum.each(rows, &handle.(config, &1))
 
-    Enum.each(timed_out, fn pending_input ->
-      handle_input_timeout(config, pending_input)
-    end)
+    if length(rows) == batch_size,
+      do: each_due(config, query, field, now, batch_size, handle, List.last(rows))
   end
+
+  defp after_row(query, _field, nil), do: query
+
+  defp after_row(query, field, last) do
+    at = Map.fetch!(last, field)
+
+    from(p in query,
+      where: field(p, ^field) > ^at or (field(p, ^field) == ^at and p.id > ^last.id)
+    )
+  end
+
+  defp pending(schema), do: from(p in schema, where: p.status == :pending)
+
+  defp process_timed_out_inputs(config, now, batch_size),
+    do:
+      each_due(
+        config,
+        pending(PendingInput),
+        :timeout_at,
+        now,
+        batch_size,
+        &handle_input_timeout/2
+      )
 
   defp handle_input_timeout(config, pending_input) do
     on_timeout = pending_input.on_timeout || :resume
@@ -261,24 +284,12 @@ defmodule Durable.Wait.TimeoutWorker do
      }}
   end
 
-  defp process_timed_out_events(config, now) do
-    # Find pending events that have timed out (only single events, not in groups)
-    query =
-      from(p in PendingEvent,
-        where:
-          p.status == :pending and
-            p.wait_type == :single and
-            is_nil(p.wait_group_id) and
-            not is_nil(p.timeout_at) and
-            p.timeout_at <= ^now,
-        preload: [:workflow]
-      )
+  # Only single events: one in a group times out with its group.
+  defp process_timed_out_events(config, now, batch_size) do
+    single =
+      from(p in pending(PendingEvent), where: p.wait_type == :single and is_nil(p.wait_group_id))
 
-    timed_out = Repo.all(config, query)
-
-    Enum.each(timed_out, fn pending_event ->
-      handle_event_timeout(config, pending_event)
-    end)
+    each_due(config, single, :timeout_at, now, batch_size, &handle_event_timeout/2)
   end
 
   defp handle_event_timeout(config, pending_event) do
@@ -401,28 +412,20 @@ defmodule Durable.Wait.TimeoutWorker do
     end
   end
 
-  defp process_timed_out_wait_groups(config, now) do
-    # Find wait groups that have timed out
-    query =
-      from(w in WaitGroup,
-        where:
-          w.status == :pending and
-            not is_nil(w.timeout_at) and
-            w.timeout_at <= ^now,
-        preload: [:workflow]
+  defp process_timed_out_wait_groups(config, now, batch_size),
+    do:
+      each_due(
+        config,
+        pending(WaitGroup),
+        :timeout_at,
+        now,
+        batch_size,
+        &handle_wait_group_timeout/2
       )
 
-    timed_out = Repo.all(config, query)
-
-    Enum.each(timed_out, fn wait_group ->
-      handle_wait_group_timeout(config, wait_group)
-    end)
-  end
-
+  # The wait reads what it got, and that it timed out, from its own group.
   defp handle_wait_group_timeout(config, wait_group) do
-    resume_data = build_wait_group_resume_data(wait_group)
-
-    case atomic_resume_after_timeout(config, wait_group, resume_data) do
+    case atomic_resume_after_timeout(config, wait_group, {%{}, %{"__timeout__" => true}}) do
       {:ok, %{pending: {0, _}}} ->
         :ok
 
@@ -435,35 +438,6 @@ defmodule Durable.Wait.TimeoutWorker do
             "#{stage} → #{inspect(reason)}"
         )
     end
-  end
-
-  # Builds the resume context for a timed-out wait group.
-  #
-  # Bug M-4: include per-event status in the resume payload so user code
-  # can distinguish events that were :received from events that :timed_out.
-  defp build_wait_group_resume_data(wait_group) do
-    received = wait_group.received_events || %{}
-
-    per_event_status =
-      Map.new(wait_group.event_names || [], fn name ->
-        case Map.get(received, name) do
-          nil -> {name, %{"status" => "timeout", "value" => nil}}
-          payload -> {name, %{"status" => "received", "value" => payload}}
-        end
-      end)
-
-    fallback_result =
-      case wait_group.wait_type do
-        :any -> {:timeout, nil}
-        :all -> {:timeout, received}
-      end
-
-    {%{},
-     %{
-       "__wait_group_result__" => fallback_result,
-       "__wait_group_status__" => per_event_status,
-       "__timeout__" => true
-     }}
   end
 
   defp log_wait_group_timeout_success(wait_group) do

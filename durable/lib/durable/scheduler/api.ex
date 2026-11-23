@@ -222,7 +222,6 @@ defmodule Durable.Scheduler.API do
           {:ok, ScheduledWorkflow.t()} | {:error, term()}
   def update_schedule(name, changes) do
     durable_name = Keyword.get(changes, :durable, Durable)
-    config = Config.get(durable_name)
 
     changes =
       case Keyword.pop(changes, :cron) do
@@ -230,11 +229,34 @@ defmodule Durable.Scheduler.API do
         {cron, changes} -> Keyword.put(changes, :cron_expression, cron)
       end
 
-    with {:ok, schedule} <- get_schedule(name, durable: durable_name),
-         {:ok, attrs} <- build_update_attrs(changes, schedule) do
-      schedule
-      |> ScheduledWorkflow.update_changeset(attrs)
-      |> Repo.update(config)
+    edit_schedule(name, durable_name, fn schedule ->
+      with {:ok, attrs} <- build_update_attrs(changes, schedule),
+           do: {:ok, ScheduledWorkflow.update_changeset(schedule, attrs)}
+    end)
+  end
+
+  # An edit is made to the schedule as it is, under its row's lock, not to a
+  # copy read before: two operators editing one schedule at once take turns,
+  # and each works out the next run from what the other left. Made to copies,
+  # one turning a schedule on and one moving its time left it set for the new
+  # time and due at the old one.
+  defp edit_schedule(name, durable_name, edit) do
+    config = Config.get(durable_name)
+
+    with {:ok, _exists} <- get_schedule(name, durable: durable_name) do
+      Repo.transaction(config, fn -> edit_locked(config, name, edit) end)
+    end
+  end
+
+  defp edit_locked(config, name, edit) do
+    locked = from(s in ScheduledWorkflow, where: s.name == ^name, lock: "FOR UPDATE")
+
+    with %ScheduledWorkflow{} = schedule <- Repo.one(config, locked) || {:error, :not_found},
+         {:ok, changeset} <- edit.(schedule),
+         {:ok, edited} <- Repo.update(changeset, config) do
+      edited
+    else
+      {:error, reason} -> config.repo.rollback(reason)
     end
   end
 
@@ -270,16 +292,14 @@ defmodule Durable.Scheduler.API do
   @spec enable_schedule(String.t(), keyword()) ::
           {:ok, ScheduledWorkflow.t()} | {:error, term()}
   def enable_schedule(name, opts \\ []) do
-    durable_name = Keyword.get(opts, :durable, Durable)
-    config = Config.get(durable_name)
-
-    with {:ok, schedule} <- get_schedule(name, durable: durable_name),
-         {:ok, next_run} <- compute_next_run(schedule.cron_expression, schedule.timezone) do
-      schedule
-      |> ScheduledWorkflow.enable_changeset(true)
-      |> Ecto.Changeset.put_change(:next_run_at, next_run)
-      |> Repo.update(config)
-    end
+    edit_schedule(name, Keyword.get(opts, :durable, Durable), fn schedule ->
+      with {:ok, next_run} <- compute_next_run(schedule.cron_expression, schedule.timezone) do
+        {:ok,
+         schedule
+         |> ScheduledWorkflow.enable_changeset(true)
+         |> Ecto.Changeset.put_change(:next_run_at, next_run)}
+      end
+    end)
   end
 
   @doc """
@@ -293,14 +313,9 @@ defmodule Durable.Scheduler.API do
   @spec disable_schedule(String.t(), keyword()) ::
           {:ok, ScheduledWorkflow.t()} | {:error, term()}
   def disable_schedule(name, opts \\ []) do
-    durable_name = Keyword.get(opts, :durable, Durable)
-    config = Config.get(durable_name)
-
-    with {:ok, schedule} <- get_schedule(name, durable: durable_name) do
-      schedule
-      |> ScheduledWorkflow.enable_changeset(false)
-      |> Repo.update(config)
-    end
+    edit_schedule(name, Keyword.get(opts, :durable, Durable), fn schedule ->
+      {:ok, ScheduledWorkflow.enable_changeset(schedule, false)}
+    end)
   end
 
   @doc """
@@ -478,7 +493,9 @@ defmodule Durable.Scheduler.API do
   @spec claim_fire(ScheduledWorkflow.t(), Config.t()) :: boolean()
   def claim_fire(%ScheduledWorkflow{} = schedule, %Config{} = config) do
     now = DateTime.utc_now()
-    {:ok, next_run} = compute_next_run(schedule.cron_expression, schedule.timezone)
+
+    {:ok, next_run} =
+      compute_next_run(schedule.cron_expression, schedule.timezone, schedule.next_run_at)
 
     {count, _} =
       Repo.update_all(
@@ -497,6 +514,53 @@ defmodule Durable.Scheduler.API do
       )
 
     count == 1
+  end
+
+  @auto_disable_after 5
+
+  @doc false
+  # Records that the fire `schedule` was read for failed, and turns the
+  # schedule off at its fifth failure in a row. Like `claim_fire/2`, one
+  # conditional UPDATE on the fire as it was read: of the nodes that failed it
+  # only one counts it, and a schedule an operator changed or turned off
+  # meanwhile is left as they made it. The count is the row's own, not the one
+  # this node read. Returns the schedule as written, or nil if it wasn't.
+  @spec record_failure(ScheduledWorkflow.t(), String.t(), Config.t()) ::
+          ScheduledWorkflow.t() | nil
+  def record_failure(%ScheduledWorkflow{} = schedule, message, %Config{} = config) do
+    now = DateTime.utc_now()
+    error = String.slice(to_string(message), 0, 1024)
+    next_run = next_run_after_failure(schedule)
+
+    {_count, written} =
+      Repo.update_all(
+        config,
+        from(s in ScheduledWorkflow,
+          where: s.id == ^schedule.id and s.next_run_at == ^schedule.next_run_at and s.enabled,
+          select: s,
+          update: [
+            set: [
+              last_error: ^error,
+              last_error_at: ^now,
+              next_run_at: ^next_run,
+              updated_at: ^now,
+              consecutive_failures: fragment("COALESCE(?, 0) + 1", s.consecutive_failures),
+              enabled:
+                fragment("COALESCE(?, 0) + 1 < ?", s.consecutive_failures, ^@auto_disable_after),
+              auto_disabled_at:
+                fragment(
+                  "CASE WHEN COALESCE(?, 0) + 1 >= ? THEN ?::timestamp END",
+                  s.consecutive_failures,
+                  ^@auto_disable_after,
+                  ^now
+                )
+            ]
+          ]
+        ),
+        []
+      )
+
+    List.first(written)
   end
 
   @doc false
@@ -559,10 +623,23 @@ defmodule Durable.Scheduler.API do
     end
   end
 
-  defp compute_next_run(cron_expression, timezone) do
+  # `fired` is the fire being claimed. One claimed late, after the clocks went
+  # back, mustn't fire again when the wall clock shows its time a second time:
+  # the next comes after the wall time it fired for, as well as after now.
+  defp compute_next_run(cron_expression, timezone, fired \\ nil) do
     with {:ok, cron} <- CronParser.parse(cron_expression),
-         {:ok, now} <- get_local_time(timezone) do
-      next_fire(cron, now, timezone, DateTime.utc_now())
+         {:ok, now} <- get_local_time(timezone),
+         {:ok, from} <- after_fired(now, fired, timezone) do
+      next_fire(cron, from, timezone, DateTime.utc_now())
+    end
+  end
+
+  defp after_fired(local_now, nil, _timezone), do: {:ok, local_now}
+
+  defp after_fired(local_now, fired, timezone) do
+    with {:ok, local} <- zoned(fired, timezone) do
+      fired_minute_over = local |> DateTime.to_naive() |> NaiveDateTime.add(60)
+      {:ok, Enum.max([local_now, fired_minute_over], NaiveDateTime)}
     end
   end
 
@@ -612,6 +689,8 @@ defmodule Durable.Scheduler.API do
       upcoming -> shift_to_utc(upcoming, timezone)
     end
   end
+
+  defp zoned(utc, timezone) when timezone in ["UTC", "Etc/UTC"], do: {:ok, utc}
 
   defp zoned(utc, timezone) do
     case DateTime.shift_zone(utc, timezone) do
@@ -739,8 +818,13 @@ defmodule Durable.Scheduler.API do
     end
   end
 
+  # A schedule turned back on starts from its next time, as with
+  # enable_schedule/2: the one it had may have gone by while it was off.
   defp updated_timing(changes, schedule) do
-    if Keyword.has_key?(changes, :cron_expression) or Keyword.has_key?(changes, :timezone) do
+    turned_on? = changes[:enabled] == true and not schedule.enabled
+
+    if turned_on? or Keyword.has_key?(changes, :cron_expression) or
+         Keyword.has_key?(changes, :timezone) do
       cron = Keyword.get(changes, :cron_expression, schedule.cron_expression)
       timezone = Keyword.get(changes, :timezone, schedule.timezone)
 

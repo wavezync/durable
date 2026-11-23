@@ -682,8 +682,9 @@ defmodule Durable.Audit4ExecBugsTest do
 
       {:ok, _} = Durable.retry(run.id)
       assert drain(run).status == :failed
-      assert Audit4ExecBugSeen.get(:posted) == 2
-      assert length(children(run)) == 2
+      # into: runs again on the lane's result; the lane isn't started again.
+      assert Audit4ExecBugSeen.get(:posted) == 1
+      assert length(children(run)) == 1
     end
 
     test "still reaches the block itself, and a step after it" do

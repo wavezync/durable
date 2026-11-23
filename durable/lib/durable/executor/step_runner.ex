@@ -23,9 +23,17 @@ defmodule Durable.Executor.StepRunner do
   # A date or a decimal is a map to Elixir, but JSON stores it as a scalar, and
   # a run's data has to come back as an object.
   @scalars [Date, DateTime, NaiveDateTime, Time, Decimal]
-  defguardp is_run_data(term)
-            when is_map(term) and
-                   not (is_struct(term) and :erlang.map_get(:__struct__, term) in @scalars)
+  @doc false
+  defguard is_run_data(term)
+           when is_map(term) and
+                  not (is_struct(term) and :erlang.map_get(:__struct__, term) in @scalars)
+
+  # A snooze's time to run again is written to the row, and Postgres holds
+  # none past the year 294276: a longer one is an invalid return, not a crash
+  # in the save.
+  # ponytail: a fixed bound (285,000 years), not "the last timestamp less now".
+  @max_snooze_ms 9_000_000_000_000_000
+  defguardp is_snooze(ms) when is_integer(ms) and ms >= 0 and ms <= @max_snooze_ms
 
   @suspending [
     :sleep,
@@ -365,6 +373,8 @@ defmodule Durable.Executor.StepRunner do
     # the failed attempt's put_context/2 writes.
     Process.put(:durable_context, data)
     Process.put(:durable_context_before, data)
+    # Each wait counts its calls from the top of the body (`Durable.Wait`).
+    Process.delete(:durable_wait_calls)
 
     # The attempt's row, written once the span has begun. Its id names the span.
     step_exec = %StepExecution{
@@ -425,9 +435,17 @@ defmodule Durable.Executor.StepRunner do
   end
 
   # The step's own `timeout:` or what's left until the run's deadline,
-  # whichever is shorter; nil when neither applies.
+  # whichever is shorter; nil when neither applies. What's left is rounded up
+  # to the millisecond: rounded down, the step was stopped before the deadline,
+  # and a run not yet past it retried the step in place of failing.
   defp time_limit(step, deadline) do
-    left = deadline && max(DateTime.diff(deadline, DateTime.utc_now(), :millisecond), 0)
+    left =
+      deadline &&
+        deadline
+        |> DateTime.diff(DateTime.utc_now(), :microsecond)
+        |> Kernel./(1000)
+        |> ceil()
+        |> max(0)
 
     [{step.opts[:timeout], :step}, {left, :run}]
     |> Enum.filter(&elem(&1, 0))
@@ -518,7 +536,10 @@ defmodule Durable.Executor.StepRunner do
   @cancel_scopes [:run, :workflow, :root]
 
   defp step_outcome({:ok, data}) when is_run_data(data), do: %{result: :ok}
-  defp step_outcome({:goto, _target, _data}), do: %{result: :ok}
+
+  defp step_outcome({:goto, target, data}) when is_atom(target) and is_run_data(data),
+    do: %{result: :ok}
+
   defp step_outcome({:throw, {kind, _opts}}) when kind in @suspending, do: %{result: :suspended}
   defp step_outcome({:error, error}), do: %{result: :error, error: error_summary(error)}
   defp step_outcome({:fail, error}), do: %{result: :error, error: error_summary(error)}
@@ -526,10 +547,8 @@ defmodule Durable.Executor.StepRunner do
   defp step_outcome({:rollback, reason}),
     do: %{result: :error, error: error_summary(rollback_error(reason))}
 
-  defp step_outcome({:snooze, ms}) when is_integer(ms) and ms >= 0, do: %{result: :snoozed}
-
-  defp step_outcome({:snooze, ms, _reason}) when is_integer(ms) and ms >= 0,
-    do: %{result: :snoozed}
+  defp step_outcome({:snooze, ms}) when is_snooze(ms), do: %{result: :snoozed}
+  defp step_outcome({:snooze, ms, _reason}) when is_snooze(ms), do: %{result: :snoozed}
 
   defp step_outcome({:cancel, _reason}), do: %{result: :cancelled}
 
@@ -573,7 +592,7 @@ defmodule Durable.Executor.StepRunner do
 
   # Handle decision with goto
   defp handle_result({:goto, target, new_data}, ctx)
-       when is_atom(target) and is_map(new_data) do
+       when is_atom(target) and is_run_data(new_data) do
     new_data = EngineState.strip(new_data)
 
     %{step_exec: step_exec, logs: logs, duration_ms: duration_ms, config: config} = ctx
@@ -641,10 +660,9 @@ defmodule Durable.Executor.StepRunner do
   end
 
   # The step asks to run again later, without using an attempt.
-  defp handle_result({:snooze, ms}, ctx) when is_integer(ms) and ms >= 0,
-    do: snooze(ms, nil, ctx)
+  defp handle_result({:snooze, ms}, ctx) when is_snooze(ms), do: snooze(ms, nil, ctx)
 
-  defp handle_result({:snooze, ms, reason}, ctx) when is_integer(ms) and ms >= 0,
+  defp handle_result({:snooze, ms, reason}, ctx) when is_snooze(ms),
     do: snooze(ms, reason_text(reason), ctx)
 
   # The step says retrying won't help: fail now, whatever attempts are left.
@@ -725,8 +743,30 @@ defmodule Durable.Executor.StepRunner do
 
   defp handle_step_success(config, _step, step_exec, new_data, logs, duration_ms) do
     output = Map.merge(put_in_body(), new_data)
+
+    record_deleted(config, step_exec, deleted_in_body())
     {:ok, _} = complete_step_execution(config, step_exec, output, logs, duration_ms)
     {:ok, new_data}
+  end
+
+  # Written before the row is completed: a completed row whose body deleted
+  # something always has its keys on the run. Lost in between, the row isn't
+  # completed and the step runs again as another row, which these don't name.
+  # Not fenced, as `Orchestration.record_child/3` isn't: it only names a row
+  # that exists, and is read for no other.
+  defp record_deleted(_config, _step_exec, []), do: :ok
+
+  defp record_deleted(config, step_exec, keys) do
+    dropped = %{EngineState.dropped_key(step_exec.id) => keys}
+
+    Repo.update_all(
+      config,
+      from(w in WorkflowExecution,
+        where: w.id == ^step_exec.workflow_id,
+        update: [set: [engine_state: fragment("? || ?", w.engine_state, type(^dropped, :map))]]
+      ),
+      []
+    )
   end
 
   # What the body put in the context without returning it is part of its
@@ -737,6 +777,14 @@ defmodule Durable.Executor.StepRunner do
 
     Process.get(:durable_context, %{})
     |> Map.reject(fn {key, value} -> match?(%{^key => ^value}, before) end)
+  end
+
+  # And what it took out of the context, which the output can't say: the keys
+  # it was handed that the context no longer has. They go in the run's engine
+  # state, since the output is the user's data.
+  defp deleted_in_body do
+    before = Process.get(:durable_context_before, %{})
+    Map.keys(before) -- Map.keys(Process.get(:durable_context, %{}))
   end
 
   defp get_max_attempts(%Step{opts: opts}) do

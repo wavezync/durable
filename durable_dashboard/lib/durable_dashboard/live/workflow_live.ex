@@ -289,6 +289,7 @@ defmodule DurableDashboard.Live.WorkflowLive do
   defp describe_error(:rolled_back), do: "This run was rolled back — rerun it instead."
   defp describe_error(:not_failed), do: "Only a failed run can be retried or rolled back."
   defp describe_error(:not_finished), do: "Only finished runs can be rerun."
+  defp describe_error(:lane), do: "A lane reruns with its block. Rerun the block's run."
   defp describe_error(:already_completed), do: "The run already finished."
   defp describe_error(:invalid_json), do: "That input isn't valid JSON."
   defp describe_error(:input_not_an_object), do: "The input must be a JSON object."
@@ -433,7 +434,8 @@ defmodule DurableDashboard.Live.WorkflowLive do
         parent_step_lookup: ChildrenTab.step_lookup(assigns.family, assigns.steps),
         retry_block: KeyTab.block(:retry, w, info),
         rerun_block: KeyTab.block(:rerun, w, info),
-        releasable?: KeyTab.release_changes?(w, info)
+        releasable?: KeyTab.release_changes?(w, info),
+        lane?: lane?(w)
       )
 
     ~H"""
@@ -485,7 +487,7 @@ defmodule DurableDashboard.Live.WorkflowLive do
           Release key
         </Core.button>
         <Core.button
-          :if={@workflow.status in finished_statuses()}
+          :if={@workflow.status in finished_statuses() and not @lane?}
           phx-click="edit-input"
           disabled={blocked?(@rerun_block)}
           data-tip="Start a new run with input you edit first · this one stays as it is"
@@ -493,7 +495,7 @@ defmodule DurableDashboard.Live.WorkflowLive do
           Rerun with edited input…
         </Core.button>
         <Core.button
-          :if={@workflow.status in finished_statuses()}
+          :if={@workflow.status in finished_statuses() and not @lane?}
           kind={if @workflow.status == :failed, do: "secondary", else: "primary"}
           phx-click="rerun"
           disabled={blocked?(@rerun_block)}
@@ -533,6 +535,18 @@ defmodule DurableDashboard.Live.WorkflowLive do
         info={@key_info}
         base_path={@base_path}
       />
+      <p
+        :if={@can_operate? and @lane? and @workflow.status in finished_statuses()}
+        class="w-full text-xs text-muted-foreground"
+      >
+        A lane reruns with its block:
+        <.link
+          navigate={DPath.execution(@base_path, @workflow.parent_workflow_id)}
+          class="text-primary hover:underline"
+        >
+          rerun the block's run
+        </.link>.
+      </p>
       <KeyTab.blocked_line
         :if={@can_operate? and @workflow.status in finished_statuses() and not blocked?(@retry_block)}
         action={:rerun}
@@ -582,6 +596,10 @@ defmodule DurableDashboard.Live.WorkflowLive do
 
   defp blocked?({:blocked, _, _}), do: true
   defp blocked?(_block), do: false
+
+  # A lane runs as part of its block's run, and the engine refuses to rerun it
+  # on its own.
+  defp lane?(run), do: run |> ChildrenTab.split() |> elem(1) |> Map.has_key?("__parallel_step")
 
   defp retry_tip({:take, nil}),
     do: "Carry on from the failed step · no run holds its key now, so it takes it back"

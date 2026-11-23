@@ -413,6 +413,9 @@ defmodule Durable.WorkflowTimeoutTest do
       assert %{status: :pending, queue: "nobody"} = run(child.id)
 
       repo().insert!(polling_node(["default"]))
+      # The lane has no `timeout:`, so its deadline is the run's. One due
+      # before the run's is a lane's own, and that lane is moved.
+      expire(parent)
       expire(child.id)
       sweep()
 
@@ -456,6 +459,8 @@ defmodule Durable.WorkflowTimeoutTest do
   test "a retried run gets its full timeout again" do
     {:ok, id} = Executor.start_workflow(SlowSaga, %{}, inline: true)
     repo().update_all(from(w in WorkflowExecution, where: w.id == ^id), set: [status: :failed])
+    # A run with an undo that completed can't be retried: this one failed with nothing undone.
+    repo().delete_all(from(s in StepExecution, where: s.workflow_id == ^id and s.is_compensation))
 
     before = DateTime.utc_now()
     {:ok, ^id} = Durable.retry(id)

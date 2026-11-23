@@ -434,8 +434,12 @@ defmodule Durable.Fuzz.Audit4ApiWaitsTest do
     tree(json_leaf(), fn child ->
       one_of([
         list_of(child, max_length: 3),
-        # No name twice in one map, once as an atom and once as a string.
-        map_of(one_of([member_of(@names), member_of([:nested, :deeper])]), child, max_length: 3),
+        # No name twice in one map, once as an atom and once as a string. Two
+        # of the names are drawn often, so a map takes more tries to fill.
+        map_of(one_of([member_of(@names), member_of([:nested, :deeper])]), child,
+          max_length: 3,
+          max_tries: 100
+        ),
         tuple({child, child})
       ])
     end)
@@ -445,7 +449,9 @@ defmodule Durable.Fuzz.Audit4ApiWaitsTest do
   # holds a name once, and the engine keeps the atom's value beside it.
   defp run_data do
     gen all(
-          names <- uniq_list_of(member_of(@names), max_length: 6),
+          # Drawing the last unused name from a handful takes more than the
+          # default 10 tries now and then.
+          names <- uniq_list_of(member_of(@names), max_length: 6, max_tries: 100),
           shapes <- list_of(member_of([:atom, :string, :both]), length: length(names)),
           values <- list_of(tuple({json_value(), json_value()}), length: length(names))
         ) do

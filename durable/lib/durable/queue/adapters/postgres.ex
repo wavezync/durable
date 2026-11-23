@@ -98,58 +98,52 @@ defmodule Durable.Queue.Adapters.Postgres do
     ack_with_retry(config, job_id, 1, 3, lock_token)
   end
 
-  # Retry the ack on transient failures (DB blip, connection lost). If we
-  # gave up here, the workflow would stay locked until stale-recovery
-  # released it 5 minutes later — at which point it would silently re-execute
-  # because there's no idempotency key (Bug M-5). The retry buys us time;
-  # the telemetry surfaces persistent failures so operators can intervene.
+  # A finished run's lock is cleared in one conditional UPDATE, on the claim's
+  # token and on the run having ended: a claim taken since the worker finished
+  # isn't stomped, and a run still `running` keeps its lock, so the stale
+  # sweep can find it. The executor clears the lock as it ends a run; this is
+  # for a row it left one on.
+  #
+  # Retried when the database is away for a moment, and reported if it stays
+  # away: the lock then waits for the stale sweep.
   defp ack_with_retry(%Config{} = config, job_id, attempt, max_attempts, lock_token) do
-    case Repo.get(config, WorkflowExecution, job_id) do
-      nil ->
-        {:error, :not_found}
+    ended =
+      from(w in still_claimed(job_id, lock_token),
+        where: w.status not in [:running, :compensating]
+      )
 
-      execution ->
-        ack_loaded(config, execution, job_id, attempt, max_attempts, lock_token)
+    case Repo.update_all(config, ended, set: [locked_by: nil, locked_at: nil]) do
+      {1, _} ->
+        :ok
+
+      {0, _} ->
+        if Repo.get(config, WorkflowExecution, job_id), do: :ok, else: {:error, :not_found}
     end
+  rescue
+    error ->
+      if attempt < max_attempts do
+        Process.sleep(:rand.uniform(50) * attempt)
+        ack_with_retry(config, job_id, attempt + 1, max_attempts, lock_token)
+      else
+        ack_failed(config, job_id, attempt, Exception.message(error))
+      end
   end
 
-  defp ack_loaded(config, execution, job_id, attempt, max_attempts, lock_token) do
-    if fenced?(execution, lock_token) do
-      # Another worker owns this row now (stale recovery + reclaim); our ack
-      # would stomp their claim — no-op.
-      :ok
-    else
-      case execution
-           |> WorkflowExecution.unlock_changeset()
-           |> Repo.update(config) do
-        {:ok, _} ->
-          :ok
+  defp ack_failed(config, job_id, attempts, reason) do
+    :telemetry.execute(
+      [:durable, :queue, :ack_failed],
+      %{count: 1, attempts: attempts},
+      %{job_id: job_id, reason: reason, durable: config.name}
+    )
 
-        {:error, _reason} when attempt < max_attempts ->
-          backoff_ms = :rand.uniform(50) * attempt
-          Process.sleep(backoff_ms)
-          ack_with_retry(config, job_id, attempt + 1, max_attempts, lock_token)
+    Logger.error("[Durable] ack failed after #{attempts} attempts for job #{job_id}: #{reason}")
 
-        {:error, reason} ->
-          :telemetry.execute(
-            [:durable, :queue, :ack_failed],
-            %{count: 1, attempts: attempt},
-            %{job_id: job_id, reason: reason, durable: config.name}
-          )
+    Durable.Activity.record(config, "ack_failed",
+      workflow_id: job_id,
+      details: %{attempts: attempts, reason: reason}
+    )
 
-          Logger.error(
-            "[Durable] ack failed after #{attempt} attempts for job #{job_id}: " <>
-              inspect(reason)
-          )
-
-          Durable.Activity.record(config, "ack_failed",
-            workflow_id: job_id,
-            details: %{attempts: attempt, reason: inspect(reason)}
-          )
-
-          {:error, reason}
-      end
-    end
+    {:error, reason}
   end
 
   @impl true
@@ -185,34 +179,66 @@ defmodule Durable.Queue.Adapters.Postgres do
     now = DateTime.utc_now()
 
     {_count, failed} =
-      Repo.update_all(
+      fail_runs(
         config,
         from(w in still_claimed(execution.id, lock_token),
-          where: w.status in [:running, :compensating],
-          select: w
+          where: w.status in [:running, :compensating]
         ),
-        set: [
-          status: :failed,
-          error: error,
-          completed_at: now,
-          updated_at: now,
-          # On a failed run this is when to roll it back (the timeout sweep),
-          # and what a retry's backoff or a delayed start left there isn't.
-          scheduled_at: nil,
-          locked_by: nil,
-          locked_at: nil,
-          lock_token: nil
-        ]
+        error,
+        completed_at: now,
+        updated_at: now,
+        # On a failed run this is when to roll it back (the timeout sweep),
+        # and what a retry's backoff or a delayed start left there isn't.
+        scheduled_at: nil,
+        locked_by: nil,
+        locked_at: nil,
+        lock_token: nil
       )
 
     for run <- failed do
       # What raised has reported this attempt's end already, as an :exception.
       StepRunner.close_attempts(config, [run.id], :failed, error)
+      if execution.status == :compensating, do: rollback_interrupted(config, run, error)
       # The executor never got to tell a parent waiting on this run.
-      Executor.maybe_notify_parent(config, run, :failed, error)
+      Executor.maybe_notify_parent(config, run, :failed, run.error)
     end
 
     :ok
+  end
+
+  # Fails the runs of `query` in the executor's place, with `error`. A run that
+  # was being rolled back keeps the error it has: that is why it is being
+  # undone, and `Durable.rollback/2` ends the run with it once it has finished
+  # the job. What cut the rollback short goes on the undo's own row, which the
+  # caller closes with `error`, and in the activity (`rollback_interrupted/3`).
+  defp fail_runs(config, query, error, set) do
+    query
+    |> select([w], w)
+    |> update([w], set: ^[{:status, :failed} | set])
+    |> update([w],
+      set: [
+        error:
+          fragment(
+            "CASE WHEN ? = 'compensating' THEN COALESCE(?, ?) ELSE ? END",
+            w.status,
+            w.error,
+            type(^error, w.error),
+            type(^error, w.error)
+          )
+      ]
+    )
+    |> then(&Repo.update_all(config, &1, []))
+  end
+
+  defp rollback_interrupted(config, run, error) do
+    Durable.Activity.record(config, "rollback_interrupted",
+      workflow_id: run.id,
+      queue: run.queue,
+      details: %{
+        reason: error["type"] || error[:type],
+        message: error["message"] || error[:message]
+      }
+    )
   end
 
   defp still_claimed(id, nil), do: from(w in WorkflowExecution, where: w.id == ^id)
@@ -402,7 +428,8 @@ defmodule Durable.Queue.Adapters.Postgres do
         select: w.id
       )
 
-    zombie_ids = Repo.all(config, waiting_zombies) ++ Repo.all(config, compensating_zombies)
+    rollbacks = Repo.all(config, compensating_zombies)
+    zombie_ids = Repo.all(config, waiting_zombies) ++ rollbacks
 
     if zombie_ids == [] do
       {:ok, 0}
@@ -419,28 +446,25 @@ defmodule Durable.Queue.Adapters.Postgres do
       # Still as they were found: one that was resumed or finished meanwhile
       # isn't a zombie any more.
       {count, zombies} =
-        Repo.update_all(
+        fail_runs(
           config,
           from(w in WorkflowExecution,
             where: w.id in ^zombie_ids and w.status in [:waiting, :compensating],
-            where: w.updated_at < ^cutoff,
-            select: w
+            where: w.updated_at < ^cutoff
           ),
-          set: [
-            status: :failed,
-            error: zombie_error,
-            # As in fail_unrecorded/4: not a time to roll back at.
-            scheduled_at: nil,
-            locked_by: nil,
-            locked_at: nil,
-            completed_at: now,
-            updated_at: now
-          ]
+          zombie_error,
+          # As in fail_unrecorded/4: not a time to roll back at.
+          scheduled_at: nil,
+          locked_by: nil,
+          locked_at: nil,
+          completed_at: now,
+          updated_at: now
         )
 
       zombie_ids = Enum.map(zombies, & &1.id)
       StepRunner.close_running(config, zombie_ids, :failed, zombie_error)
-      Enum.each(zombies, &Executor.maybe_notify_parent(config, &1, :failed, zombie_error))
+      for run <- zombies, run.id in rollbacks, do: rollback_interrupted(config, run, zombie_error)
+      Enum.each(zombies, &Executor.maybe_notify_parent(config, &1, :failed, &1.error))
 
       if count > 0 do
         Logger.warning(
@@ -530,11 +554,11 @@ defmodule Durable.Queue.Adapters.Postgres do
   end
 
   # Fencing-aware heartbeat. When the worker passes the token it claimed with,
-  # a refresh that touches 0 rows is classified: `:fenced` means another worker
-  # now owns this row (running with a different token) and the caller should
-  # abort to avoid a double-execution; `:cancelled` means the caller should stop
-  # the step; `:not_found` is a benign miss (the row completed/suspended, or was
-  # released but not yet reclaimed).
+  # a refresh that touches 0 rows is classified: `:fenced` means the row has
+  # another token now (another worker's, or none since it was released) and the
+  # caller should abort to avoid a double-execution; `:cancelled` means the
+  # caller should stop the step; `:not_found` is a benign miss (the caller's own
+  # executor just completed, parked or suspended the run, or it's gone).
   def heartbeat(%Config{} = config, job_id, lock_token) when is_binary(job_id) do
     do_heartbeat(config, job_id, lock_token)
   end
@@ -566,14 +590,23 @@ defmodule Durable.Queue.Adapters.Postgres do
     :exit, reason -> {:error, reason}
   end
 
+  # A token that isn't ours any more, whatever the status, is a claim that is
+  # gone: taken over, or put back for another claim by a stale sweep. Seen as
+  # :not_found, the step would run on, holding its slot. With our token the
+  # run is ours to settle: we just finished it, parked it or made it wait.
   defp classify_lost_lock(config, job_id, lock_token) do
     case Repo.get(config, WorkflowExecution, job_id) do
-      %WorkflowExecution{status: status, lock_token: current}
-      when status in [:running, :compensating] and current != lock_token ->
-        {:error, :fenced}
-
       %WorkflowExecution{status: :cancelled} ->
         {:error, :cancelled}
+
+      # Cancelled with `rollback: true`: back on its queue at once, to be
+      # undone once this worker has stopped (`Executor.cancel_run/3`). Stopped
+      # as a cancel, the worker closes the step it had.
+      %WorkflowExecution{status: :pending, engine_state: %{"__rollback__" => _}} ->
+        {:error, :cancelled}
+
+      %WorkflowExecution{lock_token: current} when current != lock_token ->
+        {:error, :fenced}
 
       _ ->
         {:error, :not_found}

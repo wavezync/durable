@@ -36,6 +36,21 @@ defmodule DurableDashboard.Live.QueuesLiveTest do
     assert has_element?(view, "li", "Resumed")
   end
 
+  test "a rollback cut short by a lost worker is in the operations feed", %{conn: conn} do
+    {:ok, id} = Durable.start(Fixtures.Payments, %{})
+
+    Durable.Activity.record(Durable.Config.get(Durable), "rollback_interrupted",
+      workflow_id: id,
+      queue: "default",
+      details: %{reason: "zombie_detected", message: "No worker heartbeat"}
+    )
+
+    {:ok, view, _html} = live(conn, dash("/queues"))
+
+    assert has_element?(view, "li", "lost its worker part-way through its rollback")
+    assert has_element?(view, "li a[href='#{dash("/executions/#{id}")}']")
+  end
+
   test "this node is listed as alive", %{conn: conn} do
     node_id = Durable.Config.get(Durable).node_id
 
