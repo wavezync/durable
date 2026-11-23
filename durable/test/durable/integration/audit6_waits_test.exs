@@ -47,4 +47,82 @@ defmodule Durable.Integration.Audit6WaitsTest do
       assert run.context["signed"] == %{"legal.signed" => legal, "finance.signed" => finance}
     end
   end
+
+  # A deposit, then the balance, both "payment.succeeded" (waiting.md). The
+  # deposit can also fail.
+  defmodule Audit6WaitsInstalments do
+    use Durable
+    use Durable.Wait
+
+    alias Durable.IntegrationProbe, as: Probe
+
+    workflow "audit6_waits_instalments" do
+      step :deposit, fn order ->
+        {paid, _payment} = wait_for_any(["payment.succeeded", "payment.failed"])
+        {:ok, Map.put(order, "deposit", paid)}
+      end
+
+      step :book, fn order ->
+        Probe.wait_for(:booked)
+        {:ok, order}
+      end
+
+      step :balance, fn order ->
+        {:ok, Map.put(order, "balance", wait_for_event("payment.succeeded"))}
+      end
+    end
+  end
+
+  describe "an event for a wait_for_any that already has its answer" do
+    setup do
+      start_durable!(%{default: 1})
+      {:ok, id} = Durable.start(Audit6WaitsInstalments, %{"order" => "O-311"})
+      await_status(id, :waiting)
+      assert Durable.send_event(id, "payment.succeeded", %{"amount" => 30}) == :ok
+      await_status(id, :running)
+      %{id: id}
+    end
+
+    test "under another of its names is told :ok", %{id: id} do
+      assert Durable.send_event(id, "payment.failed", %{"code" => "declined"}) == :ok
+    end
+
+    # Nothing waits for it yet: told so, the sender keeps it or tries again.
+    # Told :ok, it was gone, and the run waited for the balance for good.
+    test "under the name that answered it is told nothing waits for it", %{id: id} do
+      assert Durable.send_event(id, "payment.succeeded", %{"amount" => 70}) ==
+               {:error, :not_found}
+
+      Probe.set(:booked)
+      await_status(id, :waiting)
+      assert Durable.send_event(id, "payment.succeeded", %{"amount" => 70}) == :ok
+      assert await_status(id, :completed).context["balance"] == %{"amount" => 70}
+    end
+  end
+
+  defmodule Audit6WaitsBothSigned do
+    use Durable
+    use Durable.Wait
+
+    workflow "audit6_waits_both_signed" do
+      step :sign_off, fn contract ->
+        {:ok, Map.put(contract, "signed", wait_for_all(["legal.signed", "finance.signed"]))}
+      end
+    end
+  end
+
+  describe "a second event under a name a finished wait_for_all took" do
+    test "is told nothing waits for it, as for any wait" do
+      start_durable!(%{default: 1})
+      {:ok, id} = Durable.start(Audit6WaitsBothSigned, %{"contract" => "C-78"})
+      await_status(id, :waiting)
+
+      assert Durable.send_event(id, "legal.signed", %{"by" => "L. Ortiz"}) == :ok
+      assert Durable.send_event(id, "finance.signed", %{"by" => "F. Chen"}) == :ok
+      await_status(id, :completed)
+
+      assert Durable.send_event(id, "legal.signed", %{"by" => "L. Ortiz"}) ==
+               {:error, :not_found}
+    end
+  end
 end

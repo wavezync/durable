@@ -848,21 +848,24 @@ defmodule Durable.Wait do
   defp wake_resumed(_config, {:ok, result}), do: result
   defp wake_resumed(_config, {:error, reason}), do: {:error, reason}
 
-  # An event for a wait_for_any that already has its answer is a no-op, not an
-  # error: the sender can't know which event got there first.
+  # An event under another name of a wait_for_any that already has its answer
+  # is a no-op, not an error: the sender can't know which event got there
+  # first. Only that: under the name that answered it, or one a wait_for_all
+  # took, it is a second event for one wait, and told :ok it was lost, for a
+  # later wait of that name as well. The newest group that waited for the name
+  # says which it is.
   defp late_for_group?(config, workflow_id, event_name) do
     query =
       from(p in PendingEvent,
         join: g in WaitGroup,
         on: g.id == p.wait_group_id,
-        where:
-          p.workflow_id == ^workflow_id and p.event_name == ^event_name and
-            g.status == :completed,
+        where: p.workflow_id == ^workflow_id and p.event_name == ^event_name,
+        order_by: [desc: p.inserted_at],
         limit: 1,
-        select: true
+        select: {g.wait_type, g.status, p.status}
       )
 
-    Repo.one(config, query) == true
+    Repo.one(config, query) == {:any, :completed, :cancelled}
   end
 
   defp deliver(config, workflow_id, event_name, pending_event, safe_payload) do
