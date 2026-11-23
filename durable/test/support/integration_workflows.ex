@@ -521,13 +521,23 @@ defmodule Durable.IntegrationWorkflows do
       end
     end
 
+    # Every fifth run sleeps in b, snoozes in a, or fails c's first attempt.
     defp load_step(step, data) do
-      Probe.inside([{:run, data["n"]}], fn ->
-        Probe.note({step, data["n"]})
-        Process.sleep(data["ms"])
-      end)
+      n = data["n"]
 
-      {:ok, data}
+      seen =
+        Probe.inside([{:run, n}], fn ->
+          seen = Probe.note({step, n})
+          Process.sleep(data["ms"])
+          seen
+        end)
+
+      case {step, rem(n, 5), seen} do
+        {:b, 0, 1} -> Durable.Wait.sleep(100)
+        {:a, 1, 1} -> {:snooze, 50}
+        {:c, 2, 1} -> {:error, "first attempt fails"}
+        _ -> {:ok, data}
+      end
     end
   end
 

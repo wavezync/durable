@@ -23,14 +23,21 @@ defmodule Durable.Integration.QueueLoadTest do
     %{seed: seed}
   end
 
-  defp boot(i), do: start_node!(:"load_#{i}", @queues, @node_opts)
+  # Some nodes wait a moment for their steps when stopped, some hand back at once.
+  defp boot(i),
+    do:
+      start_node!(
+        :"load_#{i}",
+        @queues,
+        [shutdown_grace_period: Enum.random([0, 300])] ++ @node_opts
+      )
 
   test "a few thousand runs on several nodes, with workers, tasks and nodes killed" do
     nodes = for i <- 1..3, do: boot(i)
     connect_nodes!(nodes)
 
     ids = start_all(hd(nodes))
-    {nodes, _next} = chaos(nodes, 4, 60)
+    {nodes, _next} = chaos(nodes, 4, String.to_integer(System.get_env("LOAD_OPS", "200")))
     settle(ids, nodes)
     check(ids)
   end
@@ -48,24 +55,24 @@ defmodule Durable.Integration.QueueLoadTest do
   defp chaos(nodes, next, 0), do: {nodes, next}
 
   defp chaos(nodes, next, ops_left) do
-    Process.sleep(:rand.uniform(150))
+    Process.sleep(:rand.uniform(40))
     node = Enum.random(nodes)
 
     {nodes, next} =
-      case :rand.uniform(20) do
-        n when n <= 8 ->
+      case :rand.uniform(40) do
+        n when n <= 18 ->
           _ = :erpc.call(node, Durable.IntegrationCase, :kill_one, [:task, Map.keys(@queues)])
           {nodes, next}
 
-        n when n <= 14 ->
+        n when n <= 34 ->
           _ = :erpc.call(node, Durable.IntegrationCase, :kill_one, [:worker, Map.keys(@queues)])
           {nodes, next}
 
-        n when n <= 16 ->
+        35 ->
           crash_node!(node)
           replace(nodes, node, next)
 
-        n when n <= 18 ->
+        36 ->
           stop_durable!(node)
           crash_node!(node)
           replace(nodes, node, next)
@@ -127,6 +134,13 @@ defmodule Durable.Integration.QueueLoadTest do
       open = for %{status: s} = row <- mine, s in [:pending, :running], do: row.step_name
       assert open == [], "attempts left open #{inspect(open)}: #{label}"
 
+      # A body runs only after its attempt's row is written.
+      for step <- ["a", "b", "c"] do
+        attempts = Enum.count(mine, &(&1.step_name == step))
+        ran = Probe.hits({String.to_atom(step), n})
+        assert ran <= attempts, "#{step} ran #{ran} times with #{attempts} attempts: #{label}"
+      end
+
       if run.status == :completed do
         done = for %{status: :completed} = row <- mine, do: row.step_name
         assert Enum.sort(done) == ["a", "b", "c"], "a step skipped or done twice: #{label}"
@@ -144,7 +158,25 @@ defmodule Durable.Integration.QueueLoadTest do
       end
     end
 
+    for %{status: :failed} = run <- runs do
+      trail =
+        for row <- Enum.sort_by(Map.get(rows_of, run.id, []), & &1.inserted_at),
+            do: {row.step_name, row.attempt, row.status, row.error && row.error["type"]}
+
+      IO.puts("failed #{run.input["n"]}: #{inspect(run.error["type"])} #{inspect(trail)}")
+    end
+
     failed = Enum.count(runs, &(&1.status == :failed))
-    IO.puts("queue load: #{length(runs)} runs, #{failed} failed after losing workers")
+    lost = ["worker_lost", "task_crash", "node_stopped"]
+
+    touched =
+      rows
+      |> Enum.filter(&(&1.error && &1.error["type"] in lost))
+      |> Enum.uniq_by(& &1.workflow_id)
+
+    IO.puts(
+      "queue load: #{length(runs)} runs, #{length(touched)} lost an attempt, " <>
+        "#{failed} failed after losing workers"
+    )
   end
 end
