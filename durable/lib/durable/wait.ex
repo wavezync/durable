@@ -53,6 +53,7 @@ defmodule Durable.Wait do
   @finished [:completed, :failed, :cancelled, :compensated, :compensation_failed]
 
   import Ecto.Query
+  import Durable.Executor.StepRunner, only: [is_run_data: 1]
 
   @doc """
   Injects wait functions into the calling module.
@@ -869,9 +870,10 @@ defmodule Durable.Wait do
     # sent with just a string identifier) get wrapped under "value" so the
     # cast always succeeds. The wait group / resume context use the
     # unwrapped payload so user code reading `received_events` sees the
-    # original shape it sent.
+    # original shape it sent. A date is a map to Elixir but a string to JSON,
+    # and a column of maps can't read a string back: it is wrapped too.
     storable_payload =
-      if is_map(safe_payload), do: safe_payload, else: %{"value" => safe_payload}
+      if is_run_data(safe_payload), do: safe_payload, else: %{"value" => safe_payload}
 
     multi =
       build_send_event_multi(
@@ -1348,12 +1350,7 @@ defmodule Durable.Wait do
     # The workflow's downstream context still receives the unwrapped value
     # via Executor.resume_workflow, so this wrapping is purely for the
     # audit/display field on PendingInput.
-    storable_response =
-      if is_map(response) do
-        response
-      else
-        %{"value" => response}
-      end
+    storable_response = if is_run_data(response), do: response, else: %{"value" => response}
 
     pending
     |> PendingInput.complete_changeset(storable_response)

@@ -15,8 +15,12 @@ defmodule Durable.Storage.JsonMap do
   @impl true
   def cast(value), do: Ecto.Type.cast(:map, value)
 
+  # A row 2.0 wrote with a date or a decimal where a map goes holds a bare
+  # string: read as the writers wrap one now, not refused, which made the row
+  # unreadable.
   @impl true
-  def load(value), do: Ecto.Type.load(:map, value)
+  def load(value) when is_map(value) or is_nil(value), do: Ecto.Type.load(:map, value)
+  def load(value), do: {:ok, %{"value" => value}}
 
   @impl true
   def dump(value) when is_map(value) do

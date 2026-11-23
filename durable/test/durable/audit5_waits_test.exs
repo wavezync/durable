@@ -34,6 +34,24 @@ defmodule Durable.Audit5WaitsTest do
     end
   end
 
+  # The carrier sends its estimate and then a revised one, and the customer
+  # picks the day. Each answer is a date.
+  defmodule Audit5WaitsDelivery do
+    use Durable
+    use Durable.Wait
+
+    workflow "audit5_waits_delivery" do
+      step :schedule, fn data ->
+        first = wait_for_event("carrier.eta")
+        revised = wait_for_event("carrier.eta")
+        chosen = wait_for_input("delivery_date")
+
+        {:ok,
+         Map.merge(data, %{"first_eta" => first, "revised_eta" => revised, "chosen" => chosen})}
+      end
+    end
+  end
+
   # Ask the manager; if nobody answers in time, remind them and ask again.
   defmodule Audit5WaitsReminder do
     use Durable
@@ -387,6 +405,26 @@ defmodule Durable.Audit5WaitsTest do
       assert failed.status == :failed
       assert failed.error["type"] == "timeout"
       assert TestRepo.get!(WorkflowExecution, receipt.id).status == :waiting
+    end
+  end
+
+  describe "a wait answered with a date" do
+    test "gets the date's text, and an earlier wait reads it back from its own row" do
+      waiting = run_workflow(Audit5WaitsDelivery, %{})
+      assert Durable.send_event(waiting.id, "carrier.eta", ~D[2026-12-01]) == :ok
+
+      waiting = drain(waiting)
+      assert Durable.send_event(waiting.id, "carrier.eta", ~D[2026-12-03]) == :ok
+
+      waiting = drain(waiting)
+      assert_waiting_for_input(waiting, "delivery_date")
+      assert Durable.provide_input(waiting.id, "delivery_date", ~D[2026-12-04]) == :ok
+
+      finished = drain(waiting)
+      assert finished.status == :completed
+      assert finished.context["first_eta"] == "2026-12-01"
+      assert finished.context["revised_eta"] == "2026-12-03"
+      assert finished.context["chosen"] == "2026-12-04"
     end
   end
 
