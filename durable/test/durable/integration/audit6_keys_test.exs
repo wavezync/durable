@@ -58,6 +58,32 @@ defmodule Durable.Integration.Audit6KeysTest do
     assert K.overlaps(key) == []
   end
 
+  # Issue #48 item 3 has `Durable.cancel/2` free the key while the cancelled
+  # step still runs. With `rollback: true` the key goes another way, which a
+  # fix in `Keys` alone won't see: the cancel queues the undo, and a run queued
+  # to be undone lets its key go at once (`Executor.without_key/2`), so the next
+  # start finds no holder at all. The undo itself waits a heartbeat for the
+  # step to stop (`queue_cancelled/2`); the key doesn't.
+  @tag skip: "fails until issue #48 item 3 is fixed"
+  test "cancel with rollback: true doesn't start the key's next run beside the cancelled step" do
+    stop_supervised!(Durable)
+    start_durable!(%{default: 4}, heartbeat_interval: 3_000)
+    key = "account:9"
+
+    holder = start!(key, %{"v" => 1, "hold" => true})
+    assert_eventually(fn -> K.ran(key) == [1] end)
+    :ok = Durable.cancel(holder, "customer cancelled", rollback: true)
+    next = start!(key, %{"v" => 2})
+
+    # Long enough for a start that went straight ahead; well inside the beat.
+    Process.sleep(1_000)
+    assert K.overlaps(key) == []
+
+    Probe.set({:go, 1})
+    await_status(next, :completed, 15_000)
+    assert K.overlaps(key) == []
+  end
+
   # The claimed run's task dies while it waits for the key's lock. Its worker
   # puts it back on its queue, where a newer start already waits behind it.
   test "a claimed waiting run that loses its task makes way for the newer start" do

@@ -298,6 +298,20 @@ defmodule Durable.Fuzz.Audit6KeysFuzzTest do
     IntegrationRepo.all(from(w in WorkflowExecution, where: w.key in ^keys))
   end
 
+  # Checked after every op, in one read: a run of a key that is going holds
+  # the key, waits for it, or is being rolled back (and so has let it go).
+  # Anything else would run beside the holder.
+  defp without_key(keys) do
+    for run <- rows_of(keys), not accounted_for?(run), do: {:runs_without_key, describe(run)}
+  end
+
+  defp accounted_for?(%{holds_key: true}), do: true
+  defp accounted_for?(%{status: status}) when status not in @open, do: true
+  # Waiting, or claimed and about to take the key.
+  defp accounted_for?(%{runs_after_id: id}) when id != nil, do: true
+  defp accounted_for?(%{status: :compensating}), do: true
+  defp accounted_for?(%{engine_state: state}), do: Map.has_key?(state, "__rollback__")
+
   # ===========================================================================
   # Checks
   # ===========================================================================
@@ -443,7 +457,7 @@ defmodule Durable.Fuzz.Audit6KeysFuzzTest do
             {records, [Task.async(fn -> apply_op(op, ctx) end) | tasks]}
 
           op, {records, tasks} ->
-            {records ++ apply_op(op, ctx), tasks}
+            {records ++ apply_op(op, ctx) ++ without_key(keys), tasks}
         end)
 
       records = records ++ Enum.flat_map(background, &Task.await(&1, 60_000))
@@ -461,7 +475,7 @@ defmodule Durable.Fuzz.Audit6KeysFuzzTest do
       findings =
         Enum.flat_map(keys, fn key ->
           check_key(key, finals[key], Enum.filter(rows, &(&1.key == key)), sweep_errors)
-        end)
+        end) ++ Enum.filter(records, &match?({:runs_without_key, _}, &1))
 
       {known, new} = Enum.split_with(findings, &match?({:known, _, _}, &1))
       record(tally, coverage(keys, records), known, ops)
