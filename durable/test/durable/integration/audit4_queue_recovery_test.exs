@@ -481,7 +481,12 @@ defmodule Durable.Integration.Audit4QueueRecoveryTest do
 
       Process.exit(:sys.get_state(worker).task_pid, :kill)
 
-      assert %{locked_by: nil, error: %{"type" => "task_crash"}} = await_status(id, :failed)
+      # The run keeps the error it was being undone for; the activity has why
+      # the undo stopped.
+      assert %{locked_by: nil, error: %{"message" => "declined"}} = await_status(id, :failed)
+
+      assert [%{details: %{"reason" => "task_crash"}}] =
+               Durable.Activity.list!(workflow_id: id, kinds: ["rollback_interrupted"])
     end
 
     test "leaves the step it interrupted nothing to do twice" do

@@ -8,6 +8,7 @@ defmodule Durable.Activity do
   | `"stale_recovered"`   | runs whose node stopped heartbeating went back on the queue    |
   | `"zombie_recovered"`  | runs left `running` with no live worker were failed            |
   | `"worker_fenced"`     | a worker found its run reclaimed by another node and stopped   |
+  | `"rollback_interrupted"` | a run being rolled back lost its worker; `details.reason` says how |
   | `"ack_failed"`        | a worker couldn't release a finished run's lock                |
   | `"queue_paused"`      | `Durable.pause_queue/2` (`details.by` when given)               |
   | `"queue_resumed"`     | `Durable.resume_queue/2`                                       |

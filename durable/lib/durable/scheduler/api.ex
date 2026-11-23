@@ -501,6 +501,53 @@ defmodule Durable.Scheduler.API do
     count == 1
   end
 
+  @auto_disable_after 5
+
+  @doc false
+  # Records that the fire `schedule` was read for failed, and turns the
+  # schedule off at its fifth failure in a row. Like `claim_fire/2`, one
+  # conditional UPDATE on the fire as it was read: of the nodes that failed it
+  # only one counts it, and a schedule an operator changed or turned off
+  # meanwhile is left as they made it. The count is the row's own, not the one
+  # this node read. Returns the schedule as written, or nil if it wasn't.
+  @spec record_failure(ScheduledWorkflow.t(), String.t(), Config.t()) ::
+          ScheduledWorkflow.t() | nil
+  def record_failure(%ScheduledWorkflow{} = schedule, message, %Config{} = config) do
+    now = DateTime.utc_now()
+    error = String.slice(to_string(message), 0, 1024)
+    next_run = next_run_after_failure(schedule)
+
+    {_count, written} =
+      Repo.update_all(
+        config,
+        from(s in ScheduledWorkflow,
+          where: s.id == ^schedule.id and s.next_run_at == ^schedule.next_run_at and s.enabled,
+          select: s,
+          update: [
+            set: [
+              last_error: ^error,
+              last_error_at: ^now,
+              next_run_at: ^next_run,
+              updated_at: ^now,
+              consecutive_failures: fragment("COALESCE(?, 0) + 1", s.consecutive_failures),
+              enabled:
+                fragment("COALESCE(?, 0) + 1 < ?", s.consecutive_failures, ^@auto_disable_after),
+              auto_disabled_at:
+                fragment(
+                  "CASE WHEN COALESCE(?, 0) + 1 >= ? THEN ?::timestamp END",
+                  s.consecutive_failures,
+                  ^@auto_disable_after,
+                  ^now
+                )
+            ]
+          ]
+        ),
+        []
+      )
+
+    List.first(written)
+  end
+
   @doc false
   # Where a failed fire goes next: the next run in the schedule's own zone, or
   # 5 minutes from now if that can't be worked out, so it can't fire every check.
