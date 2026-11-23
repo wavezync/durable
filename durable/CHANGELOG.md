@@ -4,6 +4,103 @@ All notable changes to this package. Versions follow [Semantic
 Versioning](https://semver.org); entries come from [Conventional
 Commits](https://www.conventionalcommits.org).
 
+## [2.0.0](https://github.com/wavezync/durable/compare/durable-v1.5.0...durable-v2.0.0) - 2026-11-23
+
+### Features
+
+- Trace attempts with OpenTelemetry and close the review's bugs ([2da3a34](https://github.com/wavezync/durable/commit/2da3a34f2afcee710b7a7f2f258bbc06329f19bd))
+- Named branches and lanes, run by the executor ([63a3470](https://github.com/wavezync/durable/commit/63a34705e6d170d750970b671cf899163a0edb7d))
+- Optional lanes in a named parallel block ([f4939f4](https://github.com/wavezync/durable/commit/f4939f4264af3306d987b10dc01a35a30ef6c428))
+- A lane hands the next step what it produced, not its whole data ([34e7277](https://github.com/wavezync/durable/commit/34e72770ddab07e9d94fa70a6fbc461df9af46b2))
+- **Breaking:** A failed run is left as it failed; rollback is asked for ([0196dac](https://github.com/wavezync/durable/commit/0196dac964046275175353a8b84b64d2c0c2682f))
+- Rollback_plan/2 names what a rollback would run ([72353c7](https://github.com/wavezync/durable/commit/72353c76470dc478f4f1609988b3c428339ae952))
+- **Breaking:** A parallel block takes a name ([2446be6](https://github.com/wavezync/durable/commit/2446be619f5b5bf04720cfea297f4d0f0db39448))
+- Cancel(id, reason, rollback: true) undoes the run it cancels ([da8f5b0](https://github.com/wavezync/durable/commit/da8f5b0270e8cf576f0e1cff02858c6303fbacab))
+- Default: and timeout: on a lane ([31f68f6](https://github.com/wavezync/durable/commit/31f68f6c490ff1d9ed1627e023b2a681d870490b))
+- On_failure: [rollback_after: ms] undoes a failed run nobody acted on ([0f1618f](https://github.com/wavezync/durable/commit/0f1618f77257f51027ecf0952b2b00699bc6b68c))
+- An event kept with buffer: true reaches wait_for_any and wait_for_all ([028672b](https://github.com/wavezync/durable/commit/028672b643ddf68b2ef49047efb183eade40ee40))
+- Cancel_wait on a run waiting for its lanes or its child cancels their waits ([d734e00](https://github.com/wavezync/durable/commit/d734e0015ce829bc1cbf96bc2dd193b741abf4f0))
+- A workflow definition that can't work is refused, or warned about, when it compiles ([181ee76](https://github.com/wavezync/durable/commit/181ee768a8cda6998f5313d6199300cd63b1a9a6))
+- Queue settings that can't work are refused when Durable starts ([6fab6f3](https://github.com/wavezync/durable/commit/6fab6f336593f3fe2004252831e4b2f32b0167e2))
+- **Breaking:** Every function that reads returns {:ok, result} or {:error, reason}, with a ! twin ([5b344d6](https://github.com/wavezync/durable/commit/5b344d61bf415e0f3efe11087a679d9897a3c547))
+- A read function refuses an option it doesn't know ([97a3f8d](https://github.com/wavezync/durable/commit/97a3f8d67505d45251a97a98e18089947a3afb87))
+- Durable.cancel_wait/2, beside the other things an operator does ([e5548b0](https://github.com/wavezync/durable/commit/e5548b0644e7d26f983a239da88e863383ad8971))
+
+### Bug fixes
+
+- Make dead steps fail, stop retries starving, close the 1.5.0 gaps ([ff2d428](https://github.com/wavezync/durable/commit/ff2d42849875324a346ffdf001669ec2494c4270))
+- Stop a stale lock failing healthy runs and fix flaky CI ([7c663cd](https://github.com/wavezync/durable/commit/7c663cdb9fce84d0392b3904a1e6808c079e1005))
+- Treat a connection lost through PgBouncer as lost ([be3c319](https://github.com/wavezync/durable/commit/be3c31961f3560dc67f53717622c569ab0173613))
+- Close issue #36 and what the engine audit found ([f989d13](https://github.com/wavezync/durable/commit/f989d13717222c5b20b6b5c07c8e4842b8e5e454))
+- Retry guards for keyed runs, step names in compile-time arms ([2744430](https://github.com/wavezync/durable/commit/274443077c9639c42a6736f8bc47eb961fddb5a8))
+- Named blocks beside retries, queues and unnamed blocks; on_error: :collect ([2fe7b9b](https://github.com/wavezync/durable/commit/2fe7b9b81c2e90dffa1d929f6aa76c626e4a3373))
+- A run lost outside a step carries on; it isn't compensated ([14613d1](https://github.com/wavezync/durable/commit/14613d1b64d27e601418e4c2efbc474664cda9b9))
+- A cancel's rollback waits for the worker that had the run ([e9ea02e](https://github.com/wavezync/durable/commit/e9ea02e9504b52569ad388338272fb475fb48963))
+- A step's start event comes before its row can be closed ([0afa6b1](https://github.com/wavezync/durable/commit/0afa6b13becac33b779d4cc57b9ed5fea3bc2d8a))
+- A run failed by a dead worker was rolled back a minute later ([a03ac29](https://github.com/wavezync/durable/commit/a03ac292703976a3472ea1272ede85375b39476b))
+- Cancelling a run that never started, with rollback: true, kept its key from the next start ([647c61f](https://github.com/wavezync/durable/commit/647c61fb25a2e92cf10088a5b52f597c80bc3d93))
+- A worker lost as a rollback began left the run to carry on with its steps ([8797f14](https://github.com/wavezync/durable/commit/8797f14a1fa6231120a2a304a6003e9bfe4b4ce9))
+- A failed run waiting to be rolled back could be pruned first ([7bf6f6c](https://github.com/wavezync/durable/commit/7bf6f6cbed7ed54afc5d47759ba7cce78dc678d6))
+- An into: that returned anything unexpected crashed the worker ([8678206](https://github.com/wavezync/durable/commit/8678206c354343717bbf26aefe1431fae0b519a9))
+- A rollback claimed by a node without the workflow's code was thrown away ([7ebb718](https://github.com/wavezync/durable/commit/7ebb7180601ea730a23d7768e23aca98103cdab1))
+- A rollback lets its key go, waits for stopped lanes, and a retry brings back a lane's child workflow ([546fea0](https://github.com/wavezync/durable/commit/546fea0ffcb79c1a084883638fba673a3d7db2ec))
+- A child workflow's timeout was never applied ([685450a](https://github.com/wavezync/durable/commit/685450a7b0408425e0b04b03e0fa0b46266d9848))
+- A retried lane inside a lane could outlast the lane it is in ([cb1969b](https://github.com/wavezync/durable/commit/cb1969bc89c3f9b0589c5fe1fd5503c5bbd3f9da))
+- A run that timed out waiting for its child workflow could never be retried ([987eb62](https://github.com/wavezync/durable/commit/987eb62d5841dbb3f6f91bd4be46fe639231e7ef))
+- A cancelled lane didn't end a block that fails fast ([f332ea9](https://github.com/wavezync/durable/commit/f332ea93739eda34189d4ba8130e9c14f662f34b))
+- A cancel dropped the rollback of a run that was waiting to be undone ([5ff36de](https://github.com/wavezync/durable/commit/5ff36de272f8c5ee42af1c3089d76c52477b9413))
+- An undo got atom keys when its run failed as it resumed from a parallel block ([b7be7a4](https://github.com/wavezync/durable/commit/b7be7a403c7cc77e55e47491979e69e49a894dc1))
+- A run lost right after a jump or a branch on: step ran that step again ([a829f28](https://github.com/wavezync/durable/commit/a829f286431cf7a00b32425cc80787f3b328f9c9))
+- A jump could land inside a branch or a parallel block it wasn't in ([1a40ef6](https://github.com/wavezync/durable/commit/1a40ef65bccdd9dca35a73743054199fef9fe381))
+- A restarted queue manager left the node stopping for good ([4e4fed3](https://github.com/wavezync/durable/commit/4e4fed35d1ce9b7f1b918c585a0cc535aeda8df3))
+- A poll that raised took the queue manager down ([1939d43](https://github.com/wavezync/durable/commit/1939d43a9ecbd3f42cf25dc655c181d1996f713e))
+- A killed poller let its queue run over its limit ([b947e70](https://github.com/wavezync/durable/commit/b947e70557730b6dabc291894b28210027e63ecc))
+- A worker whose claim was taken over before it began ran the step anyway ([90e7e3d](https://github.com/wavezync/durable/commit/90e7e3d8091c6090f2dc5b13af6cf54c6168c52c))
+- Triggering a schedule whose workflow isn't on this node raised ([bfd8842](https://github.com/wavezync/durable/commit/bfd88422c1179a86616d55fe1329c2d2008c8315))
+- A start raised when the PubSub was down, after inserting its run ([aca3001](https://github.com/wavezync/durable/commit/aca3001e59e832b2cea1299cf785a59123541e53))
+- A task killed as its attempt began left a step row open for ever ([90f99d6](https://github.com/wavezync/durable/commit/90f99d6b653998b788b9e3875125e1bad9ed414f))
+- A step whose result was saved before its worker died ran again ([466b2a1](https://github.com/wavezync/durable/commit/466b2a11dc278567e73bf9bb98787d064ddbd3b6))
+- A rollback asked for again repeated the undos that had finished ([771ee58](https://github.com/wavezync/durable/commit/771ee580594065a342b2830f64a3984b39c78ab2))
+- A node stopping in the middle of a rollback left the run locked ([5c4cd59](https://github.com/wavezync/durable/commit/5c4cd591240e4bcb3bdce2a162459025cccd2612))
+- A result taken from a step's row left out what the step put in the context ([26eed43](https://github.com/wavezync/durable/commit/26eed439ce192d6fc19de1fc1ed610399517b01a))
+- Two senders of one event were both told it was delivered ([5f88cc1](https://github.com/wavezync/durable/commit/5f88cc1169d1686078e6f7c18fca9ee4741a4465))
+- The timeout sweep marked a wait answered in time as timed out ([ee08303](https://github.com/wavezync/durable/commit/ee083031b130efbe39a080bc20e5ba986f9d6a9b))
+- A wait that timed out returned its timeout_value as JSON, not as written ([53e6d3b](https://github.com/wavezync/durable/commit/53e6d3b3585eb4a04cb168ada0dfaf42a3d4e219))
+- A whole float came back from a save as an integer ([82fd1a9](https://github.com/wavezync/durable/commit/82fd1a9d22efa97d1f56d5fc6f202c8ca2ae41e4))
+- Only a wait for input broadcast :workflow_waiting ([6546c7b](https://github.com/wavezync/durable/commit/6546c7be13c42b5f348e12ffda652b8bc4aa38f6))
+- Durable.Testing raised BadMapError for an id that names no run ([2922797](https://github.com/wavezync/durable/commit/29227979781f259fc259a836ac22d4d86ca35327))
+- A wait the engine couldn't record raised out of the executor ([df6f24c](https://github.com/wavezync/durable/commit/df6f24cfd3db5a4003646edb65d72a185e5b9e27))
+- Stats.timeline built a map for every bucket, however many ([6a532a1](https://github.com/wavezync/durable/commit/6a532a1c71bfe4cf461eda26264eb1000fb171c8))
+- A start's input could drive the engine through its own context keys ([d28a6ba](https://github.com/wavezync/durable/commit/d28a6ba185a58ae1a153a67dad13b6659d069027))
+- A start that replaces the key's holder dropped the rollback of one waiting to be undone ([0420e68](https://github.com/wavezync/durable/commit/0420e68d9d6ba3d3c1b08a599a45ccb33278afad))
+- A step written with a do block crashed the compiler ([caabfa3](https://github.com/wavezync/durable/commit/caabfa3439e0ebd490c674a2c6700dc0112d7945))
+- A module's default workflow was the last one defined, not the first ([dce424c](https://github.com/wavezync/durable/commit/dce424c5f58d976d57e44c2df21b13396666acba))
+- Input/0 was always an empty map in a step ([edd8c17](https://github.com/wavezync/durable/commit/edd8c17e6085605bacebee9fcd2b764d0555059b))
+- An atom clause of branch on: stopped matching once the run was reloaded ([f0df284](https://github.com/wavezync/durable/commit/f0df28476f352cd748d166eb41c217716ce4af02))
+- A parallel block straight after one that collects its errors raised ([0e655fc](https://github.com/wavezync/durable/commit/0e655fca4a50acf6ba288960a7ae847df4b6aed2))
+- A key under both shapes lost its atom after the run was reloaded ([e71bd13](https://github.com/wavezync/durable/commit/e71bd13f6e8c5a9fd0b81b4af1656a7702850df1))
+
+### Refactoring
+
+- Split cancel_run and named_parallel for credo ([b20ab6c](https://github.com/wavezync/durable/commit/b20ab6c65cdf362ff4c438e4ca89444481d6defa))
+- Engine state has its own column, out of the run's context ([3fce50f](https://github.com/wavezync/durable/commit/3fce50f52a0a03ba28dbf549b55e2165af3fdccb))
+
+### Documentation
+
+- Don't name a version for the rollback change ([ea903af](https://github.com/wavezync/durable/commit/ea903afae1838b1d70ea4df4341fc3632e6a9a7f))
+- Parallel blocks are named; lane options, cancel with rollback, rollback_after ([d043458](https://github.com/wavezync/durable/commit/d04345823a2090d00a06f682b1b20b134766398b))
+- Cancel_wait's example called Durable.cancel_wait/2, which doesn't exist ([e2fc21b](https://github.com/wavezync/durable/commit/e2fc21bfb955c1c7617d79f9af91bac6e96aa23b))
+- The read functions' tuple and ! forms, and how to upgrade to them ([1d4ea43](https://github.com/wavezync/durable/commit/1d4ea4380eccc7e856132f6370998c7711573972))
+- A parent that times out cancels every child, as cancelling it does ([c9dd08c](https://github.com/wavezync/durable/commit/c9dd08c65dac6eaa0cf73057d0cba0fa34033d34))
+- The 2.0 upgrade, step by step, and everything else that changed ([2d042a4](https://github.com/wavezync/durable/commit/2d042a46a8122be44bcb889a6a8e60958562cd29))
+- The README for 2.0, with examples that survive a reload ([50ab33e](https://github.com/wavezync/durable/commit/50ab33ec0d9b749a574715f6f34cd9bcbd9876f8))
+- Waits: cancel_wait, what an answer comes back as, and a second send_event ([68315c8](https://github.com/wavezync/durable/commit/68315c8e04d3fc612a574c45f69419220ceafffc))
+- Branch on values as strings, and where a jump can't land ([0edd973](https://github.com/wavezync/durable/commit/0edd973179cef454c3b5c13c82ea4a0d97515a6e))
+- Orchestration, keys, parallel, compensations and testing guides for 2.0 ([1a14608](https://github.com/wavezync/durable/commit/1a1460821898f13fee13d807920a1073ddbdb2ac))
+- Moduledoc examples that compile, and the read contract as it is ([7956303](https://github.com/wavezync/durable/commit/7956303d409f23da2399e980fdfad944e42239fd))
+- Wait_for_approval's spec promised atoms it never returns ([692bc38](https://github.com/wavezync/durable/commit/692bc3819ed7432a95ed40a21bce6b1b205eba3e))
+- Guide examples that read the same data before and after a reload ([b0cd6e3](https://github.com/wavezync/durable/commit/b0cd6e3113f72923dcb59d648d9e7a9c03207661))
+
 ## [1.5.0](https://github.com/wavezync/durable/compare/durable-v1.4.0...durable-v1.5.0) - 2026-11-09
 
 ### Features
