@@ -4,6 +4,13 @@ All notable changes to this package. Versions follow [Semantic
 Versioning](https://semver.org); entries come from [Conventional
 Commits](https://www.conventionalcommits.org).
 
+## [2.0.1](https://github.com/wavezync/durable/compare/durable-v2.0.0...durable-v2.0.1) - 2026-11-23
+
+### Bug fixes
+
+- A workflow's data has string keys in every step, at every depth ([123d914](https://github.com/wavezync/durable/commit/123d9141c0a97380973757688c15c22689811a2a))
+- Helpers are the documented way to read data, and read inside it ([b1b8fae](https://github.com/wavezync/durable/commit/b1b8faeb08039d121c4ea29e703f633d8eabccab))
+
 ## [2.0.0](https://github.com/wavezync/durable/compare/durable-v1.5.0...durable-v2.0.0) - 2026-11-23
 
 ### Features
