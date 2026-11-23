@@ -7,8 +7,8 @@ defmodule Durable.Queue.Poller do
   - Concurrency limits
   - Poll interval configuration
 
-  The poller monitors workers and handles their completion messages,
-  calling ack/nack on the adapter as appropriate.
+  The poller monitors workers and frees a worker's slot when it reports. Each
+  worker settles its own run (ack/nack) before it does.
   """
 
   use GenServer
@@ -218,7 +218,7 @@ defmodule Durable.Queue.Poller do
       "Job #{job_id} completed with result=#{inspect(result)} duration=#{duration_ms}ms"
     )
 
-    state = handle_job_completion(state, worker, result)
+    state = handle_job_completion(state, worker)
     {:noreply, state}
   end
 
@@ -318,45 +318,16 @@ defmodule Durable.Queue.Poller do
     end
   end
 
-  defp handle_job_completion(state, worker, result) do
+  # The worker has settled its run already (Worker.settle_and_report/3): all
+  # that is left here is its slot.
+  defp handle_job_completion(state, worker) do
     case Map.pop(state.workers, worker) do
       {nil, _workers} ->
         state
 
-      {%{ref: ref, job_id: job_id, token: token}, workers} ->
-        safely_settle_job(state.config, job_id, token, result)
+      {%{ref: ref}, workers} ->
         Process.demonitor(ref, [:flush])
         %{state | workers: workers}
-    end
-  end
-
-  # A row that can't be read mustn't take the poller, and its other workers,
-  # down with it. Stale-lock recovery deals with the run.
-  defp safely_settle_job(config, job_id, token, result) do
-    settle_job(config, job_id, token, result)
-  rescue
-    error -> Logger.error("Couldn't settle job #{job_id}: #{Exception.message(error)}")
-  end
-
-  defp settle_job(config, job_id, token, result) do
-    adapter = Adapter.default_adapter()
-
-    case result do
-      :ok ->
-        adapter.ack(config, job_id, token)
-
-      :waiting ->
-        # Job is waiting for sleep/event/input - don't ack, leave as-is
-        # The executor already updated the status to :waiting
-        :ok
-
-      :fenced ->
-        # The worker detected it was fenced out and aborted. The row now
-        # belongs to its new owner — don't ack/nack it, just clean up locally.
-        :ok
-
-      {:error, reason} ->
-        adapter.nack(config, job_id, reason, token)
     end
   end
 

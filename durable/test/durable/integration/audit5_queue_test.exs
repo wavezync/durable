@@ -323,26 +323,23 @@ defmodule Durable.Integration.Audit5QueueTest do
       await_status(next, :completed)
     end
 
-    # Nobody fails the run for the undo that died, so it is the stale sweep's:
-    # failed after `stale_lock_timeout`, as for a node that crashed.
-    test "leaves a rollback whose undo died to the stale sweep, which fails it" do
-      start_durable!(%{default: 1}, stale_lock_timeout: 1)
+    # The worker settles its own result: with the poller gone, the run a dead
+    # undo left `compensating` used to wait for the stale sweep.
+    test "still fails a rollback whose undo died, at once" do
+      start_durable!(%{default: 1})
       {:ok, id} = Durable.start(Audit5QueueRefund, %{"order" => 11})
       assert_eventually(fn -> Probe.hits(:refunding) == 1 end)
 
       lose_report!(id, &kill_task!/1)
-      assert %{status: :compensating} = get(id)
 
-      Process.sleep(1_200)
-      StaleJobRecovery.recover_now(Durable)
-
-      assert %{status: :failed, locked_by: nil, error: %{"type" => "zombie_detected"}} = get(id)
+      assert %{status: :failed, locked_by: nil, lock_token: nil, error: %{"type" => "task_crash"}} =
+               get(id)
     end
 
-    # The third loss in a row is the poller's to fail the run for. Unheard, the
-    # run is the stale sweep's: it gets one more go, and fails then.
-    test "leaves a run lost for the third time to the stale sweep, and it fails on its next loss" do
-      start_durable!(%{default: 1}, stale_lock_timeout: 1)
+    # The third loss in a row fails the run. Unheard, it stayed locked for the
+    # stale sweep and got a fourth go.
+    test "still fails a run lost for the third time in a row, on that loss" do
+      start_durable!(%{default: 1})
       {:ok, id} = Durable.start(Audit5QueueRouting, %{"order" => 12})
 
       for n <- 1..2 do
@@ -352,16 +349,10 @@ defmodule Durable.Integration.Audit5QueueTest do
 
       assert_eventually(fn -> Probe.hits(:routing) == 3 end)
       lose_report!(id, &kill_task!/1)
-      assert %{status: :running} = get(id)
 
-      Process.sleep(1_200)
-      StaleJobRecovery.recover_now(Durable)
-
-      assert_eventually(fn -> Probe.hits(:routing) == 4 end)
-      kill_task!(:sys.get_state(worker!(id)).task_pid)
-
-      assert %{locked_by: nil, error: %{"type" => "task_crash"}} = await_status(id, :failed)
-      assert Probe.hits(:routing) == 4
+      assert %{status: :failed, locked_by: nil, error: %{"type" => "task_crash"}} = get(id)
+      Process.sleep(300)
+      assert Probe.hits(:routing) == 3
     end
   end
 

@@ -98,58 +98,52 @@ defmodule Durable.Queue.Adapters.Postgres do
     ack_with_retry(config, job_id, 1, 3, lock_token)
   end
 
-  # Retry the ack on transient failures (DB blip, connection lost). If we
-  # gave up here, the workflow would stay locked until stale-recovery
-  # released it 5 minutes later — at which point it would silently re-execute
-  # because there's no idempotency key (Bug M-5). The retry buys us time;
-  # the telemetry surfaces persistent failures so operators can intervene.
+  # A finished run's lock is cleared in one conditional UPDATE, on the claim's
+  # token and on the run having ended: a claim taken since the worker finished
+  # isn't stomped, and a run still `running` keeps its lock, so the stale
+  # sweep can find it. The executor clears the lock as it ends a run; this is
+  # for a row it left one on.
+  #
+  # Retried when the database is away for a moment, and reported if it stays
+  # away: the lock then waits for the stale sweep.
   defp ack_with_retry(%Config{} = config, job_id, attempt, max_attempts, lock_token) do
-    case Repo.get(config, WorkflowExecution, job_id) do
-      nil ->
-        {:error, :not_found}
+    ended =
+      from(w in still_claimed(job_id, lock_token),
+        where: w.status not in [:running, :compensating]
+      )
 
-      execution ->
-        ack_loaded(config, execution, job_id, attempt, max_attempts, lock_token)
+    case Repo.update_all(config, ended, set: [locked_by: nil, locked_at: nil]) do
+      {1, _} ->
+        :ok
+
+      {0, _} ->
+        if Repo.get(config, WorkflowExecution, job_id), do: :ok, else: {:error, :not_found}
     end
+  rescue
+    error ->
+      if attempt < max_attempts do
+        Process.sleep(:rand.uniform(50) * attempt)
+        ack_with_retry(config, job_id, attempt + 1, max_attempts, lock_token)
+      else
+        ack_failed(config, job_id, attempt, Exception.message(error))
+      end
   end
 
-  defp ack_loaded(config, execution, job_id, attempt, max_attempts, lock_token) do
-    if fenced?(execution, lock_token) do
-      # Another worker owns this row now (stale recovery + reclaim); our ack
-      # would stomp their claim — no-op.
-      :ok
-    else
-      case execution
-           |> WorkflowExecution.unlock_changeset()
-           |> Repo.update(config) do
-        {:ok, _} ->
-          :ok
+  defp ack_failed(config, job_id, attempts, reason) do
+    :telemetry.execute(
+      [:durable, :queue, :ack_failed],
+      %{count: 1, attempts: attempts},
+      %{job_id: job_id, reason: reason, durable: config.name}
+    )
 
-        {:error, _reason} when attempt < max_attempts ->
-          backoff_ms = :rand.uniform(50) * attempt
-          Process.sleep(backoff_ms)
-          ack_with_retry(config, job_id, attempt + 1, max_attempts, lock_token)
+    Logger.error("[Durable] ack failed after #{attempts} attempts for job #{job_id}: #{reason}")
 
-        {:error, reason} ->
-          :telemetry.execute(
-            [:durable, :queue, :ack_failed],
-            %{count: 1, attempts: attempt},
-            %{job_id: job_id, reason: reason, durable: config.name}
-          )
+    Durable.Activity.record(config, "ack_failed",
+      workflow_id: job_id,
+      details: %{attempts: attempts, reason: reason}
+    )
 
-          Logger.error(
-            "[Durable] ack failed after #{attempt} attempts for job #{job_id}: " <>
-              inspect(reason)
-          )
-
-          Durable.Activity.record(config, "ack_failed",
-            workflow_id: job_id,
-            details: %{attempts: attempt, reason: inspect(reason)}
-          )
-
-          {:error, reason}
-      end
-    end
+    {:error, reason}
   end
 
   @impl true

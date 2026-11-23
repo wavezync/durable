@@ -227,14 +227,6 @@ defmodule Durable.Storage.Schemas.WorkflowExecution do
   end
 
   @doc """
-  Creates a changeset for unlocking a workflow.
-  """
-  def unlock_changeset(execution) do
-    execution
-    |> cast(%{locked_by: nil, locked_at: nil}, [:locked_by, :locked_at])
-  end
-
-  @doc """
   Creates a changeset for marking workflow as compensating.
   """
   def compensating_changeset(execution) do
