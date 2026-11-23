@@ -609,11 +609,16 @@ defmodule Durable.Executor do
 
   defp key_taken_if_conflict(result, _config, _execution), do: result
 
-  # A retried run gets its full workflow timeout again, from now.
+  # A retried run gets its full workflow timeout again, from now, and a lane
+  # retried by its own id its `timeout:` too.
   defp retried_deadline(execution) do
     case get_workflow_definition_from_execution(execution) do
-      {:ok, workflow_def} -> deadline(workflow_def, nil)
-      _ -> execution.deadline_at
+      {:ok, workflow_def} ->
+        {_lane, ms} = declared_timeout(execution, workflow_def) || {nil, nil}
+        lane_deadline(deadline(workflow_def, nil), ms)
+
+      _ ->
+        execution.deadline_at
     end
   end
 
@@ -641,6 +646,11 @@ defmodule Durable.Executor do
   defp still_holding(changeset, _parent), do: changeset
 
   defp reopen_parallel_block(config, parent, retry_attrs) do
+    # The run's row first (rule 2): a lane's notice takes it before it touches
+    # the group, and the two would deadlock, or the notice would read a lane
+    # this is putting back as still failed.
+    Repo.one(config, from(w in WorkflowExecution, where: w.id == ^parent.id, lock: "FOR UPDATE"))
+
     key_attrs =
       case Keys.retake(config, parent, definition_or_nil(parent)) do
         {:ok, attrs} -> attrs
@@ -843,14 +853,15 @@ defmodule Durable.Executor do
   # that is. The claim there fails it before its next step, so its compensations
   # run in a worker, under that queue's limits, and not in the sweep. The update
   # goes through the row's status and queue, so it can't overlap a poller or
-  # another node's sweep. A parallel branch has no deadline check; its parent's
-  # timeout cancels it. With no polled queue anywhere it stays until a node
-  # shows up.
+  # another node's sweep. A lane whose deadline is its block's run's stays: that
+  # run's timeout cancels it. A lane past a `timeout:` of its own is moved like
+  # any run, or its block would wait for it for ever. With no polled queue
+  # anywhere it stays until a node shows up.
   @doc false
   @spec expire_unclaimed(String.t(), [String.t()], Config.t()) :: term()
   def expire_unclaimed(workflow_id, polled, %Config{} = config) do
     with {:ok, execution} <- load_execution(config, workflow_id),
-         false <- parallel_branch?(execution),
+         true <- own_deadline?(config, execution),
          {:ok, _workflow_def} <- get_workflow_definition_from_execution(execution),
          home = execution.home_queue || execution.queue,
          queue when is_binary(queue) <- Enum.find([home, "default" | polled], &(&1 in polled)),
@@ -1000,8 +1011,8 @@ defmodule Durable.Executor do
     parallel_step_flag = execution.engine_state["__parallel_step"]
 
     lane_steps = parallel_step_flag && lane_steps(workflow_def, parallel_step_flag)
-    # Whose deadline a timeout names: the lane's own, if it has one.
-    Process.put(:durable_lane_timeout, lane_timeout(execution, workflow_def))
+    # Whose deadline a timeout names: a lane's own, if that is the one it has.
+    Process.put(:durable_lane_timeout, lane_timeout(config, execution, workflow_def))
     done = execution.engine_state[@done]
 
     result =
@@ -1046,8 +1057,24 @@ defmodule Durable.Executor do
     end)
   end
 
+  # The lane whose `timeout:` is this run's deadline, and that timeout: the
+  # lane the run was started for, or one that lane's block is in. nil when the
+  # deadline is the workflow's.
+  defp lane_timeout(config, execution, workflow_def) do
+    declared = declared_timeout(execution, workflow_def)
+
+    cond do
+      not parallel_branch?(execution) -> nil
+      declared && own_deadline?(config, execution) -> declared
+      # No lane above it has one either: nothing to look up.
+      Enum.all?(workflow_def.steps, &(Map.get(&1.opts, :timeouts, %{}) == %{})) -> nil
+      block = parent_run(config, execution) -> lane_timeout(config, block, workflow_def)
+      true -> nil
+    end
+  end
+
   # The lane a run was started for and its `timeout:`, if it has one.
-  defp lane_timeout(execution, workflow_def) do
+  defp declared_timeout(execution, workflow_def) do
     lane_id = execution.engine_state["__parallel_step"]
 
     Enum.find_value(workflow_def.steps, fn
@@ -1059,6 +1086,18 @@ defmodule Durable.Executor do
       _step ->
         nil
     end)
+  end
+
+  # Whether a run's deadline is its own. A lane is given the earlier of its
+  # `timeout:` and its block's run's deadline (`lane_deadline/2`): when that
+  # run is due no later, the deadline is that run's, which ends the lane with it.
+  defp own_deadline?(config, execution) do
+    with true <- parallel_branch?(execution),
+         %{deadline_at: %DateTime{} = blocks} <- parent_run(config, execution) do
+      execution.deadline_at != nil and DateTime.before?(execution.deadline_at, blocks)
+    else
+      _not_a_lane_or_no_deadline_above -> true
+    end
   end
 
   # A lane is a run of its own steps: it resumes, retries and waits like any
@@ -2972,6 +3011,7 @@ defmodule Durable.Executor do
     multi =
       Ecto.Multi.new()
       |> lock_run(parent_id)
+      |> Ecto.Multi.run(:lane, fn repo, _ -> if_not_retried(repo, execution) end)
       |> Ecto.Multi.update(:event, PendingEvent.receive_changeset(pending_event, payload))
       |> Ecto.Multi.run(:wait_group, fn repo, _ ->
         WaitGroup.add_event_locked(
@@ -2999,6 +3039,9 @@ defmodule Durable.Executor do
         for cancelled <- stopped || [], do: close_out_cancelled(config, cancelled)
         DurablePubSub.wake(config, parent)
 
+      {:error, :lane, :retried, _} ->
+        :ok
+
       {:error, stage, reason, _} ->
         Logger.error(
           "[Durable] failed to atomically fulfill parallel child event + wait group + resume parent: " <>
@@ -3007,6 +3050,16 @@ defmodule Durable.Executor do
 
         {:error, reason}
     end
+  end
+
+  # A notice says how a lane ended. A retry of the block puts the lane back to
+  # work and waits for it on the same event, so a notice from before the retry
+  # finds that event pending again (rule 25 can't tell): taken, it would end
+  # the block on an answer the lane is no longer at. The retry stamps the lane,
+  # under the block's lock, which this holds.
+  defp if_not_retried(repo, lane) do
+    now = repo.one(from(w in WorkflowExecution, where: w.id == ^lane.id, select: w.retried_at))
+    if now == lane.retried_at, do: {:ok, lane.id}, else: {:error, :retried}
   end
 
   # Resume a parent (or any waiting workflow) inside an Ecto.Multi.run.
@@ -3637,6 +3690,52 @@ defmodule Durable.Executor do
   rescue
     error ->
       Logger.error("[Durable] redelivering lost notices failed: #{Exception.message(error)}")
+  end
+
+  @doc false
+  # Closing what a cancelled run had open (its waits, the runs under it)
+  # happens after the commit that cancelled it, so it can be lost with the
+  # process: a lane that stopped its block and died before it had closed the
+  # other lanes, a cancel cut short. It's idempotent, so the sweep does it
+  # again for a cancelled run that still has a wait open or a run under it
+  # going. A run under it that was retried since is its operator's to stop.
+  @spec close_out_lost(Config.t(), pos_integer()) :: :ok
+  def close_out_lost(%Config{} = config, older_than_seconds) do
+    cutoff = DateTime.add(DateTime.utc_now(), -older_than_seconds, :second)
+
+    cancelled =
+      from(w in WorkflowExecution,
+        where: w.status == :cancelled and w.completed_at < ^cutoff,
+        distinct: true,
+        limit: 500
+      )
+
+    with_runs_under =
+      from(w in cancelled,
+        join: c in WorkflowExecution,
+        on: c.parent_workflow_id == w.id,
+        where: c.status in [:pending, :running, :waiting],
+        # To be undone: a cancel leaves it alone (rule 17).
+        where: not EngineState.marked?(c, ^@rollback),
+        where: is_nil(c.retried_at) or c.retried_at < w.completed_at
+      )
+
+    with_waits =
+      for schema <- [PendingInput, PendingEvent, WaitGroup] do
+        from(w in cancelled,
+          join: p in ^schema,
+          on: p.workflow_id == w.id,
+          where: p.status == :pending
+        )
+      end
+
+    [with_runs_under | with_waits]
+    |> Enum.flat_map(&Repo.all(config, &1))
+    |> Enum.uniq_by(& &1.id)
+    |> Enum.each(&close_out_cancelled(config, &1))
+  rescue
+    error ->
+      Logger.error("[Durable] closing out cancelled runs failed: #{Exception.message(error)}")
   end
 
   defp notice_for(%{status: :completed} = child),

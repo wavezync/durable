@@ -413,6 +413,9 @@ defmodule Durable.WorkflowTimeoutTest do
       assert %{status: :pending, queue: "nobody"} = run(child.id)
 
       repo().insert!(polling_node(["default"]))
+      # The lane has no `timeout:`, so its deadline is the run's. One due
+      # before the run's is a lane's own, and that lane is moved.
+      expire(parent)
       expire(child.id)
       sweep()
 
