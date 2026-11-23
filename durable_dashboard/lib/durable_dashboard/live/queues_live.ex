@@ -16,8 +16,9 @@ defmodule DurableDashboard.Live.QueuesLive do
 
   # Operations shows what happened to queues and nodes. Key events
   # (`key_*`) belong to a run's Key view and its workflow's Keys section.
-  @operation_kinds ~w(stale_recovered zombie_recovered worker_fenced ack_failed queue_paused
-                      queue_resumed schedule_disabled schedule_removed pruned)
+  @operation_kinds ~w(stale_recovered zombie_recovered worker_fenced ack_failed
+                      rollback_interrupted queue_paused queue_resumed schedule_disabled
+                      schedule_removed pruned)
 
   alias DurableDashboard.Access
   alias DurableDashboard.Components.Charts
@@ -401,6 +402,14 @@ defmodule DurableDashboard.Live.QueuesLive do
     """
   end
 
+  defp activity_line(%{event: %{kind: "rollback_interrupted"}} = assigns) do
+    ~H"""
+    Run <.run_link id={@event.workflow_id} base_path={@base_path} /> lost its worker part-way
+    through its rollback<span :if={@event.details["reason"]}> ({@event.details["reason"]})</span>.
+    Roll it back again to finish: the undos that finished won't run twice.
+    """
+  end
+
   defp activity_line(%{event: %{kind: kind}} = assigns)
        when kind in ["queue_paused", "queue_resumed"] do
     ~H"""
@@ -458,8 +467,9 @@ defmodule DurableDashboard.Live.QueuesLive do
 
   defp activity_status(kind) when kind in ["stale_recovered", "zombie_recovered"], do: :waiting
 
-  defp activity_status(kind) when kind in ["worker_fenced", "ack_failed", "schedule_disabled"],
-    do: :failed
+  defp activity_status(kind)
+       when kind in ["worker_fenced", "ack_failed", "rollback_interrupted", "schedule_disabled"],
+       do: :failed
 
   defp activity_status("queue_paused"), do: :paused
   defp activity_status(_kind), do: :idle
@@ -474,6 +484,10 @@ defmodule DurableDashboard.Live.QueuesLive do
     do: "Fenced · a worker stopped because another node had taken its run over"
 
   defp activity_tip("ack_failed"), do: "Lock not released · stale-lock recovery frees it"
+
+  defp activity_tip("rollback_interrupted"),
+    do: "Rollback cut short · the run failed with its own error; roll it back again to finish"
+
   defp activity_tip("queue_paused"), do: "Queue paused"
   defp activity_tip("queue_resumed"), do: "Queue resumed"
 
