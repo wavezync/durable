@@ -173,7 +173,7 @@ Durable.start(ProcessArticle, %{"id" => 42, "rev" => 8}, key: "article:42", on_d
 #=> {:ok, new_id}
 ```
 
-The holder is cancelled and gives up its key in one step, and a new run starts with the new input. It works under any `reuse:`, `:never` included, because the holder hadn't finished. The cancel is the same as `Durable.cancel/2`: a step already running is stopped at its next heartbeat, no later step runs, and compensations don't run. The cancelled run's error says which run replaced it. A holder that is on its queue to be rolled back, or is being rolled back under `reuse: :never`, can't be cancelled: that start returns `{:error, {:key_taken, holder_id}}` and the rollback finishes. This is Temporal's TERMINATE_EXISTING, and Inngest's singleton `cancel` mode.
+The holder is cancelled and gives up its key in one step, and a new run starts with the new input. It works under any `reuse:`, `:never` included, because the holder hadn't finished. The cancel is the same as `Durable.cancel/2`: a step already running is stopped at its next heartbeat, no later step runs, and compensations don't run. The cancelled run's error says which run replaced it. A run waiting behind the holder (from an `on_duplicate: :run_again` start) has an older input, and is replaced the same way. A holder that is on its queue to be rolled back, or is being rolled back under `reuse: :never`, can't be cancelled: that start returns `{:error, {:key_taken, holder_id}}` and the rollback finishes. This is Temporal's TERMINATE_EXISTING, and Inngest's singleton `cancel` mode.
 
 ### Run Once More After It: `:run_again`
 

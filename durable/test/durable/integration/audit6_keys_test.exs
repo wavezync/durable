@@ -58,6 +58,25 @@ defmodule Durable.Integration.Audit6KeysTest do
     assert K.overlaps(key) == []
   end
 
+  # The workflow says run_again; one producer says cancel_existing, for "the
+  # newest input wins, starting over". The run waiting behind the replaced
+  # holder has an older input than the replacement.
+  test "a cancel_existing start replaces the run waiting behind the holder too" do
+    key = "account:10"
+    holder = start!(key, %{"v" => 1, "hold" => true})
+    assert_eventually(fn -> K.ran(key) == [1] end)
+    waiting = start!(key, %{"v" => 2})
+
+    {:ok, newest} =
+      Durable.start(K.Again, %{"key" => key, "v" => 3}, key: key, on_duplicate: :cancel_existing)
+
+    assert %{status: :cancelled, error: %{"replaced_by" => ^newest}} = get(waiting)
+
+    Probe.set({:go, 1})
+    await_status(newest, :completed)
+    assert K.ran(key) == [1, 3]
+  end
+
   # Issue #48 item 3 has `Durable.cancel/2` free the key while the cancelled
   # step still runs. With `rollback: true` the key goes another way, which a
   # fix in `Keys` alone won't see: the cancel queues the undo, and a run queued

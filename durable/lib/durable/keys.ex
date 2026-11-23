@@ -171,11 +171,53 @@ defmodule Durable.Keys do
     result =
       Repo.transaction(config, fn ->
         lock_key(config, ctx.entry)
-        unheld_waiting(ctx) || claim(ctx, @rounds, nil)
+        claimed = unheld_waiting(ctx) || claim(ctx, @rounds, nil)
+        {claimed, replace_waiting(ctx, claimed)}
       end)
 
-    with {:ok, claimed} <- result, do: finish(ctx, claimed)
+    with {:ok, {claimed, replaced}} <- result do
+      Enum.each(replaced, &Executor.after_cancel(config, &1))
+      finish(ctx, claimed)
+    end
   end
+
+  # `on_duplicate: :cancel_existing` starts over with the newest input. A run
+  # waiting for the key (run_again, not yet holding it) has an older one, and
+  # would run after the new run: it's replaced too. One a worker has claimed
+  # is fenced, as a cancel fences it.
+  defp replace_waiting(%{mode: :cancel_existing} = ctx, {:inserted, run, _moved}) do
+    now = DateTime.utc_now()
+
+    {_, replaced} =
+      Repo.update_all(
+        ctx.config,
+        from(w in WorkflowExecution,
+          where:
+            w.workflow_module == ^run.workflow_module and w.workflow_name == ^run.workflow_name and
+              w.key == ^run.key and not is_nil(w.runs_after_id) and not w.holds_key and
+              w.status in [:pending, :running],
+          select: w
+        ),
+        set: [
+          status: :cancelled,
+          error: %{
+            type: "cancelled",
+            message:
+              "Replaced by run #{String.slice(run.id, 0, 8)} (on_duplicate: :cancel_existing)",
+            replaced_by: run.id
+          },
+          completed_at: now,
+          updated_at: now,
+          locked_by: nil,
+          locked_at: nil,
+          lock_token: nil
+        ]
+      )
+
+    replaced
+  end
+
+  defp replace_waiting(_ctx, _claimed), do: []
 
   @doc false
   # What a key's advisory lock is named. Module as a string or an atom.
