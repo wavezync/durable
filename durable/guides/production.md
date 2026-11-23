@@ -263,8 +263,10 @@ end
 ```
 
 Runs can change nodes between steps, so don't keep files on local disk from one
-step to the next. Compensations aren't handed over: they keep running during the
-wait, and one that's killed is marked failed.
+step to the next. Compensations keep running during the wait. A rollback still
+running when the time is up goes back on its queue, and the node that claims it
+finishes it: the undo that was cut short runs again, and the ones that completed
+don't.
 
 To start before the signal arrives, call `Durable.drain()`, for example from a
 Kubernetes `preStop` hook. For app-wide cleanup of your own, use OTP's

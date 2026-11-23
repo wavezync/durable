@@ -530,11 +530,11 @@ defmodule Durable.Queue.Adapters.Postgres do
   end
 
   # Fencing-aware heartbeat. When the worker passes the token it claimed with,
-  # a refresh that touches 0 rows is classified: `:fenced` means another worker
-  # now owns this row (running with a different token) and the caller should
-  # abort to avoid a double-execution; `:cancelled` means the caller should stop
-  # the step; `:not_found` is a benign miss (the row completed/suspended, or was
-  # released but not yet reclaimed).
+  # a refresh that touches 0 rows is classified: `:fenced` means the row has
+  # another token now (another worker's, or none since it was released) and the
+  # caller should abort to avoid a double-execution; `:cancelled` means the
+  # caller should stop the step; `:not_found` is a benign miss (the caller's own
+  # executor just completed, parked or suspended the run, or it's gone).
   def heartbeat(%Config{} = config, job_id, lock_token) when is_binary(job_id) do
     do_heartbeat(config, job_id, lock_token)
   end
@@ -566,19 +566,23 @@ defmodule Durable.Queue.Adapters.Postgres do
     :exit, reason -> {:error, reason}
   end
 
+  # A token that isn't ours any more, whatever the status, is a claim that is
+  # gone: taken over, or put back for another claim by a stale sweep. Seen as
+  # :not_found, the step would run on, holding its slot. With our token the
+  # run is ours to settle: we just finished it, parked it or made it wait.
   defp classify_lost_lock(config, job_id, lock_token) do
     case Repo.get(config, WorkflowExecution, job_id) do
-      %WorkflowExecution{status: status, lock_token: current}
-      when status in [:running, :compensating] and current != lock_token ->
-        {:error, :fenced}
-
       %WorkflowExecution{status: :cancelled} ->
         {:error, :cancelled}
 
       # Cancelled with `rollback: true`: back on its queue at once, to be
-      # undone once this worker has stopped (`Executor.cancel_run/3`).
+      # undone once this worker has stopped (`Executor.cancel_run/3`). Stopped
+      # as a cancel, the worker closes the step it had.
       %WorkflowExecution{status: :pending, engine_state: %{"__rollback__" => _}} ->
         {:error, :cancelled}
+
+      %WorkflowExecution{lock_token: current} when current != lock_token ->
+        {:error, :fenced}
 
       _ ->
         {:error, :not_found}

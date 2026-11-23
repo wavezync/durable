@@ -58,7 +58,9 @@ defmodule Durable.Queue.Drainer do
         config.queues
         |> Map.keys()
         |> Task.async_stream(&Manager.drain(config.name, &1, timeout),
-          max_concurrency: map_size(config.queues),
+          # At least one: a node with no queues has nothing to wait for, and
+          # 0 is refused.
+          max_concurrency: max(map_size(config.queues), 1),
           timeout: timeout + 500,
           on_timeout: :kill_task,
           ordered: false
