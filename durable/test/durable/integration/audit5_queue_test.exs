@@ -332,8 +332,17 @@ defmodule Durable.Integration.Audit5QueueTest do
 
       lose_report!(id, &kill_task!/1)
 
-      assert %{status: :failed, locked_by: nil, lock_token: nil, error: %{"type" => "task_crash"}} =
+      # The run keeps the failure that started the rollback (rule 19); what
+      # cut the undo short is on the undo's own row.
+      assert %{status: :failed, locked_by: nil, lock_token: nil, error: %{"type" => "error"}} =
                get(id)
+
+      assert IntegrationRepo.exists?(
+               from(s in StepExecution,
+                 where: s.workflow_id == ^id and s.is_compensation and s.status == :failed,
+                 where: fragment("?->>'type' = 'task_crash'", s.error)
+               )
+             )
     end
 
     # The third loss in a row fails the run. Unheard, it stayed locked for the
