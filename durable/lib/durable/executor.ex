@@ -28,6 +28,7 @@ defmodule Durable.Executor do
   alias Durable.Storage.Schemas.WorkflowExecution
 
   import Ecto.Query
+  import Durable.Executor.StepRunner, only: [is_run_data: 1]
 
   require EngineState
   require Logger
@@ -1634,10 +1635,8 @@ defmodule Durable.Executor do
   # ponytail: a step that jumps (a decision, a `{:goto, _, _}`) and a step in
   # an unnamed branch still run again. Read their rows too if that matters.
   #
-  # ponytail: the row has the step's data, not what its body added to the
-  # engine's state. A `start_workflow` in a step lost this way isn't started
-  # again, but the run no longer knows its child by its `ref:`. Keep the body's
-  # additions on the step's row if a later step calls the same ref.
+  # The row has the step's data, not what its body added to the engine's
+  # state; a child it started is on the run's row already (`record_child/3`).
   #
   # ponytail: nor what the body took out of the context (`delete_context/1`):
   # a key the step dropped comes back from the data it was handed. Record the
@@ -2479,19 +2478,6 @@ defmodule Durable.Executor do
   defp stored(data), do: data |> sanitize_for_json() |> Jason.encode!() |> Jason.decode!()
 
   defp left_alone?({key, value}, started_with), do: Map.fetch(started_with, key) == {:ok, value}
-
-  # A run's data is a map, and not one that is stored as a scalar: a date
-  # passes `is_map/1`, and its save fails.
-  defguardp is_run_data(term)
-            when is_map(term) and
-                   not (is_struct(term) and
-                          :erlang.map_get(:__struct__, term) in [
-                            Date,
-                            DateTime,
-                            NaiveDateTime,
-                            Time,
-                            Decimal
-                          ])
 
   # Apply the into function, or put each lane under the block's name.
   # A named block: each lane goes under the block's name. Every lane finished

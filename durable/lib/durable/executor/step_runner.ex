@@ -23,7 +23,8 @@ defmodule Durable.Executor.StepRunner do
   # A date or a decimal is a map to Elixir, but JSON stores it as a scalar, and
   # a run's data has to come back as an object.
   @scalars [Date, DateTime, NaiveDateTime, Time, Decimal]
-  defguardp is_run_data(term)
+  @doc false
+  defguard is_run_data(term)
             when is_map(term) and
                    not (is_struct(term) and :erlang.map_get(:__struct__, term) in @scalars)
 
