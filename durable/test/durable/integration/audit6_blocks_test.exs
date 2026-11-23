@@ -62,6 +62,40 @@ defmodule Audit6BlocksQuotes do
   end
 end
 
+defmodule Audit6BlocksTrip do
+  @moduledoc false
+  use Durable
+  alias Durable.IntegrationProbe, as: Probe
+
+  # A seat is held, then the flight booked. Cancelling the trip undoes both:
+  # each undo needs what its step left, the trip and the flight's number.
+  workflow "audit6_trip" do
+    step :hold_seat, [compensate: :release_seat], fn trip ->
+      Probe.note(:holding)
+      if trip["slow"] == "hold", do: Process.sleep(400)
+      {:ok, Map.put(trip, "seat", "S-#{trip["trip"]}")}
+    end
+
+    step :book_flight, [compensate: :cancel_flight], fn trip ->
+      Probe.note(:booking)
+      if trip["slow"] == "book", do: Process.sleep(400)
+      {:ok, Map.put(trip, "flight", "F-#{trip["trip"]}")}
+    end
+
+    step :pay, fn trip -> {:ok, trip} end
+
+    compensate :release_seat, fn trip ->
+      Probe.put(:released, {trip["trip"], trip["seat"]})
+      {:ok, trip}
+    end
+
+    compensate :cancel_flight, fn trip ->
+      Probe.put(:cancelled, {trip["trip"], trip["flight"]})
+      {:ok, trip}
+    end
+  end
+end
+
 defmodule Durable.Integration.Audit6BlocksTest do
   @moduledoc """
   Audit 6: parallel blocks, children and rollbacks with live pollers, raced
@@ -123,5 +157,30 @@ defmodule Durable.Integration.Audit6BlocksTest do
     Probe.set(:dhl_go)
     await_status(id, :completed)
     assert Probe.fetch(:handed) == %{"dhl" => :ok, "ups" => :ok}
+  end
+
+  # A cancel with `rollback: true` leaves the step its worker is running open:
+  # finished before the worker hears, it is undone with the rest. Its result
+  # was never saved (the cancel fenced the save), so its undo was handed the
+  # data from before it: no flight to cancel. And a run cancelled in its first
+  # step had saved nothing at all, so that undo was handed nothing, not even
+  # the run's input.
+  for {slow, undo, wanted} <- [
+        {"hold", :released, {7, "S-7"}},
+        {"book", :cancelled, {7, "F-7"}}
+      ] do
+    test "a step that finishes after a cancel with rollback is undone with its result (#{slow})" do
+      start_durable!(%{default: 2}, heartbeat_interval: 2_000)
+      slow = unquote(slow)
+
+      {:ok, id} = Durable.start(Audit6BlocksTrip, %{"trip" => 7, "slow" => slow})
+      started = if slow == "hold", do: :holding, else: :booking
+      assert_eventually(fn -> Probe.hits(started) == 1 end)
+
+      :ok = Durable.cancel(id, "the traveller changed plans", rollback: true)
+      await_status(id, :compensated, 10_000)
+
+      assert Probe.fetch_or(unquote(undo), nil) == unquote(Macro.escape(wanted))
+    end
   end
 end

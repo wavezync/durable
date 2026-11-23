@@ -3721,12 +3721,7 @@ defmodule Durable.Executor do
       |> without_key(execution)
       |> cas_update!(config)
 
-    # A run that failed as it resumed (a parallel failure, its deadline, a
-    # timed-out input) hasn't run a step in this process, so its data isn't here.
-    data =
-      if Context.context() == %{},
-        do: config |> stored(exec.id) |> data_of(),
-        else: Context.context()
+    data = if Context.context() == %{}, do: undo_data(config, exec.id), else: Context.context()
 
     # A compensation is handed its data as a step is: as it is stored.
     Process.put(:durable_context, data |> stored() |> restore_lane_keys(workflow_def))
@@ -3762,6 +3757,27 @@ defmodule Durable.Executor do
 
     maybe_notify_parent(config, finished, :failed, original_error)
     {:error, original_error}
+  end
+
+  # A run that failed as it resumed (a parallel failure, its deadline, a
+  # timed-out input), or is undone by a claim of its own, hasn't run a step in
+  # this process, so its data isn't here: it is what the run last saved, or its
+  # input if it never saved. A step that finished after a cancel with
+  # `rollback: true` is undone too, and the cancel fenced its save: its result
+  # is on its row (`lost_attempt/2`), and goes over the rest, less what it
+  # deleted, as when a run comes back for it (`finished_before_lost/5`).
+  defp undo_data(config, workflow_id) do
+    run = stored(config, workflow_id)
+    data = if saved?(run), do: data_of(run), else: EngineState.strip(run.input || %{})
+
+    case lost_attempt(config, run) do
+      %{id: row_id, output: output} ->
+        dropped = Map.get(run.engine_state, EngineState.dropped_key(row_id), [])
+        data |> Map.drop(dropped) |> Map.merge(EngineState.strip(output))
+
+      nil ->
+        data
+    end
   end
 
   defp format_compensation_result({:ok, _output}), do: %{status: "completed"}
