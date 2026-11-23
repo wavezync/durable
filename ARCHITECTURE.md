@@ -111,7 +111,7 @@ A run's `context` is the user's data and nothing else. What the engine itself ne
 
 | Situation | What recovers it |
 |---|---|
-| `running`, lock not refreshed for `stale_lock_timeout` (300 s) | `StaleJobRecovery` closes the attempt as failed (`worker_lost`) and sets the run back to `pending`, and the old worker is fenced out by its `lock_token` |
+| `running`, lock not refreshed for `stale_lock_timeout` (300 s) | `StaleJobRecovery` closes the attempt as failed (`worker_lost`) and sets the run back to `pending`, and the old worker is fenced out by its `lock_token`. A worker that couldn't refresh its lock has stopped its step a heartbeat before the lock went stale, so the step doesn't run on beside its next attempt |
 | `waiting` with nothing left that could wake it | `StaleJobRecovery` marks it failed |
 | `compensating`, lock not refreshed for `stale_lock_timeout` | `StaleJobRecovery` marks it failed, with the error it had: why it was being undone. Why the rollback stopped is on the undo's row and in a `rollback_interrupted` activity. `Durable.rollback/2` then finishes the job: the undos that completed aren't run again |
 | `compensating`, on a node that stops cleanly | The node hands it back with its rollback marker, and the next node to claim it undoes what is left |

@@ -280,7 +280,9 @@ the lock goes stale, 300 seconds by default, and a sweep that runs every 60 seco
 puts them back on the queue. You can shorten that with a smaller
 `stale_lock_timeout`, keeping it several times `heartbeat_interval` (Durable warns
 at boot if it's under 3). A worker whose lock was taken over is fenced out, so
-two copies can't both record a result.
+two copies can't both record a result. A worker cut off from the database, which
+can't refresh its lock, stops its step a heartbeat before the lock goes stale, so
+the step doesn't run on beside the copy another node starts.
 
 Smaller failures don't take a queue down. A poll that raises, because the
 database is away for a moment, is logged and tried again at the next tick. A
