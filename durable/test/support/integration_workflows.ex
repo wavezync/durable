@@ -500,6 +500,37 @@ defmodule Durable.IntegrationWorkflows do
     end
   end
 
+  defmodule Load do
+    @moduledoc false
+    # Three short steps, the middle one on a step queue. Each counts itself and
+    # is counted under its run, so two of a run's steps at once show as a peak
+    # of 2. Retries to spare: a killed task uses an attempt.
+    use Durable
+
+    workflow "it_load" do
+      step :a, [retry: [max_attempts: 20, backoff: :constant, base: 5]], fn data ->
+        load_step(:a, data)
+      end
+
+      step :b, [queue: :ocr, retry: [max_attempts: 20, backoff: :constant, base: 5]], fn data ->
+        load_step(:b, data)
+      end
+
+      step :c, [retry: [max_attempts: 20, backoff: :constant, base: 5]], fn data ->
+        load_step(:c, data)
+      end
+    end
+
+    defp load_step(step, data) do
+      Probe.inside([{:run, data["n"]}], fn ->
+        Probe.note({step, data["n"]})
+        Process.sleep(data["ms"])
+      end)
+
+      {:ok, data}
+    end
+  end
+
   defmodule HeldOnOcr do
     @moduledoc false
     use Durable

@@ -190,6 +190,37 @@ defmodule Durable.IntegrationCase do
       end)
   end
 
+  @doc """
+  On the node it's called on: kills one of Durable's workers on `queues` at
+  random, or its step's task (`:task`). Returns the run it was working on.
+  """
+  def kill_one(kind, queues) do
+    workers =
+      for queue <- queues,
+          sup = Process.whereis(Module.concat([Durable, Queue, WorkerSupervisor, camel(queue)])),
+          sup != nil,
+          {_id, pid, _type, _modules} <- DynamicSupervisor.which_children(sup),
+          is_pid(pid),
+          do: pid
+
+    with [_ | _] <- workers,
+         worker = Enum.random(workers),
+         %{job: job, task_pid: task} <- :sys.get_state(worker, 500) do
+      Process.exit(if(kind == :task, do: task, else: worker), :kill)
+      job.id
+    else
+      _none -> nil
+    end
+  catch
+    :exit, _gone -> nil
+  end
+
+  defp camel(queue),
+    do: queue |> to_string() |> String.split("_") |> Enum.map_join(&String.capitalize/1)
+
+  @doc "Stops Durable on `node` the way a deploy does, so it hands its runs back."
+  def stop_durable!(node), do: :ok = :erpc.call(node, Durable.Supervisor, :stop, [Durable])
+
   @doc "Kills a node the way a crash would: no shutdown, no clean-up."
   def crash_node!(node) do
     Node.monitor(node, true)
