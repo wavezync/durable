@@ -86,10 +86,14 @@ defmodule Durable.Queue.Drainer do
     end
   end
 
-  # Its workers are about to be killed. Without this, their runs would sit
-  # locked until `stale_lock_timeout`. Clearing the fencing token means a worker
-  # still finishing up can't record anything over the next claim.
+  # Its workers are stopped, then their runs go back on their queues. Without
+  # this, those runs would sit locked until `stale_lock_timeout`. Stopped
+  # first: a step still running once its run was back could run beside the
+  # next node's, and steps that held every connection of the pool left none
+  # for the hand-back, so it never happened.
   defp hand_back_running(config) do
+    stop_workers(config)
+
     case Adapter.default_adapter().release_node_jobs(config, config.node_id) do
       {:ok, count} ->
         Logger.warning(
@@ -105,5 +109,14 @@ defmodule Durable.Queue.Drainer do
       {:error, reason} ->
         Logger.error("[Durable] couldn't hand back this node's runs: #{inspect(reason)}")
     end
+  end
+
+  # Killed, as their supervisor would after its own wait: a worker stuck in a
+  # write never gets to a shutdown signal. Its step's task dies with it.
+  defp stop_workers(config) do
+    workers = Manager.workers(config)
+    refs = Enum.map(workers, &Process.monitor/1)
+    Enum.each(workers, &Process.exit(&1, :kill))
+    for ref <- refs, do: receive(do: ({:DOWN, ^ref, :process, _pid, _reason} -> :ok))
   end
 end

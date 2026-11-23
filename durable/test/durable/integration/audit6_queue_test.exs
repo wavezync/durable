@@ -23,6 +23,21 @@ defmodule Audit6QueueExport do
   end
 end
 
+defmodule Audit6QueueReport do
+  @moduledoc false
+  use Durable
+  alias Durable.IntegrationProbe, as: Probe
+
+  # A report built by one long query, on the node's own repo.
+  workflow "audit6_queue_report" do
+    step :build_report, fn report ->
+      Probe.note(:building)
+      Audit6QueueRepo.query!("SELECT pg_sleep(3)", [], timeout: 10_000)
+      {:ok, report}
+    end
+  end
+end
+
 defmodule Durable.Integration.Audit6QueueTest do
   @moduledoc """
   Audit 6: the queue and recovery under load. Workers that can't reach the
@@ -33,6 +48,33 @@ defmodule Durable.Integration.Audit6QueueTest do
   alias Durable.Queue.StaleJobRecovery
 
   @moduletag :capture_log
+
+  # A node on a repo of its own: stopping it is the node losing the database,
+  # and a small pool is one its steps can fill.
+  defp start_on_own_repo!(repo_opts, durable_opts) do
+    config = Keyword.merge(Application.fetch_env!(:durable, IntegrationRepo), repo_opts)
+    Application.put_env(:durable, Audit6QueueRepo, config)
+    start_supervised!(Audit6QueueRepo)
+
+    Durable.DataCase.start_supervised_durable!(
+      [repo: Audit6QueueRepo, queues: queue_opts(%{default: 2})] ++ durable_opts
+    )
+  end
+
+  describe "a node that stops while its steps hold every connection of its pool" do
+    test "still hands its runs back" do
+      start_on_own_repo!([pool_size: 2], [])
+
+      ids = for n <- 1..2, do: elem(Durable.start(Audit6QueueReport, %{"n" => n}), 1)
+      assert_eventually(fn -> Probe.hits(:building) == 2 end)
+
+      stop_supervised!(Durable)
+
+      for id <- ids do
+        assert %{status: :pending, locked_by: nil} = get(id)
+      end
+    end
+  end
 
   describe "a worker cut off from the database" do
     # Node A runs on a repo of its own; stopping it is A losing the database

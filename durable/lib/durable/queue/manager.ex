@@ -106,6 +106,17 @@ defmodule Durable.Queue.Manager do
     |> Enum.map(&to_string/1)
   end
 
+  @doc false
+  # This node's workers, on every queue.
+  @spec workers(Config.t()) :: [pid()]
+  def workers(%Config{} = config) do
+    for queue <- Map.keys(config.queues),
+        {_id, pid, _type, _modules} <-
+          DynamicSupervisor.which_children(worker_supervisor_name(to_string(queue), config.name)),
+        is_pid(pid),
+        do: pid
+  end
+
   # Supervisor callbacks
 
   @impl true
