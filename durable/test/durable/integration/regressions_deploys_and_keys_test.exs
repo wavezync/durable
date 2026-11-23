@@ -228,7 +228,11 @@ defmodule Durable.Integration.DeploysAndKeysRegressionsTest do
 
       StaleJobRecovery.recover_now(Durable)
       failed = await_status(id, :failed, 3_000)
-      assert failed.error["type"] == "zombie_detected"
+      # Still the error the run is being undone for; the sweep's is in the activity.
+      assert failed.error["message"] == "no"
+
+      assert [%{details: %{"reason" => "zombie_detected"}}] =
+               Durable.Activity.list!(workflow_id: id, kinds: ["rollback_interrupted"])
 
       :ok = Probe.set(:comp_resume)
       Process.sleep(500)

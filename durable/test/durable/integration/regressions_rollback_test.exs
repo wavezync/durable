@@ -140,7 +140,13 @@ defmodule Durable.Integration.RegressionsRollbackTest do
     {:ok, id} = Durable.start(Delivery, %{})
     run = await_status(id, :failed)
 
-    assert run.error["type"] == "task_crash"
+    # The run keeps the error it was being undone for; that the undo died is
+    # in the activity.
+    assert run.error["type"] == "rollback"
+
+    assert [%{details: %{"reason" => "task_crash"}}] =
+             Durable.Activity.list!(workflow_id: id, kinds: ["rollback_interrupted"])
+
     assert Probe.hits({:release, id}) == 1
 
     sweep()

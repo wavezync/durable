@@ -251,9 +251,76 @@ defmodule Durable.Audit5WaitsTest do
     def time_zone_periods_from_wall_datetime(_, _), do: {:error, :time_zone_not_found}
   end
 
+  # An order waits for its manager's approval, its payment or its carrier,
+  # each for a limited time.
+  defmodule Audit5WaitsOvernight do
+    use Durable
+    use Durable.Wait
+
+    workflow "audit5_waits_overnight" do
+      step :wait, fn order ->
+        got =
+          case order["waits_for"] do
+            "approval" -> wait_for_input("manager_approval", timeout: 0, timeout_value: "nobody")
+            "payment" -> wait_for_event("payment.succeeded", timeout: 0, timeout_value: "nobody")
+            "carrier" -> wait_for_any(["delivered", "lost"], timeout: 0, timeout_value: "nobody")
+          end
+
+        {:ok, Map.put(order, "got", got)}
+      end
+    end
+  end
+
   defp time_out_waits do
     TimeoutWorker.check_timeouts()
     :sys.get_state(TimeoutWorker.worker_name(Durable))
+  end
+
+  # Tells the test how many rows each read of the waits that timed out returned.
+  def note_load(_event, _measurements, %{query: query, result: {:ok, %{num_rows: rows}}}, test) do
+    if query =~ ~r/^SELECT/ and query =~ ~s("timeout_at" <=), do: send(test, {:loaded, rows})
+  end
+
+  def note_load(_event, _measurements, _metadata, _test), do: :ok
+
+  defp loads do
+    receive do
+      {:loaded, rows} -> [rows | loads()]
+    after
+      0 -> []
+    end
+  end
+
+  describe "a backlog of waits that timed out while every node was down" do
+    test "is read a batch at a time, and all of it is handled in the one check" do
+      start_supervised!(
+        {TimeoutWorker, config: Config.get(Durable), interval: 3_600_000, batch_size: 2}
+      )
+
+      waiting =
+        for waits_for <- ["approval", "payment", "carrier"], order <- 1..5 do
+          run_workflow(Audit5WaitsOvernight, %{"waits_for" => waits_for, "order" => order})
+        end
+
+      :telemetry.attach(
+        "a5-loads",
+        [:durable, :test_repo, :query],
+        &__MODULE__.note_load/4,
+        self()
+      )
+
+      on_exit(fn -> :telemetry.detach("a5-loads") end)
+      time_out_waits()
+
+      loaded = loads()
+      assert Enum.sum(loaded) == 15
+      assert Enum.max(loaded) <= 2, "a read took the whole backlog: #{inspect(loaded)}"
+
+      for run <- waiting do
+        finished = drain(run)
+        assert {finished.status, finished.context["got"]} == {:completed, "nobody"}
+      end
+    end
   end
 
   describe "the same event waited for in two steps" do

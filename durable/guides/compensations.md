@@ -102,7 +102,7 @@ The run stops failed like any other, and can be retried or rolled back by hand. 
 
 A run that is on its queue to be rolled back can't be cancelled out of it. `Durable.cancel/2` returns `{:error, :already_completed}`, `Durable.cancel_all/2` and a parent's cancel pass over it, and the rollback finishes.
 
-A rollback that was cut short picks up where it stopped. If the worker died part-way, the run is left `:failed` and `Durable.rollback/2` again runs only the undos that hadn't completed. Some of it is undone, so `Durable.retry/2` refuses it with `{:error, :rolled_back}`. A node that stops cleanly in the middle hands the run back, and the node that claims it undoes what is left: the undo that was cut short runs again from the top, so keep compensations safe to repeat.
+A rollback that was cut short picks up where it stopped. If the worker died part-way, the run is left `:failed` and `Durable.rollback/2` again runs only the undos that hadn't completed. The run keeps the error that started the rollback (`"card declined"`), and ends `:compensated` with it. What cut the rollback short (`"task_crash"`, or `"zombie_detected"` when its node was lost) is the error on the undo's own step row, and a `"rollback_interrupted"` entry in `Durable.Activity.list/1`. Some of it is undone, so `Durable.retry/2` refuses it with `{:error, :rolled_back}`. A node that stops cleanly in the middle hands the run back, and the node that claims it undoes what is left: the undo that was cut short runs again from the top, so keep compensations safe to repeat.
 
 ### Upgrading to 1.6
 

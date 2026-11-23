@@ -185,34 +185,66 @@ defmodule Durable.Queue.Adapters.Postgres do
     now = DateTime.utc_now()
 
     {_count, failed} =
-      Repo.update_all(
+      fail_runs(
         config,
         from(w in still_claimed(execution.id, lock_token),
-          where: w.status in [:running, :compensating],
-          select: w
+          where: w.status in [:running, :compensating]
         ),
-        set: [
-          status: :failed,
-          error: error,
-          completed_at: now,
-          updated_at: now,
-          # On a failed run this is when to roll it back (the timeout sweep),
-          # and what a retry's backoff or a delayed start left there isn't.
-          scheduled_at: nil,
-          locked_by: nil,
-          locked_at: nil,
-          lock_token: nil
-        ]
+        error,
+        completed_at: now,
+        updated_at: now,
+        # On a failed run this is when to roll it back (the timeout sweep),
+        # and what a retry's backoff or a delayed start left there isn't.
+        scheduled_at: nil,
+        locked_by: nil,
+        locked_at: nil,
+        lock_token: nil
       )
 
     for run <- failed do
       # What raised has reported this attempt's end already, as an :exception.
       StepRunner.close_attempts(config, [run.id], :failed, error)
+      if execution.status == :compensating, do: rollback_interrupted(config, run, error)
       # The executor never got to tell a parent waiting on this run.
-      Executor.maybe_notify_parent(config, run, :failed, error)
+      Executor.maybe_notify_parent(config, run, :failed, run.error)
     end
 
     :ok
+  end
+
+  # Fails the runs of `query` in the executor's place, with `error`. A run that
+  # was being rolled back keeps the error it has: that is why it is being
+  # undone, and `Durable.rollback/2` ends the run with it once it has finished
+  # the job. What cut the rollback short goes on the undo's own row, which the
+  # caller closes with `error`, and in the activity (`rollback_interrupted/3`).
+  defp fail_runs(config, query, error, set) do
+    query
+    |> select([w], w)
+    |> update([w], set: ^[{:status, :failed} | set])
+    |> update([w],
+      set: [
+        error:
+          fragment(
+            "CASE WHEN ? = 'compensating' THEN COALESCE(?, ?) ELSE ? END",
+            w.status,
+            w.error,
+            type(^error, w.error),
+            type(^error, w.error)
+          )
+      ]
+    )
+    |> then(&Repo.update_all(config, &1, []))
+  end
+
+  defp rollback_interrupted(config, run, error) do
+    Durable.Activity.record(config, "rollback_interrupted",
+      workflow_id: run.id,
+      queue: run.queue,
+      details: %{
+        reason: error["type"] || error[:type],
+        message: error["message"] || error[:message]
+      }
+    )
   end
 
   defp still_claimed(id, nil), do: from(w in WorkflowExecution, where: w.id == ^id)
@@ -402,7 +434,8 @@ defmodule Durable.Queue.Adapters.Postgres do
         select: w.id
       )
 
-    zombie_ids = Repo.all(config, waiting_zombies) ++ Repo.all(config, compensating_zombies)
+    rollbacks = Repo.all(config, compensating_zombies)
+    zombie_ids = Repo.all(config, waiting_zombies) ++ rollbacks
 
     if zombie_ids == [] do
       {:ok, 0}
@@ -419,28 +452,25 @@ defmodule Durable.Queue.Adapters.Postgres do
       # Still as they were found: one that was resumed or finished meanwhile
       # isn't a zombie any more.
       {count, zombies} =
-        Repo.update_all(
+        fail_runs(
           config,
           from(w in WorkflowExecution,
             where: w.id in ^zombie_ids and w.status in [:waiting, :compensating],
-            where: w.updated_at < ^cutoff,
-            select: w
+            where: w.updated_at < ^cutoff
           ),
-          set: [
-            status: :failed,
-            error: zombie_error,
-            # As in fail_unrecorded/4: not a time to roll back at.
-            scheduled_at: nil,
-            locked_by: nil,
-            locked_at: nil,
-            completed_at: now,
-            updated_at: now
-          ]
+          zombie_error,
+          # As in fail_unrecorded/4: not a time to roll back at.
+          scheduled_at: nil,
+          locked_by: nil,
+          locked_at: nil,
+          completed_at: now,
+          updated_at: now
         )
 
       zombie_ids = Enum.map(zombies, & &1.id)
       StepRunner.close_running(config, zombie_ids, :failed, zombie_error)
-      Enum.each(zombies, &Executor.maybe_notify_parent(config, &1, :failed, zombie_error))
+      for run <- zombies, run.id in rollbacks, do: rollback_interrupted(config, run, zombie_error)
+      Enum.each(zombies, &Executor.maybe_notify_parent(config, &1, :failed, &1.error))
 
       if count > 0 do
         Logger.warning(

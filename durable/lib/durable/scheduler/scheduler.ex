@@ -29,7 +29,6 @@ defmodule Durable.Scheduler do
 
   alias Durable.Repo
   alias Durable.Scheduler.API
-  alias Durable.Storage.Schemas.ScheduledWorkflow
 
   @default_interval 60_000
 
@@ -251,39 +250,32 @@ defmodule Durable.Scheduler do
   end
 
   defp record_failure(schedule, config, message) do
-    changeset =
-      ScheduledWorkflow.failure_changeset(schedule, message,
-        next_run_at: API.next_run_after_failure(schedule),
-        auto_disable_after: 5
-      )
+    case API.record_failure(schedule, message, config) do
+      nil ->
+        Logger.debug(
+          "[Durable.Scheduler] #{schedule.name}: the fire that failed was recorded by " <>
+            "another node, or the schedule has changed since"
+        )
 
-    case Repo.update(changeset, config) do
-      {:ok, updated} ->
-        if updated.auto_disabled_at do
-          Logger.error(
-            "[Durable.Scheduler] Auto-disabled #{schedule.name} after " <>
-              "#{updated.consecutive_failures} consecutive failures: #{message}"
-          )
+      %{auto_disabled_at: nil} = updated ->
+        Logger.warning(
+          "[Durable.Scheduler] Schedule #{schedule.name} failure " <>
+            "(#{updated.consecutive_failures}): #{message}"
+        )
 
-          Durable.Activity.record(config, "schedule_disabled",
-            queue: schedule.queue,
-            details: %{
-              schedule: schedule.name,
-              failures: updated.consecutive_failures,
-              error: message
-            }
-          )
-        else
-          Logger.warning(
-            "[Durable.Scheduler] Schedule #{schedule.name} failure " <>
-              "(#{updated.consecutive_failures}): #{message}"
-          )
-        end
-
-      {:error, cs} ->
+      updated ->
         Logger.error(
-          "[Durable.Scheduler] Failed to record failure for #{schedule.name}: " <>
-            inspect(cs.errors)
+          "[Durable.Scheduler] Auto-disabled #{schedule.name} after " <>
+            "#{updated.consecutive_failures} consecutive failures: #{message}"
+        )
+
+        Durable.Activity.record(config, "schedule_disabled",
+          queue: schedule.queue,
+          details: %{
+            schedule: schedule.name,
+            failures: updated.consecutive_failures,
+            error: message
+          }
         )
     end
   end

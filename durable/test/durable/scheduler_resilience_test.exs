@@ -1,7 +1,7 @@
 defmodule Durable.SchedulerResilienceTest do
   @moduledoc """
   Regression coverage for PR 7 / L-1 — the scheduler must surface persistent
-  failures in `ScheduledWorkflow.failure_changeset/3` and auto-disable the
+  failures (`Durable.Scheduler.API.record_failure/3`) and auto-disable the
   schedule after N consecutive failures, rather than looping hot on the
   same unresolvable schedule every poll cycle.
   """
@@ -9,6 +9,7 @@ defmodule Durable.SchedulerResilienceTest do
 
   alias Durable.Config
   alias Durable.Repo
+  alias Durable.Scheduler.API
   alias Durable.Storage.Schemas.ScheduledWorkflow
 
   defp config, do: Config.get(Durable)
@@ -19,7 +20,8 @@ defmodule Durable.SchedulerResilienceTest do
       workflow_module: "Elixir.NonExistentModuleXYZ",
       workflow_name: "never_runs",
       cron_expression: "*/5 * * * *",
-      enabled: true
+      enabled: true,
+      next_run_at: DateTime.add(DateTime.utc_now(), -5, :second)
     }
 
     attrs = Map.merge(defaults, attrs)
@@ -32,13 +34,10 @@ defmodule Durable.SchedulerResilienceTest do
     s
   end
 
-  test "failure_changeset/3 records error + increments counter" do
+  test "record_failure/3 records error + increments counter" do
     schedule = insert_schedule()
 
-    {:ok, updated} =
-      schedule
-      |> ScheduledWorkflow.failure_changeset("module not found")
-      |> Repo.update(config())
+    updated = API.record_failure(schedule, "module not found", config())
 
     assert updated.consecutive_failures == 1
     assert updated.last_error =~ "module not found"
@@ -48,29 +47,35 @@ defmodule Durable.SchedulerResilienceTest do
     assert is_nil(updated.auto_disabled_at)
   end
 
-  test "failure_changeset auto-disables after N consecutive failures" do
+  test "record_failure/3 auto-disables after 5 consecutive failures" do
     schedule = insert_schedule(%{consecutive_failures: 4})
 
-    {:ok, updated} =
-      schedule
-      |> ScheduledWorkflow.failure_changeset("still broken", auto_disable_after: 5)
-      |> Repo.update(config())
+    updated = API.record_failure(schedule, "still broken", config())
 
     assert updated.consecutive_failures == 5
     assert updated.enabled == false
     assert updated.auto_disabled_at != nil
   end
 
-  test "failure_changeset advances next_run_at when supplied" do
+  test "record_failure/3 advances next_run_at" do
     schedule = insert_schedule()
-    future = DateTime.utc_now() |> DateTime.add(600, :second) |> DateTime.truncate(:microsecond)
 
-    {:ok, updated} =
-      schedule
-      |> ScheduledWorkflow.failure_changeset("boom", next_run_at: future)
-      |> Repo.update(config())
+    updated = API.record_failure(schedule, "boom", config())
 
     # Defer the next fire so we don't loop hot on the same broken schedule
-    assert updated.next_run_at == future
+    assert DateTime.after?(updated.next_run_at, DateTime.utc_now())
+  end
+
+  test "record_failure/3 counts on the row, not on the copy the tick read" do
+    schedule = insert_schedule(%{consecutive_failures: 2})
+
+    # The copy this node holds is behind: the row has moved on to 3.
+    stale = %{schedule | consecutive_failures: 0}
+    {:ok, _} = schedule |> Ecto.Changeset.change(consecutive_failures: 3) |> Repo.update(config())
+
+    assert API.record_failure(stale, "boom", config()).consecutive_failures == 4
+    # The fire it failed has been moved on: a second node's failure isn't counted.
+    assert API.record_failure(stale, "boom", config()) == nil
+    assert Repo.get(config(), ScheduledWorkflow, schedule.id).consecutive_failures == 4
   end
 end

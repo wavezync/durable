@@ -934,9 +934,12 @@ defmodule Durable.Integration.FailurePathsTest do
       Process.exit(:sys.get_state(worker_pid!(id)).task_pid, :kill)
 
       run = await_status(id, :failed)
-      assert run.error["type"] == "task_crash"
+      # The run keeps the error it was being undone for. The undo's own row
+      # has what killed it.
+      refute run.error["type"] == "task_crash"
       assert run.locked_by == nil
       refute Enum.any?(step_rows(id), &(&1.status == :running))
+      assert Enum.any?(step_rows(id), &match?(%{error: %{"type" => "task_crash"}}, &1))
     end
 
     test "with its node is failed by the sweep, and its row closed" do
