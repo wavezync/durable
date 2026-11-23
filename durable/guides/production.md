@@ -295,7 +295,7 @@ A node that doesn't have a workflow's code yet leaves the run for one that does:
 
 A step whose process crashes uses one of its attempts and runs again if it has any left. A takeover like the one above uses none: the step runs again, and the run fails only after losing its worker three times.
 
-A step that finished is never run again by any of this. That includes a step whose worker died after the step's row was written and before the run saved the result: the run that comes back takes the result from the row, with what the step put in the context. The danger is a step that was in the middle: the worker dies after the payment provider accepted the charge and before Durable recorded the step as done, and the step runs again on another node. So every step with an effect outside your database must be safe to repeat:
+A step that finished is never run again by any of this. That includes a step whose worker died after the step's row was written and before the run saved the result: the run that comes back takes the result from the row, with what the step put in the context and without what it deleted from it. The danger is a step that was in the middle: the worker dies after the payment provider accepted the charge and before Durable recorded the step as done, and the step runs again on another node. So every step with an effect outside your database must be safe to repeat:
 
 ```elixir
 step :charge_card, [retry: [max_attempts: 3]], fn trip ->

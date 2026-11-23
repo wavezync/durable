@@ -20,6 +20,38 @@ defmodule Audit5ExecTokenize do
   end
 end
 
+defmodule Audit5ExecVault do
+  @moduledoc false
+  use Durable
+  use Durable.Context
+  alias Durable.IntegrationProbe, as: Probe
+
+  # The card goes to the vault and only its token is returned. What the step
+  # leaves of the payment is what it did to the context.
+  workflow "audit5_exec_vault" do
+    step :vault_card, fn _payment ->
+      Probe.note(:vaulted)
+      # Taken out for good.
+      delete_context(:card_number)
+      # Taken out and put back: as it was, and changed.
+      delete_context(:order_id)
+      put_context(:order_id, "o-1")
+      delete_context(:currency)
+      put_context(:currency, "EUR")
+      # A key inside another.
+      update_context(:card, &Map.delete(&1, "cvc"))
+      # Taken out of the context, and returned.
+      delete_context(:amount)
+      {:ok, %{"card_token" => "tok_1", "amount" => 1200}}
+    end
+
+    step :charge, fn payment ->
+      Probe.put(:charge_got, payment)
+      {:ok, payment}
+    end
+  end
+end
+
 defmodule Audit5ExecUnderwrite do
   @moduledoc false
   use Durable
@@ -119,10 +151,9 @@ defmodule Durable.Integration.Audit5ExecTest do
       assert Probe.fetch(:ship_got) == %{"order_id" => "o-9", "route" => "express"}
     end
 
-    # Open: the row holds what the step returned and what it put in the
-    # context, not what it deleted from it, so the run that takes the result
-    # from the row (`finished_before_lost/5`) puts the card number back.
-    @tag :skip
+    # The row held what the step returned and what it put in the context, not
+    # what it deleted from it, so the run that took the result from the row
+    # (`finished_before_lost/5`) put the card number back.
     test "doesn't hand the next step a key the step took out of its data" do
       kill_at!([:durable, :step, :stop], :tokenize_card)
       start_durable!(%{default: 1})
@@ -138,5 +169,66 @@ defmodule Durable.Integration.Audit5ExecTest do
       refute Map.has_key?(Probe.fetch(:charge_got), "card_number")
       refute Map.has_key?(run.context, "card_number")
     end
+
+    test "keeps the keys it deleted off the step's output" do
+      kill_at!([:durable, :step, :stop], :tokenize_card)
+      start_durable!(%{default: 1})
+
+      {:ok, id} =
+        Durable.start(Audit5ExecTokenize, %{"order_id" => "o-1", "card_number" => "4242"})
+
+      await_status(id, :completed)
+
+      {:ok, run} = Durable.get_execution(id, include_steps: true)
+      tokenized = Enum.find(run.steps, &(&1.step_name == "tokenize_card"))
+      assert tokenized.output == %{"order_id" => "o-1", "card_token" => "tok_1"}
+    end
   end
+
+  describe "a step that deletes from the context" do
+    @payment %{
+      "order_id" => "o-1",
+      "currency" => "USD",
+      "amount" => 1200,
+      "card_number" => "4242424242424242",
+      "card" => %{"last4" => "4242", "cvc" => "123"}
+    }
+
+    @left %{
+      "order_id" => "o-1",
+      "currency" => "EUR",
+      "amount" => 1200,
+      "card" => %{"last4" => "4242"},
+      "card_token" => "tok_1"
+    }
+
+    test "leaves the next step what its body left" do
+      start_durable!(%{default: 1})
+
+      {:ok, id} = Durable.start(Audit5ExecVault, @payment)
+      run = await_status(id, :completed)
+
+      assert Probe.fetch(:charge_got) == @left
+      assert run.context == @left
+      assert dropped_markers(run) == []
+    end
+
+    test "leaves the same when its task is killed after its row was written" do
+      kill_at!([:durable, :step, :stop], :vault_card)
+      start_durable!(%{default: 1})
+
+      {:ok, id} = Durable.start(Audit5ExecVault, @payment)
+      run = await_status(id, :completed)
+
+      assert Probe.hits(:killed) == 1
+      assert Probe.hits(:vaulted) == 1
+      assert Probe.fetch(:charge_got) == @left
+      assert run.context == @left
+      assert dropped_markers(run) == []
+    end
+  end
+
+  # What the engine keeps of an attempt's deleted keys until the run saves.
+  defp dropped_markers(run),
+    do: Enum.filter(Map.keys(run.engine_state), &String.starts_with?(&1, "__dropped:"))
 end

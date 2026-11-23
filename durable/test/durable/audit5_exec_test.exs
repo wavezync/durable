@@ -6,6 +6,7 @@ defmodule Durable.Audit5ExecTest do
 
   import Durable.Testing
 
+  alias Durable.Storage.Schemas.StepExecution
   alias Durable.Storage.Schemas.WorkflowExecution
   alias Durable.TestRepo, as: Repo
 
@@ -143,6 +144,19 @@ defmodule Durable.Audit5ExecTest do
     end
   end
 
+  defmodule Audit5ExecQuote do
+    @moduledoc false
+    use Durable
+
+    # A shipping quote is good for a moment. The carrier's rates are asked for
+    # twice if need be, and this time the carrier never answers.
+    workflow "audit5_quote", timeout: 12 do
+      step :fetch_rates, [retry: [max_attempts: 2, base: 1]], fn _quote ->
+        Process.sleep(:infinity)
+      end
+    end
+  end
+
   setup do
     Audit5ExecSeen.clear()
     :ok
@@ -244,5 +258,29 @@ defmodule Durable.Audit5ExecTest do
 
     assert run.status == :compensated
     assert Audit5ExecSeen.get(:cancelled_hotel) == "H-8"
+  end
+
+  describe "a step stopped by its run's deadline" do
+    # The step's time limit was the milliseconds left to the deadline, rounded
+    # down, so the step could be stopped before the deadline. Not past it yet,
+    # the run took the stop for a failure to retry, and failed "before" the
+    # step at the next claim. Each run lands somewhere else in its millisecond.
+    test "is never stopped before the deadline, to be retried" do
+      for n <- 1..60 do
+        run = run_workflow(Audit5ExecQuote, %{"quote_id" => n})
+
+        attempts = Repo.all(from(s in StepExecution, where: s.workflow_id == ^run.id))
+
+        assert run.status == :failed
+
+        # A run slow to start can be past its deadline before the step begins,
+        # and then has no attempt. One that began is stopped at the deadline.
+        assert attempts == [] or
+                 run.error["message"] == "the run passed its timeout during fetch_rates",
+               "run #{n}: #{run.error["message"]}"
+
+        assert length(attempts) <= 1
+      end
+    end
   end
 end
