@@ -238,4 +238,91 @@ defmodule Durable.Integration.Audit5WaitsTest do
                Durable.Activity.list!(kinds: ["schedule_disabled"])
     end
   end
+
+  # Holds one operator's edit after it has read the schedule, until the test
+  # lets it go on, as a slow request would. `:any` holds at every read of it,
+  # `:locked` only at the read under the row's lock.
+  def hold_edit(_event, _measurements, %{query: query}, {pid, which}) do
+    if self() == pid and query =~ ~r/^SELECT/ and
+         query =~ ~s(FROM "durable"."scheduled_workflows") and
+         (which == :any or query =~ "FOR UPDATE") do
+      Probe.note(:edit_read)
+      Probe.wait_for({:edit_goes_on, Probe.hits(:edit_read)})
+    end
+  end
+
+  describe "two operators editing one schedule at once" do
+    setup do
+      start_durable!(%{default: 1}, scheduler_interval: :timer.hours(1))
+
+      # The weekly digest went out at 02:00 and was turned off a week ago, so
+      # the time it was next due has long gone by.
+      {:ok, _} = Durable.schedule(Audit5WaitsNightlyReport, "0 2 * * *", name: "weekly_digest")
+      {:ok, _} = Durable.disable_schedule("weekly_digest")
+
+      IntegrationRepo.update_all(from(s in ScheduledWorkflow, where: s.name == "weekly_digest"),
+        set: [next_run_at: DateTime.add(DateTime.utc_now(), -7, :day)]
+      )
+
+      :ok
+    end
+
+    # Operator A turns the digest back on; A's request is held where `which`
+    # says, once it has read the schedule.
+    defp turn_on_held(which) do
+      turning_on =
+        Task.async(fn ->
+          receive do
+            :go -> Durable.enable_schedule("weekly_digest")
+          end
+        end)
+
+      handler = "a5-hold-edit-#{System.unique_integer([:positive])}"
+
+      :telemetry.attach(
+        handler,
+        [:durable, :integration_repo, :query],
+        &__MODULE__.hold_edit/4,
+        {turning_on.pid, which}
+      )
+
+      on_exit(fn -> :telemetry.detach(handler) end)
+      send(turning_on.pid, :go)
+      assert_eventually(fn -> Probe.hits(:edit_read) == 1 end)
+      turning_on
+    end
+
+    defp digest, do: IntegrationRepo.get_by!(ScheduledWorkflow, name: "weekly_digest")
+
+    test "the one that read first works out the next run from what the other wrote" do
+      turning_on = turn_on_held(:any)
+
+      # Operator B moves the digest to 14:00 while A's request is held.
+      {:ok, _moved} = Durable.update_schedule("weekly_digest", cron: "0 14 * * *")
+
+      for read <- 1..2, do: Probe.set({:edit_goes_on, read})
+      assert {:ok, _} = Task.await(turning_on)
+
+      row = digest()
+      assert {row.enabled, row.cron_expression} == {true, "0 14 * * *"}
+
+      assert {row.next_run_at.hour, row.next_run_at.minute} == {14, 0},
+             "set for 14:00 but due at #{row.next_run_at}"
+    end
+
+    test "the second waits while the first has the schedule" do
+      turning_on = turn_on_held(:locked)
+
+      moving = Task.async(fn -> Durable.update_schedule("weekly_digest", cron: "0 14 * * *") end)
+      refute Task.yield(moving, 200), "B's edit didn't wait for A's to commit"
+
+      Probe.set({:edit_goes_on, 1})
+      assert {:ok, _} = Task.await(turning_on)
+      assert {:ok, _} = Task.await(moving)
+
+      row = digest()
+      assert {row.enabled, row.cron_expression} == {true, "0 14 * * *"}
+      assert {row.next_run_at.hour, row.next_run_at.minute} == {14, 0}
+    end
+  end
 end

@@ -222,7 +222,6 @@ defmodule Durable.Scheduler.API do
           {:ok, ScheduledWorkflow.t()} | {:error, term()}
   def update_schedule(name, changes) do
     durable_name = Keyword.get(changes, :durable, Durable)
-    config = Config.get(durable_name)
 
     changes =
       case Keyword.pop(changes, :cron) do
@@ -230,11 +229,34 @@ defmodule Durable.Scheduler.API do
         {cron, changes} -> Keyword.put(changes, :cron_expression, cron)
       end
 
-    with {:ok, schedule} <- get_schedule(name, durable: durable_name),
-         {:ok, attrs} <- build_update_attrs(changes, schedule) do
-      schedule
-      |> ScheduledWorkflow.update_changeset(attrs)
-      |> Repo.update(config)
+    edit_schedule(name, durable_name, fn schedule ->
+      with {:ok, attrs} <- build_update_attrs(changes, schedule),
+           do: {:ok, ScheduledWorkflow.update_changeset(schedule, attrs)}
+    end)
+  end
+
+  # An edit is made to the schedule as it is, under its row's lock, not to a
+  # copy read before: two operators editing one schedule at once take turns,
+  # and each works out the next run from what the other left. Made to copies,
+  # one turning a schedule on and one moving its time left it set for the new
+  # time and due at the old one.
+  defp edit_schedule(name, durable_name, edit) do
+    config = Config.get(durable_name)
+
+    with {:ok, _exists} <- get_schedule(name, durable: durable_name) do
+      Repo.transaction(config, fn -> edit_locked(config, name, edit) end)
+    end
+  end
+
+  defp edit_locked(config, name, edit) do
+    locked = from(s in ScheduledWorkflow, where: s.name == ^name, lock: "FOR UPDATE")
+
+    with %ScheduledWorkflow{} = schedule <- Repo.one(config, locked) || {:error, :not_found},
+         {:ok, changeset} <- edit.(schedule),
+         {:ok, edited} <- Repo.update(changeset, config) do
+      edited
+    else
+      {:error, reason} -> config.repo.rollback(reason)
     end
   end
 
@@ -270,16 +292,14 @@ defmodule Durable.Scheduler.API do
   @spec enable_schedule(String.t(), keyword()) ::
           {:ok, ScheduledWorkflow.t()} | {:error, term()}
   def enable_schedule(name, opts \\ []) do
-    durable_name = Keyword.get(opts, :durable, Durable)
-    config = Config.get(durable_name)
-
-    with {:ok, schedule} <- get_schedule(name, durable: durable_name),
-         {:ok, next_run} <- compute_next_run(schedule.cron_expression, schedule.timezone) do
-      schedule
-      |> ScheduledWorkflow.enable_changeset(true)
-      |> Ecto.Changeset.put_change(:next_run_at, next_run)
-      |> Repo.update(config)
-    end
+    edit_schedule(name, Keyword.get(opts, :durable, Durable), fn schedule ->
+      with {:ok, next_run} <- compute_next_run(schedule.cron_expression, schedule.timezone) do
+        {:ok,
+         schedule
+         |> ScheduledWorkflow.enable_changeset(true)
+         |> Ecto.Changeset.put_change(:next_run_at, next_run)}
+      end
+    end)
   end
 
   @doc """
@@ -293,14 +313,9 @@ defmodule Durable.Scheduler.API do
   @spec disable_schedule(String.t(), keyword()) ::
           {:ok, ScheduledWorkflow.t()} | {:error, term()}
   def disable_schedule(name, opts \\ []) do
-    durable_name = Keyword.get(opts, :durable, Durable)
-    config = Config.get(durable_name)
-
-    with {:ok, schedule} <- get_schedule(name, durable: durable_name) do
-      schedule
-      |> ScheduledWorkflow.enable_changeset(false)
-      |> Repo.update(config)
-    end
+    edit_schedule(name, Keyword.get(opts, :durable, Durable), fn schedule ->
+      {:ok, ScheduledWorkflow.enable_changeset(schedule, false)}
+    end)
   end
 
   @doc """
