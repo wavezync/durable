@@ -162,21 +162,26 @@ defmodule Durable.Keys do
       reuse: reuse(workflow_def),
       mode: mode,
       debounce: debounce(workflow_def),
-      workflow_def: workflow_def
+      workflow_def: workflow_def,
+      retried: false
     }
 
-    # One transaction so a release (or a replaced holder's cancel) and the
-    # insert that follows land together. Nothing in here raises on a taken
-    # key, and nothing rolls back, so a caller's own transaction stays usable.
+    attempt(ctx)
+  end
+
+  # One transaction so a release (or a replaced holder's cancel) and the
+  # insert that follows land together. Nothing in here raises on a taken
+  # key, and nothing rolls back, so a caller's own transaction stays usable.
+  defp attempt(ctx) do
     result =
-      Repo.transaction(config, fn ->
-        lock_key(config, ctx.entry)
+      Repo.transaction(ctx.config, fn ->
+        lock_key(ctx.config, ctx.entry)
         claimed = unheld_waiting(ctx) || claim(ctx, @rounds, nil)
         {claimed, replace_waiting(ctx, claimed)}
       end)
 
     with {:ok, {claimed, replaced}} <- result do
-      Enum.each(replaced, &Executor.after_cancel(config, &1))
+      Enum.each(replaced, &Executor.after_cancel(ctx.config, &1))
       finish(ctx, claimed)
     end
   end
@@ -587,16 +592,26 @@ defmodule Durable.Keys do
   end
 
   defp answer(%{mode: {:send_event, name}} = ctx, holder) do
-    if holder.status in WorkflowExecution.open_statuses() and
-         Durable.Wait.send_event(holder.id, name, ctx.entry.input,
-           buffer: true,
-           durable: ctx.config.name
-         ) == :ok do
-      record_duplicate(ctx, holder, :send_event, %{event: name})
-      {:duplicate, holder.id, :use_existing}
-    else
-      record_duplicate(ctx, holder, :error)
-      {:duplicate, holder.id, :error}
+    sent =
+      holder.status in WorkflowExecution.open_statuses() and
+        Durable.Wait.send_event(holder.id, name, ctx.entry.input,
+          buffer: true,
+          durable: ctx.config.name
+        )
+
+    cond do
+      sent == :ok ->
+        record_duplicate(ctx, holder, :send_event, %{event: name})
+        {:duplicate, holder.id, :use_existing}
+
+      # It ended after it was read, outside the key's lock: the key may be
+      # free now, and then the start takes it. Asked once more.
+      sent == {:error, :finished} and not ctx.retried ->
+        attempt(%{ctx | retried: true})
+
+      true ->
+        record_duplicate(ctx, holder, :error)
+        {:duplicate, holder.id, :error}
     end
   end
 

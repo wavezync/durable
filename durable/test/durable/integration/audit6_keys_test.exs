@@ -63,7 +63,7 @@ defmodule Durable.Integration.Audit6KeysTest do
   # holder has an older input than the replacement.
   test "a cancel_existing start replaces the run waiting behind the holder too" do
     key = "account:10"
-    holder = start!(key, %{"v" => 1, "hold" => true})
+    start!(key, %{"v" => 1, "hold" => true})
     assert_eventually(fn -> K.ran(key) == [1] end)
     waiting = start!(key, %{"v" => 2})
 
@@ -75,6 +75,32 @@ defmodule Durable.Integration.Audit6KeysTest do
     Probe.set({:go, 1})
     await_status(newest, :completed)
     assert K.ran(key) == [1, 3]
+  end
+
+  # Starts keep coming while the holder finishes. Each either reaches the
+  # holder while it's going, or finds the key free and starts a run: the
+  # guide's table has no third answer for a key reuse: lets go.
+  test "a send_event start never answers key_taken for a holder that just finished" do
+    refused =
+      for n <- 1..100, reduce: [] do
+        refused ->
+          key = "doc:#{n}"
+          holder = start!(key, %{"v" => 0, "ms" => 20})
+          refused ++ send_until_free(key, holder, 1)
+      end
+
+    assert refused == []
+  end
+
+  defp send_until_free(key, holder, v) do
+    case Durable.start(K.Again, %{"key" => key, "v" => v},
+           key: key,
+           on_duplicate: {:send_event, "upd"}
+         ) do
+      {:ok, ^holder} -> send_until_free(key, holder, v + 1)
+      {:ok, _new_run} -> []
+      refused -> [{key, get(holder).status, refused}]
+    end
   end
 
   # Issue #48 item 3 has `Durable.cancel/2` free the key while the cancelled
