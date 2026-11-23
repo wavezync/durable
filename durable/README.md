@@ -130,8 +130,8 @@ A run's data is saved as JSON after every step, and every step is handed it
 as it is stored, whether the run went straight on or was loaded again after a
 wait, a retry or a move to another node. So:
 
-- Keys are strings, at every depth: read them as `ctx["id"]`, or
-  `get(ctx, :id)`. `ctx.id` and `%{id: id} = ctx` never match.
+- Keys are strings, at every depth: read them as `get(ctx, :id)` or
+  `ctx["id"]`. `ctx.id` and `%{id: id} = ctx` never match.
 - A step can return a map written with atom keys, and the helpers take a key
   as an atom or a string: `assign(ctx, :total, total)` sets `ctx["total"]`.
 - Values come back as JSON holds them: an atom is a string (`:paid` is
@@ -445,11 +445,18 @@ Durable.send_event(workflow_id, "payment.success", %{transaction_id: "txn_123"})
 
 ### Helper Functions
 
+**Best practice: read and write a workflow's data through the helpers.** They
+take a key as an atom, the way Elixir code usually names one, and use the
+string key the data is stored with. `ctx.total` and `ctx[:total]` don't read
+it; `get(ctx, :total)` does, in every step.
+
 ```elixir
 use Durable.Helpers
 
 # A key is an atom or a string; the data's own keys are strings
 get(ctx, :key)              # Read a value: ctx["key"]
+get(ctx, [:user, :email])   # Read inside it: ctx["user"]["email"]
+get(ctx, :key, default)     # With a default
 assign(ctx, :key, value)    # Set a value
 assign(ctx, %{a: 1, b: 2})  # Merge multiple values
 update(ctx, :key, default, fn old -> new end)

@@ -112,6 +112,16 @@ defmodule Durable.Audit4FollowUpTest do
       end
     end
 
+    # A step writes an atom over a key the data already has as a string.
+    workflow "audit4_fu_overwrite" do
+      step :reprice, fn order -> {:ok, Map.put(order, :total, 99)} end
+
+      step :charge, fn order ->
+        Seen.put(:charged, order)
+        {:ok, order}
+      end
+    end
+
     workflow "audit4_fu_second" do
       step :only, fn data -> {:ok, Map.put(data, "ran", "second")} end
     end
@@ -220,6 +230,15 @@ defmodule Durable.Audit4FollowUpTest do
              } = Seen.get(:values_same_pass)
 
       assert Seen.get(:values_after_reload) === Seen.get(:values_same_pass)
+    end
+  end
+
+  describe "a key written as an atom over the stored string" do
+    test "is stored once, with what the step wrote" do
+      run = run_workflow(Signup, %{"total" => 12}, workflow: "audit4_fu_overwrite")
+      assert run.status == :completed
+      assert Seen.get(:charged) == %{"total" => 99}
+      assert run.context == %{"total" => 99}
     end
   end
 

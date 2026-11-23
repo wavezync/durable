@@ -16,11 +16,15 @@ defmodule Durable.DSL.Step do
   `compensate`. Durable never makes atoms out of data.
 
       step :check, fn data ->
+        get(data, [:invoice, :total])   # Durable.Helpers: keys named by atoms
         data["invoice"]["total"]
         %{"invoice" => %{"total" => total}} = data
-        get(data, :invoice)   # Durable.Helpers: the key named by an atom or a string
         {:ok, data}
       end
+
+  Reading and writing through `Durable.Helpers` (`get/2`, `assign/3` and the
+  rest) is the recommended way: a step names its keys with atoms and the
+  helpers use the string keys the data has.
 
   What a step returns may be written with atom keys. It is stored with string
   keys, and the next step reads strings:

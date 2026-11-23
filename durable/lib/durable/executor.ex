@@ -2819,7 +2819,7 @@ defmodule Durable.Executor do
   def sanitize_for_json(term), do: inspect(term)
 
   defp sanitize_json_key(k) when is_binary(k), do: storable_string(k)
-  defp sanitize_json_key(k) when is_atom(k), do: sanitize_for_json(k)
+  defp sanitize_json_key(k) when is_atom(k), do: Atom.to_string(k)
   defp sanitize_json_key(k), do: inspect(k)
 
   # jsonb can't hold a NUL, and JSON can't hold bytes that aren't UTF-8.

@@ -93,7 +93,9 @@ The DSL is written without parentheses (`step :name, fn data -> ... end`), and
 a step returns `{:ok, data}` or one of the other results in `Durable.DSL.Step`.
 
 A workflow's data has string keys at every depth, in every step: it is handed
-over as it is stored. Read `data["key"]` or `get(data, :key)`, never `data.key`.
+over as it is stored. Read `get(data, :key)` (best practice: the `Durable.Helpers`
+take atom names, and `get(data, [:a, :b])` reads inside) or `data["key"]`, never
+`data.key`.
 A step may return atom keys, and the helpers take a key either way; an atom
 value is stored as its text (`:paid` is `"paid"`).
 
