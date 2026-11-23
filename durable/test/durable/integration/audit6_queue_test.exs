@@ -163,6 +163,35 @@ defmodule Durable.Integration.Audit6QueueTest do
     end
   end
 
+  describe "a run started inline on a node that stops past its grace period" do
+    # Its caller isn't one of the node's workers: nothing stops it, and the
+    # hand-back can't tell its claim from theirs.
+    test "isn't handed to another node while its caller still runs the step" do
+      start_durable!(%{default: 1})
+
+      # A worker still busy at the stop, so the node hands back what it has.
+      {:ok, _trip} = Durable.start(Audit6QueueTrip, %{"seat" => "3C"})
+      assert_eventually(fn -> Probe.hits(:charging) == 1 end)
+
+      spawn(fn -> Durable.start(Audit6QueueExport, %{}, inline: true, queue: :reports) end)
+      assert_eventually(fn -> Probe.hits(:upload_started) == 1 end)
+
+      stop_supervised!(Durable)
+
+      Durable.DataCase.start_supervised_durable!(
+        name: :audit6_node_b,
+        repo: IntegrationRepo,
+        queues: queue_opts(%{reports: 1})
+      )
+
+      Process.sleep(500)
+
+      # The caller's upload is the only one.
+      assert Probe.hits(:upload_started) == 1
+      assert Probe.peak(:uploading) == 1
+    end
+  end
+
   describe "a worker cut off from the database" do
     # Node A runs on a repo of its own; stopping it is A losing the database
     # while its step goes on. Node B is a second instance on the real repo.
