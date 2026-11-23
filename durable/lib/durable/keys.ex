@@ -263,18 +263,37 @@ defmodule Durable.Keys do
   end
 
   # Under run_again a run may already be waiting behind this holder, about to
-  # be claimed. It takes the newer input: a new holder beside it would run
-  # first, and leave the older input to run last.
+  # take the key: it goes first (`join_waiter/4`).
   defp take_from_closed(ctx, holder, rounds, moved) do
-    case ctx.mode == :run_again && refresh_waiting(ctx) do
-      id when is_binary(id) ->
-        {:waiting_refreshed, id, holder}
+    case ctx.mode == :run_again && join_waiter(ctx, holder, rounds, moved) do
+      joined when is_tuple(joined) or joined == :contended ->
+        joined
 
       _no_waiter ->
         moved =
           if release_closed(ctx.config, holder, ctx.reuse), do: {:released, holder}, else: moved
 
         claim(ctx, rounds - 1, moved)
+    end
+  end
+
+  # run_again with a run waiting for the key: a new holder beside it would run
+  # first, and leave the older input to run last. One no worker has yet takes
+  # the newer input. One a worker has claimed has read its input, and is about
+  # to take the key: the newer input waits behind it. `about` is the run the
+  # activity is recorded on. nil when there's no such run.
+  defp join_waiter(ctx, about, rounds, moved) do
+    refreshed = about && refresh_waiting(ctx)
+
+    cond do
+      is_binary(refreshed) ->
+        {:waiting_refreshed, refreshed, about}
+
+      claimed = Repo.one(ctx.config, claimed_waiter(ctx.entry)) ->
+        run_after(ctx, claimed, rounds, moved)
+
+      true ->
+        nil
     end
   end
 
@@ -378,6 +397,19 @@ defmodule Durable.Keys do
     )
   end
 
+  # A run that waited for the key (run_again), claimed by a worker that hasn't
+  # taken the key for it yet (`take_waiting/3`).
+  defp claimed_waiter(entry) do
+    from(w in WorkflowExecution,
+      where:
+        w.workflow_module == ^entry.workflow_module and
+          w.workflow_name == ^entry.workflow_name and w.key == ^entry.key and
+          not is_nil(w.runs_after_id) and w.status == :running,
+      order_by: [desc: w.inserted_at],
+      limit: 1
+    )
+  end
+
   defp refresh_waiting(%{config: config, entry: entry}) do
     {_, ids} =
       Repo.update_all(config, from(w in waiting(entry), select: w.id),
@@ -392,13 +424,8 @@ defmodule Durable.Keys do
   # the newer input, as it would behind a holder: a new holder would run
   # first, and leave the older input to run last.
   defp unheld_waiting(%{mode: :run_again} = ctx) do
-    with nil <- holder(ctx.config, ctx.entry),
-         %WorkflowExecution{} = waiter <- Repo.one(ctx.config, waiting(ctx.entry)),
-         id when is_binary(id) <- refresh_waiting(ctx) do
-      {:waiting_refreshed, id, waiter}
-    else
-      _ -> nil
-    end
+    if is_nil(holder(ctx.config, ctx.entry)),
+      do: join_waiter(ctx, Repo.one(ctx.config, waiting(ctx.entry)), @rounds, nil)
   end
 
   defp unheld_waiting(_ctx), do: nil
