@@ -419,6 +419,61 @@ defmodule Durable.Integration.Issue48Test do
   end
 
   # ---------------------------------------------------------------------------
+  # Found by the audit: a keyed schedule whose key is busy
+  # ---------------------------------------------------------------------------
+
+  describe "a due schedule whose key a long transaction holds" do
+    defp overdue!(name, seconds) do
+      {1, _} =
+        IntegrationRepo.update_all(
+          from(s in Durable.Storage.Schemas.ScheduledWorkflow, where: s.name == ^name),
+          set: [next_run_at: DateTime.add(DateTime.utc_now(), -seconds, :second)]
+        )
+    end
+
+    defp fired(name) do
+      IntegrationRepo.all(
+        from(w in WorkflowExecution, where: w.trigger == :schedule and w.trigger_ref == ^name)
+      )
+    end
+
+    test "doesn't hold up the other due schedules, and fires at a later check" do
+      start_durable!(%{default: 2})
+
+      {:ok, _} =
+        Durable.schedule(Issue48Thumbnail, "* * * * *", name: "i48_keyed", key: "thumbs")
+
+      {:ok, _} = Durable.schedule(Issue48Thumbnail, "* * * * *", name: "i48_plain")
+      # The keyed one is checked first.
+      overdue!("i48_keyed", 120)
+      overdue!("i48_plain", 60)
+
+      lock = hold_key_lock(Issue48Thumbnail, "i48_thumbnail", "thumbs")
+
+      {us, _} =
+        :timer.tc(fn ->
+          Durable.Scheduler.check_schedules()
+          Durable.Scheduler.status()
+        end)
+
+      assert us < 2_000_000, "the check took #{div(us, 1000)} ms"
+      assert [_] = fired("i48_plain")
+      assert [] = fired("i48_keyed")
+
+      keyed =
+        IntegrationRepo.get_by!(Durable.Storage.Schemas.ScheduledWorkflow, name: "i48_keyed")
+
+      assert keyed.consecutive_failures == 0
+      assert DateTime.before?(keyed.next_run_at, DateTime.utc_now())
+
+      let_go(lock)
+      Durable.Scheduler.check_schedules()
+      Durable.Scheduler.status()
+      assert [_] = fired("i48_keyed")
+    end
+  end
+
+  # ---------------------------------------------------------------------------
   # 6. Failing a run nothing recorded the end of
   # ---------------------------------------------------------------------------
 

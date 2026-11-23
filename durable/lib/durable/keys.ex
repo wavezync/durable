@@ -172,7 +172,7 @@ defmodule Durable.Keys do
     # key, and nothing rolls back, so a caller's own transaction stays usable.
     result =
       Repo.transaction(config, fn ->
-        lock_key(config, ctx.entry)
+        lock_key(config, ctx.entry, Keyword.get(opts, :key_lock, :wait))
         unheld_waiting(ctx) || claim(ctx, @rounds, nil)
       end)
 
@@ -188,7 +188,13 @@ defmodule Durable.Keys do
   # over from a finished holder can't lock the same rows in opposite orders. A
   # lock that can't be taken (a deadlock, a `lock_timeout`) rolls the
   # transaction back: Postgres has aborted it anyway.
-  defp lock_key(config, %{workflow_module: module, workflow_name: name, key: key}) do
+  #
+  # `:try` doesn't wait: a key someone else is changing rolls it back with
+  # `:key_locked`. The scheduler fires that way, so one key held in a long
+  # transaction can't stall every other due schedule behind it.
+  defp lock_key(config, entry, mode \\ :wait)
+
+  defp lock_key(config, %{workflow_module: module, workflow_name: name, key: key}, :wait) do
     with {:error, reason} <-
            Repo.query(config, "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [
              lock_name(module, name, key)
@@ -197,6 +203,16 @@ defmodule Durable.Keys do
     end
 
     :ok
+  end
+
+  defp lock_key(config, %{workflow_module: module, workflow_name: name, key: key}, :try) do
+    case Repo.query(config, "SELECT pg_try_advisory_xact_lock(hashtextextended($1, 0))", [
+           lock_name(module, name, key)
+         ]) do
+      {:ok, %{rows: [[true]]}} -> :ok
+      {:ok, %{rows: [[false]]}} -> config.repo.rollback(:key_locked)
+      {:error, reason} -> config.repo.rollback(reason)
+    end
   end
 
   @doc false

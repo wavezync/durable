@@ -294,6 +294,11 @@ defmodule Durable.Scheduler do
       {:ok, :claimed_elsewhere} ->
         Logger.debug("Schedule #{schedule.name} was fired by another node")
 
+      # Its key is being changed right now (a start in a long transaction):
+      # nobody's failure, and the fire stays due for the next check.
+      {:error, :key_locked} ->
+        Logger.debug("Schedule #{schedule.name}: key #{schedule.key} is busy, trying later")
+
       {:error, reason} ->
         record_failure(schedule, config, "Failed to start workflow: #{inspect(reason)}")
     end
@@ -319,7 +324,8 @@ defmodule Durable.Scheduler do
         durable: config.name,
         trigger: :schedule,
         trigger_ref: schedule.name,
-        return: :details
+        return: :details,
+        key_lock: :try
       )
 
     case result do
