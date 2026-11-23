@@ -701,7 +701,9 @@ defmodule Durable.Executor do
     end
 
     reopen_group(config, group_id, %{
-      stopped: Enum.map(stopped, fn {id, _} -> "__parallel_done:#{id}" end),
+      # Every lane that hasn't completed is waited for again, the one already
+      # retried by its own id and running included: its failure isn't its answer.
+      stopped: Enum.map(children, &"__parallel_done:#{&1.id}"),
       # A child can finish after its block stopped, when nobody was counting
       # any more. The group is told now, or it would wait for it for ever.
       finished: for(id <- child_ids -- Enum.map(children, & &1.id), do: "__parallel_done:#{id}"),
@@ -1065,9 +1067,11 @@ defmodule Durable.Executor do
   defp run_lane(execution, steps, {lane_id, done}, workflow_def, config) do
     data = execution |> data_of() |> restore_lane_keys(workflow_def)
 
-    # A step on its own in the block is a lane with that step's name.
-    started? = execution.current_step != lane_id or (done && done["step"] == lane_id)
-    current = if started?, do: execution.current_step
+    # A step on its own in the block is a lane with that step's name: its run
+    # is at that step from the start, and back at it, it may have finished it
+    # (`finished_before_lost/5`).
+    one_step? = Enum.any?(steps, &(Atom.to_string(&1.name) == lane_id))
+    current = if execution.current_step != lane_id or one_step?, do: execution.current_step
     execute_steps(steps, %{execution | current_step: current}, config, data, done)
   end
 
@@ -1080,20 +1084,23 @@ defmodule Durable.Executor do
         key = to_string(key),
         is_map(data[key]),
         reduce: data do
-      data -> Map.update!(data, key, &lane_pairs(&1, opts))
+      data -> Map.update!(data, key, &lane_pairs(&1, opts, workflow_def))
     end
   end
 
   # A block that collects holds each lane as a pair, stored as a two-item list.
-  defp lane_pairs(results, %{error_strategy: :collect}) do
-    Map.new(results, fn
-      {lane, ["ok", data]} -> {lane, {:ok, data}}
-      {lane, ["error", reason]} -> {lane, {:error, reason}}
-      other -> other
-    end)
+  # A lane's data can hold a block of its own, which is put back the same way.
+  defp lane_pairs(results, opts, workflow_def) do
+    collect? = opts[:error_strategy] == :collect
+    Map.new(results, fn {lane, result} -> {lane, lane_pair(result, collect?, workflow_def)} end)
   end
 
-  defp lane_pairs(results, _opts), do: results
+  defp lane_pair(["ok", data], true, workflow_def), do: {:ok, in_lane(data, workflow_def)}
+  defp lane_pair(["error", reason], true, _workflow_def), do: {:error, reason}
+  defp lane_pair(data, _collect?, workflow_def), do: in_lane(data, workflow_def)
+
+  defp in_lane(data, workflow_def) when is_map(data), do: restore_lane_keys(data, workflow_def)
+  defp in_lane(data, _workflow_def), do: data
 
   # Every save leaves this in the engine's state: a run that has it has saved
   # a context, even an empty one. Its value is the context's keys, which the
@@ -1964,12 +1971,14 @@ defmodule Durable.Executor do
               branch_data
             )
 
+          # Found among the clause's steps and what follows the block: the
+          # other clauses' steps are in `remaining_steps` too.
           {:decision, exec, step, target_step, new_data} ->
             handle_decision_result(
               exec,
               target_step,
               new_data,
-              remaining_steps,
+              only_clause(remaining_steps, branch_step, matching_steps),
               step,
               step_index,
               workflow_def,
@@ -2434,11 +2443,10 @@ defmodule Durable.Executor do
               goto_ctx
             )
 
-          # Saved without the jump: a retry runs `into:` again, and doesn't
-          # make a jump that was refused.
+          # Not saved, as for an `into:` that fails: the run keeps its record
+          # of the lanes, so a retry runs `into:` again on their results and
+          # doesn't start them a second time, or make a jump that was refused.
           {:error, reason} ->
-            {:ok, exec} = save_data_as_context(config, exec, goto_ctx)
-
             handle_step_failure(
               exec,
               %{type: "parallel_goto_error", message: reason},
@@ -2472,6 +2480,19 @@ defmodule Durable.Executor do
 
   defp left_alone?({key, value}, started_with), do: Map.fetch(started_with, key) == {:ok, value}
 
+  # A run's data is a map, and not one that is stored as a scalar: a date
+  # passes `is_map/1`, and its save fails.
+  defguardp is_run_data(term)
+            when is_map(term) and
+                   not (is_struct(term) and
+                          :erlang.map_get(:__struct__, term) in [
+                            Date,
+                            DateTime,
+                            NaiveDateTime,
+                            Time,
+                            Decimal
+                          ])
+
   # Apply the into function, or put each lane under the block's name.
   # A named block: each lane goes under the block's name. Every lane finished
   # (one that didn't has failed the block), so that is its data; a block that
@@ -2501,10 +2522,10 @@ defmodule Durable.Executor do
     # can't crash regardless of what shape the user returns.
     # What `into:` returns is the user's data, like a step's result.
     case into_fn.(base_ctx, Map.new(results, fn {lane, result} -> {to_string(lane), result} end)) do
-      {:ok, data} when is_map(data) ->
+      {:ok, data} when is_run_data(data) ->
         {:ok, EngineState.strip(data)}
 
-      {:goto, step, data} when is_atom(step) and is_map(data) ->
+      {:goto, step, data} when is_atom(step) and is_run_data(data) ->
         {:goto, step, EngineState.strip(data)}
 
       {:error, _reason} = error ->
@@ -3154,14 +3175,17 @@ defmodule Durable.Executor do
     multi =
       Ecto.Multi.new()
       |> lock_run(parent.id)
-      |> Ecto.Multi.update(
-        :event,
-        PendingEvent.receive_changeset(pending_event, pending_event.payload || %{})
-      )
-      |> Ecto.Multi.run(:parent, fn repo, _changes ->
+      |> Ecto.Multi.run(:event, fn repo, _changes ->
+        {:ok, receive_if_pending(repo, pending_event)}
+      end)
+      |> Ecto.Multi.run(:parent, fn repo, %{event: received} ->
         # The lock makes the child's own notice and settle_child/2 take turns,
-        # so the second one sees the parent moved on.
-        case repo.get(WorkflowExecution, parent.id) do
+        # so the second one finds the wait answered. It was read before the
+        # lock: by now the parent may be in another wait, not to be ended here.
+        case received && repo.get(WorkflowExecution, parent.id) do
+          false ->
+            {:ok, %{no_op: true}}
+
           nil ->
             {:error, :parent_not_found}
 
@@ -3195,6 +3219,23 @@ defmodule Durable.Executor do
 
         {:error, reason}
     end
+  end
+
+  # Marks the event received if it still waits. Whether it did.
+  defp receive_if_pending(repo, %PendingEvent{id: id} = event) do
+    now = DateTime.utc_now()
+
+    {count, _} =
+      repo.update_all(from(p in PendingEvent, where: p.id == ^id and p.status == :pending),
+        set: [
+          status: :received,
+          payload: event.payload || %{},
+          completed_at: now,
+          updated_at: now
+        ]
+      )
+
+    count == 1
   end
 
   # What the parent's engine state gets: the child's result under the ref the
