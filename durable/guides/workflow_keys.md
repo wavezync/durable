@@ -192,7 +192,7 @@ However many starts arrive, one run waits, with the newest input. When the holde
 
 - `reuse:` still decides. A failed holder lets the waiting run go under the default `:after_close`. If `reuse:` keeps the key (`:after_failure` and the holder completed), the waiting run is cancelled, and its error says why. `:run_again` with `reuse: :never` fails the compile.
 - A holder that no worker has picked up yet takes the newer input itself, as with `debounce:`, so nothing waits behind a run that hasn't started.
-- If another start took the key between the holder ending and the waiting run starting, the waiting run waits behind that run instead.
+- If another start took the key between the holder ending and the waiting run starting (one with `on_duplicate: :use_existing`, say), the waiting run waits behind that run instead. A `:run_again` start in that time waits behind the waiting run, so the newest input still runs last.
 - The waiting run's `timeout:` counts from when it takes the key. Its `runs_after_id` is the run it waits for.
 
 In Oban this takes a job that finishes, checks for new work and snoozes to go again.
