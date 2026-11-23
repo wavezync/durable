@@ -524,42 +524,23 @@ defmodule Durable.Integration.RunControlTest do
     end
   end
 
-  defmodule Holds do
-    @moduledoc false
-    # Locks the parent's row from before the child exists until the test says
-    # so: the parent can't start waiting, and the child finishes first.
-
-    def parent_row(id) do
-      me = self()
-
-      spawn(fn ->
-        IntegrationRepo.transaction(fn ->
-          IntegrationRepo.query!(
-            "SELECT 1 FROM durable.workflow_executions WHERE id = $1 FOR NO KEY UPDATE",
-            [Ecto.UUID.dump!(id)]
-          )
-
-          send(me, :row_locked)
-          Probe.wait_for(:parent_released)
-        end)
-      end)
-
-      receive do
-        :row_locked -> :ok
-      end
-    end
+  # Holds the parent's worker once its step has started the child and stopped
+  # to wait for it, before the wait is written, until the test says so: the
+  # child finishes first. (A lock on the parent's row can't do it: the child
+  # is recorded on that row as it is started.)
+  def hold_parent(_event, _measurements, %{workflow: "rc_parent_held_up"}, _config) do
+    unless Probe.set?(:parent_released), do: Probe.wait_for(:parent_released)
   end
+
+  def hold_parent(_event, _measurements, _meta, _config), do: :ok
 
   defmodule ParentHeldUp do
     use Durable
-    use Durable.Context
     use Durable.Helpers
     use Durable.Orchestration
 
     workflow "rc_parent_held_up" do
       step :call, fn data ->
-        unless Probe.set?(:parent_released), do: Holds.parent_row(workflow_id())
-
         case call_workflow(String.to_existing_atom(data["child"]), %{}, ref: :child) do
           {:ok, _} -> {:ok, assign(data, :child_ok, true)}
           {:error, error} -> {:ok, assign(data, :child_error, error)}
@@ -1118,6 +1099,10 @@ defmodule Durable.Integration.RunControlTest do
           {ChildCompensationFails, :compensation_failed, "card declined"}
         ] do
       test "ending #{status} before its parent has started waiting isn't missed" do
+        handler = "rc-hold-parent-#{System.unique_integer([:positive])}"
+        :telemetry.attach(handler, [:durable, :step, :stop], &__MODULE__.hold_parent/4, nil)
+        on_exit(fn -> :telemetry.detach(handler) end)
+
         child = to_string(unquote(child))
         id = start!(ParentHeldUp, %{"child" => child})
 
