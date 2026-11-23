@@ -861,14 +861,15 @@ defmodule Durable.Wait do
   # is a no-op, not an error: the sender can't know which event got there
   # first. Only that: under the name that answered it, or one a wait_for_all
   # took, it is a second event for one wait, and told :ok it was lost, for a
-  # later wait of that name as well. The newest group that waited for the name
-  # says which it is.
+  # later wait of that name as well. The newest wait for the name says which
+  # it is.
   defp late_for_group?(config, workflow_id, event_name) do
     query =
       from(p in PendingEvent,
-        join: g in WaitGroup,
+        left_join: g in WaitGroup,
         on: g.id == p.wait_group_id,
         where: p.workflow_id == ^workflow_id and p.event_name == ^event_name,
+        where: p.status != :buffered,
         order_by: [desc: p.inserted_at],
         limit: 1,
         select: {g.wait_type, g.status, p.status}

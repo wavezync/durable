@@ -101,6 +101,23 @@ defmodule Durable.Integration.Audit6WaitsTest do
     end
   end
 
+  describe "a second event for a later wait of a name a wait_for_any didn't take" do
+    test "is told nothing waits for it" do
+      start_durable!(%{default: 1})
+      {:ok, id} = Durable.start(Audit6WaitsInstalments, %{"order" => "O-312"})
+      await_status(id, :waiting)
+      assert Durable.send_event(id, "payment.failed", %{"code" => "declined"}) == :ok
+
+      Probe.set(:booked)
+      await_status(id, :waiting)
+      assert Durable.send_event(id, "payment.succeeded", %{"amount" => 100}) == :ok
+      await_status(id, :completed)
+
+      assert Durable.send_event(id, "payment.succeeded", %{"amount" => 100}) ==
+               {:error, :not_found}
+    end
+  end
+
   defmodule Audit6WaitsBothSigned do
     use Durable
     use Durable.Wait
