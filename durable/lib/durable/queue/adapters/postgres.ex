@@ -377,6 +377,29 @@ defmodule Durable.Queue.Adapters.Postgres do
     end
   end
 
+  @doc false
+  # A worker that stopped (or a caller running it inline) lets go of a run that
+  # was cancelled to be undone while it ran (`Executor.cancel_run/3` leaves the
+  # lock, with no token, until then), so its undo can be claimed now.
+  @impl true
+  def let_go(%Config{} = config, job_id) do
+    {_count, runs} =
+      Repo.update_all(
+        config,
+        from(w in WorkflowExecution,
+          where: w.id == ^job_id and w.status == :pending,
+          where: is_nil(w.lock_token) and not is_nil(w.locked_by),
+          select: w
+        ),
+        set: [locked_by: nil, locked_at: nil]
+      )
+
+    for run <- runs, do: Durable.PubSub.wake(config, run)
+    :ok
+  rescue
+    _error -> :ok
+  end
+
   @impl true
   def release_node_jobs(%Config{} = config, node_id) when is_binary(node_id) do
     running =
@@ -407,9 +430,17 @@ defmodule Durable.Queue.Adapters.Postgres do
     # A deploy isn't the step's fault: :snoozed doesn't use an attempt.
     stopped = %{type: "node_stopped", message: "the node stopped before this attempt finished"}
 
+    # Undos its workers kept from being claimed while their steps ran.
+    to_undo =
+      from(w in WorkflowExecution,
+        where: w.status == :pending and is_nil(w.lock_token) and w.locked_by == ^node_id
+      )
+
     with {:ok, runs} <- release_runs(config, running, :snoozed, stopped),
-         {:ok, rollbacks} <- release_runs(config, compensating, :snoozed, stopped),
-         do: {:ok, length(runs) + length(rollbacks)}
+         {:ok, rollbacks} <- release_runs(config, compensating, :snoozed, stopped) do
+      Repo.update_all(config, to_undo, set: [locked_by: nil, locked_at: nil])
+      {:ok, length(runs) + length(rollbacks)}
+    end
   rescue
     e -> {:error, Exception.message(e)}
   end

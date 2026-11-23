@@ -147,6 +147,12 @@ defmodule Durable.Queue.Adapter do
   @callback wake_sleeping_workflows(config :: Config.t(), batch_size :: pos_integer()) ::
               {:ok, non_neg_integer()} | {:error, term()}
 
+  @doc """
+  Lets go of a run cancelled to be undone while this worker ran it, once its
+  step has stopped.
+  """
+  @callback let_go(config :: Config.t(), job_id :: job_id()) :: :ok
+
   @optional_callbacks recover_zombie_workflows: 2, wake_sleeping_workflows: 2
 
   @doc """

@@ -245,15 +245,15 @@ defmodule Durable.Executor do
     seen = opts[:rollback] && status_now(config, workflow_id)
     cancellable = if seen, do: where(cancellable, [w], w.status == ^seen), else: cancellable
 
-    set = [
-      status: :cancelled,
-      error: error,
-      completed_at: now,
-      updated_at: now,
-      locked_by: nil,
-      locked_at: nil,
-      lock_token: nil
-    ]
+    # A run a worker had, cancelled to be undone, keeps that worker's lock with
+    # no token: the claim of its undo waits until the worker has stopped its
+    # step and let go (`Postgres.let_go/2`), or the lock went stale. A worker
+    # that can't reach the database never hears of the cancel at a heartbeat.
+    lock = if seen == :running, do: [], else: [locked_by: nil, locked_at: nil]
+
+    set =
+      [status: :cancelled, error: error, completed_at: now, updated_at: now, lock_token: nil] ++
+        lock
 
     {:ok, cancelled} =
       Repo.transaction(config, fn -> cancel_and_queue(config, cancellable, set, opts) end)
@@ -316,7 +316,8 @@ defmodule Durable.Executor do
 
   defp queue_cancelled(config, cancelled) do
     at = DateTime.add(DateTime.utc_now(), config.heartbeat_interval, :millisecond)
-    {:ok, _queued} = queue_rollback(config, cancelled, at)
+    lock = [locked_by: cancelled.locked_by, locked_at: cancelled.locked_at]
+    {:ok, _queued} = queue_rollback(config, cancelled, at, lock)
   end
 
   # Once the runs under it are stopped, a run nobody was running is undone a
@@ -461,20 +462,20 @@ defmodule Durable.Executor do
     end
   end
 
-  defp queue_rollback(config, execution, at \\ nil) do
+  defp queue_rollback(config, execution, at \\ nil, lock \\ [locked_by: nil, locked_at: nil]) do
     execution
     |> Ecto.Changeset.change(
-      status: :pending,
-      engine_state:
-        Map.put(execution.engine_state, @rollback, %{
-          "error" => execution.error || %{},
-          "status" => Atom.to_string(execution.status)
-        }),
-      completed_at: nil,
-      scheduled_at: at,
-      locked_by: nil,
-      locked_at: nil,
-      lock_token: nil
+      [
+        status: :pending,
+        engine_state:
+          Map.put(execution.engine_state, @rollback, %{
+            "error" => execution.error || %{},
+            "status" => Atom.to_string(execution.status)
+          }),
+        completed_at: nil,
+        scheduled_at: at,
+        lock_token: nil
+      ] ++ lock
     )
     |> without_key(execution)
     |> cas_update(config)
@@ -965,6 +966,7 @@ defmodule Durable.Executor do
       fun.()
     after
       Process.exit(beat, :kill)
+      Adapter.default_adapter().let_go(config, id)
     end
   end
 

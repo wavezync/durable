@@ -201,9 +201,12 @@ defmodule Durable.Queue.Worker do
   defp settle(config, job, {:error, reason}),
     do: Adapter.default_adapter().nack(config, job.id, reason, job[:lock_token])
 
+  # :fenced — the row is its new owner's, or a cancel queued its undo, which
+  # waits for this worker to let go.
+  defp settle(config, job, :fenced), do: Adapter.default_adapter().let_go(config, job.id)
+
   # :waiting — the executor made the run wait, or put it back on its queue.
-  # :fenced — the row is its new owner's.
-  defp settle(_config, _job, _waiting_or_fenced), do: :ok
+  defp settle(_config, _job, :waiting), do: :ok
 
   defp execute_job(job, config) do
     case Durable.Executor.execute_workflow(job.id, config, job[:lock_token]) do
@@ -309,6 +312,7 @@ defmodule Durable.Queue.Worker do
     duration_ms = stop_task(state)
 
     safely(:ok, fn -> StepRunner.close_cancelled(state.config, state.job.id) end)
+    safely(:ok, fn -> Adapter.default_adapter().let_go(state.config, state.job.id) end)
 
     emit_telemetry(state.job, :fenced, duration_ms)
     send(state.poller_pid, {:job_complete, self(), state.job.id, :fenced, duration_ms})
