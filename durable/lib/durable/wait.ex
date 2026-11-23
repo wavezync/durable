@@ -826,15 +826,15 @@ defmodule Durable.Wait do
   defp deliver_to_waiter(config, workflow_id, event_name, safe_payload) do
     sent =
       Repo.transaction(config, fn ->
-        lock_run(config, workflow_id)
-        deliver_if_waiting(config, workflow_id, event_name, safe_payload)
+        run = lock_run(config, workflow_id)
+        deliver_if_waiting(config, run, workflow_id, event_name, safe_payload)
       end)
 
     wake_resumed(config, sent)
   end
 
-  defp deliver_if_waiting(config, workflow_id, event_name, payload) do
-    case find_pending_event(config, workflow_id, event_name) do
+  defp deliver_if_waiting(config, run, workflow_id, event_name, payload) do
+    case waiting_for(config, run, event_name) do
       {:ok, pending_event} ->
         deliver(config, workflow_id, event_name, pending_event, payload)
 
@@ -842,6 +842,15 @@ defmodule Durable.Wait do
         if late_for_group?(config, workflow_id, event_name), do: :ok, else: not_found
     end
   end
+
+  # Only a waiting run is answered (rule 4). One cancelled a moment ago keeps
+  # its waits open until its canceller closes them, or until the stale sweep
+  # does if the canceller was lost: an event taken there was told :ok and
+  # reached nobody.
+  defp waiting_for(config, %{status: :waiting, id: id}, event_name),
+    do: find_pending_event(config, id, event_name)
+
+  defp waiting_for(_config, _not_waiting, _event_name), do: {:error, :not_found}
 
   # The wake goes out once the transaction that resumed the run has committed.
   defp wake_resumed(config, {:ok, {:resumed, run}}), do: DurablePubSub.wake(config, run)
@@ -913,15 +922,15 @@ defmodule Durable.Wait do
         case lock_run(config, workflow_id) do
           nil -> {:error, :not_found}
           %{status: status} when status in @finished -> {:error, :finished}
-          _open -> deliver_or_buffer(config, workflow_id, event_name, payload)
+          open -> deliver_or_buffer(config, open, workflow_id, event_name, payload)
         end
       end)
 
     wake_resumed(config, sent)
   end
 
-  defp deliver_or_buffer(config, workflow_id, event_name, payload) do
-    case find_pending_event(config, workflow_id, event_name) do
+  defp deliver_or_buffer(config, run, workflow_id, event_name, payload) do
+    case waiting_for(config, run, event_name) do
       {:ok, pending_event} ->
         deliver(config, workflow_id, event_name, pending_event, payload)
 

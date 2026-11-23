@@ -8,6 +8,7 @@ defmodule Durable.Integration.Audit6WaitsTest do
   @moduletag :capture_log
   @moduletag timeout: 60_000
 
+  alias Durable.Storage.Schemas.PendingEvent
   alias Durable.Wait.TimeoutWorker
 
   # A contract goes out once legal and finance have both signed it, within the
@@ -108,6 +109,70 @@ defmodule Durable.Integration.Audit6WaitsTest do
       step :sign_off, fn contract ->
         {:ok, Map.put(contract, "signed", wait_for_all(["legal.signed", "finance.signed"]))}
       end
+    end
+  end
+
+  # Stops the process that set `:audit6_hold` once its first transaction has
+  # committed, until the test lets it go on.
+  def hold_after_commit(_event, _measurements, %{query: "commit"}, test) do
+    if Process.get(:audit6_hold) do
+      Process.delete(:audit6_hold)
+      send(test, {:held, self()})
+      Probe.wait_for(:audit6_go_on)
+    end
+  end
+
+  def hold_after_commit(_event, _measurements, _meta, _test), do: :ok
+
+  defmodule Audit6WaitsDelivery do
+    use Durable
+    use Durable.Wait
+
+    workflow "audit6_waits_delivery" do
+      step :await_delivery, fn order ->
+        {:ok, Map.put(order, "delivery", wait_for_event("shipment.delivered"))}
+      end
+    end
+  end
+
+  describe "an event for a cancelled run whose waits aren't closed yet" do
+    # A cancel commits and then closes the run's waits. Its process lost in
+    # between (a request timing out), they stay open until the stale sweep
+    # gets to them, and an event sent meanwhile was told :ok.
+    test "is told nothing waits for it" do
+      start_durable!(%{default: 1})
+      handler = "audit6-hold-#{System.unique_integer([:positive])}"
+
+      :telemetry.attach(
+        handler,
+        [:durable, :integration_repo, :query],
+        &__MODULE__.hold_after_commit/4,
+        self()
+      )
+
+      on_exit(fn -> :telemetry.detach(handler) end)
+
+      {:ok, id} = Durable.start(Audit6WaitsDelivery, %{"order" => "O-12"})
+      await_status(id, :waiting)
+
+      cancelling =
+        spawn(fn ->
+          Process.put(:audit6_hold, true)
+          Durable.cancel(id, "customer cancelled")
+        end)
+
+      assert_receive {:held, ^cancelling}, 5_000
+      Process.exit(cancelling, :kill)
+      assert get(id).status == :cancelled
+
+      # The wait is still open: the canceller never got to it.
+      assert [:pending] = IntegrationRepo.all(from(p in PendingEvent, select: p.status))
+
+      assert Durable.send_event(id, "shipment.delivered", %{"signed_by" => "R. Diaz"}) ==
+               {:error, :not_found}
+
+      assert Durable.send_event(id, "shipment.delivered", %{"late" => true}, buffer: true) ==
+               {:error, :finished}
     end
   end
 
