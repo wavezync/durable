@@ -127,6 +127,37 @@ defmodule Audit6BlocksCarriers do
   end
 end
 
+defmodule Audit6BlocksSurvey do
+  @moduledoc false
+  use Durable
+  use Durable.Helpers
+  alias Durable.IntegrationProbe, as: Probe
+
+  # Three surveyors visit the site at once. The last finds it can't be built
+  # on, which ends the survey.
+  workflow "audit6_survey" do
+    parallel :visits do
+      step :soil, fn site ->
+        Probe.note(:soil_out)
+        Probe.wait_for(:never)
+        {:ok, site}
+      end
+
+      step :drainage, fn site ->
+        Probe.note(:drainage_out)
+        Probe.wait_for(:never)
+        {:ok, site}
+      end
+
+      step :access, fn _site ->
+        Probe.note(:access_out)
+        Probe.wait_for(:no_access)
+        {:fail, "no road to the site"}
+      end
+    end
+  end
+end
+
 defmodule Durable.Integration.Audit6BlocksTest do
   @moduledoc """
   Audit 6: parallel blocks, children and rollbacks with live pollers, raced
@@ -236,6 +267,74 @@ defmodule Durable.Integration.Audit6BlocksTest do
 
     assert {Probe.peak(:dhl_quoting), Probe.hits(:dhl_quoting)} == {1, 1},
            "DHL quoted #{Probe.hits(:dhl_quoting)} times, #{Probe.peak(:dhl_quoting)} at once"
+  end
+
+  # Holds two processes where each has done half of what it does to the
+  # block's events: the cancel once it has cancelled the run, before it closes
+  # the run's waits, and the failing lane's notice once it has taken its own
+  # event, before it takes the others.
+  def hold_halfway(_event, _measurements, %{query: query}, _config) do
+    cond do
+      Process.get(:audit6_cancelling) && query =~ ~s(UPDATE "durable"."step_executions") ->
+        Process.delete(:audit6_cancelling)
+        Process.sleep(500)
+
+      query =~ "wait_groups" && query =~ "FOR UPDATE" && Probe.note(:notice_held) == 1 ->
+        Process.sleep(1_200)
+
+      true ->
+        :ok
+    end
+  end
+
+  # A cancel closed the run's waits without its row (rule 2): one statement
+  # over the block's events, in the table's order. A lane's notice holds the
+  # run's row and its own event, then cancels the other lanes' events. The two
+  # took the events in opposite orders and deadlocked, and Postgres killed one:
+  # the operator's cancel raised, its cascade undone, or the lane's notice was
+  # lost with its task.
+  test "a cancel racing a failing lane's notice doesn't deadlock on the block's events" do
+    start_durable!(%{default: 4}, heartbeat_interval: 5_000)
+
+    {:ok, id} = Durable.start(Audit6BlocksSurvey, %{})
+
+    assert_eventually(fn ->
+      Enum.all?([:soil_out, :drainage_out, :access_out], &(Probe.hits(&1) == 1))
+    end)
+
+    :telemetry.attach(
+      "audit6-hold",
+      [:durable, :integration_repo, :query],
+      &__MODULE__.hold_halfway/4,
+      nil
+    )
+
+    on_exit(fn -> :telemetry.detach("audit6-hold") end)
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        cancel =
+          Task.async(fn ->
+            Process.put(:audit6_cancelling, true)
+
+            try do
+              Durable.cancel(id, "the client withdrew")
+            rescue
+              error -> {:raised, Exception.message(error)}
+            end
+          end)
+
+        Process.sleep(150)
+        Probe.set(:no_access)
+
+        assert Task.await(cancel, 15_000) == :ok
+        assert_eventually(fn -> Enum.all?(lanes(id), &(&1.status in [:cancelled, :failed])) end)
+        Process.sleep(500)
+      end)
+
+    assert Probe.hits(:notice_held) >= 1
+    refute log =~ "deadlock", log
+    assert get(id).status == :cancelled
   end
 
   # A cancel with `rollback: true` leaves the step its worker is running open:

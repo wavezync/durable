@@ -1158,17 +1158,23 @@ defmodule Durable.Wait do
   @doc false
   @spec cancel_pending_waits(Config.t(), String.t()) :: :ok
   def cancel_pending_waits(config, workflow_id) do
-    # Cancel pending inputs
-    query = from(p in PendingInput, where: p.workflow_id == ^workflow_id and p.status == :pending)
-    Repo.update_all(config, query, set: [status: :cancelled, completed_at: DateTime.utc_now()])
+    # The run's row first (rule 2). A block's lane takes it before it changes
+    # the block's events; without it, this took them in the table's order and
+    # the lane in its own, and the two deadlocked.
+    {:ok, :ok} =
+      Repo.transaction(config, fn ->
+        lock_run(config, workflow_id)
 
-    # Cancel pending events
-    query = from(p in PendingEvent, where: p.workflow_id == ^workflow_id and p.status == :pending)
-    Repo.update_all(config, query, set: [status: :cancelled, completed_at: DateTime.utc_now()])
+        for schema <- [PendingInput, PendingEvent, WaitGroup] do
+          query = from(p in schema, where: p.workflow_id == ^workflow_id and p.status == :pending)
 
-    # Cancel wait groups
-    query = from(w in WaitGroup, where: w.workflow_id == ^workflow_id and w.status == :pending)
-    Repo.update_all(config, query, set: [status: :cancelled, completed_at: DateTime.utc_now()])
+          Repo.update_all(config, query,
+            set: [status: :cancelled, completed_at: DateTime.utc_now()]
+          )
+        end
+
+        :ok
+      end)
 
     :ok
   end
