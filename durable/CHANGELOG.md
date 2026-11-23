@@ -4,6 +4,29 @@ All notable changes to this package. Versions follow [Semantic
 Versioning](https://semver.org); entries come from [Conventional
 Commits](https://www.conventionalcommits.org).
 
+## [2.0.2](https://github.com/wavezync/durable/compare/durable-v2.0.1...durable-v2.0.2) - 2026-11-23
+
+### Bug fixes
+
+- What a failed step leaves, and data a save can't take ([9c28811](https://github.com/wavezync/durable/commit/9c288118a7788e58cfbf2fe618573c525af3b249))
+- Cancels with rollback, partial rollbacks, run_again without a holder, compensation timeouts ([29fe16b](https://github.com/wavezync/durable/commit/29fe16b37ad49fd28940208f9c5df32137ed7846))
+- Workers that lost their claim stop, and runs go back to their own node ([35dc5ab](https://github.com/wavezync/durable/commit/35dc5abc9c4bdd389eceecbf388ef5c4fab5ea08))
+- Blocks and child workflows that stalled, ran twice or answered wrong ([1cbe344](https://github.com/wavezync/durable/commit/1cbe3445f0e276c4687ccba827fae51ad5dac690))
+- A snooze no timestamp holds is an invalid return, not a crash in the save ([b16e2a5](https://github.com/wavezync/durable/commit/b16e2a5cfd52e9ba403dcc95366da2f1c368e500))
+- Each wait gets its own answer; waits and schedules survive crashes and clock changes ([28eced1](https://github.com/wavezync/durable/commit/28eced141accfb6e81e05f7c04cd814ce6290c28))
+- An answer that is a date or a decimal is stored wrapped, and read back ([f23bb89](https://github.com/wavezync/durable/commit/f23bb894f33cc59f1bf0eb67574b99819894b480))
+- A rollback keeps its error, a cancelled run never holds a key, and the sweeps are bounded ([300c29b](https://github.com/wavezync/durable/commit/300c29b5c9528adddde10721b06e3c0f66800e39))
+- Lane timeouts on unpolled queues, stale lane notices, lost close-outs of cancelled lanes ([d52fbc1](https://github.com/wavezync/durable/commit/d52fbc183b03ab3f03329dfc07fb28cbfc0ac534))
+- A key a step deleted stays deleted when its worker is lost, and a deadline never stops a step early ([b6f4485](https://github.com/wavezync/durable/commit/b6f4485369df86e8f1d68a0b81640e1c492a5362))
+- A clean stop at grace 0 hands runs back, inline runs take a claim, one poll timer ([a97a462](https://github.com/wavezync/durable/commit/a97a46217e6033defb51f1fefe7de34583e5c301))
+- A worker settles its own run, and the ack is fenced ([d55a956](https://github.com/wavezync/durable/commit/d55a9569ea777b0876237417d8583ada95280030))
+- Every timeout sweep reads oldest first and pages past what it can't handle ([f24a73c](https://github.com/wavezync/durable/commit/f24a73ca3062055c099fda2426f6bc56537f720f))
+- An edit to a schedule is made to it as it is, under its row's lock ([fdf96ae](https://github.com/wavezync/durable/commit/fdf96ae6b3d79cc00e22a44738f2615749f0d7e5))
+
+### Refactoring
+
+- One is_run_data guard, and drop a ponytail the child record made stale ([29d840a](https://github.com/wavezync/durable/commit/29d840a9653e3be88aa6bb130409211f814ac48d))
+
 ## [2.0.1](https://github.com/wavezync/durable/compare/durable-v2.0.0...durable-v2.0.1) - 2026-11-23
 
 ### Bug fixes
