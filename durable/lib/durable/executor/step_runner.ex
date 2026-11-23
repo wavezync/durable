@@ -25,8 +25,15 @@ defmodule Durable.Executor.StepRunner do
   @scalars [Date, DateTime, NaiveDateTime, Time, Decimal]
   @doc false
   defguard is_run_data(term)
-            when is_map(term) and
-                   not (is_struct(term) and :erlang.map_get(:__struct__, term) in @scalars)
+           when is_map(term) and
+                  not (is_struct(term) and :erlang.map_get(:__struct__, term) in @scalars)
+
+  # A snooze's time to run again is written to the row, and Postgres holds
+  # none past the year 294276: a longer one is an invalid return, not a crash
+  # in the save.
+  # ponytail: a fixed bound (285,000 years), not "the last timestamp less now".
+  @max_snooze_ms 9_000_000_000_000_000
+  defguardp is_snooze(ms) when is_integer(ms) and ms >= 0 and ms <= @max_snooze_ms
 
   @suspending [
     :sleep,
@@ -530,10 +537,8 @@ defmodule Durable.Executor.StepRunner do
   defp step_outcome({:rollback, reason}),
     do: %{result: :error, error: error_summary(rollback_error(reason))}
 
-  defp step_outcome({:snooze, ms}) when is_integer(ms) and ms >= 0, do: %{result: :snoozed}
-
-  defp step_outcome({:snooze, ms, _reason}) when is_integer(ms) and ms >= 0,
-    do: %{result: :snoozed}
+  defp step_outcome({:snooze, ms}) when is_snooze(ms), do: %{result: :snoozed}
+  defp step_outcome({:snooze, ms, _reason}) when is_snooze(ms), do: %{result: :snoozed}
 
   defp step_outcome({:cancel, _reason}), do: %{result: :cancelled}
 
@@ -645,10 +650,9 @@ defmodule Durable.Executor.StepRunner do
   end
 
   # The step asks to run again later, without using an attempt.
-  defp handle_result({:snooze, ms}, ctx) when is_integer(ms) and ms >= 0,
-    do: snooze(ms, nil, ctx)
+  defp handle_result({:snooze, ms}, ctx) when is_snooze(ms), do: snooze(ms, nil, ctx)
 
-  defp handle_result({:snooze, ms, reason}, ctx) when is_integer(ms) and ms >= 0,
+  defp handle_result({:snooze, ms, reason}, ctx) when is_snooze(ms),
     do: snooze(ms, reason_text(reason), ctx)
 
   # The step says retrying won't help: fail now, whatever attempts are left.

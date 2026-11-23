@@ -87,6 +87,12 @@ defmodule Durable.Audit5ExecTest do
         :post -> step :post, fn parcel -> {:ok, parcel} end
       end
     end
+
+    # Held for a pickup slot worked out in the wrong unit: 300,000 years on,
+    # past the last time Postgres can store.
+    workflow "audit5_parcel_pickup" do
+      step :await_pickup, fn _parcel -> {:snooze, 300_000 * 365 * 86_400_000} end
+    end
   end
 
   defmodule Audit5ExecCheckout do
@@ -198,6 +204,15 @@ defmodule Durable.Audit5ExecTest do
         assert run.status == :failed
         assert run.error["type"] == "invalid_step_return"
       end
+    end
+  end
+
+  describe "a snooze longer than a timestamp holds" do
+    test "fails the run as an invalid return, not left running" do
+      run = run_workflow(Audit5ExecParcel, %{"id" => 1}, workflow: "audit5_parcel_pickup")
+
+      assert run.status == :failed
+      assert run.error["type"] == "invalid_step_return"
     end
   end
 
