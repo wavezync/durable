@@ -3557,6 +3557,11 @@ defmodule Durable.Executor do
   # ponytail: a stopped run that was waiting, with no worker, makes the undo
   # wait as well. Record whether a worker had it when it was stopped if that
   # wait matters.
+  #
+  # A run under one that was stopped, and still going, hasn't been told yet:
+  # the cancel passes down after the commit that stopped its parent, and can
+  # be lost with whoever was passing it, for the sweep to finish
+  # (`close_out_lost/2`). The undo waits for it as well, a heartbeat at a time.
   defp settles_at(config, execution) do
     beat = config.heartbeat_interval
     since = DateTime.add(DateTime.utc_now(), -beat, :millisecond)
@@ -3569,8 +3574,29 @@ defmodule Durable.Executor do
         select: max(w.completed_at)
       )
 
-    with %DateTime{} = last <- Repo.one(config, stopped),
+    with nil <- not_yet_stopped(config, execution),
+         %DateTime{} = last <- Repo.one(config, stopped),
          do: DateTime.add(last, beat, :millisecond)
+  end
+
+  # A heartbeat from now if a run under a cancelled one in this run's tree is
+  # still going, as the sweep finds them: not one queued to be undone (rule
+  # 17), nor one retried since.
+  defp not_yet_stopped(config, execution) do
+    root = execution.root_workflow_id || execution.id
+
+    going =
+      from(c in WorkflowExecution,
+        join: p in WorkflowExecution,
+        on: p.id == c.parent_workflow_id,
+        where: c.root_workflow_id == ^root and c.id != ^execution.id,
+        where: p.status == :cancelled and c.status in [:pending, :running, :waiting],
+        where: not EngineState.marked?(c, ^@rollback),
+        where: is_nil(c.retried_at) or c.retried_at < p.completed_at
+      )
+
+    if Repo.aggregate(config, going, :count) > 0,
+      do: DateTime.add(DateTime.utc_now(), config.heartbeat_interval, :millisecond)
   end
 
   # Back on its queue to be undone at `at`, as `queue_rollback/3` leaves a run
@@ -3602,6 +3628,30 @@ defmodule Durable.Executor do
 
   # `rollback_workflow/2` asked: undo the run, keeping the error it failed with.
   defp roll_back(execution, workflow_def, config) do
+    # Queued a heartbeat after what was stopped then, but something under it
+    # may not have been stopped yet. Back on its queue, marker and all, if so.
+    case not_yet_stopped(config, execution) do
+      nil -> roll_back_now(execution, workflow_def, config)
+      at -> undo_at(config, execution, at)
+    end
+  end
+
+  defp undo_at(config, execution, at) do
+    {:ok, parked} =
+      execution
+      |> Ecto.Changeset.change(
+        status: :pending,
+        scheduled_at: at,
+        locked_by: nil,
+        locked_at: nil,
+        lock_token: nil
+      )
+      |> cas_update!(config)
+
+    {:waiting, parked}
+  end
+
+  defp roll_back_now(execution, workflow_def, config) do
     {%{"error" => error, "status" => was}, engine_state} =
       Map.pop(execution.engine_state, @rollback)
 

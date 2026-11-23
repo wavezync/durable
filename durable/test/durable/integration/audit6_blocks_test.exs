@@ -158,6 +158,55 @@ defmodule Audit6BlocksSurvey do
   end
 end
 
+defmodule Audit6BlocksCourier do
+  @moduledoc false
+  use Durable
+  alias Durable.IntegrationProbe, as: Probe
+
+  # The courier goes out and collects the parcel.
+  workflow "audit6_courier" do
+    step :collect, fn job ->
+      Probe.set(:courier_out)
+      Process.sleep(800)
+      Probe.note(:collected)
+      {:ok, job}
+    end
+  end
+end
+
+defmodule Audit6BlocksPickup do
+  @moduledoc false
+  use Durable
+  use Durable.Orchestration
+  alias Durable.IntegrationProbe, as: Probe
+
+  # A pickup slot is booked, then stock is checked while a courier is sent.
+  # No stock undoes the booking: freeing the slot needs to know whether the
+  # parcel was collected.
+  workflow "audit6_pickup", on_failure: :rollback do
+    step :book_slot, [compensate: :free_slot], fn job -> {:ok, job} end
+
+    parallel :prep do
+      step :stock, fn _job ->
+        Probe.wait_for(:courier_out)
+        {:fail, "out of stock"}
+      end
+
+      step :courier, fn job ->
+        case call_workflow(Audit6BlocksCourier, %{}, ref: :courier) do
+          {:ok, _collected} -> {:ok, job}
+          {:error, reason} -> {:error, reason}
+        end
+      end
+    end
+
+    compensate :free_slot, fn job ->
+      Probe.note({:freed_with_collected, Probe.hits(:collected)})
+      {:ok, job}
+    end
+  end
+end
+
 defmodule Durable.Integration.Audit6BlocksTest do
   @moduledoc """
   Audit 6: parallel blocks, children and rollbacks with live pollers, raced
@@ -360,5 +409,39 @@ defmodule Durable.Integration.Audit6BlocksTest do
 
       assert Probe.fetch_or(unquote(undo), nil) == unquote(Macro.escape(wanted))
     end
+  end
+
+  # Kills the failing lane's process as it commits the stop of its block:
+  # the other lanes are cancelled, and the runs under them not yet.
+  def kill_after_stopping_block(_event, _measurements, meta, _config) do
+    if Enum.any?(meta.params, &match?(%{message: "another branch" <> _}, &1)),
+      do: Process.put(:audit6_stopped_block, true)
+
+    if meta.query == "commit" and Process.get(:audit6_stopped_block) do
+      Probe.note(:killed_after_stopping)
+      Process.exit(self(), :kill)
+    end
+  end
+
+  # The run was undone a heartbeat after its lanes were stopped. A lane's
+  # child is stopped by the cascade after that, and lost with the lane that
+  # was cascading, it ran on until the sweep: the courier collected the parcel
+  # after the slot was freed as if he never had (rule 15).
+  test "a run isn't undone while a child of a stopped lane can still finish a step" do
+    handler = "audit6-kill-#{System.unique_integer([:positive])}"
+    event = [:durable, :integration_repo, :query]
+    :telemetry.attach(handler, event, &__MODULE__.kill_after_stopping_block/4, nil)
+    on_exit(fn -> :telemetry.detach(handler) end)
+    start_durable!(%{default: 4}, heartbeat_interval: 300)
+
+    {:ok, id} = Durable.start(Audit6BlocksPickup, %{})
+    await_status(id, :compensated, 10_000)
+    assert Probe.hits(:killed_after_stopping) == 1
+
+    assert_eventually(fn -> Probe.hits(:collected) == 1 end, 5_000)
+    Process.sleep(200)
+
+    assert Probe.hits({:freed_with_collected, 1}) == 1,
+           "the slot was freed before the courier's step ended: #{inspect(Probe.log())}"
   end
 end
