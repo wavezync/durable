@@ -123,41 +123,41 @@ defmodule Durable.Integration.QueueLoadTest do
     rows = IntegrationRepo.all(from(s in StepExecution, where: s.workflow_id in ^ids))
     rows_of = Enum.group_by(rows, & &1.workflow_id)
 
-    for run <- runs do
-      n = run.input["n"]
-      mine = Map.get(rows_of, run.id, [])
-      label = "run #{n} #{run.id} #{run.status} #{inspect(run.error)}"
+    for run <- runs, do: check_run(run, Map.get(rows_of, run.id, []))
+    report(runs, rows, rows_of)
+  end
 
-      assert run.locked_by == nil, "left locked: #{label}"
-      assert Probe.peak({:run, n}) <= 1, "two of its steps at once: #{label}"
+  defp check_run(run, mine) do
+    n = run.input["n"]
+    label = "run #{n} #{run.id} #{run.status} #{inspect(run.error)}"
 
-      open = for %{status: s} = row <- mine, s in [:pending, :running], do: row.step_name
-      assert open == [], "attempts left open #{inspect(open)}: #{label}"
+    assert run.locked_by == nil, "left locked: #{label}"
+    assert Probe.peak({:run, n}) <= 1, "two of its steps at once: #{label}"
 
-      # A body runs only after its attempt's row is written.
-      for step <- ["a", "b", "c"] do
-        attempts = Enum.count(mine, &(&1.step_name == step))
-        ran = Probe.hits({String.to_atom(step), n})
-        assert ran <= attempts, "#{step} ran #{ran} times with #{attempts} attempts: #{label}"
-      end
+    open = for %{status: s} = row <- mine, s in [:pending, :running], do: row.step_name
+    assert open == [], "attempts left open #{inspect(open)}: #{label}"
 
-      if run.status == :completed do
-        done = for %{status: :completed} = row <- mine, do: row.step_name
-        assert Enum.sort(done) == ["a", "b", "c"], "a step skipped or done twice: #{label}"
-      else
-        # Only losing its worker three times fails a run here.
-        assert run.error["type"] in ["worker_lost", "task_crash"], "failed: #{label}"
-      end
+    # A body runs only after its attempt's row is written, and a run nothing
+    # was done to ran each step once.
+    untouched? = Enum.all?(mine, &(&1.status == :completed))
 
-      # Nothing was done to it: each step ran once.
-      if Enum.all?(mine, &(&1.status == :completed)) do
-        for step <- [:a, :b, :c] do
-          assert Probe.hits({step, n}) == 1,
-                 "#{step} ran #{Probe.hits({step, n})} times, untouched: #{label}"
-        end
-      end
+    for step <- [:a, :b, :c] do
+      attempts = Enum.count(mine, &(&1.step_name == Atom.to_string(step)))
+      ran = Probe.hits({step, n})
+      assert ran <= attempts, "#{step} ran #{ran} times with #{attempts} attempts: #{label}"
+      assert ran == 1 or not untouched?, "#{step} ran #{ran} times, untouched: #{label}"
     end
 
+    if run.status == :completed do
+      done = for %{status: :completed} = row <- mine, do: row.step_name
+      assert Enum.sort(done) == ["a", "b", "c"], "a step skipped or done twice: #{label}"
+    else
+      # Only losing its worker three times fails a run here.
+      assert run.error["type"] in ["worker_lost", "task_crash"], "failed: #{label}"
+    end
+  end
+
+  defp report(runs, rows, rows_of) do
     for %{status: :failed} = run <- runs do
       trail =
         for row <- Enum.sort_by(Map.get(rows_of, run.id, []), & &1.inserted_at),
