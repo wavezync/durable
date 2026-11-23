@@ -500,7 +500,7 @@ defmodule Durable.Queue.Adapters.PostgresTest do
           workflow_name: "test",
           locked_by: "node_a",
           locked_at: DateTime.utc_now(),
-          status: :running
+          status: :completed
         )
 
       :ok = Postgres.ack(config(), job.id)
@@ -519,7 +519,7 @@ defmodule Durable.Queue.Adapters.PostgresTest do
           workflow_name: "test",
           locked_by: "node_a",
           locked_at: DateTime.utc_now(),
-          status: :running
+          status: :completed
         )
 
       assert :ok = Postgres.ack(config(), job.id)
@@ -694,6 +694,17 @@ defmodule Durable.Queue.Adapters.PostgresTest do
       still = repo().get!(WorkflowExecution, job.id)
       assert still.status == :running
       assert still.locked_by == "node_a"
+
+      # Still running, it keeps its lock: unlocked, no sweep would find it.
+      assert :ok = Postgres.ack(config(), job.id, job.lock_token)
+      assert repo().get!(WorkflowExecution, job.id).locked_by == "node_a"
+
+      repo().update_all(from(w in WorkflowExecution, where: w.id == ^job.id),
+        set: [status: :completed]
+      )
+
+      assert :ok = Postgres.ack(config(), job.id, Ecto.UUID.generate())
+      assert repo().get!(WorkflowExecution, job.id).locked_by == "node_a"
 
       assert :ok = Postgres.ack(config(), job.id, job.lock_token)
       assert repo().get!(WorkflowExecution, job.id).locked_by == nil

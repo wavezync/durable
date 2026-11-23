@@ -19,6 +19,7 @@ defmodule Durable.Executor do
   alias Durable.Keys
   alias Durable.PubSub, as: DurablePubSub
   alias Durable.Query.Opts
+  alias Durable.Queue.Adapter
   alias Durable.Queue.Drainer
   alias Durable.Repo
   alias Durable.Storage.Schemas.PendingEvent
@@ -888,14 +889,92 @@ defmodule Durable.Executor do
   A worker passes the `lock_token` of its claim. The claim may have been taken
   from it before it got here, and then the run is another worker's: nothing
   runs, and this returns `{:error, :superseded}`.
+
+  A caller with no claim (`inline: true`, `Durable.Testing`) takes one here, as
+  a poller would, and keeps it fresh while it runs. A run a worker has claimed
+  is that worker's, and this returns `{:error, :superseded}`.
   """
   @spec execute_workflow(String.t(), Config.t(), String.t() | nil) ::
           {:ok, map()} | {:waiting, map()} | {:error, term()}
   def execute_workflow(workflow_id, %Config{} = config, lock_token \\ nil) do
     with {:ok, execution} <- load_execution(config, workflow_id),
          true <- execution.status in [:pending, :running] || {:error, :superseded},
-         true <- lock_token in [nil, execution.lock_token] || {:error, :superseded},
-         {:ok, workflow_def} <- definition_or_leave(config, execution),
+         {:ok, execution} <- claimed(config, execution, lock_token) do
+      execute_claimed(config, execution, lock_token)
+    end
+  end
+
+  # The claim is the caller's own, taken here: the caller keeps it fresh.
+  defp execute_claimed(config, execution, nil),
+    do: keeping_claim(config, execution, fn -> execute_claimed(config, execution) end)
+
+  defp execute_claimed(config, execution, _workers_token), do: execute_claimed(config, execution)
+
+  defp claimed(_config, %{lock_token: token} = execution, token) when token != nil,
+    do: {:ok, execution}
+
+  defp claimed(_config, _execution, token) when token != nil, do: {:error, :superseded}
+
+  defp claimed(_config, %{status: :running, lock_token: held}, nil) when held != nil,
+    do: {:error, :superseded}
+
+  # The caller runs it itself, in its own process. Without a claim a poller
+  # could take the run while the caller ran it, and a caller that died left it
+  # `running` with no lock for the stale sweep to find. Only if the row is
+  # still as it was read: `pending`, or `running` with no claim at all.
+  defp claimed(config, %{id: id, status: status, lock_token: left} = _execution, nil) do
+    now = DateTime.utc_now()
+    as_read = from(w in WorkflowExecution, where: w.id == ^id and w.status == ^status, select: w)
+
+    # A run back on its queue can carry the token of a claim long over.
+    as_read =
+      if left,
+        do: where(as_read, [w], w.lock_token == ^left),
+        else: where(as_read, [w], is_nil(w.lock_token))
+
+    claim = [
+      status: :running,
+      locked_by: config.node_id,
+      locked_at: now,
+      lock_token: Ecto.UUID.generate(),
+      updated_at: now
+    ]
+
+    case Repo.update_all(config, as_read, set: claim) do
+      {1, [claimed]} -> {:ok, claimed}
+      {0, []} -> {:error, :superseded}
+    end
+  end
+
+  # A worker's heartbeat, for a caller that has none: a step that outlasts
+  # `stale_lock_timeout` would be taken for lost, and run again elsewhere.
+  # Not linked, so nothing lands in the caller's mailbox.
+  defp keeping_claim(config, %{id: id, lock_token: token}, fun) do
+    caller = self()
+    {:ok, beat} = Task.start(fn -> beat(config, id, token, Process.monitor(caller)) end)
+
+    try do
+      fun.()
+    after
+      Process.exit(beat, :kill)
+    end
+  end
+
+  defp beat(config, id, token, caller) do
+    receive do
+      {:DOWN, ^caller, :process, _pid, _reason} -> :ok
+    after
+      config.heartbeat_interval ->
+        # Any error but a failed write means the claim is over or gone.
+        case Adapter.default_adapter().heartbeat(config, id, token) do
+          {:error, reason} when reason in [:fenced, :cancelled, :not_found] -> :ok
+          _refreshed_or_failed -> beat(config, id, token, caller)
+        end
+    end
+  end
+
+  defp execute_claimed(config, execution) do
+    with {:ok, workflow_def} <- definition_or_leave(config, execution),
          {:ok, execution} <- take_waiting_key(config, execution, workflow_def),
          resumed = execution.current_step != nil,
          {:ok, execution} <- mark_running(config, execution) do

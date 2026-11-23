@@ -130,11 +130,8 @@ defmodule Durable.Queue.Worker do
 
     duration_ms = System.monotonic_time(:millisecond) - state.started_at
 
-    # Emit telemetry
     emit_telemetry(state.job, result, duration_ms)
-
-    # Notify poller of completion
-    send(state.poller_pid, {:job_complete, self(), state.job.id, result, duration_ms})
+    settle_and_report(state, result, duration_ms)
 
     {:stop, :normal, state}
   end
@@ -156,7 +153,7 @@ defmodule Durable.Queue.Worker do
       safely(:fenced, fn -> Durable.Executor.attempt_died(state.job, error, state.config) end)
 
     emit_telemetry(state.job, result, duration_ms)
-    send(state.poller_pid, {:job_complete, self(), state.job.id, result, duration_ms})
+    settle_and_report(state, result, duration_ms)
 
     {:stop, :normal, state}
   end
@@ -166,6 +163,27 @@ defmodule Durable.Queue.Worker do
   def handle_info({:EXIT, _pid, _reason}, state), do: {:noreply, state}
 
   # Private functions
+
+  # The worker settles its own result, by its claim's token, and only then
+  # tells the poller, which has nothing left to do but free the slot. Left to
+  # the poller, a result sent to one that had just died was never settled: the
+  # run stayed locked for the stale sweep.
+  defp settle_and_report(state, result, duration_ms) do
+    safely(:ok, fn -> settle(state.config, state.job, result) end)
+    send(state.poller_pid, {:job_complete, self(), state.job.id, result, duration_ms})
+  end
+
+  defp settle(config, job, :ok),
+    do: Adapter.default_adapter().ack(config, job.id, job[:lock_token])
+
+  # Fails the run if nothing recorded how it ended: the executor raised
+  # outside a step, a compensation died, or the run lost its worker too often.
+  defp settle(config, job, {:error, reason}),
+    do: Adapter.default_adapter().nack(config, job.id, reason, job[:lock_token])
+
+  # :waiting — the executor made the run wait, or put it back on its queue.
+  # :fenced — the row is its new owner's.
+  defp settle(_config, _job, _waiting_or_fenced), do: :ok
 
   defp execute_job(job, config) do
     case Durable.Executor.execute_workflow(job.id, config, job[:lock_token]) do

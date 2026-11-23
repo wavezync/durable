@@ -262,6 +262,9 @@ step :crawl, fn ctx ->
 end
 ```
 
+With `shutdown_grace_period: 0` the node doesn't wait at all: every run it has
+goes back on its queue at once, and the step each was on runs again.
+
 Runs can change nodes between steps, so don't keep files on local disk from one
 step to the next. Compensations keep running during the wait. A rollback still
 running when the time is up goes back on its queue, and the node that claims it
