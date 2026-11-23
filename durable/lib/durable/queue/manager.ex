@@ -107,14 +107,21 @@ defmodule Durable.Queue.Manager do
   end
 
   @doc false
-  # This node's workers, on every queue.
+  # This node's workers, on every queue. A queue whose supervisor is down has
+  # none to give.
   @spec workers(Config.t()) :: [pid()]
   def workers(%Config{} = config) do
     for queue <- Map.keys(config.queues),
         {_id, pid, _type, _modules} <-
-          DynamicSupervisor.which_children(worker_supervisor_name(to_string(queue), config.name)),
+          children(worker_supervisor_name(to_string(queue), config.name)),
         is_pid(pid),
         do: pid
+  end
+
+  defp children(supervisor) do
+    DynamicSupervisor.which_children(supervisor)
+  catch
+    :exit, _down -> []
   end
 
   # Supervisor callbacks
