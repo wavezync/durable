@@ -83,6 +83,9 @@ defmodule Durable.Queue.Adapters.Postgres do
         -- a worker that may still be running its step: stopped mid-step
         -- (`WorkflowExecution.keeping_worker/1`), or queued to be undone
         -- since. Until that worker lets go, or the lock is stale.
+        -- ponytail: read through the key's index, so through every run the key
+        -- has kept. A partial index on locks with no token, if a key's history
+        -- grows long enough to show in the claim.
         AND (w.key IS NULL OR NOT EXISTS (
           SELECT 1 FROM #{prefix}.workflow_executions k
           WHERE k.lock_token IS NULL AND k.locked_by IS NOT NULL
