@@ -409,6 +409,34 @@ defmodule Durable.Integration.Audit6QueueTest do
       :ok = Probe.set(:upload_done)
       await_status(id, :completed)
     end
+
+    test "running a run inline, stops its step too: its caller is its worker" do
+      db = Application.fetch_env!(:durable, IntegrationRepo)
+      start_supervised!({Audit6QueueProxy, db[:port]})
+      timing = [stale_lock_timeout: 2, heartbeat_interval: 200]
+      start_on_own_repo!([hostname: "localhost", port: Audit6QueueProxy.port()], timing)
+
+      # On a queue node A doesn't poll, so no worker of its takes the run first.
+      caller =
+        spawn(fn ->
+          Durable.start(Audit6QueueExport, %{"customer" => "c-8"}, inline: true, queue: :reports)
+        end)
+
+      ref = Process.monitor(caller)
+      assert_eventually(fn -> Probe.hits(:upload_started) == 1 end)
+      :ok = Audit6QueueProxy.freeze()
+
+      start_node_b!([queues: queue_opts(%{reports: 1})] ++ timing)
+      Process.sleep(2_200)
+      assert_received {:DOWN, ^ref, :process, ^caller, :killed}
+
+      {:ok, 1} = StaleJobRecovery.recover_now(:audit6_node_b)
+      assert_eventually(fn -> Probe.hits(:upload_started) == 2 end)
+      Process.sleep(300)
+
+      assert Probe.peak(:uploading) == 1
+      :ok = Probe.set(:upload_done)
+    end
   end
 
   # A cancel lets a worker running the run keep its lock. Until the worker has

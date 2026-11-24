@@ -114,10 +114,9 @@ defmodule Durable.Queue.Worker do
   def handle_info(:heartbeat, state) do
     # Refresh the lock, passing the per-claim fencing token so a heartbeat can
     # tell whether we've been fenced out by stale-lock recovery + reclaim.
-    adapter = Adapter.default_adapter()
     sent = System.monotonic_time(:millisecond)
 
-    case beat_within_lease(adapter, state) do
+    case beat_within_lease(state.config, state.job.id, state.job[:lock_token], state.beat_at) do
       {:error, :fenced} ->
         self_fence(state)
 
@@ -133,7 +132,7 @@ defmodule Durable.Queue.Worker do
         Logger.warning("Heartbeat failed for job #{state.job.id}: #{inspect(reason)}")
         emit_heartbeat_telemetry(state.job)
 
-        if lease_lost?(state) do
+        if lease_lost?(state.config, state.beat_at) do
           self_fence(state)
         else
           timer = schedule_heartbeat(state.config.heartbeat_interval)
@@ -301,12 +300,13 @@ defmodule Durable.Queue.Worker do
   # attempt. A pool that refuses for a few seconds is nowhere near it.
   # A database that stops answering holds a query for its timeout, 15 seconds
   # by default, which can be past the lease: the step would run on beside its
-  # next attempt. The heartbeat is given until the lease runs out.
-  defp beat_within_lease(adapter, state) do
-    left = state.beat_at + lease_ms(state.config) - System.monotonic_time(:millisecond)
-
-    beat =
-      Task.async(fn -> adapter.heartbeat(state.config, state.job.id, state.job[:lock_token]) end)
+  # next attempt. The heartbeat is given until the lease runs out. Also the
+  # heartbeat of a caller running a run inline (`Executor.keeping_claim/3`).
+  @doc false
+  def beat_within_lease(config, job_id, lock_token, beat_at) do
+    left = beat_at + lease_ms(config) - System.monotonic_time(:millisecond)
+    adapter = Adapter.default_adapter()
+    beat = Task.async(fn -> adapter.heartbeat(config, job_id, lock_token) end)
 
     case Task.yield(beat, max(left, 0)) || Task.shutdown(beat, :brutal_kill) do
       {:ok, result} -> result
@@ -315,7 +315,8 @@ defmodule Durable.Queue.Worker do
     end
   end
 
-  defp lease_lost?(%{config: config, beat_at: beat_at}),
+  @doc false
+  def lease_lost?(config, beat_at),
     do: System.monotonic_time(:millisecond) - beat_at >= lease_ms(config)
 
   defp lease_ms(config), do: config.stale_lock_timeout * 1_000 - config.heartbeat_interval

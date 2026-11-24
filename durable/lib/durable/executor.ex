@@ -22,6 +22,7 @@ defmodule Durable.Executor do
   alias Durable.Query.Opts
   alias Durable.Queue.Adapter
   alias Durable.Queue.Drainer
+  alias Durable.Queue.Worker
   alias Durable.Repo
   alias Durable.Storage.Schemas.PendingEvent
   alias Durable.Storage.Schemas.PendingInput
@@ -1023,9 +1024,17 @@ defmodule Durable.Executor do
   # A worker's heartbeat, for a caller that has none: a step that outlasts
   # `stale_lock_timeout` would be taken for lost, and run again elsewhere.
   # Not linked, so nothing lands in the caller's mailbox.
+  #
+  # The caller is the run's worker, and its step runs in the caller. Cut off
+  # from the database for the lease, the caller is killed, as a worker's step
+  # is (`Worker.lease_lost?/2`): past it, another node takes the run and runs
+  # the step again beside it.
   defp keeping_claim(config, %{id: id, lock_token: token}, fun) do
     caller = self()
-    {:ok, beat} = Task.start(fn -> beat(config, id, token, Process.monitor(caller)) end)
+    since = System.monotonic_time(:millisecond)
+
+    {:ok, beat} =
+      Task.start(fn -> beat(config, {id, token}, {caller, Process.monitor(caller)}, since) end)
 
     try do
       fun.()
@@ -1035,16 +1044,32 @@ defmodule Durable.Executor do
     end
   end
 
-  defp beat(config, id, token, caller) do
+  defp beat(config, {id, token} = claim, {_caller, monitor} = by, beat_at) do
     receive do
-      {:DOWN, ^caller, :process, _pid, _reason} -> :ok
+      {:DOWN, ^monitor, :process, _pid, _reason} -> :ok
     after
       config.heartbeat_interval ->
+        sent = System.monotonic_time(:millisecond)
+
         # Any error but a failed write means the claim is over or gone.
-        case Adapter.default_adapter().heartbeat(config, id, token) do
+        case Worker.beat_within_lease(config, id, token, beat_at) do
+          :ok -> beat(config, claim, by, sent)
           {:error, reason} when reason in [:fenced, :cancelled, :not_found] -> :ok
-          _refreshed_or_failed -> beat(config, id, token, caller)
+          {:error, _failed} -> beat_failed(config, claim, by, beat_at)
         end
+    end
+  end
+
+  defp beat_failed(config, {id, _token} = claim, {caller, _monitor} = by, beat_at) do
+    if Worker.lease_lost?(config, beat_at) do
+      Logger.error(
+        "[Durable] killing the caller running job #{id} inline: it couldn't reach the " <>
+          "database to keep its claim, and another node may run the step again"
+      )
+
+      Process.exit(caller, :kill)
+    else
+      beat(config, claim, by, beat_at)
     end
   end
 
@@ -1319,6 +1344,9 @@ defmodule Durable.Executor do
   ## Options
 
   - `:inline` - If true, execute synchronously instead of via queue (default: false).
+    The caller is then the run's worker: if it can't reach the database for as
+    long as a worker's claim lasts (`stale_lock_timeout`, less a heartbeat), it
+    is killed, as a worker's step is, before another node can run the step again.
     Runs until the run finishes or parks: a retry, snooze, wait or move to a
     step's queue is left for the queue
   - `:durable` - The Durable instance name (default: Durable)
