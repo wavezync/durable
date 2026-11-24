@@ -213,6 +213,19 @@ defmodule Durable.WorkflowKeyModesTest do
       assert [%{"outcome" => "debounced", "input_changed" => true}] = duplicates()
     end
 
+    # A rerun is refused while the key is held, so the operator sees why
+    # nothing ran (`Durable.rerun/2`). It isn't a burst of the same start.
+    test "a rerun is refused by a run that waits out the period, and leaves its input" do
+      {:ok, done} = Durable.start(Debounced, %{"rev" => 1}, key: "d:rerun")
+      set!(done, status: :completed, holds_key: false, completed_at: DateTime.utc_now())
+
+      {:ok, waiting} = Durable.start(Debounced, %{"rev" => 2}, key: "d:rerun")
+      assert waiting != done
+
+      assert {:error, {:key_taken, ^waiting}} = Durable.rerun(done)
+      assert reload(waiting).input == %{"rev" => 2}
+    end
+
     test "never pushes the start past timeout after the first start" do
       {:ok, id} = Durable.start(Debounced, %{}, key: "d:3")
       long_ago = DateTime.add(DateTime.utc_now(), -290, :second)

@@ -163,7 +163,9 @@ defmodule Durable.Keys do
       entry: entry(changeset),
       reuse: reuse(workflow_def),
       mode: mode,
-      debounce: debounce(workflow_def),
+      # A rerun isn't one more start of a burst: it doesn't hand its input to
+      # a run that waits out the period, and is refused like any other.
+      debounce: if(opts[:trigger] != :rerun, do: debounce(workflow_def)),
       workflow_def: workflow_def,
       retried: false,
       key_lock: Keyword.get(opts, :key_lock, :wait)
