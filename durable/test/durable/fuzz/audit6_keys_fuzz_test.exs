@@ -4,8 +4,9 @@ defmodule Durable.Fuzz.Audit6KeysFuzzTest do
   keys, on two live nodes, checked against what workflow_keys.md promises:
 
     * one run of a key at a time: no two steps of a key's runs are going at once
-    * the newest input runs last: each case ends with a run_again start on
-      every key, and that input is the last to run
+    * the newest input runs last: each case ends with a run_again or
+      cancel_existing start on every key, and that input is the last to run,
+      whatever on_duplicate: the starts before it used (issue #50)
     * nothing is stuck: once the ops stop, every run ends and the key is free
 
   Failures that match a bug already reported (issue #48) are counted and
@@ -116,9 +117,21 @@ defmodule Durable.Fuzz.Audit6KeysFuzzTest do
         do: {:start_many, opts[:key], input["v"], :run_again, result}
   end
 
-  # A finished holder lets its key go, as an operator would.
+  # A finished holder lets its key go, as an operator would. Most finished
+  # runs have handed their key on, and release_key/2 refuses those, so the
+  # one still holding it is picked when there is one (issue #50).
   defp apply_op({:release, k, i}, ctx) do
-    case runs_of(Enum.at(ctx.keys, k), [:completed, :failed, :cancelled]) do
+    key = Enum.at(ctx.keys, k)
+
+    holding =
+      IntegrationRepo.all(
+        from(w in WorkflowExecution,
+          where: w.key == ^key and w.holds_key and w.status in [:completed, :failed, :cancelled],
+          select: w.id
+        )
+      )
+
+    case if(holding != [], do: holding, else: runs_of(key, [:completed, :failed, :cancelled])) do
       [] -> []
       ids -> [{:release, Durable.release_key(Enum.at(ids, rem(i, length(ids))), by: "fuzz")}]
     end
@@ -149,26 +162,29 @@ defmodule Durable.Fuzz.Audit6KeysFuzzTest do
 
   # Most retries meet a newer run going and are refused: this one waits for
   # the key's runs to end first, so the failed run can take the key back.
+  # A failed run that still holds its key is handed on first, by a start that
+  # takes the key from it, so the retry has a lost key to take back: left to
+  # the random ops, some seeds never made one (issue #50).
   defp apply_op({:retry_when_idle, k, i}, ctx) do
     key = Enum.at(ctx.keys, k)
     await_idle(key, 50)
 
-    lost =
-      IntegrationRepo.all(
-        from(w in WorkflowExecution,
-          where: w.key == ^key and w.status == :failed and not w.holds_key,
-          order_by: w.inserted_at,
-          select: w.id
-        )
-      )
+    handed_on =
+      if lost(key) == [] and IntegrationRepo.exists?(failed_holder(key)) do
+        records = apply_op({:start, k, :run_again, %{"ms" => 0, "fail" => false}, :here}, ctx)
+        await_idle(key, 50)
+        records
+      else
+        []
+      end
 
-    case lost do
+    case lost(key) do
       [] ->
-        apply_op({:retry, k, i}, ctx)
+        handed_on ++ apply_op({:retry, k, i}, ctx)
 
       ids ->
         id = Enum.at(ids, rem(i, length(ids)))
-        [{:retry, id, Durable.retry(id)}]
+        handed_on ++ [{:retake, id, Durable.retry(id)}]
     end
   end
 
@@ -214,6 +230,20 @@ defmodule Durable.Fuzz.Audit6KeysFuzzTest do
     Process.sleep(ms)
     []
   end
+
+  # The key's failed runs that lost it.
+  defp lost(key) do
+    IntegrationRepo.all(
+      from(w in WorkflowExecution,
+        where: w.key == ^key and w.status == :failed and not w.holds_key,
+        order_by: w.inserted_at,
+        select: w.id
+      )
+    )
+  end
+
+  defp failed_holder(key),
+    do: from(w in WorkflowExecution, where: w.key == ^key and w.status == :failed and w.holds_key)
 
   defp await_idle(_key, 0), do: :ok
 
@@ -417,8 +447,12 @@ defmodule Durable.Fuzz.Audit6KeysFuzzTest do
       waiter_made: Enum.count(activity, &(&1 == {"key_duplicate", "run_again"})),
       replaced: Enum.count(activity, &(&1 == {"key_duplicate", "cancel_existing"})),
       handed_off: Enum.count(activity, &match?({"key_handed_off", _}, &1)),
-      retaken: Enum.count(activity, &match?({"key_retaken", _}, &1)),
-      retried: Enum.count(records, &match?({:retry, _, {:ok, _}}, &1)),
+      # A retry of a run that lost its key took it back: from a finished holder
+      # (`key_retaken`) or, with releases landing, often from nobody, which
+      # records nothing (issue #50).
+      retaken: Enum.count(records, &match?({:retake, _, {:ok, _}}, &1)),
+      retried:
+        Enum.count(records, &match?({retry, _, {:ok, _}} when retry in [:retry, :retake], &1)),
       # Queued to be undone, so the key went (`Executor.without_key/2`).
       undone:
         Enum.count(
