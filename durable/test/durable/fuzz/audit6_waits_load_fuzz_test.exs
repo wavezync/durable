@@ -78,15 +78,23 @@ defmodule Durable.Fuzz.Audit6WaitsLoadTest do
     for name <- [Durable, Audit6OtherNode], do: TimeoutWorker.check_timeouts(name)
   end
 
+  # Under the run's row lock, taken first as the engine takes it (rule 2).
+  # Updated bare, a run's wait rows deadlocked with an engine write that held
+  # the run and was closing them (CI, seed 354780).
   defp make_due(id) do
     past = DateTime.add(DateTime.utc_now(), -1, :second)
 
-    for schema <- [PendingInput, PendingEvent, WaitGroup] do
-      IntegrationRepo.update_all(
-        from(p in schema, where: p.workflow_id == ^id and p.status == :pending),
-        set: [timeout_at: past]
-      )
-    end
+    {:ok, _} =
+      IntegrationRepo.transaction(fn ->
+        IntegrationRepo.one(from(w in WorkflowExecution, where: w.id == ^id, lock: "FOR UPDATE"))
+
+        for schema <- [PendingInput, PendingEvent, WaitGroup] do
+          IntegrationRepo.update_all(
+            from(p in schema, where: p.workflow_id == ^id and p.status == :pending),
+            set: [timeout_at: past]
+          )
+        end
+      end)
   end
 
   # The process running `id`'s step, if one is.
