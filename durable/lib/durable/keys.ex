@@ -26,7 +26,7 @@ defmodule Durable.Keys do
   alias Durable.EngineState
   alias Durable.Executor
   alias Durable.Repo
-  alias Durable.Storage.Schemas.{StepExecution, WorkflowExecution}
+  alias Durable.Storage.Schemas.WorkflowExecution
 
   require EngineState
 
@@ -337,15 +337,13 @@ defmodule Durable.Keys do
         joined
 
       _no_waiter ->
+        # One cancelled mid-step keeps its worker's lock, and the claim of the
+        # run that takes the key waits for it (`Postgres.claim_sql/1`).
         if release_closed(ctx.config, holder, ctx.reuse),
-          do: claim(after_settled(ctx, holder), rounds - 1, {:released, holder}),
+          do: claim(ctx, rounds - 1, {:released, holder}),
           else: claim(ctx, rounds - 1, moved)
     end
   end
-
-  # The run that takes the key from a holder cancelled mid-step is due once
-  # that step has stopped (`settles_at/2`).
-  defp after_settled(ctx, holder), do: due_after(ctx, settles_at(ctx.config, holder))
 
   # A run of the key cancelled with `rollback: true` let the key go at once,
   # though its worker may still be running a step: the run keeps that
@@ -372,8 +370,6 @@ defmodule Durable.Keys do
     end
   end
 
-  defp due_after(ctx, nil), do: ctx
-
   defp due_after(ctx, at) do
     at = latest(ctx.entry[:scheduled_at], at)
     deadline = Executor.deadline(ctx.workflow_def, at)
@@ -381,33 +377,16 @@ defmodule Durable.Keys do
   end
 
   @doc false
-  # When a holder cancelled while a worker ran its step stops for good: its
-  # worker hears of the cancel at its next heartbeat, and until then the step
-  # runs on. nil once it has, or for a holder that wasn't cancelled mid-step.
-  # The claim query asks the same of the run a waiter is behind
-  # (`Postgres.claim_sql/1`): change them together.
-  @spec settles_at(Config.t(), WorkflowExecution.t()) :: DateTime.t() | nil
-  def settles_at(config, %{status: :cancelled, completed_at: %DateTime{} = cancelled} = holder) do
-    at = DateTime.add(cancelled, config.heartbeat_interval, :millisecond)
-    if DateTime.after?(at, DateTime.utc_now()) and stepping?(config, holder.id, cancelled), do: at
-  end
+  # A holder cancelled while a worker ran it keeps that worker's lock until the
+  # worker has stopped its step (`WorkflowExecution.keeping_worker/1`). The
+  # claim of any other run of the key waits for it (`Postgres.claim_sql/1`):
+  # this is for a run that is already claimed.
+  @spec settling?(Config.t(), WorkflowExecution.t()) :: boolean()
+  def settling?(config, %{status: :cancelled, locked_by: by, locked_at: %DateTime{} = at})
+      when by != nil,
+      do: DateTime.diff(DateTime.utc_now(), at) < config.stale_lock_timeout
 
-  def settles_at(_config, _holder), do: nil
-
-  # A step was running as it was cancelled (the cancel closed its row after
-  # it cancelled the run) or began after. A step that cancelled its own run
-  # closed its row before, and has finished.
-  defp stepping?(config, id, cancelled) do
-    Repo.one(
-      config,
-      from(s in StepExecution,
-        where: s.workflow_id == ^id,
-        where: s.status == :running or (s.status == :cancelled and s.completed_at >= ^cancelled),
-        select: true,
-        limit: 1
-      )
-    ) == true
-  end
+  def settling?(_config, _holder), do: false
 
   # run_again with a run waiting for the key: a new holder beside it would run
   # first, and leave the older input to run last. One no worker has yet takes
@@ -608,21 +587,21 @@ defmodule Durable.Keys do
       replaced_by: ctx.entry.id
     }
 
+    # The new run waits for the worker to let go (`keeping_worker/1`).
     case Repo.update_all(
            ctx.config,
-           from(w in WorkflowExecution,
-             where: w.id == ^holder.id and w.holds_key and w.status in ^@cancellable,
-             where: not EngineState.marked?(w, ^"__rollback__"),
-             select: w
+           WorkflowExecution.keeping_worker(
+             from(w in WorkflowExecution,
+               where: w.id == ^holder.id and w.holds_key and w.status in ^@cancellable,
+               where: not EngineState.marked?(w, ^"__rollback__"),
+               select: w
+             )
            ),
            set: [
              status: :cancelled,
              error: error,
              completed_at: now,
              updated_at: now,
-             locked_by: nil,
-             locked_at: nil,
-             lock_token: nil,
              holds_key: false
            ]
          ) do
@@ -732,6 +711,7 @@ defmodule Durable.Keys do
             :workflow_module,
             :workflow_name,
             :locked_by,
+            :locked_at,
             :started_at,
             :completed_at,
             :inserted_at
@@ -809,7 +789,7 @@ defmodule Durable.Keys do
           holder.status not in WorkflowExecution.reusable_statuses(reuse) ->
             {:kept, holder.id}
 
-          settles_at(config, holder) ->
+          settling?(config, holder) ->
             {:behind, holder.id}
 
           release_closed(config, holder, reuse) ->
@@ -889,8 +869,7 @@ defmodule Durable.Keys do
 
           release_closed(config, holder, reuse) ->
             record(config, "key_retaken", run, %{from: holder.id})
-            at = settles_at(config, holder)
-            {:ok, if(at, do: [{:scheduled_at, at} | taken_back()], else: taken_back())}
+            {:ok, taken_back()}
 
           true ->
             do_retake(config, run, reuse, rounds - 1)

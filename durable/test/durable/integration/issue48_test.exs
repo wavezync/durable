@@ -427,6 +427,20 @@ defmodule Durable.Integration.Issue48Test do
       assert Probe.peak(:sync) == 1
     end
 
+    test "starts the run that replaced it under :cancel_existing once its step has stopped" do
+      start_durable!(%{default: 2}, heartbeat_interval: 1_000)
+
+      holder = sync(1, hold: true)
+      assert_eventually(fn -> Probe.hits({:synced, 1}) == 1 end)
+
+      next = sync(2, on_duplicate: :cancel_existing)
+      assert next != holder
+      await_status(next, :completed, 10_000)
+
+      assert %{status: :cancelled} = get(holder)
+      assert Probe.peak(:sync) == 1
+    end
+
     test "doesn't hold up the key when its own step cancelled it" do
       start_durable!(%{default: 1}, heartbeat_interval: 60_000)
 
@@ -658,6 +672,37 @@ defmodule Durable.Integration.Issue48Test do
       assert {"failed", "failed"} in seen
       assert %{status: :failed} = get(id)
       assert Enum.all?(step_rows(id), &(&1.status != :running))
+    end
+  end
+
+  describe "a run whose worker crashed outside its step, with the database busy a moment" do
+    test "is failed once it answers, not left locked for the stale sweep" do
+      IntegrationRepo.query!("CREATE SEQUENCE durable.i48_busy")
+      on_exit(fn -> IntegrationRepo.query!("DROP SEQUENCE IF EXISTS durable.i48_busy") end)
+
+      before_update!(
+        "i48_refuse_charge",
+        "step_executions",
+        "NEW.step_name = 'charge' AND NEW.status = 'completed'",
+        "RAISE EXCEPTION 'the ledger refused it'"
+      )
+
+      # The first write that fails the run can't have its lock, as with a
+      # pool too busy to hand out a connection in time.
+      before_update!(
+        "i48_busy_fail",
+        "workflow_executions",
+        "NEW.status = 'failed' AND OLD.status = 'running'",
+        "IF nextval('durable.i48_busy') = 1 THEN " <>
+          "RAISE EXCEPTION 'busy' USING ERRCODE = '55P03'; END IF"
+      )
+
+      start_durable!(%{default: 1}, heartbeat_interval: 60_000)
+      {:ok, id} = Durable.start(Issue48Charge, %{"order" => 2})
+      assert_eventually(fn -> Probe.hits(:charging) == 1 end)
+      :ok = Probe.set(:card_answered)
+
+      assert %{status: :failed, locked_by: nil} = await_status(id, :failed, 3_000)
     end
   end
 

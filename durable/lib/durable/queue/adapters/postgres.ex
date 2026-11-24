@@ -72,21 +72,25 @@ defmodule Durable.Queue.Adapters.Postgres do
         AND NOT EXISTS (
           SELECT 1 FROM #{prefix}.queues q WHERE q.name = $1 AND q.paused_at IS NOT NULL
         )
-        -- A run_again run waits until the run it's behind has ended, and a
-        -- step it was cancelled in has stopped (`Keys.settles_at/2`). A run
+        -- A run_again run waits until the run it's behind has ended. A run
         -- never waits behind itself.
         AND NOT EXISTS (
           SELECT 1 FROM #{prefix}.workflow_executions h
           WHERE h.id = w.runs_after_id AND h.id <> w.id
-            AND (h.status IN ('pending', 'running', 'waiting', 'compensating')
-              OR (h.status = 'cancelled'
-                AND h.completed_at > #{@utc_now} - INTERVAL '#{config.heartbeat_interval} milliseconds'
-                AND EXISTS (
-                  SELECT 1 FROM #{prefix}.step_executions s
-                  WHERE s.workflow_id = h.id AND (s.status = 'running'
-                    OR (s.status = 'cancelled' AND s.completed_at >= h.completed_at))
-                )))
+            AND h.status IN ('pending', 'running', 'waiting', 'compensating')
         )
+        -- Nor does any run of a key while another run of it keeps the lock of
+        -- a worker that may still be running its step: stopped mid-step
+        -- (`WorkflowExecution.keeping_worker/1`), or queued to be undone
+        -- since. Until that worker lets go, or the lock is stale.
+        AND (w.key IS NULL OR NOT EXISTS (
+          SELECT 1 FROM #{prefix}.workflow_executions k
+          WHERE k.lock_token IS NULL AND k.locked_by IS NOT NULL
+            AND k.workflow_module = w.workflow_module AND k.workflow_name = w.workflow_name
+            AND k.key = w.key AND k.id <> w.id
+            AND k.status IN ('pending', 'cancelled')
+            AND k.locked_at >= #{@utc_now} - INTERVAL '#{config.stale_lock_timeout} seconds'
+        ))
       ORDER BY w.priority DESC, COALESCE(w.scheduled_at, w.inserted_at) ASC, w.inserted_at ASC
       LIMIT $2
       FOR UPDATE SKIP LOCKED
@@ -161,11 +165,25 @@ defmodule Durable.Queue.Adapters.Postgres do
 
   @impl true
   def nack(%Config{} = config, job_id, reason) when is_binary(job_id) do
-    do_nack(config, job_id, reason, nil)
+    nack_with_retry(config, job_id, reason, nil, 1)
   end
 
   def nack(%Config{} = config, job_id, reason, lock_token) when is_binary(job_id) do
+    nack_with_retry(config, job_id, reason, lock_token, 1)
+  end
+
+  # As an ack is: a pool busy for a moment would leave the run locked, for the
+  # stale sweep to retry a run that failed. Each try is one conditional write.
+  defp nack_with_retry(config, job_id, reason, lock_token, attempt) do
     do_nack(config, job_id, reason, lock_token)
+  rescue
+    error ->
+      if attempt < 3 and Repo.transient?(error) do
+        Process.sleep(:rand.uniform(50) * attempt)
+        nack_with_retry(config, job_id, reason, lock_token, attempt + 1)
+      else
+        reraise error, __STACKTRACE__
+      end
   end
 
   defp do_nack(config, job_id, reason, lock_token) do
@@ -173,16 +191,18 @@ defmodule Durable.Queue.Adapters.Postgres do
       nil ->
         {:error, :not_found}
 
+      # Cancelled as it ran, the run kept this worker's lock.
+      %{status: status} when status not in [:running, :compensating] ->
+        let_go(config, job_id)
+
       execution ->
         # Only a run still :running or :compensating needs failing here — the
         # worker crashed before the executor could record an outcome. Anything
         # else was settled by the executor (failed, compensated, cancelled,
         # waiting) and must not be overwritten.
-        if fenced?(execution, lock_token) or execution.status not in [:running, :compensating] do
-          :ok
-        else
-          fail_unrecorded(config, execution, Executor.storable_error(reason), lock_token)
-        end
+        if fenced?(execution, lock_token),
+          do: :ok,
+          else: fail_unrecorded(config, execution, Executor.storable_error(reason), lock_token)
     end
   end
 
@@ -380,20 +400,26 @@ defmodule Durable.Queue.Adapters.Postgres do
     end
   end
 
+  # A lock a cancel left a worker that had the run, with no token
+  # (`WorkflowExecution.keeping_worker/1`), on the run cancelled or since put
+  # back on its queue to be undone or retried.
+  defp kept_lock(query) do
+    from(w in query,
+      where: w.status in [:pending, :cancelled],
+      where: is_nil(w.lock_token) and not is_nil(w.locked_by)
+    )
+  end
+
   @doc false
   # A worker that stopped (or a caller running it inline) lets go of a run that
-  # was cancelled to be undone while it ran (`Executor.cancel_run/3` leaves the
-  # lock, with no token, until then), so its undo can be claimed now.
+  # was cancelled while it ran, so the run's undo, and the next run of its key,
+  # can be claimed now.
   @impl true
   def let_go(%Config{} = config, job_id) do
     {_count, runs} =
       Repo.update_all(
         config,
-        from(w in WorkflowExecution,
-          where: w.id == ^job_id and w.status == :pending,
-          where: is_nil(w.lock_token) and not is_nil(w.locked_by),
-          select: w
-        ),
+        from(w in kept_lock(WorkflowExecution), where: w.id == ^job_id, select: w),
         set: [locked_by: nil, locked_at: nil]
       )
 
@@ -403,17 +429,13 @@ defmodule Durable.Queue.Adapters.Postgres do
     _error -> :ok
   end
 
-  # An undo a worker kept from being claimed (`Executor.cancel_run/3`), when
-  # that worker is lost: let go of with the rest of what it held.
+  # A lock a cancel kept for a worker that is lost: let go of with the rest of
+  # what it held.
   defp let_go_of_lost(config, cutoff) do
     {_count, runs} =
       Repo.update_all(
         config,
-        from(w in WorkflowExecution,
-          where: w.status == :pending and is_nil(w.lock_token) and not is_nil(w.locked_by),
-          where: w.locked_at < ^cutoff,
-          select: w
-        ),
+        from(w in kept_lock(WorkflowExecution), where: w.locked_at < ^cutoff, select: w),
         set: [locked_by: nil, locked_at: nil]
       )
 
@@ -450,11 +472,8 @@ defmodule Durable.Queue.Adapters.Postgres do
     # A deploy isn't the step's fault: :snoozed doesn't use an attempt.
     stopped = %{type: "node_stopped", message: "the node stopped before this attempt finished"}
 
-    # Undos its workers kept from being claimed while their steps ran.
-    to_undo =
-      from(w in WorkflowExecution,
-        where: w.status == :pending and is_nil(w.lock_token) and w.locked_by == ^node_id
-      )
+    # The locks its workers kept, for runs cancelled while their steps ran.
+    to_undo = from(w in kept_lock(WorkflowExecution), where: w.locked_by == ^node_id)
 
     with {:ok, runs} <- release_runs(config, running, :snoozed, stopped),
          {:ok, rollbacks} <- release_runs(config, compensating, :snoozed, stopped) do

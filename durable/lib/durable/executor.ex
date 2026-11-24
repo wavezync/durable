@@ -245,15 +245,11 @@ defmodule Durable.Executor do
     seen = opts[:rollback] && status_now(config, workflow_id)
     cancellable = if seen, do: where(cancellable, [w], w.status == ^seen), else: cancellable
 
-    # A run a worker had, cancelled to be undone, keeps that worker's lock with
-    # no token: the claim of its undo waits until the worker has stopped its
-    # step and let go (`Postgres.let_go/2`), or the lock went stale. A worker
-    # that can't reach the database never hears of the cancel at a heartbeat.
-    lock = if seen == :running, do: [], else: [locked_by: nil, locked_at: nil]
-
-    set =
-      [status: :cancelled, error: error, completed_at: now, updated_at: now, lock_token: nil] ++
-        lock
+    # A run a worker had keeps that worker's lock with no token
+    # (`WorkflowExecution.keeping_worker/1`): its key's next run, and its undo,
+    # wait until the worker has stopped its step and let go.
+    cancellable = WorkflowExecution.keeping_worker(cancellable)
+    set = [status: :cancelled, error: error, completed_at: now, updated_at: now]
 
     {:ok, cancelled} =
       Repo.transaction(config, fn -> cancel_and_queue(config, cancellable, set, opts) end)
@@ -306,22 +302,14 @@ defmodule Durable.Executor do
   defp not_cancelled(_ended, _seen, _cancel), do: {:error, :already_completed}
 
   # `rollback: true`: the cancelled run goes back on its queue to be undone.
-  # A worker that had it is told at its next heartbeat, and until then a step
-  # of its can still finish. The undo waits that long, so it sees that step,
-  # and as long while the cancel goes on to stop the runs under it.
+  # A worker that had it keeps its lock (`WorkflowExecution.keeping_worker/1`),
+  # and the claim of the undo waits for that worker to let go, so it sees what
+  # the step did. The undo is due a heartbeat on, while the cancel goes on to
+  # stop the runs under it, and then waits for those too (settles_at/2).
   #
   # A run that never started has nothing to undo. Back on its queue it would
   # still be its key's holder, a run yet to come, to the next start.
-  # Claimed but not begun, it has no step for its undo to wait for either.
-  defp queue_cancelled(config, %{started_at: nil} = cancelled) do
-    if cancelled.locked_by do
-      Repo.update_all(config, from(w in WorkflowExecution, where: w.id == ^cancelled.id),
-        set: [locked_by: nil, locked_at: nil]
-      )
-    end
-
-    :ok
-  end
+  defp queue_cancelled(_config, %{started_at: nil}), do: :ok
 
   defp queue_cancelled(config, cancelled) do
     at = DateTime.add(DateTime.utc_now(), config.heartbeat_interval, :millisecond)
@@ -329,9 +317,9 @@ defmodule Durable.Executor do
     {:ok, _queued} = queue_rollback(config, cancelled, at, lock)
   end
 
-  # Once the runs under it are stopped, a run nobody was running is undone a
-  # heartbeat after the last of them (settles_at/2), or now. One a worker had
-  # waits the heartbeat it was queued with.
+  # A run nobody was running is undone once the runs under it are stopped
+  # (settles_at/2), or now. One a worker had waits the heartbeat it was queued
+  # with.
   defp undo_once_stopped(_config, _cancelled, :running), do: :ok
   defp undo_once_stopped(_config, %{started_at: nil}, _seen), do: :ok
 
@@ -789,11 +777,37 @@ defmodule Durable.Executor do
     {blocks, steps} =
       Enum.split_with(stopped, fn {_id, state} -> stopped_block?(config, state) end)
 
+    # One stopped while a worker ran it keeps that worker's lock
+    # (`WorkflowExecution.keeping_worker/1`): put back, it waits for the
+    # worker to let go, or its step would run twice at once.
+
     for {runs, status} <- [{steps, :pending}, {blocks, :waiting}] do
       Repo.update_all(
         config,
-        from(c in WorkflowExecution, where: c.id in ^Enum.map(runs, &elem(&1, 0))),
-        set: [status: status, updated_at: DateTime.utc_now()] ++ retry_attrs
+        from(c in WorkflowExecution,
+          where: c.id in ^Enum.map(runs, &elem(&1, 0)),
+          update: [
+            set: [
+              locked_by:
+                fragment(
+                  "CASE WHEN ? = 'cancelled' AND ? IS NULL THEN ? END",
+                  c.status,
+                  c.lock_token,
+                  c.locked_by
+                ),
+              locked_at:
+                fragment(
+                  "CASE WHEN ? = 'cancelled' AND ? IS NULL THEN ? END",
+                  c.status,
+                  c.lock_token,
+                  c.locked_at
+                )
+            ]
+          ]
+        ),
+        set:
+          [status: status, updated_at: DateTime.utc_now()] ++
+            Keyword.drop(retry_attrs, [:locked_by, :locked_at])
       )
     end
 
@@ -3257,15 +3271,12 @@ defmodule Durable.Executor do
       )
 
     {_count, cancelled} =
-      repo.update_all(query,
+      repo.update_all(WorkflowExecution.keeping_worker(query),
         set: [
           status: :cancelled,
           error: %{type: "cancelled", message: "another branch of the parallel block failed"},
           completed_at: now,
-          updated_at: now,
-          locked_by: nil,
-          locked_at: nil,
-          lock_token: nil
+          updated_at: now
         ]
       )
 
@@ -3573,53 +3584,41 @@ defmodule Durable.Executor do
     end
   end
 
-  # When the last step of a run under this one can still finish. A stopped
-  # run's worker is told at its next heartbeat, and until then its step runs
-  # on: undone before that, the run would miss what the step did. nil when
-  # nothing under it was stopped in the last heartbeat.
-  #
-  # ponytail: a stopped run that was waiting, with no worker, makes the undo
-  # wait as well. Record whether a worker had it when it was stopped if that
-  # wait matters.
+  # When to look again at undoing this run, while something under it can still
+  # finish a step: undone before then, the run would miss what that step did.
+  # A run under it stopped while a worker ran it keeps that worker's lock
+  # until the worker has stopped its step (`WorkflowExecution.keeping_worker/1`),
+  # and a worker that can't reach the database stops before its lock goes
+  # stale. nil once nothing can, and the undo can go ahead.
   #
   # A run under one that was stopped, and still going, hasn't been told yet:
   # the cancel passes down after the commit that stopped its parent, and can
   # be lost with whoever was passing it, for the sweep to finish
-  # (`close_out_lost/2`). The undo waits for it as well, a heartbeat at a time.
+  # (`close_out_lost/2`). The undo waits for it as well. Not one queued to be
+  # undone (rule 17), nor one retried since.
   defp settles_at(config, execution) do
-    beat = config.heartbeat_interval
-    since = DateTime.add(DateTime.utc_now(), -beat, :millisecond)
     root = execution.root_workflow_id || execution.id
+    fresh = DateTime.add(DateTime.utc_now(), -config.stale_lock_timeout, :second)
 
-    stopped =
-      from(w in WorkflowExecution,
-        where: w.root_workflow_id == ^root and w.id != ^execution.id,
-        where: w.status == :cancelled and not is_nil(w.started_at) and w.completed_at > ^since,
-        select: max(w.completed_at)
+    tree =
+      from(w in WorkflowExecution, where: w.root_workflow_id == ^root and w.id != ^execution.id)
+
+    stepping =
+      from(w in tree,
+        where: w.status in [:pending, :cancelled] and is_nil(w.lock_token),
+        where: not is_nil(w.locked_by) and w.locked_at >= ^fresh
       )
 
-    with nil <- not_yet_stopped(config, execution),
-         %DateTime{} = last <- Repo.one(config, stopped),
-         do: DateTime.add(last, beat, :millisecond)
-  end
-
-  # A heartbeat from now if a run under a cancelled one in this run's tree is
-  # still going, as the sweep finds them: not one queued to be undone (rule
-  # 17), nor one retried since.
-  defp not_yet_stopped(config, execution) do
-    root = execution.root_workflow_id || execution.id
-
     going =
-      from(c in WorkflowExecution,
+      from(c in tree,
         join: p in WorkflowExecution,
         on: p.id == c.parent_workflow_id,
-        where: c.root_workflow_id == ^root and c.id != ^execution.id,
         where: p.status == :cancelled and c.status in [:pending, :running, :waiting],
         where: not EngineState.marked?(c, ^@rollback),
         where: is_nil(c.retried_at) or c.retried_at < p.completed_at
       )
 
-    if Repo.aggregate(config, going, :count) > 0,
+    if Enum.any?([stepping, going], &(Repo.aggregate(config, &1, :count) > 0)),
       do: DateTime.add(DateTime.utc_now(), config.heartbeat_interval, :millisecond)
   end
 
@@ -3652,9 +3651,9 @@ defmodule Durable.Executor do
 
   # `rollback_workflow/2` asked: undo the run, keeping the error it failed with.
   defp roll_back(execution, workflow_def, config) do
-    # Queued a heartbeat after what was stopped then, but something under it
-    # may not have been stopped yet. Back on its queue, marker and all, if so.
-    case not_yet_stopped(config, execution) do
+    # Something under it may not have stopped yet. Back on its queue, marker
+    # and all, if so.
+    case settles_at(config, execution) do
       nil -> roll_back_now(execution, workflow_def, config)
       at -> undo_at(config, execution, at)
     end

@@ -77,6 +77,91 @@ defmodule Audit6QueueTrip do
   end
 end
 
+defmodule Audit6QueueSync do
+  @moduledoc false
+  use Durable
+  alias Durable.IntegrationProbe, as: Probe
+
+  # One sync of an account at a time. An edit while one runs syncs again after
+  # it, with the newest edit.
+  workflow "audit6_queue_sync", on_duplicate: :run_again do
+    step :sync, fn account ->
+      Probe.inside([:sync], fn ->
+        Probe.note({:syncing, account["rev"]})
+        if account["slow"], do: Probe.wait_for(:sync_done)
+      end)
+
+      {:ok, account}
+    end
+  end
+end
+
+defmodule Audit6QueueCheckout do
+  @moduledoc false
+  use Durable
+  alias Durable.IntegrationProbe, as: Probe
+
+  # The stock is released only once nothing can still charge the card.
+  workflow "audit6_queue_checkout" do
+    step :reserve_stock, [compensate: :release_stock], fn order -> {:ok, order} end
+
+    parallel :pay do
+      step :charge_card, fn order ->
+        Probe.inside([:stock_and_card], fn ->
+          Probe.note(:charging)
+          Probe.wait_for(:gateway_answered)
+        end)
+
+        {:ok, order}
+      end
+
+      step :email_receipt, fn order -> {:ok, order} end
+    end
+
+    compensate :release_stock, fn order ->
+      Probe.inside([:stock_and_card], fn -> Probe.note(:released) end)
+      {:ok, order}
+    end
+  end
+end
+
+defmodule Audit6QueuePayment do
+  @moduledoc false
+  use Durable
+  alias Durable.IntegrationProbe, as: Probe
+
+  # The card is charged on its queue while the fraud check runs on its own. An
+  # order flagged once is cleared on review.
+  workflow "audit6_queue_payment" do
+    step :reserve_stock, [compensate: :release_stock], fn order -> {:ok, order} end
+
+    parallel :pay do
+      step :charge_card, [queue: :cards], fn order ->
+        Probe.inside([:card], fn ->
+          Probe.note(:charging)
+          Probe.wait_for(:gateway_answered)
+        end)
+
+        {:ok, order}
+      end
+
+      step :check_fraud, [queue: :fraud], fn order ->
+        if Probe.hits(:flagged) == 0 do
+          Probe.note(:flagged)
+          {:error, "flagged for review"}
+        else
+          {:ok, order}
+        end
+      end
+    end
+
+    compensate :release_stock, fn order ->
+      Probe.inside([:card], fn -> Probe.note(:released) end)
+      {:ok, order}
+    end
+  end
+end
+
 defmodule Durable.Integration.Audit6QueueTest do
   @moduledoc """
   Audit 6: the queue and recovery under load. Workers that can't reach the
@@ -96,7 +181,17 @@ defmodule Durable.Integration.Audit6QueueTest do
     start_supervised!(Audit6QueueRepo)
 
     Durable.DataCase.start_supervised_durable!(
-      [repo: Audit6QueueRepo, queues: queue_opts(%{default: 2})] ++ durable_opts
+      Keyword.merge([repo: Audit6QueueRepo, queues: queue_opts(%{default: 2})], durable_opts)
+    )
+  end
+
+  # Node B: a second instance, on the real repo.
+  defp start_node_b!(durable_opts) do
+    Durable.DataCase.start_supervised_durable!(
+      Keyword.merge(
+        [name: :audit6_node_b, repo: IntegrationRepo, queues: queue_opts(%{default: 1})],
+        durable_opts
+      )
     )
   end
 
@@ -233,6 +328,100 @@ defmodule Durable.Integration.Audit6QueueTest do
 
       :ok = Probe.set(:upload_done)
       await_status(id, :completed)
+    end
+  end
+
+  # A cancel lets a worker running the run keep its lock. Until the worker has
+  # stopped its step and let go, or the lock is stale, nothing else of the
+  # key runs, nor an undo of the run's tree. They waited a heartbeat for the
+  # worker to hear of the cancel; one whose heartbeats fail never hears, and
+  # stops its step only before its lock goes stale.
+  describe "a run cancelled while a worker that can't reach the database runs its step" do
+    @timing [stale_lock_timeout: 2, heartbeat_interval: 200]
+
+    defp cut_off_mid_step!(start, probe, queues \\ {%{default: 2}, %{default: 1}}) do
+      {on_a, on_b} = queues
+      start_on_own_repo!([], [queues: queue_opts(on_a)] ++ @timing)
+      id = start.()
+      assert_eventually(fn -> Probe.hits(probe) == 1 end)
+      stop_supervised!(Audit6QueueRepo)
+      start_node_b!([queues: queue_opts(on_b)] ++ @timing)
+      id
+    end
+
+    # The card is charged on node A, which is then cut off. The fraud check,
+    # on node B, fails the block, which stops the charge.
+    defp flagged_mid_charge! do
+      order =
+        cut_off_mid_step!(
+          fn -> elem(Durable.start(Audit6QueuePayment, %{"sku" => "mug"}), 1) end,
+          :charging,
+          {%{default: 1, cards: 1}, %{default: 1, cards: 1, fraud: 1}}
+        )
+
+      await_status(order, :failed)
+      order
+    end
+
+    defp sync(rev, opts) do
+      input = %{"rev" => rev, "slow" => Keyword.get(opts, :slow, false)}
+      opts = [key: "acct:5"] ++ Keyword.delete(opts, :slow)
+      elem(Durable.start(Audit6QueueSync, input, opts), 1)
+    end
+
+    test "keeps the run waiting behind it on the key until that step has stopped" do
+      holder = cut_off_mid_step!(fn -> sync(1, slow: true) end, {:syncing, 1})
+      waiter = sync(2, durable: :audit6_node_b)
+
+      :ok = Durable.cancel(holder, "superseded by an edit", durable: :audit6_node_b)
+      await_status(waiter, :completed, 10_000)
+
+      assert Probe.peak(:sync) == 1
+    end
+
+    test "keeps the key's next start from running until that step has stopped" do
+      holder = cut_off_mid_step!(fn -> sync(1, slow: true) end, {:syncing, 1})
+
+      :ok = Durable.cancel(holder, "wrong account", durable: :audit6_node_b)
+      next = sync(2, durable: :audit6_node_b)
+      assert next != holder
+      await_status(next, :completed, 10_000)
+
+      assert Probe.peak(:sync) == 1
+    end
+
+    test "doesn't undo the run it's under while that step can still finish" do
+      order =
+        cut_off_mid_step!(
+          fn -> elem(Durable.start(Audit6QueueCheckout, %{"sku" => "mug"}), 1) end,
+          :charging
+        )
+
+      :ok = Durable.cancel(order, "customer cancelled", rollback: true, durable: :audit6_node_b)
+      assert_eventually(fn -> Probe.hits(:released) == 1 end, 10_000)
+
+      # The stock is released while the card is still being charged.
+      assert Probe.peak(:stock_and_card) == 1
+    end
+
+    test "doesn't undo a run whose block stopped that step while it can still finish" do
+      order = flagged_mid_charge!()
+
+      {:ok, _} = Durable.rollback(order, durable: :audit6_node_b)
+      assert_eventually(fn -> Probe.hits(:released) == 1 end, 10_000)
+
+      assert Probe.peak(:card) == 1
+    end
+
+    test "doesn't run that step again, when its block is retried, while it can still finish" do
+      order = flagged_mid_charge!()
+
+      {:ok, _} = Durable.retry(order, durable: :audit6_node_b)
+      assert_eventually(fn -> Probe.hits(:charging) == 2 end, 10_000)
+      assert Probe.peak(:card) == 1
+
+      :ok = Probe.set(:gateway_answered)
+      await_status(order, :completed)
     end
   end
 end

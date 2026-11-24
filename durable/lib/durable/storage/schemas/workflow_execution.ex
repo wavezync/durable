@@ -8,6 +8,7 @@ defmodule Durable.Storage.Schemas.WorkflowExecution do
 
   use Ecto.Schema
   import Ecto.Changeset
+  require Ecto.Query
 
   @type status ::
           :pending
@@ -182,6 +183,36 @@ defmodule Durable.Storage.Schemas.WorkflowExecution do
     changeset
     |> validate_length(:key, min: 1, max: 255, count: :bytes)
     |> unique_constraint(:key, name: :workflow_executions_key_holder_index)
+  end
+
+  @doc false
+  # For an update that stops runs (a cancel). A run a worker had begun keeps
+  # that worker's lock, with no token, until the worker has stopped its step
+  # and let go (`Postgres.let_go/2`), or the lock went stale. Nothing else of
+  # its key is claimed meanwhile, nor an undo of its tree (rule 15). A worker
+  # that can't reach the database never hears of the stop, and stops its step
+  # before its lock goes stale (`Worker.lease_lost?/1`). Claimed but not
+  # begun, a run has no step to wait for: its worker finds the claim gone.
+  def keeping_worker(query) do
+    Ecto.Query.update(query, [w],
+      set: [
+        locked_by:
+          fragment(
+            "CASE WHEN ? = 'running' AND ? IS NOT NULL THEN ? END",
+            w.status,
+            w.started_at,
+            w.locked_by
+          ),
+        locked_at:
+          fragment(
+            "CASE WHEN ? = 'running' AND ? IS NOT NULL THEN ? END",
+            w.status,
+            w.started_at,
+            w.locked_at
+          ),
+        lock_token: nil
+      ]
+    )
   end
 
   @doc "Statuses of a run that's still going: it always keeps its key."
