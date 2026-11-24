@@ -10,13 +10,14 @@ defmodule Durable.Queue.Control do
 
   import Ecto.Query
 
+  alias Durable.Clock
   alias Durable.Config
   alias Durable.Repo
   alias Durable.Storage.Schemas.Queue
 
   @spec pause(Config.t(), atom() | String.t(), keyword()) :: :ok | {:error, term()}
   def pause(%Config{} = config, queue, opts \\ []) do
-    with :ok <- put_paused_at(config, queue, DateTime.utc_now()),
+    with :ok <- put_paused_at(config, queue, Clock.utc_now()),
          do: record(config, "queue_paused", queue, opts)
   end
 
@@ -43,7 +44,7 @@ defmodule Durable.Queue.Control do
   end
 
   defp upsert_paused_at(config, queue, paused_at) do
-    now = DateTime.utc_now()
+    now = Clock.utc_now()
 
     %Queue{name: to_string(queue), paused_at: paused_at}
     |> Repo.insert(config,

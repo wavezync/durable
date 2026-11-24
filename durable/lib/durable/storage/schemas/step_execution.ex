@@ -9,6 +9,8 @@ defmodule Durable.Storage.Schemas.StepExecution do
   use Ecto.Schema
   import Ecto.Changeset
 
+  alias Durable.Clock
+
   @type status ::
           :pending | :running | :completed | :failed | :waiting | :cancelled | :snoozed
 
@@ -64,7 +66,7 @@ defmodule Durable.Storage.Schemas.StepExecution do
 
     belongs_to(:workflow, Durable.Storage.Schemas.WorkflowExecution, foreign_key: :workflow_id)
 
-    timestamps(type: :utc_datetime_usec)
+    timestamps(type: :utc_datetime_usec, autogenerate: {Clock, :utc_now, []})
   end
 
   @required_fields [:workflow_id, :step_name]
@@ -99,7 +101,7 @@ defmodule Durable.Storage.Schemas.StepExecution do
   """
   def start_changeset(step_execution) do
     step_execution
-    |> cast(%{status: :running, started_at: DateTime.utc_now()}, [:status, :started_at])
+    |> cast(%{status: :running, started_at: Clock.utc_now()}, [:status, :started_at])
   end
 
   @doc """
@@ -112,7 +114,7 @@ defmodule Durable.Storage.Schemas.StepExecution do
         status: :completed,
         output: output,
         logs: logs,
-        completed_at: DateTime.utc_now(),
+        completed_at: Clock.utc_now(),
         duration_ms: duration_ms
       },
       [:status, :output, :logs, :completed_at, :duration_ms]
@@ -131,7 +133,7 @@ defmodule Durable.Storage.Schemas.StepExecution do
         status: status,
         error: error,
         logs: logs,
-        completed_at: DateTime.utc_now(),
+        completed_at: Clock.utc_now(),
         duration_ms: duration_ms
       },
       [:status, :error, :logs, :completed_at, :duration_ms]

@@ -6,6 +6,8 @@ defmodule Durable.Storage.Schemas.Queue do
   """
   use Ecto.Schema
 
+  alias Durable.Clock
+
   @type t :: %__MODULE__{
           name: String.t(),
           paused_at: DateTime.t() | nil,
@@ -17,6 +19,6 @@ defmodule Durable.Storage.Schemas.Queue do
   @schema_prefix "durable"
   schema "queues" do
     field(:paused_at, :utc_datetime_usec)
-    timestamps(type: :utc_datetime_usec)
+    timestamps(type: :utc_datetime_usec, autogenerate: {Clock, :utc_now, []})
   end
 end

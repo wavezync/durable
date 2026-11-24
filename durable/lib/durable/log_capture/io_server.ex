@@ -23,6 +23,8 @@ defmodule Durable.LogCapture.IOServer do
 
   use GenServer
 
+  alias Durable.Clock
+
   defstruct [:original_leader, :passthrough, :parent_pid]
 
   @doc """
@@ -221,7 +223,7 @@ defmodule Durable.LogCapture.IOServer do
     # retrieve them when stopping.
 
     # For now, let's send a message to the parent to add the log
-    send(parent_pid, {:durable_io_log, output, DateTime.utc_now()})
+    send(parent_pid, {:durable_io_log, output, Clock.utc_now()})
   end
 
   defp forward_to_original(original_leader, request) do

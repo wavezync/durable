@@ -9,6 +9,8 @@ defmodule Durable.Storage.Schemas.WaitGroup do
   import Ecto.Changeset
   import Ecto.Query
 
+  alias Durable.Clock
+
   @type wait_type :: :any | :all
 
   @type status :: :pending | :completed | :timeout | :cancelled
@@ -62,7 +64,7 @@ defmodule Durable.Storage.Schemas.WaitGroup do
 
     belongs_to(:workflow, Durable.Storage.Schemas.WorkflowExecution, foreign_key: :workflow_id)
 
-    timestamps(type: :utc_datetime_usec)
+    timestamps(type: :utc_datetime_usec, autogenerate: {Clock, :utc_now, []})
   end
 
   @required_fields [:workflow_id, :step_name, :wait_type, :event_names]
@@ -109,7 +111,7 @@ defmodule Durable.Storage.Schemas.WaitGroup do
         %{
           received_events: updated_events,
           status: :completed,
-          completed_at: DateTime.utc_now()
+          completed_at: Clock.utc_now()
         }
       else
         %{received_events: updated_events}
@@ -164,7 +166,7 @@ defmodule Durable.Storage.Schemas.WaitGroup do
   """
   def timeout_changeset(wait_group) do
     wait_group
-    |> cast(%{status: :timeout, completed_at: DateTime.utc_now()}, [:status, :completed_at])
+    |> cast(%{status: :timeout, completed_at: Clock.utc_now()}, [:status, :completed_at])
   end
 
   @doc """
@@ -172,6 +174,6 @@ defmodule Durable.Storage.Schemas.WaitGroup do
   """
   def cancel_changeset(wait_group) do
     wait_group
-    |> cast(%{status: :cancelled, completed_at: DateTime.utc_now()}, [:status, :completed_at])
+    |> cast(%{status: :cancelled, completed_at: Clock.utc_now()}, [:status, :completed_at])
   end
 end

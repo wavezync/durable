@@ -15,6 +15,7 @@ defmodule Durable.Query do
 
   import Ecto.Query
 
+  alias Durable.Clock
   alias Durable.Config
   alias Durable.Query.Opts
   alias Durable.Repo
@@ -287,7 +288,7 @@ defmodule Durable.Query do
 
   defp key_activity(config, rows) do
     keys = rows |> Enum.map(& &1.key) |> Enum.uniq()
-    since = DateTime.add(DateTime.utc_now(), -86_400, :second)
+    since = DateTime.add(Clock.utc_now(), -86_400, :second)
 
     Repo.all(
       config,

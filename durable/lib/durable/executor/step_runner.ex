@@ -8,6 +8,7 @@ defmodule Durable.Executor.StepRunner do
   The first step receives the workflow input.
   """
 
+  alias Durable.Clock
   alias Durable.Config
   alias Durable.Context
   alias Durable.Definition.Step
@@ -125,7 +126,7 @@ defmodule Durable.Executor.StepRunner do
   def close_attempts(_config, [], _status, _error), do: []
 
   def close_attempts(%Config{} = config, workflow_ids, status, error) do
-    now = DateTime.utc_now()
+    now = Clock.utc_now()
 
     {_count, closed} =
       Repo.update_all(
@@ -255,7 +256,7 @@ defmodule Durable.Executor.StepRunner do
 
   # From when the attempt started, the best a process that wasn't there can do.
   defp closed_time(rows) do
-    now = DateTime.utc_now()
+    now = Clock.utc_now()
     started = rows |> Enum.map(&(&1.started_at || now)) |> Enum.min(DateTime)
 
     elapsed_us = max(DateTime.diff(now, started, :microsecond), 0)
@@ -463,7 +464,7 @@ defmodule Durable.Executor.StepRunner do
     left =
       deadline &&
         deadline
-        |> DateTime.diff(DateTime.utc_now(), :microsecond)
+        |> DateTime.diff(Clock.utc_now(), :microsecond)
         |> Kernel./(1000)
         |> ceil()
         |> max(0)
@@ -474,7 +475,7 @@ defmodule Durable.Executor.StepRunner do
   end
 
   defp past?(nil), do: false
-  defp past?(deadline), do: DateTime.compare(DateTime.utc_now(), deadline) != :lt
+  defp past?(deadline), do: DateTime.compare(Clock.utc_now(), deadline) != :lt
 
   # Keys Task sets for itself; everything else in the dictionary is copied.
   @task_keys [:"$ancestors", :"$callers", :"$initial_call"]

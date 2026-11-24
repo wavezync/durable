@@ -10,6 +10,8 @@ defmodule Durable.Storage.Schemas.WorkflowExecution do
   import Ecto.Changeset
   require Ecto.Query
 
+  alias Durable.Clock
+
   @type status ::
           :pending
           | :running
@@ -126,7 +128,7 @@ defmodule Durable.Storage.Schemas.WorkflowExecution do
     has_many(:step_executions, Durable.Storage.Schemas.StepExecution, foreign_key: :workflow_id)
     has_many(:pending_inputs, Durable.Storage.Schemas.PendingInput, foreign_key: :workflow_id)
 
-    timestamps(type: :utc_datetime_usec)
+    timestamps(type: :utc_datetime_usec, autogenerate: {Clock, :utc_now, []})
   end
 
   @required_fields [:workflow_module, :workflow_name]
@@ -254,7 +256,7 @@ defmodule Durable.Storage.Schemas.WorkflowExecution do
   """
   def lock_changeset(execution, locked_by) do
     execution
-    |> cast(%{locked_by: locked_by, locked_at: DateTime.utc_now()}, [:locked_by, :locked_at])
+    |> cast(%{locked_by: locked_by, locked_at: Clock.utc_now()}, [:locked_by, :locked_at])
   end
 
   @doc """
@@ -269,7 +271,7 @@ defmodule Durable.Storage.Schemas.WorkflowExecution do
   Creates a changeset for marking workflow as compensated (all compensations succeeded).
   """
   def compensated_changeset(execution, results) do
-    now = DateTime.utc_now()
+    now = Clock.utc_now()
 
     # A rolled-back run is finished too: completed_at marks the end of every
     # terminal run, so durations and retention treat them alike.
@@ -295,8 +297,8 @@ defmodule Durable.Storage.Schemas.WorkflowExecution do
         status: :compensation_failed,
         compensation_results: results,
         error: error,
-        compensated_at: DateTime.utc_now(),
-        completed_at: DateTime.utc_now()
+        compensated_at: Clock.utc_now(),
+        completed_at: Clock.utc_now()
       },
       [:status, :compensation_results, :error, :compensated_at, :completed_at]
     )

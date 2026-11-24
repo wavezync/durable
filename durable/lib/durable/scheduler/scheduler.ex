@@ -27,6 +27,7 @@ defmodule Durable.Scheduler do
 
   require Logger
 
+  alias Durable.Clock
   alias Durable.Repo
   alias Durable.Scheduler.API
 
@@ -239,7 +240,7 @@ defmodule Durable.Scheduler do
   defp handle_missing_module(schedule, config, reason) do
     code = "#{schedule.workflow_module} (#{schedule.workflow_name})"
 
-    if DateTime.diff(DateTime.utc_now(), schedule.next_run_at) < @code_grace_seconds do
+    if DateTime.diff(Clock.utc_now(), schedule.next_run_at) < @code_grace_seconds do
       Logger.warning(
         "[Durable.Scheduler] #{schedule.name}: #{code} isn't on this node, " <>
           "leaving it for one that has it"

@@ -31,6 +31,7 @@ defmodule Mix.Tasks.Durable.Cleanup do
 
   import Ecto.Query
 
+  alias Durable.Clock
   alias Durable.Config
   alias Durable.Mix.Helpers
   alias Durable.Repo
@@ -85,7 +86,7 @@ defmodule Mix.Tasks.Durable.Cleanup do
       [_, num_str, unit] ->
         num = String.to_integer(num_str)
         seconds = duration_to_seconds(num, unit)
-        cutoff = DateTime.add(DateTime.utc_now(), -seconds, :second)
+        cutoff = DateTime.add(Clock.utc_now(), -seconds, :second)
         {:ok, cutoff}
 
       nil ->

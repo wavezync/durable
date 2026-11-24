@@ -29,6 +29,7 @@ defmodule Mix.Tasks.Durable.Doctor do
 
   use Mix.Task
 
+  alias Durable.Clock
   alias Durable.Mix.Helpers
   alias Durable.Queue.Adapter
   alias Durable.Repo
@@ -98,7 +99,7 @@ defmodule Mix.Tasks.Durable.Doctor do
   end
 
   defp find_stale_locks(config) do
-    cutoff = DateTime.add(DateTime.utc_now(), -config.stale_lock_timeout, :second)
+    cutoff = DateTime.add(Clock.utc_now(), -config.stale_lock_timeout, :second)
 
     query =
       from(w in WorkflowExecution,
@@ -120,7 +121,7 @@ defmodule Mix.Tasks.Durable.Doctor do
   # Compensation that got stuck before reaching a terminal state. Rare,
   # but devastating when it happens because the rollback is half-done.
   defp find_stuck_compensating(config) do
-    cutoff = DateTime.add(DateTime.utc_now(), -config.stale_lock_timeout, :second)
+    cutoff = DateTime.add(Clock.utc_now(), -config.stale_lock_timeout, :second)
 
     query =
       from(w in WorkflowExecution,

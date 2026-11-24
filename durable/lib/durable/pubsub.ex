@@ -35,6 +35,7 @@ defmodule Durable.PubSub do
   silently no-op and subscribers simply never receive messages.
   """
 
+  alias Durable.Clock
   alias Durable.Config
   alias Durable.Queue.CommitWaker
   alias Durable.Repo
@@ -241,7 +242,7 @@ defmodule Durable.PubSub do
   end
 
   defp due?(nil), do: true
-  defp due?(at), do: DateTime.compare(at, DateTime.utc_now()) != :gt
+  defp due?(at), do: DateTime.compare(at, Clock.utc_now()) != :gt
 
   defp broadcast(%Config{} = config, topic, msg) do
     with server when not is_nil(server) <- server(config),

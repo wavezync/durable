@@ -22,6 +22,7 @@ defmodule Durable.Keys do
   import Ecto.Query
 
   alias Durable.Activity
+  alias Durable.Clock
   alias Durable.Config
   alias Durable.EngineState
   alias Durable.Executor
@@ -129,7 +130,7 @@ defmodule Durable.Keys do
       # `timeout` caps the wait from the first start, this one.
       %{period: period, timeout: timeout} ->
         wait = if timeout, do: min(period, timeout), else: period
-        latest(scheduled_at, DateTime.add(DateTime.utc_now(), wait, :millisecond))
+        latest(scheduled_at, DateTime.add(Clock.utc_now(), wait, :millisecond))
     end
   end
 
@@ -197,7 +198,7 @@ defmodule Durable.Keys do
   # would run after the new run: it's replaced too. One a worker has claimed
   # is fenced, as a cancel fences it.
   defp replace_waiting(%{mode: :cancel_existing} = ctx, {:inserted, run, _moved}) do
-    now = DateTime.utc_now()
+    now = Clock.utc_now()
 
     {_, replaced} =
       Repo.update_all(
@@ -365,7 +366,7 @@ defmodule Durable.Keys do
 
     case Repo.one(ctx.config, undo) do
       %DateTime{} = at ->
-        if DateTime.after?(at, DateTime.utc_now()), do: due_after(ctx, at), else: ctx
+        if DateTime.after?(at, Clock.utc_now()), do: due_after(ctx, at), else: ctx
 
       nil ->
         ctx
@@ -386,7 +387,7 @@ defmodule Durable.Keys do
   @spec settling?(Config.t(), WorkflowExecution.t()) :: boolean()
   def settling?(config, %{status: :cancelled, locked_by: by, locked_at: %DateTime{} = at})
       when by != nil,
-      do: DateTime.diff(DateTime.utc_now(), at) < config.stale_lock_timeout
+      do: DateTime.diff(Clock.utc_now(), at) < config.stale_lock_timeout
 
   def settling?(_config, _holder), do: false
 
@@ -470,7 +471,7 @@ defmodule Durable.Keys do
   defp refresh_unstarted(ctx, holder) do
     {count, _} =
       Repo.update_all(ctx.config, unstarted_holder(holder.id),
-        set: [input: ctx.entry.input, updated_at: DateTime.utc_now()]
+        set: [input: ctx.entry.input, updated_at: Clock.utc_now()]
       )
 
     count == 1
@@ -526,7 +527,7 @@ defmodule Durable.Keys do
   defp refresh_waiting(%{config: config, entry: entry}) do
     {_, ids} =
       Repo.update_all(config, from(w in waiting(entry), select: w.id),
-        set: [input: entry.input, updated_at: DateTime.utc_now()]
+        set: [input: entry.input, updated_at: Clock.utc_now()]
       )
 
     List.first(ids)
@@ -547,7 +548,7 @@ defmodule Durable.Keys do
   # pushes its start back by `period`, but not past `timeout` after the first
   # start. Matches no row once a worker claimed it.
   defp debounce_holder(%{debounce: %{period: period, timeout: timeout}} = ctx, holder) do
-    now = DateTime.utc_now()
+    now = Clock.utc_now()
     # The later of the caller's `scheduled_at:` and the quiet period, as for a
     # first start, so a duplicate can't pull a run scheduled for later forward.
     at = ctx.entry[:scheduled_at] || DateTime.add(now, period, :millisecond)
@@ -580,7 +581,7 @@ defmodule Durable.Keys do
   # waiting to be rolled back is left to it, and the start is told the key is
   # taken.
   defp cancel_holder(ctx, holder) do
-    now = DateTime.utc_now()
+    now = Clock.utc_now()
 
     error = %{
       type: "cancelled",
@@ -689,7 +690,7 @@ defmodule Durable.Keys do
   end
 
   defp entry(changeset) do
-    now = DateTime.utc_now()
+    now = Clock.utc_now()
 
     changeset
     |> Ecto.Changeset.apply_changes()
@@ -733,7 +734,7 @@ defmodule Durable.Keys do
         from(w in WorkflowExecution,
           where: w.id == ^holder.id and w.holds_key and w.status in ^statuses
         ),
-        set: [holds_key: false, updated_at: DateTime.utc_now()]
+        set: [holds_key: false, updated_at: Clock.utc_now()]
       )
 
     count == 1
@@ -812,7 +813,7 @@ defmodule Durable.Keys do
       |> Ecto.Changeset.change(
         holds_key: true,
         runs_after_id: nil,
-        deadline_at: Executor.deadline(workflow_def, DateTime.utc_now())
+        deadline_at: Executor.deadline(workflow_def, Clock.utc_now())
       )
       |> Ecto.Changeset.unique_constraint(:key, name: :workflow_executions_key_holder_index)
 
@@ -928,7 +929,7 @@ defmodule Durable.Keys do
            from(w in WorkflowExecution,
              where: w.id == ^run.id and w.holds_key and w.status in ^closed
            ),
-           set: [holds_key: false, updated_at: DateTime.utc_now()]
+           set: [holds_key: false, updated_at: Clock.utc_now()]
          ) do
       {1, _} ->
         record(config, "key_released", run, if(by, do: %{by: to_string(by)}, else: %{}))

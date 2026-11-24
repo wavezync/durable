@@ -15,6 +15,7 @@ defmodule Durable.Queue.Sampler do
 
   import Ecto.Query
 
+  alias Durable.Clock
   alias Durable.Config
   alias Durable.Repo
   alias Durable.Storage.Schemas.{ActivityEvent, QueueSample, WorkflowExecution}
@@ -42,7 +43,7 @@ defmodule Durable.Queue.Sampler do
   """
   @spec sample(Config.t()) :: [map()]
   def sample(%Config{} = config) do
-    now = DateTime.utc_now()
+    now = Clock.utc_now()
     minute = %{DateTime.truncate(now, :second) | second: 0}
 
     counts =
@@ -85,7 +86,7 @@ defmodule Durable.Queue.Sampler do
 
   # Just after the next minute boundary, so every node samples the same minute.
   defp schedule_next do
-    ms = 60_000 - rem(System.os_time(:millisecond), 60_000) + 500
+    ms = 60_000 - rem(DateTime.to_unix(Clock.utc_now(), :millisecond), 60_000) + 500
     Process.send_after(self(), :sample, ms)
   end
 

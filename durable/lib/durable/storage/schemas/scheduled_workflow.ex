@@ -9,6 +9,7 @@ defmodule Durable.Storage.Schemas.ScheduledWorkflow do
   import Ecto.Changeset
 
   alias Crontab.CronExpression.Parser, as: CronParser
+  alias Durable.Clock
 
   @type t :: %__MODULE__{
           id: Ecto.UUID.t(),
@@ -55,7 +56,7 @@ defmodule Durable.Storage.Schemas.ScheduledWorkflow do
     field(:consecutive_failures, :integer, default: 0)
     field(:auto_disabled_at, :utc_datetime_usec)
 
-    timestamps(type: :utc_datetime_usec)
+    timestamps(type: :utc_datetime_usec, autogenerate: {Clock, :utc_now, []})
   end
 
   @required_fields [:name, :workflow_module, :workflow_name, :cron_expression]

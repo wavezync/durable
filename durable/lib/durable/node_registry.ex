@@ -16,6 +16,7 @@ defmodule Durable.NodeRegistry do
 
   import Ecto.Query
 
+  alias Durable.Clock
   alias Durable.Config
   alias Durable.Repo
   alias Durable.Storage.Schemas.Node
@@ -33,7 +34,7 @@ defmodule Durable.NodeRegistry do
   """
   @spec list(Config.t()) :: [map()]
   def list(%Config{} = config) do
-    cutoff = DateTime.add(DateTime.utc_now(), -@missing_after_ms, :millisecond)
+    cutoff = DateTime.add(Clock.utc_now(), -@missing_after_ms, :millisecond)
 
     running =
       config
@@ -63,8 +64,8 @@ defmodule Durable.NodeRegistry do
   def init(%Config{} = config) do
     Process.flag(:trap_exit, true)
     # Before the rest of the tree starts, so it starts on the database's clock.
-    Durable.Clock.sync(config)
-    {:ok, %{config: config, started_at: DateTime.utc_now()}, {:continue, :boot}}
+    Clock.sync(config)
+    {:ok, %{config: config, started_at: Clock.utc_now()}, {:continue, :boot}}
   end
 
   @impl true
@@ -82,8 +83,8 @@ defmodule Durable.NodeRegistry do
   end
 
   defp beat(%{config: config} = state) do
-    Durable.Clock.sync(config)
-    now = DateTime.utc_now()
+    Clock.sync(config)
+    now = Clock.utc_now()
 
     node = %Node{
       id: config.node_id,

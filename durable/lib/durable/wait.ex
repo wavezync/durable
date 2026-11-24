@@ -42,6 +42,7 @@ defmodule Durable.Wait do
   - `wait_for_all/2` - Wait for all of multiple events
   """
 
+  alias Durable.Clock
   alias Durable.Config
   alias Durable.Context
   alias Durable.EngineState
@@ -1053,7 +1054,7 @@ defmodule Durable.Wait do
   defp close_group_events(repo, wait_group_id) do
     repo.update_all(
       from(p in PendingEvent, where: p.wait_group_id == ^wait_group_id and p.status == :pending),
-      set: [status: :cancelled, completed_at: DateTime.utc_now()]
+      set: [status: :cancelled, completed_at: Clock.utc_now()]
     )
   end
 
@@ -1181,9 +1182,7 @@ defmodule Durable.Wait do
         for schema <- [PendingInput, PendingEvent, WaitGroup] do
           query = from(p in schema, where: p.workflow_id == ^workflow_id and p.status == :pending)
 
-          Repo.update_all(config, query,
-            set: [status: :cancelled, completed_at: DateTime.utc_now()]
-          )
+          Repo.update_all(config, query, set: [status: :cancelled, completed_at: Clock.utc_now()])
         end
 
         :ok

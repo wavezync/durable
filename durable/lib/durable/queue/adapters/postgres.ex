@@ -9,6 +9,7 @@ defmodule Durable.Queue.Adapters.Postgres do
 
   @behaviour Durable.Queue.Adapter
 
+  alias Durable.Clock
   alias Durable.Config
   alias Durable.Executor
   alias Durable.Executor.StepRunner
@@ -214,7 +215,7 @@ defmodule Durable.Queue.Adapters.Postgres do
   # activity are written in one transaction: nothing sweeps a failed run, so an
   # attempt left `running` on one would stay so.
   defp fail_unrecorded(config, execution, error, lock_token) do
-    now = DateTime.utc_now()
+    now = Clock.utc_now()
 
     {:ok, failed} =
       Repo.transaction(config, fn ->
@@ -327,7 +328,7 @@ defmodule Durable.Queue.Adapters.Postgres do
               locked_by: nil,
               locked_at: nil,
               lock_token: nil,
-              updated_at: DateTime.utc_now()
+              updated_at: Clock.utc_now()
             ]
           )
 
@@ -343,7 +344,7 @@ defmodule Durable.Queue.Adapters.Postgres do
 
   @impl true
   def recover_stale_locks(%Config{} = config, timeout_seconds) when timeout_seconds > 0 do
-    cutoff = DateTime.add(DateTime.utc_now(), -timeout_seconds, :second)
+    cutoff = DateTime.add(Clock.utc_now(), -timeout_seconds, :second)
 
     query =
       from(w in WorkflowExecution,
@@ -387,7 +388,7 @@ defmodule Durable.Queue.Adapters.Postgres do
         []
 
       ids ->
-        now = DateTime.utc_now()
+        now = Clock.utc_now()
 
         error = %{
           type: "worker_lost",
@@ -544,7 +545,7 @@ defmodule Durable.Queue.Adapters.Postgres do
 
   @impl true
   def recover_zombie_workflows(%Config{} = config, timeout_seconds) when timeout_seconds > 0 do
-    cutoff = DateTime.add(DateTime.utc_now(), -timeout_seconds, :second)
+    cutoff = DateTime.add(Clock.utc_now(), -timeout_seconds, :second)
 
     # Two zombie classes:
     #
@@ -597,7 +598,7 @@ defmodule Durable.Queue.Adapters.Postgres do
     if zombie_ids == [] do
       {:ok, 0}
     else
-      now = DateTime.utc_now()
+      now = Clock.utc_now()
 
       zombie_error = %{
         "type" => "zombie_detected",
@@ -727,7 +728,7 @@ defmodule Durable.Queue.Adapters.Postgres do
   end
 
   defp do_heartbeat(config, job_id, lock_token) do
-    now = DateTime.utc_now()
+    now = Clock.utc_now()
 
     base =
       from(w in WorkflowExecution,
@@ -799,7 +800,7 @@ defmodule Durable.Queue.Adapters.Postgres do
       from(w in base_query,
         where: w.status == :pending,
         where: not is_nil(w.scheduled_at),
-        where: w.scheduled_at > ^DateTime.utc_now()
+        where: w.scheduled_at > ^Clock.utc_now()
       )
 
     scheduled = Repo.aggregate(config, scheduled_query, :count)

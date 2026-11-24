@@ -22,6 +22,7 @@ defmodule Mix.Tasks.Durable.Pending do
 
   use Mix.Task
 
+  alias Durable.Clock
   alias Durable.Mix.Helpers
   alias Durable.Repo
   alias Durable.Storage.Schemas.{PendingEvent, PendingInput, WorkflowExecution}
@@ -119,7 +120,7 @@ defmodule Mix.Tasks.Durable.Pending do
   defp expiring_cutoff(opts) do
     case Keyword.get(opts, :expiring_in) do
       nil -> nil
-      hours -> DateTime.add(DateTime.utc_now(), hours * 3600, :second)
+      hours -> DateTime.add(Clock.utc_now(), hours * 3600, :second)
     end
   end
 
@@ -199,7 +200,7 @@ defmodule Mix.Tasks.Durable.Pending do
   # Show relative "in 2h" for future timeouts, "overdue 5m" for past ones —
   # fastest way to spot rows that should already have been handled.
   defp format_timeout(dt) do
-    diff = DateTime.diff(dt, DateTime.utc_now(), :second)
+    diff = DateTime.diff(dt, Clock.utc_now(), :second)
 
     if diff > 0 do
       "in #{Helpers.format_seconds(diff)}"
@@ -209,6 +210,6 @@ defmodule Mix.Tasks.Durable.Pending do
   end
 
   defp age_seconds(inserted_at) do
-    DateTime.diff(DateTime.utc_now(), inserted_at, :second)
+    DateTime.diff(Clock.utc_now(), inserted_at, :second)
   end
 end
