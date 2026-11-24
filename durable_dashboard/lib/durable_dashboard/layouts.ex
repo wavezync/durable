@@ -29,7 +29,8 @@ defmodule DurableDashboard.Layouts do
           name="durable-now"
           content={DateTime.to_unix(DurableDashboard.Clock.utc_now(), :millisecond)}
         />
-        <title>Durable Console</title>
+        <.live_title default="Durable" suffix=" · Durable">{assigns[:page_title]}</.live_title>
+        <link rel="icon" type="image/svg+xml" href={asset_path(assigns, "favicon.svg")} />
         <link rel="preconnect" href="https://fonts.googleapis.com" />
         <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="anonymous" />
         <link

@@ -380,8 +380,8 @@ its own `Phoenix.LiveComponent` module under
 - **No topbar.** The sidebar carries everything global: brand, ⌘K, nav,
   live indicator, version, GitHub and theme toggle.
 - **Sidebar** (232px, `bg-card`, hairline right border):
-  - Brand: the three-step mark (persisted steps rising) + "Durable" over the
-    schema name.
+  - Brand: the Durable logo from the site (`site/public/favicon.svg`, the
+    `mark` icon, in its own colours) + "Durable" over the schema name.
   - ⌘K button ("Jump to run, workflow…").
   - Nav in three intent groups under plain sentence-case captions —
     **Observe** (Overview, Runs, Workflows), **Operate** (Inbox, Keys, Queues &
@@ -938,11 +938,10 @@ For every list LV:
   to `size-4`. Heroicons-style functional glyphs stay `0 0 20 20`.
 - **Forbidden:** inline `<svg>` with hard-coded paths in component files
   outside `core.ex` and the curated lucide imports. **One sanctioned
-  exception:** the sidebar **pulse mark** (the brand lockup in
-  `Sidebar.brand/1`) — a one-off identity glyph, not reusable iconography, so
-  it lives inline rather than in `core.ex`. Its two paths use
-  `stroke="currentColor"` with `text-*` token classes (muted baseline, primary
-  beat); no other bespoke SVG is allowed.
+  exception:** the **`mark`** icon in `core.ex` is the Durable logo, copied
+  from the site (`site/public/favicon.svg`) with its own fixed colours rather
+  than `currentColor` — it is the brand, not iconography. No other bespoke
+  colours in an SVG.
 
 ## 8. Density
 

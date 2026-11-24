@@ -40,7 +40,7 @@ defmodule DurableDashboard.Components.Layout.Sidebar do
       @class
     ]}>
       <div class="flex items-center gap-2.5 px-4 pt-4 pb-3">
-        <Core.icon name="mark" class="size-[22px] text-foreground" />
+        <Core.icon name="mark" class="size-[22px]" />
         <div class="flex flex-col leading-tight min-w-0">
           <span class="text-sm font-semibold">Durable</span>
           <span
