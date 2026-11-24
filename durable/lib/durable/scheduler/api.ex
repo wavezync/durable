@@ -494,7 +494,9 @@ defmodule Durable.Scheduler.API do
   @doc false
   # Takes this fire for the calling node. One conditional UPDATE: of the nodes
   # that saw the schedule due, Postgres lets exactly one move its next_run_at,
-  # and the others match no row. A false return means another node has it.
+  # and the others match no row. A false return means another node has it, or
+  # an operator changed the schedule since it was read: an edit keeps the fire
+  # that was due (`due_or/2`), for the next check to fire as edited.
   @spec claim_fire(ScheduledWorkflow.t(), Config.t()) :: boolean()
   def claim_fire(%ScheduledWorkflow{} = schedule, %Config{} = config) do
     now = DateTime.utc_now()
@@ -505,9 +507,7 @@ defmodule Durable.Scheduler.API do
     {count, _} =
       Repo.update_all(
         config,
-        from(s in ScheduledWorkflow,
-          where: s.id == ^schedule.id and s.next_run_at == ^schedule.next_run_at and s.enabled
-        ),
+        from(s in as_read(schedule)),
         set: [
           last_run_at: now,
           next_run_at: next_run,
@@ -519,6 +519,14 @@ defmodule Durable.Scheduler.API do
       )
 
     count == 1
+  end
+
+  # The schedule as a tick read it, on and unchanged since.
+  defp as_read(schedule) do
+    from(s in ScheduledWorkflow,
+      where: s.id == ^schedule.id and s.enabled,
+      where: s.next_run_at == ^schedule.next_run_at and s.updated_at == ^schedule.updated_at
+    )
   end
 
   @auto_disable_after 5
@@ -540,8 +548,7 @@ defmodule Durable.Scheduler.API do
     {_count, written} =
       Repo.update_all(
         config,
-        from(s in ScheduledWorkflow,
-          where: s.id == ^schedule.id and s.next_run_at == ^schedule.next_run_at and s.enabled,
+        from(s in as_read(schedule),
           select: s,
           update: [
             set: [

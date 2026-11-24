@@ -858,6 +858,23 @@ defmodule Durable.SchedulerTest do
       refute API.claim_fire(schedule, config)
     end
 
+    test "loses to an operator's edit since it was read, and the fire waits for the next check" do
+      config = Config.get(Durable)
+
+      {:ok, schedule} = Durable.schedule(SimpleWorkflow, "0 9 * * *", name: "claim_edit")
+
+      {:ok, read} =
+        schedule
+        |> Ecto.Changeset.change(next_run_at: DateTime.add(DateTime.utc_now(), -5, :second))
+        |> config.repo.update()
+
+      {:ok, _} = Durable.update_schedule("claim_edit", cron: "30 9 * * *", input: %{"v" => 2})
+      refute API.claim_fire(read, config)
+
+      assert [%{name: "claim_edit", input: %{"v" => 2}} = edited] = API.get_due_schedules(config)
+      assert API.claim_fire(edited, config)
+    end
+
     test "loses to an operator who turned the schedule off" do
       config = Config.get(Durable)
 
