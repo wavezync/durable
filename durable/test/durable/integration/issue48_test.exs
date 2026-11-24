@@ -441,6 +441,24 @@ defmodule Durable.Integration.Issue48Test do
       assert Probe.peak(:sync) == 1
     end
 
+    test "lets the key go once its worker dies, without waiting for the lock to go stale" do
+      start_durable!(%{default: 2}, heartbeat_interval: 60_000)
+
+      holder = sync(1, hold: true, on_duplicate: :use_existing)
+      assert_eventually(fn -> Probe.hits({:synced, 1}) == 1 end)
+
+      :ok = Durable.cancel(holder, "wrong account")
+      assert %{locked_by: by} = get(holder)
+      assert by, "the cancel kept the lock of the worker that has the step"
+
+      # The worker never hears of the cancel, and dies with its step.
+      kill_worker_of(holder)
+
+      next = sync(2, on_duplicate: :use_existing)
+      await_status(next, :completed, 5_000)
+      assert %{locked_by: nil} = get(holder)
+    end
+
     test "doesn't hold up the key when its own step cancelled it" do
       start_durable!(%{default: 1}, heartbeat_interval: 60_000)
 

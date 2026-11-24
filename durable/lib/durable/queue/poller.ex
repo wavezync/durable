@@ -234,7 +234,10 @@ defmodule Durable.Queue.Poller do
 
       {%{job_id: job_id}, workers} ->
         Logger.warning("Worker for job #{job_id} crashed: #{inspect(reason)}")
-        # Job remains locked in DB, will be recovered by stale lock recovery
+        # A run still running stays locked, for the stale sweep. One cancelled
+        # while the worker ran it kept the worker's lock (rule 30): the step
+        # died with the worker it's linked to, so that lock is let go now.
+        Adapter.default_adapter().let_go(state.config, job_id)
         {:noreply, %{state | workers: workers}}
     end
   end
