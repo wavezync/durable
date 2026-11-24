@@ -117,7 +117,7 @@ defmodule Durable.Queue.Worker do
     adapter = Adapter.default_adapter()
     sent = System.monotonic_time(:millisecond)
 
-    case adapter.heartbeat(state.config, state.job.id, state.job[:lock_token]) do
+    case beat_within_lease(adapter, state) do
       {:error, :fenced} ->
         self_fence(state)
 
@@ -299,10 +299,26 @@ defmodule Durable.Queue.Worker do
   # can't reach the database can't hear of that, so it stops its step a
   # heartbeat before then: past it, the step would run on beside its next
   # attempt. A pool that refuses for a few seconds is nowhere near it.
-  defp lease_lost?(%{config: config, beat_at: beat_at}) do
-    lease_ms = config.stale_lock_timeout * 1_000 - config.heartbeat_interval
-    System.monotonic_time(:millisecond) - beat_at >= lease_ms
+  # A database that stops answering holds a query for its timeout, 15 seconds
+  # by default, which can be past the lease: the step would run on beside its
+  # next attempt. The heartbeat is given until the lease runs out.
+  defp beat_within_lease(adapter, state) do
+    left = state.beat_at + lease_ms(state.config) - System.monotonic_time(:millisecond)
+
+    beat =
+      Task.async(fn -> adapter.heartbeat(state.config, state.job.id, state.job[:lock_token]) end)
+
+    case Task.yield(beat, max(left, 0)) || Task.shutdown(beat, :brutal_kill) do
+      {:ok, result} -> result
+      {:exit, reason} -> {:error, reason}
+      nil -> {:error, :no_answer_in_lease}
+    end
   end
+
+  defp lease_lost?(%{config: config, beat_at: beat_at}),
+    do: System.monotonic_time(:millisecond) - beat_at >= lease_ms(config)
+
+  defp lease_ms(config), do: config.stale_lock_timeout * 1_000 - config.heartbeat_interval
 
   # Cancelled while its step ran. The cancel already settled the run, so this
   # only stops the work and closes the attempt.

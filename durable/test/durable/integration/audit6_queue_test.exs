@@ -162,6 +162,59 @@ defmodule Audit6QueuePayment do
   end
 end
 
+defmodule Audit6QueueProxy do
+  @moduledoc false
+  # A TCP proxy in front of Postgres that can stop passing bytes without
+  # closing anything: to the node behind it, a network that drops its packets.
+  # Queries then hang, where a stopped repo refuses them at once.
+  use GenServer
+
+  def start_link(target), do: GenServer.start_link(__MODULE__, target, name: __MODULE__)
+  def port, do: GenServer.call(__MODULE__, :port)
+  def freeze, do: GenServer.call(__MODULE__, :freeze)
+
+  @impl true
+  def init(target) do
+    {:ok, listen} = :gen_tcp.listen(0, [:binary, active: false, reuseaddr: true])
+    {:ok, port} = :inet.port(listen)
+    frozen = :atomics.new(1, [])
+    spawn_link(fn -> accept(listen, target, frozen) end)
+    {:ok, %{port: port, frozen: frozen}}
+  end
+
+  @impl true
+  def handle_call(:port, _from, state), do: {:reply, state.port, state}
+
+  def handle_call(:freeze, _from, state) do
+    :atomics.put(state.frozen, 1, 1)
+    {:reply, :ok, state}
+  end
+
+  defp accept(listen, target, frozen) do
+    {:ok, client} = :gen_tcp.accept(listen)
+    {:ok, server} = :gen_tcp.connect(~c"localhost", target, [:binary, active: false])
+
+    for {from, to} <- [{client, server}, {server, client}] do
+      pid = spawn(fn -> receive(do: (:go -> pipe(from, to, frozen))) end)
+      :ok = :gen_tcp.controlling_process(from, pid)
+      send(pid, :go)
+    end
+
+    accept(listen, target, frozen)
+  end
+
+  defp pipe(from, to, frozen) do
+    case :gen_tcp.recv(from, 0) do
+      {:ok, data} ->
+        if :atomics.get(frozen, 1) == 0, do: :gen_tcp.send(to, data)
+        pipe(from, to, frozen)
+
+      {:error, _closed} ->
+        :gen_tcp.close(to)
+    end
+  end
+end
+
 defmodule Durable.Integration.Audit6QueueTest do
   @moduledoc """
   Audit 6: the queue and recovery under load. Workers that can't reach the
@@ -324,6 +377,33 @@ defmodule Durable.Integration.Audit6QueueTest do
       Process.sleep(300)
 
       # B's upload is the only one: A's stopped when it lost its claim.
+      assert Probe.peak(:uploading) == 1
+
+      :ok = Probe.set(:upload_done)
+      await_status(id, :completed)
+    end
+  end
+
+  describe "a worker whose database stops answering mid-step" do
+    # Its heartbeat hangs, where a stopped repo refuses it at once. Hung for
+    # the query's timeout, it couldn't stop the step before its claim went
+    # stale and another node ran it.
+    test "stops its step before its claim goes stale and another node runs it" do
+      db = Application.fetch_env!(:durable, IntegrationRepo)
+      start_supervised!({Audit6QueueProxy, db[:port]})
+      timing = [stale_lock_timeout: 2, heartbeat_interval: 200]
+      start_on_own_repo!([hostname: "localhost", port: Audit6QueueProxy.port()], timing)
+
+      {:ok, id} = Durable.start(Audit6QueueExport, %{"customer" => "c-7"})
+      assert_eventually(fn -> Probe.hits(:upload_started) == 1 end)
+      :ok = Audit6QueueProxy.freeze()
+
+      start_node_b!(timing)
+      Process.sleep(2_200)
+      {:ok, 1} = StaleJobRecovery.recover_now(:audit6_node_b)
+      assert_eventually(fn -> Probe.hits(:upload_started) == 2 end)
+      Process.sleep(300)
+
       assert Probe.peak(:uploading) == 1
 
       :ok = Probe.set(:upload_done)
