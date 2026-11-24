@@ -92,12 +92,13 @@ defmodule Durable.NodeRegistry do
         if(config.queue_enabled, do: Enum.map(Map.keys(config.queues), &to_string/1), else: []),
       version: Application.spec(:durable, :vsn) |> to_string(),
       started_at: state.started_at,
-      heartbeat_at: now
+      heartbeat_at: now,
+      clock_skew_ms: Clock.skew_ms()
     }
 
     safely(fn ->
       Repo.insert(node, config,
-        on_conflict: {:replace, [:queues, :version, :heartbeat_at]},
+        on_conflict: {:replace, [:queues, :version, :heartbeat_at, :clock_skew_ms]},
         conflict_target: :id
       )
 

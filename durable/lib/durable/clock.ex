@@ -55,6 +55,19 @@ defmodule Durable.Clock do
     {sent, db, System.monotonic_time(:microsecond)}
   end
 
+  @doc """
+  How far this node's own clock is ahead of the database's, in milliseconds
+  (behind if negative), as of the last sync. Durable reads the database's, so
+  this is for whatever else on the node reads its own. 0 before a sync.
+  """
+  @spec skew_ms() :: integer()
+  def skew_ms do
+    case :persistent_term.get(@key, nil) do
+      nil -> 0
+      _offset -> DateTime.diff(DateTime.utc_now(), utc_now(), :millisecond)
+    end
+  end
+
   @doc false
   # The database's clock less this node's monotonic one, from `{sent, db,
   # received}` samples. The database read its clock somewhere in the round

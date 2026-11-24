@@ -11,7 +11,8 @@ defmodule Durable.Storage.Schemas.Node do
           queues: [String.t()],
           version: String.t() | nil,
           started_at: DateTime.t(),
-          heartbeat_at: DateTime.t()
+          heartbeat_at: DateTime.t(),
+          clock_skew_ms: integer() | nil
         }
 
   @primary_key {:id, :string, autogenerate: false}
@@ -21,5 +22,8 @@ defmodule Durable.Storage.Schemas.Node do
     field(:version, :string)
     field(:started_at, :utc_datetime_usec)
     field(:heartbeat_at, :utc_datetime_usec)
+    # How far the node's own clock is ahead of the database's (behind if
+    # negative), as it last measured. Durable itself reads the database's.
+    field(:clock_skew_ms, :integer)
   end
 end

@@ -44,6 +44,14 @@ defmodule Durable.ClockTest do
     assert_in_delta DateTime.diff(Clock.utc_now(), DateTime.utc_now(), :millisecond), 0, 1_000
   end
 
+  test "the skew is how far this node's own clock is ahead of the database's" do
+    Clock.put_offset(ahead_of_this_node(3_600_000))
+    assert_in_delta Clock.skew_ms(), -3_600_000, 1_000
+
+    Clock.put_offset(nil)
+    assert Clock.skew_ms() == 0
+  end
+
   test "a sync sets the clock to the database's, however far off it was" do
     Clock.put_offset(ahead_of_this_node(3_600_000))
 
