@@ -101,8 +101,9 @@ defmodule Durable.Telemetry do
       taken. `:workflow`, `:key`, `:holder_id`, `:outcome` (`:use_existing`,
       `:error`, `:cancel_existing`, `:send_event` or `:debounced`),
       `:input_changed`
-    * `[:durable, :key, :handoff]` — `%{count}`; a start took the key from a
-      finished run. `:workflow`, `:key`, `:from`, `:to`
+    * `[:durable, :key, :handoff]` — `%{count}`; a start, a run waiting
+      behind the holder (`on_duplicate: :run_again`), or a retry took the key
+      from a finished run. `:workflow`, `:key`, `:from`, `:to`
     * `[:durable, :key, :release]` — `%{count}`; `Durable.release_key/2`.
       `:workflow`, `:key`, `:workflow_id`, `:by`
 

@@ -618,12 +618,12 @@ defmodule Durable.Keys do
         {:ok, run}
 
       {:inserted, run, {:released, from}} ->
-        record_handoff(ctx, run, from, %{})
+        record_handoff(ctx.config, ctx.reuse, run, from, %{})
         {:ok, run}
 
       {:inserted, run, {:replaced, from, cancelled}} ->
         record_duplicate(ctx, from, :cancel_existing)
-        record_handoff(ctx, run, from, %{replaced: true})
+        record_handoff(ctx.config, ctx.reuse, run, from, %{replaced: true})
         Executor.after_cancel(ctx.config, cancelled)
         {:ok, run}
 
@@ -758,7 +758,7 @@ defmodule Durable.Keys do
 
     case result do
       {:ok, {:ok, taken, from}} ->
-        if from, do: record(config, "key_handed_off", taken, %{key: run.key, from: from.id})
+        if from, do: record_handoff(config, reuse(workflow_def), taken, from, %{})
         {:ok, taken}
 
       {:ok, other} ->
@@ -871,6 +871,7 @@ defmodule Durable.Keys do
 
           release_closed(config, holder, reuse) ->
             record(config, "key_retaken", run, %{from: holder.id})
+            handed_off(config, run, holder)
             {:ok, taken_back()}
 
           true ->
@@ -997,16 +998,22 @@ defmodule Durable.Keys do
   # Compare as stored JSON, so atom and string keys compare equal.
   defp json(term), do: term |> Jason.encode!() |> Jason.decode!()
 
-  defp record_handoff(ctx, run, from, extra) do
+  defp record_handoff(config, reuse, run, from, extra) do
     record(
-      ctx.config,
+      config,
       "key_handed_off",
       run,
-      Map.merge(%{from: from.id, from_status: from.status, reuse: ctx.reuse}, extra)
+      Map.merge(%{from: from.id, from_status: from.status, reuse: reuse}, extra)
     )
 
+    handed_off(config, run, from)
+  end
+
+  # A start, a run waiting behind the holder, or a retry took the key from a
+  # finished run.
+  defp handed_off(config, run, from) do
     :telemetry.execute([:durable, :key, :handoff], %{count: 1}, %{
-      durable: ctx.config.name,
+      durable: config.name,
       workflow: run.workflow_name,
       key: run.key,
       from: from.id,

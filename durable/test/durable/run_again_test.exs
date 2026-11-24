@@ -90,11 +90,19 @@ defmodule Durable.RunAgainTest do
   end
 
   test "a failed holder still lets the waiting run go, as reuse: :after_close does" do
+    Durable.TelemetryHandler.attach_events([[:durable, :key, :handoff]])
     holder = run_workflow(Rebuild, %{"v" => 1}, key: "k")
     {:ok, waiting} = Durable.start(Rebuild, %{"v" => 2}, key: "k")
 
     assert finish(holder, %{"fail" => true}).status == :failed
     assert drain(waiting).holds_key
+
+    # Handed off as a start's is.
+    holder_id = holder.id
+    assert_receive {:event, :handoff, %{count: 1}, %{from: ^holder_id, to: ^waiting}}
+
+    assert [%{details: %{"from_status" => "failed", "reuse" => "after_close"}}] =
+             Durable.Activity.list!(workflow_id: waiting, kinds: ["key_handed_off"])
   end
 
   test "the waiting run is cancelled when reuse: keeps the key" do
