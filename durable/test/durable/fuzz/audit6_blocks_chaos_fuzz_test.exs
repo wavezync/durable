@@ -304,14 +304,15 @@ defmodule Durable.Fuzz.Audit6BlocksChaosTest do
   defp apply_op({:cancel_rollback, i}, runs),
     do: hit(i, :cancel_rollback, Durable.cancel(at(runs, i), "chaos", rollback: true))
 
-  defp apply_op({:retry, i}, runs), do: hit(i, :retry, Durable.retry(at(runs, i)))
-  # A rollback lands only on a failed run: it goes for one if the batch has
-  # one now, or it would rarely land at all.
-  defp apply_op({:rollback, i}, runs) do
-    failed =
-      for {run, j} <- Enum.with_index(runs), get(run.id).status == :failed, do: j
+  # A retry or a rollback lands only on a failed run: each goes for one if
+  # the batch has one now, or it would rarely land at all.
+  defp apply_op({:retry, i}, runs) do
+    j = failed_or(runs, i)
+    hit(j, :retry, Durable.retry(at(runs, j)))
+  end
 
-    j = if failed == [], do: i, else: Enum.at(failed, rem(i, length(failed)))
+  defp apply_op({:rollback, i}, runs) do
+    j = failed_or(runs, i)
     hit(j, :rollback, Durable.rollback(at(runs, j)))
   end
 
@@ -413,6 +414,11 @@ defmodule Durable.Fuzz.Audit6BlocksChaosTest do
   end
 
   defp at(runs, i), do: Enum.at(runs, i).id
+
+  defp failed_or(runs, i) do
+    failed = for {run, j} <- Enum.with_index(runs), get(run.id).status == :failed, do: j
+    if failed == [], do: i, else: Enum.at(failed, rem(i, length(failed)))
+  end
 
   # The family less the run itself, which is its oldest member.
   defp tl_or_empty([_root | rest]), do: rest
