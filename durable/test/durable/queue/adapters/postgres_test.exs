@@ -30,6 +30,37 @@ defmodule Durable.Queue.Adapters.PostgresTest do
       refute plan =~ "Sort"
     end
 
+    # Every run of a key waits while another keeps a stopped worker's lock.
+    # Without an index of its own, that check reads every run a worker holds,
+    # or the key's whole history.
+    test "checks a key for a kept lock without reading the key's history" do
+      repo().query!("""
+      INSERT INTO durable.workflow_executions
+        (id, workflow_module, workflow_name, key, status, queue, input, context,
+         completed_at, inserted_at, updated_at)
+      SELECT gen_random_uuid(), 'M', 'w', 'account:7', 'completed', 'default', '{}', '{}',
+             now(), now(), now()
+      FROM generate_series(1, 20000)
+      """)
+
+      repo().query!("""
+      INSERT INTO durable.workflow_executions
+        (id, workflow_module, workflow_name, key, status, queue, input, context,
+         inserted_at, updated_at)
+      VALUES (gen_random_uuid(), 'M', 'w', 'account:7', 'pending', 'default', '{}', '{}',
+              now(), now())
+      """)
+
+      repo().query!("ANALYZE durable.workflow_executions")
+
+      plan =
+        repo().query!("EXPLAIN " <> Postgres.claim_sql(config()), ["default", 10, "node_a"]).rows
+        |> List.flatten()
+        |> Enum.join("\n")
+
+      assert plan =~ "workflow_executions_kept_lock_index"
+    end
+
     test "claims pending jobs atomically" do
       # Create 5 pending jobs
       for i <- 1..5 do
