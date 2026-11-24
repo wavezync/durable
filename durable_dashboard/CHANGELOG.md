@@ -4,6 +4,19 @@ All notable changes to this package. Versions follow [Semantic
 Versioning](https://semver.org); entries come from [Conventional
 Commits](https://www.conventionalcommits.org).
 
+## [2.1.0](https://github.com/wavezync/durable/compare/durable_dashboard-v2.0.1...durable_dashboard-v2.1.0) - 2026-11-24
+
+### Features
+
+- The graph draws lanes, and what a step's definition says ([58a024c](https://github.com/wavezync/durable/commit/58a024c925390facf14ab5872b1d3ffaa468a9c2))
+- The run page says what a worker's lock means, and nodes show their clock ([2364dd8](https://github.com/wavezync/durable/commit/2364dd87c5662cbe3a58e14dbeca6981dc43e8e5))
+- The site's logo in the sidebar, a favicon, and page titles ([64e4857](https://github.com/wavezync/durable/commit/64e4857f726d60a5ed9af0dc4d30de4db1766e83))
+- The sidebar names the dashboard by a :label ([19faf71](https://github.com/wavezync/durable/commit/19faf71335640a5b1a70317fd300a813a66fa716))
+
+### Bug fixes
+
+- Times are shown by Durable's clock, the database's ([74866da](https://github.com/wavezync/durable/commit/74866daa4fc5575a5fa6d3a1620d6eec1da04817))
+
 ## [2.0.1](https://github.com/wavezync/durable/compare/durable_dashboard-v2.0.0...durable_dashboard-v2.0.1) - 2026-11-23
 
 ### Bug fixes
