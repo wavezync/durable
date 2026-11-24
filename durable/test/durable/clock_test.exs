@@ -62,6 +62,44 @@ defmodule Durable.ClockTest do
                     1_000
   end
 
+  # What a module calls is in its beam's import table, so a doc example
+  # doesn't count. Telemetry's span start carries the system time by
+  # convention.
+  test "nothing in lib reads this node's own clock but Durable.Clock" do
+    own_clock = [
+      {DateTime, :utc_now},
+      {NaiveDateTime, :utc_now},
+      {System, :os_time},
+      {System, :system_time},
+      {:os, :system_time},
+      {:erlang, :system_time}
+    ]
+
+    readers =
+      for mod <- Application.spec(:durable, :modules),
+          to_string(mod.module_info(:compile)[:source]) =~ "/durable/lib/",
+          {:ok, {_, [imports: imports]}} = :beam_lib.chunks(:code.which(mod), [:imports]),
+          {called, fun, _arity} <- imports,
+          {called, fun} in own_clock,
+          {mod, called} not in [{Durable.Clock, DateTime}, {Durable.Telemetry, :erlang}],
+          uniq: true,
+          do: {mod, called, fun}
+
+    assert readers == []
+  end
+
+  test "every schema's timestamps come from Durable.Clock" do
+    stamped =
+      for mod <- Application.spec(:durable, :modules),
+          function_exported?(mod, :__schema__, 1),
+          {fields, mfa} <- mod.__schema__(:autogenerate),
+          :inserted_at in fields or :updated_at in fields,
+          do: {mod, mfa}
+
+    assert stamped != []
+    assert Enum.reject(stamped, &match?({_, {Durable.Clock, :utc_now, []}}, &1)) == []
+  end
+
   test "a node sets the clock as it starts" do
     Clock.put_offset(ahead_of_this_node(3_600_000))
 
