@@ -851,7 +851,7 @@ defmodule Durable.SchedulerTest do
       assert API.claim_fire(schedule, config)
 
       {:ok, updated} = Durable.get_schedule("claim_test")
-      assert DateTime.diff(DateTime.utc_now(), updated.last_run_at, :second) in 0..4
+      assert DateTime.diff(Durable.Clock.utc_now(), updated.last_run_at, :second) in 0..4
       assert DateTime.compare(updated.next_run_at, updated.last_run_at) == :gt
 
       # A second node that read the same row loses.
