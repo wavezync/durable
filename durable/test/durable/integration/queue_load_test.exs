@@ -138,8 +138,9 @@ defmodule Durable.Integration.QueueLoadTest do
     assert open == [], "attempts left open #{inspect(open)}: #{label}"
 
     # A body runs only after its attempt's row is written, and a run nothing
-    # was done to ran each step once.
-    untouched? = Enum.all?(mine, &(&1.status == :completed))
+    # was done to ran each step once. A run lost three times between two steps
+    # failed with every row it has completed: it was done to (CI, seed 485061).
+    untouched? = run.status != :failed and Enum.all?(mine, &(&1.status == :completed))
 
     for step <- [:a, :b, :c] do
       attempts = Enum.count(mine, &(&1.step_name == Atom.to_string(step)))
