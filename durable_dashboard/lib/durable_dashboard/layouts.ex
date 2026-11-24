@@ -24,7 +24,13 @@ defmodule DurableDashboard.Layouts do
         <meta name="viewport" content="width=device-width, initial-scale=1" />
         <meta name="csrf-token" content={get_csrf_token()} />
         <meta name="live-socket-path" content={@config.live_socket_path} />
-        <title>Durable Console</title>
+        <%!-- The server's clock (Durable's), for the times the browser works out itself. --%>
+        <meta
+          name="durable-now"
+          content={DateTime.to_unix(DurableDashboard.Clock.utc_now(), :millisecond)}
+        />
+        <.live_title default="Durable" suffix=" · Durable">{assigns[:page_title]}</.live_title>
+        <link rel="icon" type="image/svg+xml" href={asset_path(assigns, "favicon.svg")} />
         <link rel="preconnect" href="https://fonts.googleapis.com" />
         <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="anonymous" />
         <link
@@ -100,6 +106,7 @@ defmodule DurableDashboard.Layouts do
   attr :breadcrumbs, :list, default: []
   attr :base_path, :string, required: true
   attr :durable, :any, default: nil
+  attr :label, :map, default: nil, doc: "what the sidebar names this dashboard by"
   attr :inbox_count, :integer, default: 0, doc: "pending inputs, for the sidebar badge"
   slot :inner_block, required: true
 
@@ -112,7 +119,7 @@ defmodule DurableDashboard.Layouts do
       Skip to main content
     </a>
     <div class="flex min-h-screen">
-      <Sidebar.sidebar base_path={@base_path} current_path={@current_path} durable={@durable} inbox_count={@inbox_count} />
+      <Sidebar.sidebar base_path={@base_path} current_path={@current_path} durable={@durable} label={@label} inbox_count={@inbox_count} />
       <div class="flex flex-col flex-1 min-w-0">
         <main
           id="main-content"

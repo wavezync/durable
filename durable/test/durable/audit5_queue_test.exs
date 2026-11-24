@@ -76,7 +76,7 @@ defmodule Durable.Audit5QueueTest do
 
       in_step = Process.get(:row_in_step)
       assert in_step.status == :running
-      assert in_step.locked_by == config.node_id
+      assert in_step.locked_by == "#{config.node_id}/inline"
       assert %DateTime{} = in_step.locked_at
       assert is_binary(in_step.lock_token)
 

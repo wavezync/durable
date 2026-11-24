@@ -8,6 +8,7 @@ defmodule Durable.Executor.StepRunner do
   The first step receives the workflow input.
   """
 
+  alias Durable.Clock
   alias Durable.Config
   alias Durable.Context
   alias Durable.Definition.Step
@@ -125,7 +126,7 @@ defmodule Durable.Executor.StepRunner do
   def close_attempts(_config, [], _status, _error), do: []
 
   def close_attempts(%Config{} = config, workflow_ids, status, error) do
-    now = DateTime.utc_now()
+    now = Clock.utc_now()
 
     {_count, closed} =
       Repo.update_all(
@@ -255,7 +256,7 @@ defmodule Durable.Executor.StepRunner do
 
   # From when the attempt started, the best a process that wasn't there can do.
   defp closed_time(rows) do
-    now = DateTime.utc_now()
+    now = Clock.utc_now()
     started = rows |> Enum.map(&(&1.started_at || now)) |> Enum.min(DateTime)
 
     elapsed_us = max(DateTime.diff(now, started, :microsecond), 0)
@@ -319,22 +320,43 @@ defmodule Durable.Executor.StepRunner do
   # failed attempt, so it must not advance the retry counter. Each genuine retry
   # writes exactly one `:failed` row, so `failed + 1` is the next attempt.
   #
-  # A `worker_lost` row is counted apart (`lost`), against @max_lost_workers.
+  # A `worker_lost` row is counted apart (`lost`), against @max_lost_workers,
+  # and only in a row: an attempt that ended any other way since (it snoozed,
+  # waited, failed) starts the count again, so a step that polls for days
+  # isn't failed by three outages over its life.
   defp attempts_used(config, workflow_id, step_name) do
-    # Only failures since the last Durable.retry/2 count: an operator retry
+    # Only attempts since the last Durable.retry/2 count: an operator retry
     # hands the step a fresh max_attempts budget.
-    Repo.one(
-      config,
+    rows =
       from(s in StepExecution,
         join: w in WorkflowExecution,
         on: w.id == s.workflow_id,
-        where:
-          s.workflow_id == ^workflow_id and s.step_name == ^step_name and s.status == :failed,
-        where: is_nil(w.retried_at) or s.inserted_at > w.retried_at,
+        where: s.workflow_id == ^workflow_id and s.step_name == ^step_name,
+        where: is_nil(w.retried_at) or s.inserted_at > w.retried_at
+      )
+
+    since =
+      Repo.one(
+        config,
+        from(s in rows,
+          where:
+            s.status != :failed or fragment("?->>'type' IS DISTINCT FROM 'worker_lost'", s.error),
+          select: max(s.inserted_at)
+        )
+      ) || DateTime.from_unix!(0, :microsecond)
+
+    Repo.one(
+      config,
+      from(s in rows,
+        where: s.status == :failed,
         select: %{
           failed:
             filter(count(s.id), fragment("?->>'type' IS DISTINCT FROM 'worker_lost'", s.error)),
-          lost: filter(count(s.id), fragment("?->>'type' = 'worker_lost'", s.error))
+          lost:
+            filter(
+              count(s.id),
+              fragment("?->>'type' = 'worker_lost'", s.error) and s.inserted_at > ^since
+            )
         }
       )
     )
@@ -442,7 +464,7 @@ defmodule Durable.Executor.StepRunner do
     left =
       deadline &&
         deadline
-        |> DateTime.diff(DateTime.utc_now(), :microsecond)
+        |> DateTime.diff(Clock.utc_now(), :microsecond)
         |> Kernel./(1000)
         |> ceil()
         |> max(0)
@@ -453,7 +475,7 @@ defmodule Durable.Executor.StepRunner do
   end
 
   defp past?(nil), do: false
-  defp past?(deadline), do: DateTime.compare(DateTime.utc_now(), deadline) != :lt
+  defp past?(deadline), do: DateTime.compare(Clock.utc_now(), deadline) != :lt
 
   # Keys Task sets for itself; everything else in the dictionary is copied.
   @task_keys [:"$ancestors", :"$callers", :"$initial_call"]
@@ -640,22 +662,31 @@ defmodule Durable.Executor.StepRunner do
       config: config
     } = ctx
 
-    if attempt < max_attempts and not past?(deadline) do
-      {:ok, _} = fail_step_execution(config, step_exec, error, logs, duration_ms)
+    cond do
+      attempt < max_attempts and not past?(deadline) ->
+        {:ok, _} = fail_step_execution(config, step_exec, error, logs, duration_ms)
 
-      backoff_ms = backoff_ms(step, attempt)
+        backoff_ms = backoff_ms(step, attempt)
 
-      :telemetry.execute(
-        [:durable, :step, :retry],
-        %{backoff_ms: backoff_ms},
-        config
-        |> step_span_meta(step_exec, step, attempt, max_attempts)
-        |> Map.put(:error, error_summary(error))
-      )
+        :telemetry.execute(
+          [:durable, :step, :retry],
+          %{backoff_ms: backoff_ms},
+          config
+          |> step_span_meta(step_exec, step, attempt, max_attempts)
+          |> Map.put(:error, error_summary(error))
+        )
 
-      {:park, backoff_ms}
-    else
-      give_up(error, ctx)
+        {:park, backoff_ms}
+
+      # Out of time, not of attempts: the step's error came back as its time
+      # ran out, before it could be stopped. It fails for the timeout, as one
+      # stopped there does, and the attempt keeps its own error.
+      attempt < max_attempts ->
+        {:ok, _} = fail_step_execution(config, step_exec, error, logs, duration_ms)
+        {:error, timeout_error(step, :run)}
+
+      true ->
+        give_up(error, ctx)
     end
   end
 

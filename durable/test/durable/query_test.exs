@@ -120,6 +120,30 @@ defmodule Durable.QueryTest do
       {:ok, parent_map} = Query.get_execution(parent.id)
       assert parent_map.parent_workflow_id == nil
     end
+
+    # Cancelled while its worker ran a step, a run keeps the worker's lock
+    # until the worker stops: what the dashboard shows as stopping.
+    test "says whether a run keeps the lock of a worker that hasn't stopped", %{repo: repo} do
+      now = DateTime.utc_now()
+
+      running =
+        insert_exec(repo, %{
+          status: :running,
+          started_at: now,
+          locked_by: "node-a",
+          locked_at: now,
+          lock_token: Ecto.UUID.generate()
+        })
+
+      assert %{kept_lock: false, locked_by: "node-a", locked_at: %DateTime{}} =
+               Query.get_execution!(running.id)
+
+      :ok = Durable.cancel(running.id, "wrong account")
+      assert %{status: :cancelled, kept_lock: true} = Query.get_execution!(running.id)
+
+      assert %{kept_lock: false} =
+               Query.get_execution!(insert_exec(repo, %{status: :cancelled}).id)
+    end
   end
 
   defmodule Orders do

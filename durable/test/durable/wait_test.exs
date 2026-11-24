@@ -50,7 +50,7 @@ defmodule Durable.WaitTest do
     test "sets scheduled_at to correct future time" do
       config = Config.get(Durable)
       repo = config.repo
-      before = DateTime.utc_now()
+      before = Durable.Clock.utc_now()
 
       {:ok, execution} = create_and_execute_workflow(SleepTestWorkflow, %{})
 
@@ -302,7 +302,7 @@ defmodule Durable.WaitTest do
     test "with timeout option sets timeout_at" do
       config = Config.get(Durable)
       repo = config.repo
-      before = DateTime.utc_now()
+      before = Durable.Clock.utc_now()
 
       {:ok, execution} = create_and_execute_workflow(EventWaitTestWorkflow, %{})
 
@@ -549,7 +549,7 @@ defmodule Durable.WaitTest do
     test "with timeout option sets timeout_at" do
       config = Config.get(Durable)
       repo = config.repo
-      before = DateTime.utc_now()
+      before = Durable.Clock.utc_now()
 
       {:ok, execution} = create_and_execute_workflow(InputWaitTestWorkflow, %{})
 
@@ -831,7 +831,7 @@ defmodule Durable.WaitTest do
     test "zero timeout sets timeout_at to essentially now" do
       config = Config.get(Durable)
       repo = config.repo
-      before = DateTime.utc_now()
+      before = Durable.Clock.utc_now()
 
       {:ok, execution} = create_and_execute_workflow(ZeroTimeoutEventWorkflow, %{})
 

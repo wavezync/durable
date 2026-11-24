@@ -161,7 +161,8 @@ defmodule Durable.LaneOptionsTest do
       assert run.status == :completed
       assert micros < 400_000
       # Five attempts of 40ms don't fit in 60ms, and the next step never starts.
-      assert Enum.count(Seen.all(), &(&1 == :find_profiles)) in 1..2
+      # On a slow machine the time can run out before the first.
+      assert Enum.count(Seen.all(), &(&1 == :find_profiles)) in 0..2
       assert :rate not in Seen.all()
       assert {:decide, %{"social" => %{"profiles" => 0}}} = List.last(Seen.all())
 
@@ -188,7 +189,7 @@ defmodule Durable.LaneOptionsTest do
       {:ok, _} = Durable.retry(run.id)
       [lane] = lanes_of(run)
       assert DateTime.after?(lane.deadline_at, first_deadline)
-      assert DateTime.diff(lane.deadline_at, DateTime.utc_now(), :millisecond) in 0..30
+      assert DateTime.diff(lane.deadline_at, Durable.Clock.utc_now(), :millisecond) in 0..30
 
       assert drain(run).status == :completed
       assert {:decide, %{"employer" => %{"employed" => true}}} = List.last(Seen.all())

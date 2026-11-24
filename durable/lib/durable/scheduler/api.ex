@@ -26,6 +26,7 @@ defmodule Durable.Scheduler.API do
   alias Crontab.CronExpression
   alias Crontab.CronExpression.Parser, as: CronParser
   alias Crontab.Scheduler
+  alias Durable.Clock
   alias Durable.Config
   alias Durable.Executor
   alias Durable.Query.Opts
@@ -211,6 +212,11 @@ defmodule Durable.Scheduler.API do
   - `:queue` - New queue
   - `:key` - New workflow key (`nil` for none)
   - `:enabled` - Enable/disable
+
+  A new cron or time zone sets the next run from now. A fire that was due
+  before the edit, and that the scheduler hasn't started yet, still fires,
+  with the edited schedule. A schedule turned back on starts from its next
+  time, and doesn't fire the ones it missed.
 
   ## Examples
 
@@ -452,7 +458,7 @@ defmodule Durable.Scheduler.API do
               s.name not in ^declared,
           select: s.name
         ),
-        set: [enabled: false, source: "removed", updated_at: DateTime.utc_now()]
+        set: [enabled: false, source: "removed", updated_at: Clock.utc_now()]
       )
 
     report_removed(config, names)
@@ -478,7 +484,7 @@ defmodule Durable.Scheduler.API do
 
   @doc false
   def get_due_schedules(config) do
-    now = DateTime.utc_now()
+    now = Clock.utc_now()
 
     Repo.all(
       config,
@@ -489,10 +495,12 @@ defmodule Durable.Scheduler.API do
   @doc false
   # Takes this fire for the calling node. One conditional UPDATE: of the nodes
   # that saw the schedule due, Postgres lets exactly one move its next_run_at,
-  # and the others match no row. A false return means another node has it.
+  # and the others match no row. A false return means another node has it, or
+  # an operator changed the schedule since it was read: an edit keeps the fire
+  # that was due (`due_or/2`), for the next check to fire as edited.
   @spec claim_fire(ScheduledWorkflow.t(), Config.t()) :: boolean()
   def claim_fire(%ScheduledWorkflow{} = schedule, %Config{} = config) do
-    now = DateTime.utc_now()
+    now = Clock.utc_now()
 
     {:ok, next_run} =
       compute_next_run(schedule.cron_expression, schedule.timezone, schedule.next_run_at)
@@ -500,9 +508,7 @@ defmodule Durable.Scheduler.API do
     {count, _} =
       Repo.update_all(
         config,
-        from(s in ScheduledWorkflow,
-          where: s.id == ^schedule.id and s.next_run_at == ^schedule.next_run_at and s.enabled
-        ),
+        from(s in as_read(schedule)),
         set: [
           last_run_at: now,
           next_run_at: next_run,
@@ -514,6 +520,14 @@ defmodule Durable.Scheduler.API do
       )
 
     count == 1
+  end
+
+  # The schedule as a tick read it, on and unchanged since.
+  defp as_read(schedule) do
+    from(s in ScheduledWorkflow,
+      where: s.id == ^schedule.id and s.enabled,
+      where: s.next_run_at == ^schedule.next_run_at and s.updated_at == ^schedule.updated_at
+    )
   end
 
   @auto_disable_after 5
@@ -528,15 +542,14 @@ defmodule Durable.Scheduler.API do
   @spec record_failure(ScheduledWorkflow.t(), String.t(), Config.t()) ::
           ScheduledWorkflow.t() | nil
   def record_failure(%ScheduledWorkflow{} = schedule, message, %Config{} = config) do
-    now = DateTime.utc_now()
+    now = Clock.utc_now()
     error = String.slice(to_string(message), 0, 1024)
     next_run = next_run_after_failure(schedule)
 
     {_count, written} =
       Repo.update_all(
         config,
-        from(s in ScheduledWorkflow,
-          where: s.id == ^schedule.id and s.next_run_at == ^schedule.next_run_at and s.enabled,
+        from(s in as_read(schedule),
           select: s,
           update: [
             set: [
@@ -577,7 +590,7 @@ defmodule Durable.Scheduler.API do
     _error -> retry_in_five_minutes()
   end
 
-  defp retry_in_five_minutes, do: DateTime.add(DateTime.utc_now(), 300, :second)
+  defp retry_in_five_minutes, do: DateTime.add(Clock.utc_now(), 300, :second)
 
   # ============================================================================
   # Private Functions
@@ -630,7 +643,7 @@ defmodule Durable.Scheduler.API do
     with {:ok, cron} <- CronParser.parse(cron_expression),
          {:ok, now} <- get_local_time(timezone),
          {:ok, from} <- after_fired(now, fired, timezone) do
-      next_fire(cron, from, timezone, DateTime.utc_now())
+      next_fire(cron, from, timezone, Clock.utc_now())
     end
   end
 
@@ -754,11 +767,11 @@ defmodule Durable.Scheduler.API do
     end
   end
 
-  defp get_local_time("UTC"), do: {:ok, NaiveDateTime.utc_now()}
-  defp get_local_time("Etc/UTC"), do: {:ok, NaiveDateTime.utc_now()}
+  defp get_local_time("UTC"), do: {:ok, DateTime.to_naive(Clock.utc_now())}
+  defp get_local_time("Etc/UTC"), do: {:ok, DateTime.to_naive(Clock.utc_now())}
 
   defp get_local_time(timezone) do
-    case DateTime.shift_zone(DateTime.utc_now(), timezone) do
+    case DateTime.shift_zone(Clock.utc_now(), timezone) do
       {:ok, dt} -> {:ok, DateTime.to_naive(dt)}
       {:error, reason} -> {:error, {:timezone_error, timezone, reason}}
     end
@@ -828,13 +841,25 @@ defmodule Durable.Scheduler.API do
       cron = Keyword.get(changes, :cron_expression, schedule.cron_expression)
       timezone = Keyword.get(changes, :timezone, schedule.timezone)
 
+      # Turned on, it doesn't fire the times it missed while off.
+      kept = if turned_on?, do: %{schedule | enabled: false}, else: schedule
+
       with {:ok, next_run} <- compute_next_run(cron, timezone) do
-        {:ok, %{cron_expression: cron, timezone: timezone, next_run_at: next_run}}
+        {:ok, %{cron_expression: cron, timezone: timezone, next_run_at: due_or(kept, next_run)}}
       end
     else
       {:ok, %{}}
     end
   end
+
+  # A new time for a schedule that's on doesn't drop the fire it has due now,
+  # which the next check hasn't come to yet. That fire goes with what the edit
+  # set, and the one after it by the new time.
+  defp due_or(%{enabled: true, next_run_at: %DateTime{} = due}, next_run) do
+    if DateTime.after?(due, Clock.utc_now()), do: next_run, else: due
+  end
+
+  defp due_or(_schedule, next_run), do: next_run
 
   defp updated_input(changes) do
     case Keyword.fetch(changes, :input) do
@@ -915,7 +940,7 @@ defmodule Durable.Scheduler.API do
         Map.put(attrs, :enabled, true)
 
       existing.cron_expression != attrs.cron_expression or existing.timezone != attrs.timezone ->
-        attrs
+        %{attrs | next_run_at: due_or(existing, attrs.next_run_at)}
 
       true ->
         Map.delete(attrs, :next_run_at)

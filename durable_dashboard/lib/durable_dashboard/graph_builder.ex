@@ -40,7 +40,7 @@ defmodule DurableDashboard.GraphBuilder do
     by_name = Map.new(steps, &{to_string(&1.name), &1})
 
     %{
-      nodes: nodes |> Enum.reverse() |> Enum.map(&put_max_attempts(&1, by_name)),
+      nodes: nodes |> Enum.reverse() |> Enum.map(&put_step_options(&1, by_name)),
       edges: Enum.reverse(edges)
     }
   end
@@ -125,10 +125,12 @@ defmodule DurableDashboard.GraphBuilder do
           name: to_string(lane),
           tails: tails || [],
           nodes: Enum.map(lane_nodes, & &1.id),
-          optional: lane in (step.opts[:optional] || [])
+          optional: lane in (step.opts[:optional] || []),
+          default: Map.has_key?(step.opts[:defaults] || %{}, lane),
+          timeout_ms: (step.opts[:timeouts] || %{})[lane]
         }
 
-        {lane_nodes ++ nodes, lane_edges ++ edges, lanes ++ [lane]}
+        {with_lane(lane_nodes, lane) ++ nodes, lane_edges ++ edges, lanes ++ [lane]}
       end)
 
     join = %{
@@ -150,18 +152,41 @@ defmodule DurableDashboard.GraphBuilder do
     {[join | nodes], into_join ++ edges, [join_id]}
   end
 
+  # A lane of one step is drawn as that step, which carries the lane's options.
+  # A longer lane is drawn as a frame around its steps (`graph-layout.ts`).
+  defp with_lane([only], lane) when lane.optional or lane.timeout_ms != nil,
+    do: [put_in(only, [:data, :lane], Map.take(lane, [:name, :optional, :default, :timeout_ms]))]
+
+  defp with_lane(lane_nodes, _lane), do: lane_nodes
+
   defp into_arm(%{source: id} = edge, id, arm),
     do: Map.merge(edge, %{label: arm, className: "flow-edge-conditional"})
 
   defp into_arm(edge, _id, _arm), do: edge
 
-  # Retry budget from the step's definition, for "attempt 2 of 3".
-  defp put_max_attempts(%{data: %{name: name}} = node, by_name) do
+  # What the step's definition says about it: its retry budget, for "attempt
+  # 2 of 3", and the time limit, undo and queue written on it.
+  defp put_step_options(%{data: %{name: name}} = node, by_name) do
     case by_name[name] do
-      %Step{opts: %{retry: %{max_attempts: max}}} -> put_in(node, [:data, :max_attempts], max)
-      %Step{type: :step} -> put_in(node, [:data, :max_attempts], 1)
-      _ -> node
+      %Step{type: :step, opts: opts} ->
+        update_in(node.data, &Map.merge(&1, step_options(opts)))
+
+      %Step{opts: %{retry: %{max_attempts: max}}} ->
+        put_in(node, [:data, :max_attempts], max)
+
+      _ ->
+        node
     end
+  end
+
+  defp step_options(opts) do
+    %{
+      max_attempts: get_in(opts, [:retry, :max_attempts]) || 1,
+      timeout_ms: opts[:timeout],
+      compensate: opts[:compensate] && to_string(opts[:compensate]),
+      queue: opts[:queue] && to_string(opts[:queue])
+    }
+    |> Map.reject(fn {_key, value} -> is_nil(value) end)
   end
 
   @doc "The definition a run was started from, `{:ok, workflow}` or `:error` if it isn't loaded here."
@@ -321,6 +346,8 @@ defmodule DurableDashboard.GraphBuilder do
     |> put_in([:data, :status], status)
     |> put_in([:data, :done], Enum.count(lane_statuses, &(&1 == "completed")))
     |> put_in([:data, :failed], Enum.count(lane_statuses, &(&1 == "failed")))
+    # Each lane's own, for the frame drawn around a lane of several steps.
+    |> put_in([:data, :lanes], Enum.zip_with(lanes, lane_statuses, &Map.put(&1, :status, &2)))
   end
 
   # A named branch's gateway is a step: its status is its own, and the arm it

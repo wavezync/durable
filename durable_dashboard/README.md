@@ -88,6 +88,8 @@ its links follow. `mount: "/"` works too.
   auth or other concerns (default: `[]`)
 - `:resolver` — a `DurableDashboard.Access` module that decides who can change
   things. Without one the dashboard is read-only
+- `:label` — what the sidebar says under "Durable", e.g. `"Production"`
+  (default: your repo's database name)
 - `:as` — the name of this mount's `live_session` (default:
   `:durable_dashboard`). Only needed to mount the dashboard more than once
 

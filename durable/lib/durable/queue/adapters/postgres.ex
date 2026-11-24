@@ -9,6 +9,7 @@ defmodule Durable.Queue.Adapters.Postgres do
 
   @behaviour Durable.Queue.Adapter
 
+  alias Durable.Clock
   alias Durable.Config
   alias Durable.Executor
   alias Durable.Executor.StepRunner
@@ -23,6 +24,10 @@ defmodule Durable.Queue.Adapters.Postgres do
   # has to be read as UTC too, whatever its TimeZone setting.
   @utc_now "(NOW() AT TIME ZONE 'UTC')"
   @utc_clock "(clock_timestamp() AT TIME ZONE 'UTC')"
+
+  # What a run put back on its queue is set to, and what is read of it.
+  @release [status: :pending, locked_by: nil, locked_at: nil, lock_token: nil]
+  @released [:id, :queue, :current_step, :retried_at, :inserted_at, :parent_workflow_id]
 
   @impl true
   def fetch_jobs(%Config{} = config, queue, limit, node_id)
@@ -68,12 +73,27 @@ defmodule Durable.Queue.Adapters.Postgres do
         AND NOT EXISTS (
           SELECT 1 FROM #{prefix}.queues q WHERE q.name = $1 AND q.paused_at IS NOT NULL
         )
-        -- A run_again run waits until the run it's behind has ended.
+        -- A run_again run waits until the run it's behind has ended. A run
+        -- never waits behind itself.
         AND NOT EXISTS (
           SELECT 1 FROM #{prefix}.workflow_executions h
-          WHERE h.id = w.runs_after_id
+          WHERE h.id = w.runs_after_id AND h.id <> w.id
             AND h.status IN ('pending', 'running', 'waiting', 'compensating')
         )
+        -- Nor does any run of a key while another run of it keeps the lock of
+        -- a worker that may still be running its step: stopped mid-step
+        -- (`WorkflowExecution.keeping_worker/1`), or queued to be undone
+        -- since. Until that worker lets go, or the lock is stale.
+        -- Read through workflow_executions_kept_lock_index, which holds only
+        -- such runs: none of the key's history.
+        AND (w.key IS NULL OR NOT EXISTS (
+          SELECT 1 FROM #{prefix}.workflow_executions k
+          WHERE k.lock_token IS NULL AND k.locked_by IS NOT NULL
+            AND k.workflow_module = w.workflow_module AND k.workflow_name = w.workflow_name
+            AND k.key = w.key AND k.id <> w.id
+            AND k.status IN ('pending', 'cancelled')
+            AND k.locked_at >= #{@utc_now} - INTERVAL '#{config.stale_lock_timeout} seconds'
+        ))
       ORDER BY w.priority DESC, COALESCE(w.scheduled_at, w.inserted_at) ASC, w.inserted_at ASC
       LIMIT $2
       FOR UPDATE SKIP LOCKED
@@ -148,11 +168,25 @@ defmodule Durable.Queue.Adapters.Postgres do
 
   @impl true
   def nack(%Config{} = config, job_id, reason) when is_binary(job_id) do
-    do_nack(config, job_id, reason, nil)
+    nack_with_retry(config, job_id, reason, nil, 1)
   end
 
   def nack(%Config{} = config, job_id, reason, lock_token) when is_binary(job_id) do
+    nack_with_retry(config, job_id, reason, lock_token, 1)
+  end
+
+  # As an ack is: a pool busy for a moment would leave the run locked, for the
+  # stale sweep to retry a run that failed. Each try is one conditional write.
+  defp nack_with_retry(config, job_id, reason, lock_token, attempt) do
     do_nack(config, job_id, reason, lock_token)
+  rescue
+    error ->
+      if attempt < 3 and Repo.transient?(error) do
+        Process.sleep(:rand.uniform(50) * attempt)
+        nack_with_retry(config, job_id, reason, lock_token, attempt + 1)
+      else
+        reraise error, __STACKTRACE__
+      end
   end
 
   defp do_nack(config, job_id, reason, lock_token) do
@@ -160,48 +194,58 @@ defmodule Durable.Queue.Adapters.Postgres do
       nil ->
         {:error, :not_found}
 
+      # Cancelled as it ran, the run kept this worker's lock.
+      %{status: status} when status not in [:running, :compensating] ->
+        let_go(config, job_id)
+
       execution ->
         # Only a run still :running or :compensating needs failing here — the
         # worker crashed before the executor could record an outcome. Anything
         # else was settled by the executor (failed, compensated, cancelled,
         # waiting) and must not be overwritten.
-        if fenced?(execution, lock_token) or execution.status not in [:running, :compensating] do
-          :ok
-        else
-          fail_unrecorded(config, execution, Executor.storable_error(reason), lock_token)
-        end
+        if fenced?(execution, lock_token),
+          do: :ok,
+          else: fail_unrecorded(config, execution, Executor.storable_error(reason), lock_token)
     end
   end
 
-  # One conditional UPDATE: a cancel or a takeover that lands after the row was
-  # read wins, and this writes nothing.
+  # A conditional UPDATE: a cancel or a takeover that lands after the row was
+  # read wins, and this writes nothing. The run, its open attempt and the
+  # activity are written in one transaction: nothing sweeps a failed run, so an
+  # attempt left `running` on one would stay so.
   defp fail_unrecorded(config, execution, error, lock_token) do
-    now = DateTime.utc_now()
+    now = Clock.utc_now()
 
-    {_count, failed} =
-      fail_runs(
-        config,
-        from(w in still_claimed(execution.id, lock_token),
-          where: w.status in [:running, :compensating]
-        ),
-        error,
-        completed_at: now,
-        updated_at: now,
-        # On a failed run this is when to roll it back (the timeout sweep),
-        # and what a retry's backoff or a delayed start left there isn't.
-        scheduled_at: nil,
-        locked_by: nil,
-        locked_at: nil,
-        lock_token: nil
-      )
+    {:ok, failed} =
+      Repo.transaction(config, fn ->
+        {_count, failed} =
+          fail_runs(
+            config,
+            from(w in still_claimed(execution.id, lock_token),
+              where: w.status in [:running, :compensating]
+            ),
+            error,
+            completed_at: now,
+            updated_at: now,
+            # On a failed run this is when to roll it back (the timeout sweep),
+            # and what a retry's backoff or a delayed start left there isn't.
+            scheduled_at: nil,
+            locked_by: nil,
+            locked_at: nil,
+            lock_token: nil
+          )
 
-    for run <- failed do
-      # What raised has reported this attempt's end already, as an :exception.
-      StepRunner.close_attempts(config, [run.id], :failed, error)
-      if execution.status == :compensating, do: rollback_interrupted(config, run, error)
-      # The executor never got to tell a parent waiting on this run.
-      Executor.maybe_notify_parent(config, run, :failed, run.error)
-    end
+        # What raised has reported this attempt's end already, as an :exception.
+        StepRunner.close_attempts(config, Enum.map(failed, & &1.id), :failed, error)
+
+        if execution.status == :compensating,
+          do: Enum.each(failed, &rollback_interrupted(config, &1, error))
+
+        failed
+      end)
+
+    # The executor never got to tell a parent waiting on this run.
+    for run <- failed, do: Executor.maybe_notify_parent(config, run, :failed, run.error)
 
     :ok
   end
@@ -283,7 +327,7 @@ defmodule Durable.Queue.Adapters.Postgres do
               locked_by: nil,
               locked_at: nil,
               lock_token: nil,
-              updated_at: DateTime.utc_now()
+              updated_at: Clock.utc_now()
             ]
           )
 
@@ -297,16 +341,24 @@ defmodule Durable.Queue.Adapters.Postgres do
   defp fenced?(_execution, nil), do: false
   defp fenced?(%WorkflowExecution{lock_token: current}, token), do: current != token
 
+  # A lock is stamped by the database's clock (the claim, the heartbeat), so
+  # its age is the database's to tell: a node whose clock read ahead took
+  # live locks, and the step ran on two nodes at once. clock_timestamp(), as
+  # in wake_sleeping_workflows/2: in the test sandbox's one transaction NOW()
+  # never moves, and a lock it stamped would never age.
   @impl true
   def recover_stale_locks(%Config{} = config, timeout_seconds) when timeout_seconds > 0 do
-    cutoff = DateTime.add(DateTime.utc_now(), -timeout_seconds, :second)
-
     query =
       from(w in WorkflowExecution,
         where: w.status == :running,
         where: not is_nil(w.locked_by),
-        where: w.locked_at < ^cutoff,
-        select: w.id
+        where:
+          w.locked_at <
+            fragment(
+              "(clock_timestamp() AT TIME ZONE 'UTC') - make_interval(secs => ?)",
+              ^timeout_seconds
+            ),
+        select: struct(w, ^@released)
       )
 
     # The step may be fine: an outage or a frozen VM takes every lock at once.
@@ -317,9 +369,96 @@ defmodule Durable.Queue.Adapters.Postgres do
       message: "the worker running this attempt stopped responding"
     }
 
-    release_runs(config, query, :failed, error, &StepRunner.retry_after_lost(config, &1))
+    with {:ok, runs} <-
+           release_runs(config, query, :failed, error,
+             retry: &StepRunner.retry_after_lost(config, &1),
+             count_losses: true
+           ) do
+      let_go_of_lost(config, timeout_seconds)
+      {:ok, length(runs)}
+    end
   rescue
     e -> {:error, Exception.message(e)}
+  end
+
+  # A run lost between two steps (its node died saving a step's result, say)
+  # has no attempt to count. Each loss counts at the step it's at, as a worker
+  # that outlives its task counts one (`Executor.lost_too_often?/2`), and the
+  # third in a row fails the run, so one that takes its node down every time
+  # can't go round for ever. In the transaction that puts it back, before a
+  # poller can claim it.
+  defp fail_looping(config, runs, closed) do
+    in_a_step = MapSet.new(closed, & &1.workflow_id)
+
+    case for(r <- runs, r.id not in in_a_step, Executor.lost_too_often?(config, r), do: r.id) do
+      [] ->
+        []
+
+      ids ->
+        now = Clock.utc_now()
+
+        error = %{
+          type: "worker_lost",
+          message: "the run lost its worker three times in a row at the same step"
+        }
+
+        query = from(w in WorkflowExecution, where: w.id in ^ids)
+
+        {_count, failed} =
+          fail_runs(config, query, error, completed_at: now, updated_at: now, scheduled_at: nil)
+
+        failed
+    end
+  end
+
+  # A lock a cancel left a worker that had the run, with no token
+  # (`WorkflowExecution.keeping_worker/1`), on the run cancelled or since put
+  # back on its queue to be undone or retried.
+  defp kept_lock(query) do
+    from(w in query,
+      where: w.status in [:pending, :cancelled],
+      where: is_nil(w.lock_token) and not is_nil(w.locked_by)
+    )
+  end
+
+  @doc false
+  # A worker that stopped (or a caller running it inline) lets go of a run that
+  # was cancelled while it ran, so the run's undo, and the next run of its key,
+  # can be claimed now.
+  @impl true
+  def let_go(%Config{} = config, job_id) do
+    {_count, runs} =
+      Repo.update_all(
+        config,
+        from(w in kept_lock(WorkflowExecution), where: w.id == ^job_id, select: w),
+        set: [locked_by: nil, locked_at: nil]
+      )
+
+    for run <- runs, do: Durable.PubSub.wake(config, run)
+    :ok
+  rescue
+    _error -> :ok
+  end
+
+  # A lock a cancel kept for a worker that is lost: let go of with the rest of
+  # what it held.
+  defp let_go_of_lost(config, timeout_seconds) do
+    {_count, runs} =
+      Repo.update_all(
+        config,
+        from(w in kept_lock(WorkflowExecution),
+          where:
+            w.locked_at <
+              fragment(
+                "(clock_timestamp() AT TIME ZONE 'UTC') - make_interval(secs => ?)",
+                ^timeout_seconds
+              ),
+          select: w
+        ),
+        set: [locked_by: nil, locked_at: nil]
+      )
+
+    for run <- runs, do: Durable.PubSub.wake(config, run)
   end
 
   @impl true
@@ -327,7 +466,7 @@ defmodule Durable.Queue.Adapters.Postgres do
     running =
       from(w in WorkflowExecution,
         where: w.status == :running and w.locked_by == ^node_id,
-        select: w.id
+        select: struct(w, ^@released)
       )
 
     # A run being rolled back goes back to be rolled back, not to run: with
@@ -336,7 +475,7 @@ defmodule Durable.Queue.Adapters.Postgres do
     compensating =
       from(w in WorkflowExecution,
         where: w.status == :compensating and w.locked_by == ^node_id,
-        select: w.id,
+        select: struct(w, ^@released),
         update: [
           set: [
             engine_state:
@@ -352,36 +491,76 @@ defmodule Durable.Queue.Adapters.Postgres do
     # A deploy isn't the step's fault: :snoozed doesn't use an attempt.
     stopped = %{type: "node_stopped", message: "the node stopped before this attempt finished"}
 
+    # The locks its workers kept, for runs cancelled while their steps ran.
+    to_undo = from(w in kept_lock(WorkflowExecution), where: w.locked_by == ^node_id)
+
     with {:ok, runs} <- release_runs(config, running, :snoozed, stopped),
-         {:ok, rollbacks} <- release_runs(config, compensating, :snoozed, stopped),
-         do: {:ok, runs + rollbacks}
+         {:ok, rollbacks} <- release_runs(config, compensating, :snoozed, stopped) do
+      Repo.update_all(config, to_undo, set: [locked_by: nil, locked_at: nil])
+      {:ok, length(runs) + length(rollbacks)}
+    end
   rescue
     e -> {:error, Exception.message(e)}
   end
 
   # Back to :pending with the lock cleared, and the attempts those runs had
   # in flight closed with them. Clearing the fencing token means the next claim
-  # stamps a fresh one, and the old worker's can never match again.
-  defp release_runs(config, query, step_status, error, retry \\ fn _row -> nil end) do
+  # stamps a fresh one, and the old worker's can never match again. The runs
+  # it handled. `count_losses:` fails the runs that are lost too often.
+  defp release_runs(config, query, step_status, error, opts \\ []) do
     result =
       Repo.transaction(config, fn ->
-        {count, ids} =
-          Repo.update_all(config, query,
-            set: [status: :pending, locked_by: nil, locked_at: nil, lock_token: nil]
-          )
+        {_count, runs} =
+          Repo.update_all(config, where(query, [w], is_nil(w.runs_after_id)), set: @release)
 
-        {count, StepRunner.close_attempts(config, ids, step_status, error)}
+        closed = StepRunner.close_attempts(config, Enum.map(runs, & &1.id), step_status, error)
+        failed = if opts[:count_losses], do: fail_looping(config, runs, closed), else: []
+        {runs, closed, failed}
       end)
 
-    with {:ok, {count, closed}} <- result do
-      StepRunner.report_closed(config, closed, step_status, error, retry)
-      {:ok, count}
+    with {:ok, {runs, closed, failed}} <- result do
+      StepRunner.report_closed(
+        config,
+        closed,
+        step_status,
+        error,
+        opts[:retry] || fn _ -> nil end
+      )
+
+      for run <- failed, do: Executor.maybe_notify_parent(config, run, :failed, run.error)
+      {:ok, runs ++ release_waiters(config, query)}
     end
+  end
+
+  # A run_again run claimed before it took its key (it has no attempt yet)
+  # goes back to wait for it. One run waits per key: if a newer start waits
+  # there already, that one has the newer input and this one is cancelled, as
+  # `Executor.wait_behind/3` does. One by one, so a run that can't go back
+  # holds up none of the others.
+  defp release_waiters(config, query) do
+    waiting = query |> exclude(:update) |> where([w], not is_nil(w.runs_after_id))
+
+    for run <- Repo.all(config, waiting),
+        released_waiter?(config, where(query, [w], w.id == ^run.id), run.id),
+        do: run
+  end
+
+  defp released_waiter?(config, query, id) do
+    {count, _} = Repo.update_all(config, query, set: @release)
+    count == 1
+  rescue
+    error in Postgrex.Error ->
+      if error.postgres.code != :unique_violation, do: reraise(error, __STACKTRACE__)
+
+      _ =
+        Executor.cancel_workflow(id, "a newer start is waiting for the key", durable: config.name)
+
+      false
   end
 
   @impl true
   def recover_zombie_workflows(%Config{} = config, timeout_seconds) when timeout_seconds > 0 do
-    cutoff = DateTime.add(DateTime.utc_now(), -timeout_seconds, :second)
+    cutoff = DateTime.add(Clock.utc_now(), -timeout_seconds, :second)
 
     # Two zombie classes:
     #
@@ -434,7 +613,7 @@ defmodule Durable.Queue.Adapters.Postgres do
     if zombie_ids == [] do
       {:ok, 0}
     else
-      now = DateTime.utc_now()
+      now = Clock.utc_now()
 
       zombie_error = %{
         "type" => "zombie_detected",
@@ -563,9 +742,9 @@ defmodule Durable.Queue.Adapters.Postgres do
     do_heartbeat(config, job_id, lock_token)
   end
 
+  # Stamped by the database's clock, as the claim stamps it and the stale
+  # sweep reads it.
   defp do_heartbeat(config, job_id, lock_token) do
-    now = DateTime.utc_now()
-
     base =
       from(w in WorkflowExecution,
         where: w.id == ^job_id,
@@ -575,7 +754,12 @@ defmodule Durable.Queue.Adapters.Postgres do
     guarded =
       if lock_token, do: from(w in base, where: w.lock_token == ^lock_token), else: base
 
-    {count, _} = Repo.update_all(config, guarded, set: [locked_at: now])
+    {count, _} =
+      Repo.update_all(
+        config,
+        update(guarded, set: [locked_at: fragment("(clock_timestamp() AT TIME ZONE 'UTC')")]),
+        []
+      )
 
     cond do
       count == 1 -> :ok
@@ -636,7 +820,7 @@ defmodule Durable.Queue.Adapters.Postgres do
       from(w in base_query,
         where: w.status == :pending,
         where: not is_nil(w.scheduled_at),
-        where: w.scheduled_at > ^DateTime.utc_now()
+        where: w.scheduled_at > ^Clock.utc_now()
       )
 
     scheduled = Repo.aggregate(config, scheduled_query, :count)
@@ -684,7 +868,11 @@ defmodule Durable.Queue.Adapters.Postgres do
 
   defp decode_uuid(uuid) when is_binary(uuid), do: uuid
 
+  # Postgrex has decoded the jsonb already. A bare value is one 2.0 wrote where
+  # a map goes, read as the schema reads it (`JsonMap.load/1`): raising here,
+  # after the claim had committed, left every run it took with it locked and
+  # without a worker until `stale_lock_timeout`, and then took them again.
   defp decode_json(nil), do: %{}
   defp decode_json(value) when is_map(value), do: value
-  defp decode_json(value) when is_binary(value), do: Jason.decode!(value)
+  defp decode_json(value), do: %{"value" => value}
 end

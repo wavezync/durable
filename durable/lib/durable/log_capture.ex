@@ -52,6 +52,7 @@ defmodule Durable.LogCapture do
   top run's id) and `"span_id"` (from the attempt's row id).
   """
 
+  alias Durable.Clock
   alias Durable.LogCapture.IOServer
 
   require Logger
@@ -172,7 +173,7 @@ defmodule Durable.LogCapture do
   Called when processing IO log messages from the IO server.
   """
   @spec add_io_log(String.t(), DateTime.t()) :: :ok
-  def add_io_log(output, logged_at \\ DateTime.utc_now())
+  def add_io_log(output, logged_at \\ Clock.utc_now())
 
   def add_io_log(output, logged_at) when is_binary(output) and byte_size(output) > 0 do
     metadata = Map.merge(process_metadata(), %{source: :io, durable_logged_at: logged_at})
@@ -369,7 +370,7 @@ defmodule Durable.LogCapture do
 
     %{
       timestamp:
-        metadata |> Map.get(:durable_logged_at, DateTime.utc_now()) |> DateTime.to_iso8601(),
+        metadata |> Map.get(:durable_logged_at, Clock.utc_now()) |> DateTime.to_iso8601(),
       level: Atom.to_string(level),
       severity_number: Map.get(@severity, level),
       message: truncate_message(message, max_message_length),

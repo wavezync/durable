@@ -23,6 +23,7 @@ defmodule Mix.Tasks.Durable.Inspect do
 
   use Mix.Task
 
+  alias Durable.Clock
   alias Durable.Mix.Helpers
   alias Durable.Repo
   alias Durable.Storage.Schemas.{PendingEvent, PendingInput, StepExecution, WorkflowExecution}
@@ -417,7 +418,7 @@ defmodule Mix.Tasks.Durable.Inspect do
   defp maybe_stale_lock(findings, %{locked_by: nil}), do: findings
 
   defp maybe_stale_lock(findings, %{locked_at: locked_at}) do
-    age = DateTime.diff(DateTime.utc_now(), locked_at, :second)
+    age = DateTime.diff(Clock.utc_now(), locked_at, :second)
 
     if age > 600 do
       ["Lock is #{Helpers.format_seconds(age)} old — possible stale lock." | findings]

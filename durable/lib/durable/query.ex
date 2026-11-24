@@ -15,6 +15,7 @@ defmodule Durable.Query do
 
   import Ecto.Query
 
+  alias Durable.Clock
   alias Durable.Config
   alias Durable.Query.Opts
   alias Durable.Repo
@@ -287,7 +288,7 @@ defmodule Durable.Query do
 
   defp key_activity(config, rows) do
     keys = rows |> Enum.map(& &1.key) |> Enum.uniq()
-    since = DateTime.add(DateTime.utc_now(), -86_400, :second)
+    since = DateTime.add(Clock.utc_now(), -86_400, :second)
 
     Repo.all(
       config,
@@ -841,6 +842,12 @@ defmodule Durable.Query do
 
   defp escape_like(text), do: String.replace(text, ["\\", "%", "_"], &("\\" <> &1))
 
+  defp kept_lock?(%{locked_by: by, lock_token: nil, status: status})
+       when by != nil and status in [:pending, :cancelled],
+       do: true
+
+  defp kept_lock?(_execution), do: false
+
   defp execution_to_map(execution, include_steps, include_logs) do
     base = %{
       id: execution.id,
@@ -862,6 +869,11 @@ defmodule Durable.Query do
       runs_after_id: execution.runs_after_id,
       tags: execution.tags,
       locked_by: execution.locked_by,
+      locked_at: execution.locked_at,
+      # A cancelled run whose worker hadn't stopped its step yet, or a run put
+      # back since: the worker's lock, without the claim's token. Nothing else
+      # of its key runs until it's let go or goes stale (ARCHITECTURE rule 30).
+      kept_lock: kept_lock?(execution),
       scheduled_at: execution.scheduled_at,
       started_at: execution.started_at,
       completed_at: execution.completed_at,

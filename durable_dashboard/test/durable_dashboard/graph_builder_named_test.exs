@@ -199,6 +199,15 @@ defmodule DurableDashboard.GraphBuilderNamedTest do
              ]) == %{status: "completed", done: 3}
     end
 
+    test "a join's lanes each carry how they did, for the frames around them", %{graph: graph} do
+      steps = [ran("fulfil__points"), ran("fulfil__ship__pack", :running)]
+      %{nodes: nodes} = GraphBuilder.overlay_status(graph, steps, [])
+      lanes = Enum.find(nodes, &(&1.id == "fulfil__join")).data.lanes
+
+      assert Map.new(lanes, &{&1.name, &1.status}) ==
+               %{"points" => "completed", "ship" => "running", "papers" => "pending"}
+    end
+
     test "a join is running while a lane is, and failed when one failed", %{graph: graph} do
       status = fn steps ->
         %{nodes: nodes} = GraphBuilder.overlay_status(graph, steps, [])
@@ -295,6 +304,40 @@ defmodule DurableDashboard.GraphBuilderNamedTest do
       graph = GraphBuilder.overlay_status(graph, rows, run_status: :failed)
 
       assert %{status: "failed", done: 1, failed: 1} = node(graph, "lookups__join").data
+    end
+  end
+
+  describe "what a workflow's definition says about its steps and lanes" do
+    setup do
+      {:ok, definition} = NamedBlocksWorkflow.__workflow_definition__("loan")
+      %{loan: GraphBuilder.build(definition)}
+    end
+
+    test "a step carries its retry budget, time limit, undo and queue", %{loan: graph} do
+      assert %{max_attempts: 1, timeout_ms: 30_000, compensate: "withdraw"} =
+               node(graph, "open").data
+
+      assert node(graph, "lookups__credit").data.max_attempts == 3
+      assert node(graph, "lookups__social__rate").data.queue == "scoring"
+      refute Map.has_key?(node(graph, "lookups__social__find").data, :queue)
+    end
+
+    test "a lane of one step carries the lane's options on that step", %{loan: graph} do
+      assert node(graph, "lookups__device").data.lane ==
+               %{name: "device", optional: true, default: true, timeout_ms: nil}
+
+      refute Map.has_key?(node(graph, "lookups__credit").data, :lane)
+    end
+
+    test "a lane of several steps is listed on its join, options and all", %{loan: graph} do
+      %{data: %{lanes: lanes}} = node(graph, "lookups__join")
+      social = Enum.find(lanes, &(&1.name == "social"))
+
+      assert %{optional: true, default: true, timeout_ms: 5_000} = social
+      assert Enum.sort(social.nodes) == ["lookups__social__find", "lookups__social__rate"]
+
+      assert %{optional: false, default: false, timeout_ms: nil} =
+               Enum.find(lanes, &(&1.name == "credit"))
     end
   end
 end

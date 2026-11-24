@@ -198,7 +198,7 @@ defmodule DurableDashboard.Live.SchedulesLive do
       assign(assigns,
         can_operate?: Access.allowed?(assigns.access, :operator),
         can_toggle?: Access.allowed?(assigns.access, :admin),
-        now: DateTime.utc_now()
+        now: DurableDashboard.Clock.utc_now()
       )
 
     ~H"""
@@ -206,7 +206,7 @@ defmodule DurableDashboard.Live.SchedulesLive do
       base_path={@base_path}
       current_path={@current_path}
       breadcrumbs={@breadcrumbs}
-      durable={@durable}
+      durable={@durable} label={@dashboard_label}
       inbox_count={@inbox_count}
     >
       <.index :if={is_nil(@name)} {assigns} />
@@ -333,7 +333,7 @@ defmodule DurableDashboard.Live.SchedulesLive do
     """
 
   defp next_run(assigns) do
-    if DateTime.compare(assigns.schedule.next_run_at, DateTime.utc_now()) == :gt do
+    if DateTime.compare(assigns.schedule.next_run_at, DurableDashboard.Clock.utc_now()) == :gt do
       ~H"""
       <Core.relative_time at={@schedule.next_run_at} />
       """

@@ -17,6 +17,7 @@ defmodule Durable.Pruner do
 
   import Ecto.Query
 
+  alias Durable.Clock
   alias Durable.Config
   alias Durable.Repo
   alias Durable.Storage.Schemas.WorkflowExecution
@@ -41,7 +42,7 @@ defmodule Durable.Pruner do
   def prune(%Config{prune: policy} = config) do
     deleted =
       for {group, statuses} <- @groups, keep_ms = policy[group], into: %{} do
-        cutoff = DateTime.add(DateTime.utc_now(), -keep_ms, :millisecond)
+        cutoff = DateTime.add(Clock.utc_now(), -keep_ms, :millisecond)
         {group, prune_group(config, group, statuses, cutoff, 0)}
       end
 

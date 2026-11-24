@@ -340,6 +340,7 @@ defmodule Durable.WorkflowKeysTest do
     end
 
     test "takes the key back from a newer run that failed", %{old_id: old_id, config: config} do
+      Durable.TelemetryHandler.attach_events([[:durable, :key, :handoff]])
       {:ok, new_id} = Durable.start(Article, %{"id" => 7}, key: "article:7")
       Process.put({Article, :broken}, true)
       Executor.execute_workflow(new_id, config)
@@ -350,6 +351,7 @@ defmodule Durable.WorkflowKeysTest do
       assert %{holds_key: false} = reload(new_id)
       assert [%{workflow_id: ^old_id, details: details}] = activity("key_retaken")
       assert stringify(details)["from"] == new_id
+      assert_receive {:event, :handoff, %{count: 1}, %{from: ^new_id, to: ^old_id}}
     end
 
     test "takes a released key back", %{old_id: old_id} do

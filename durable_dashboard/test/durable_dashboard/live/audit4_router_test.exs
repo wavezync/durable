@@ -68,7 +68,8 @@ defmodule DurableDashboard.Live.Audit4RouterTest do
         refute Enum.any?(links, &String.contains?(&1, "//")), "#{path}: #{inspect(links)}"
       end
 
-      # The stylesheet and the script come from the mount's own asset route.
+      # The stylesheet, the script and the favicon come from the mount's own
+      # asset route.
       # (Mounted at "/", they were asked for at "//__assets__/app.css", which
       # a browser reads as the host "__assets__": the page had no styles and
       # no script.)
@@ -81,11 +82,15 @@ defmodule DurableDashboard.Live.Audit4RouterTest do
       assets =
         Enum.filter(
           LazyHTML.attribute(LazyHTML.query(document, "link[rel=stylesheet]"), "href") ++
+            LazyHTML.attribute(LazyHTML.query(document, "link[rel=icon]"), "href") ++
             LazyHTML.attribute(LazyHTML.query(document, "script[src]"), "src"),
           &String.starts_with?(&1, "/")
         )
 
-      assert length(assets) == 2
+      assert length(assets) == 3
+
+      # The tab says which page, and that it's Durable's.
+      assert LazyHTML.text(LazyHTML.query(document, "title")) == "Overview · Durable"
       assert Enum.all?(assets, &String.starts_with?(&1, base <> "/__assets__/")), inspect(assets)
       for asset <- assets, do: assert(get(conn, asset).status == 200)
 

@@ -41,6 +41,7 @@ defmodule Durable.Activity do
 
   require Logger
 
+  alias Durable.Clock
   alias Durable.Config
   alias Durable.Query.Opts
   alias Durable.Repo
@@ -57,7 +58,7 @@ defmodule Durable.Activity do
   @spec record(Config.t(), String.t(), keyword()) :: :ok
   def record(%Config{} = config, kind, attrs \\ []) do
     event = %ActivityEvent{
-      at: DateTime.utc_now(),
+      at: Clock.utc_now(),
       kind: kind,
       node_id: config.node_id,
       queue: attrs[:queue] && to_string(attrs[:queue]),
@@ -108,7 +109,7 @@ defmodule Durable.Activity do
 
   defp events(opts) do
     config = Config.get(Keyword.get(opts, :durable, Durable))
-    since = Keyword.get(opts, :since, DateTime.add(DateTime.utc_now(), -86_400, :second))
+    since = Keyword.get(opts, :since, DateTime.add(Clock.utc_now(), -86_400, :second))
 
     query =
       from(a in ActivityEvent,

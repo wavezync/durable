@@ -13,6 +13,7 @@ defmodule Durable.Executor.CompensationRunner do
   - Retry logic is supported for individual compensations
   """
 
+  alias Durable.Clock
   alias Durable.Config
   alias Durable.Context
   alias Durable.Definition.Compensation
@@ -214,7 +215,7 @@ defmodule Durable.Executor.CompensationRunner do
       # Written running, in one go: a process killed between two writes would
       # leave a row nobody closes.
       status: :running,
-      started_at: DateTime.utc_now(),
+      started_at: Clock.utc_now(),
       is_compensation: true,
       compensation_for: Atom.to_string(compensating_step)
     }

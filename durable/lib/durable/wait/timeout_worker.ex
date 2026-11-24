@@ -13,6 +13,7 @@ defmodule Durable.Wait.TimeoutWorker do
 
   use GenServer
 
+  alias Durable.Clock
   alias Durable.EngineState
   alias Durable.Executor
   alias Durable.NodeRegistry
@@ -100,7 +101,7 @@ defmodule Durable.Wait.TimeoutWorker do
   end
 
   defp do_check_timeouts(%{config: config, batch_size: batch_size}) do
-    now = DateTime.utc_now()
+    now = Clock.utc_now()
 
     for sweep <- [
           &process_timed_out_inputs/3,
@@ -360,7 +361,7 @@ defmodule Durable.Wait.TimeoutWorker do
       {answer |> Executor.sanitize_for_json() |> EngineState.strip(),
        Executor.sanitize_for_json(engine)}
 
-    now = DateTime.utc_now()
+    now = Clock.utc_now()
 
     multi =
       Ecto.Multi.new()

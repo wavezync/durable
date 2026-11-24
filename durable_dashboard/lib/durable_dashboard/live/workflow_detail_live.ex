@@ -93,7 +93,7 @@ defmodule DurableDashboard.Live.WorkflowDetailLive do
   defp load(socket) do
     %{durable: durable, name: name, range: range} = socket.assigns
     {span, bucket} = Charts.range_window(range)
-    now = DateTime.utc_now()
+    now = DurableDashboard.Clock.utc_now()
 
     window = [
       durable: durable,
@@ -165,7 +165,7 @@ defmodule DurableDashboard.Live.WorkflowDetailLive do
       base_path={@base_path}
       current_path={@current_path}
       breadcrumbs={@breadcrumbs}
-      durable={@durable} inbox_count={@inbox_count}
+      durable={@durable} label={@dashboard_label} inbox_count={@inbox_count}
     >
       <header class="flex flex-wrap items-end justify-between gap-3">
         <div class="min-w-0">

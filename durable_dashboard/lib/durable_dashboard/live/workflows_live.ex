@@ -70,7 +70,7 @@ defmodule DurableDashboard.Live.WorkflowsLive do
 
   defp load(socket) do
     {span, _bucket} = Charts.range_window(socket.assigns.range)
-    now = DateTime.utc_now()
+    now = DurableDashboard.Clock.utc_now()
 
     rows =
       Durable.Stats.workflows!(
@@ -89,7 +89,7 @@ defmodule DurableDashboard.Live.WorkflowsLive do
       base_path={@base_path}
       current_path={@current_path}
       breadcrumbs={@breadcrumbs}
-      durable={@durable} inbox_count={@inbox_count}
+      durable={@durable} label={@dashboard_label} inbox_count={@inbox_count}
     >
       <header class="flex flex-wrap items-end justify-between gap-3">
         <Core.heading level={1} subtitle={"#{Format.count(length(@rows), "workflow")} · numbers for the last #{@range}"}>

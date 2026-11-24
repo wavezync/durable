@@ -696,6 +696,12 @@ defmodule DurableDashboard.Live.Audit4RegressionsTest do
       assert has_element?(view, ~s([aria-label="1 waiting"]))
       {:ok, view, _html} = live(conn, @main <> "/inputs")
       refute has_element?(view, ~s([aria-label="1 waiting"]))
+
+      # The sidebar names each: by the router's label, else by its database.
+      {:ok, view, _html} = live(conn, @billing)
+      assert has_element?(view, "aside span", "Billing")
+      {:ok, view, _html} = live(conn, @main)
+      assert has_element?(view, "aside span", DurableDashboard.TestRepo.config()[:database])
     end
 
     test "no link, asset or redirect on one mount points into the other",

@@ -5,6 +5,7 @@ defmodule Durable.Migration.SchemaMigration do
 
   use Ecto.Migration
 
+  alias Durable.Clock
   alias Ecto.Migration.Runner
 
   @table_name "durable_schema_migrations"
@@ -78,7 +79,7 @@ defmodule Durable.Migration.SchemaMigration do
   """
   @spec record_version(String.t(), pos_integer()) :: :ok
   def record_version(prefix, version) do
-    now = DateTime.utc_now()
+    now = Clock.utc_now()
 
     query =
       "INSERT INTO #{prefix}.#{@table_name} (version, inserted_at) VALUES ($1, $2)"

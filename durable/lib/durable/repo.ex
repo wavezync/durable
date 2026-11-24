@@ -32,18 +32,26 @@ defmodule Durable.Repo do
     do: is_binary(value) and byte_size(value) == 36 and Ecto.UUID.cast(value) != :error
 
   @doc false
-  # Whether this means the connection went, rather than a query being refused.
-  # Directly that's DBConnection's error; through PgBouncer it's a FATAL from
-  # the pooler, such as "server conn crashed?".
-  @spec connection_lost?(term()) :: boolean()
-  def connection_lost?(%DBConnection.ConnectionError{}), do: true
+  # Whether this says nothing about what was written, so a try later may go
+  # through: the connection went, or the database gave up on the statement
+  # (a statement or lock timeout, a deadlock, a serialization failure) rather
+  # than refusing it. A dropped connection is DBConnection's error directly,
+  # and through PgBouncer a FATAL from the pooler, such as "server conn
+  # crashed?".
+  @spec transient?(term()) :: boolean()
+  def transient?(%DBConnection.ConnectionError{}), do: true
 
-  def connection_lost?(%Postgrex.Error{postgres: %{severity: severity}})
+  def transient?(%Postgrex.Error{postgres: %{severity: severity}})
       when severity in ["FATAL", "PANIC"],
       do: true
 
-  def connection_lost?(%Postgrex.Error{postgres: %{pg_code: "08" <> _}}), do: true
-  def connection_lost?(_error), do: false
+  def transient?(%Postgrex.Error{postgres: %{pg_code: "08" <> _}}), do: true
+
+  def transient?(%Postgrex.Error{postgres: %{pg_code: code}})
+      when code in ["57014", "40P01", "55P03", "40001"],
+      do: true
+
+  def transient?(_error), do: false
 
   @doc false
   # A name Postgres can't hold as text, so it can't match a row or be stored.

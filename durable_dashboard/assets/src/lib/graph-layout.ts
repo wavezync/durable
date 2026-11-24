@@ -113,7 +113,7 @@ export function layoutGraph(
   const canReuse = prevPositions !== undefined && allNodes.every((n) => prevPositions.has(n.id));
   const positions = canReuse ? (prevPositions as PositionMap) : layoutDagre(allNodes, allEdges);
 
-  const nodes: Node[] = allNodes.map((n) => {
+  const steps: Node[] = allNodes.map((n) => {
     const pos = positions.get(n.id) || { x: 0, y: 0 };
     return {
       id: n.id,
@@ -122,6 +122,9 @@ export function layoutGraph(
       data: (n.data ?? {}) as Record<string, unknown>,
     };
   });
+
+  // Frames go first, so they're drawn behind the steps they hold.
+  const nodes: Node[] = [...laneFrames(graph, positions), ...steps];
 
   const edges: Edge[] = allEdges.map((e) => ({
     id: e.id,
@@ -141,6 +144,57 @@ export function layoutGraph(
   return { nodes, edges, positions };
 }
 
+// Room a lane's frame leaves around its steps: less than half the row gap
+// above and below, so frames of neighbouring lanes never touch.
+const LANE_PAD_X = 14;
+const LANE_PAD_Y = 12;
+
+/**
+ * A frame for each lane of several steps in a named parallel block, sized to
+ * the steps the block's join lists for it (`graph_builder.ex`).
+ */
+function laneFrames(graph: GraphData, positions: PositionMap): Node[] {
+  const types = new Map(graph.nodes.map((n) => [n.id, n.type]));
+  const frames: Node[] = [];
+
+  for (const join of graph.nodes) {
+    for (const lane of join.data.lanes ?? []) {
+      const members = (lane.nodes ?? []).filter((id) => positions.has(id));
+      if (members.length < 2) continue;
+
+      let minX = Infinity;
+      let minY = Infinity;
+      let maxX = -Infinity;
+      let maxY = -Infinity;
+      for (const id of members) {
+        const pos = positions.get(id) as { x: number; y: number };
+        const { width, height } = dimsFor(types.get(id) ?? "step");
+        minX = Math.min(minX, pos.x);
+        minY = Math.min(minY, pos.y);
+        maxX = Math.max(maxX, pos.x + width);
+        maxY = Math.max(maxY, pos.y + height);
+      }
+
+      const width = maxX - minX + 2 * LANE_PAD_X;
+      const height = maxY - minY + 2 * LANE_PAD_Y;
+      frames.push({
+        id: `${join.id}:lane:${lane.name}`,
+        type: "lane",
+        position: { x: minX - LANE_PAD_X, y: minY - LANE_PAD_Y },
+        data: { ...lane, width, height },
+        width,
+        height,
+        zIndex: -1,
+        draggable: false,
+        selectable: false,
+        focusable: false,
+      });
+    }
+  }
+
+  return frames;
+}
+
 /** The laid-out graph's extent, in flow coordinates. */
 export function graphBounds(nodes: Node[]): {
   x: number;
@@ -150,7 +204,9 @@ export function graphBounds(nodes: Node[]): {
 } {
   let [minX, minY, maxX, maxY] = [Infinity, Infinity, -Infinity, -Infinity];
   for (const n of nodes) {
-    const { width, height } = dimsFor(n.type ?? "step");
+    // A lane frame is sized to its lane; every other node by its type.
+    const { width, height } =
+      n.width && n.height ? { width: n.width, height: n.height } : dimsFor(n.type ?? "step");
     minX = Math.min(minX, n.position.x);
     minY = Math.min(minY, n.position.y);
     maxX = Math.max(maxX, n.position.x + width);

@@ -106,10 +106,17 @@ defmodule Durable.Integration.RecoveryAndSchedulesRegressionsTest do
     on_exit(fn -> :telemetry.detach(handler) end)
   end
 
-  defp attempt_events do
+  # Every attempt's end, given a busy machine a moment to send it: whoever
+  # closes a row sends its end just after.
+  defp attempt_events(events \\ [], tries \\ 50) do
     Process.sleep(100)
-    events = drain_attempts([])
-    {for({:start, id} <- events, do: id), for({phase, id} <- events, phase != :start, do: id)}
+    events = drain_attempts(events)
+    starts = for {:start, id} <- events, do: id
+    ends = for {phase, id} <- events, phase != :start, do: id
+
+    if Enum.sort(starts) != Enum.sort(ends) and tries > 0,
+      do: attempt_events(events, tries - 1),
+      else: {starts, ends}
   end
 
   defp drain_attempts(acc) do
@@ -153,15 +160,23 @@ defmodule Durable.Integration.RecoveryAndSchedulesRegressionsTest do
   end
 
   describe "a write that fails for any other reason" do
+    # A cancelled or timed-out statement says nothing about the step, so the
+    # run goes back like a lost connection's (issue #48): this one is refused.
     test "fails the run and closes the step's row" do
+      before_update!(
+        "r_refuse_charge",
+        "step_executions",
+        "NEW.step_name = 'charge' AND NEW.status = 'completed'",
+        "RAISE EXCEPTION 'the ledger refused it'"
+      )
+
       start_durable!(%{default: 1})
       {:ok, id} = Durable.start(Booked, %{})
       assert_eventually(fn -> Probe.hits(:charge) == 1 end)
+      :ok = Probe.set(:release)
 
-      row = Enum.find(step_rows(id), &(&1.step_name == "charge"))
-      hold_row_then_kill_writer(row.id, fn -> :ok = Probe.set(:release) end, "pg_cancel_backend")
-
-      await_status(id, :failed)
+      run = await_status(id, :failed)
+      assert run.error["message"] =~ "the ledger refused it"
       assert Enum.all?(step_rows(id), &(&1.status != :running))
     end
   end

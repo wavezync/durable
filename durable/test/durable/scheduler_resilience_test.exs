@@ -69,9 +69,14 @@ defmodule Durable.SchedulerResilienceTest do
   test "record_failure/3 counts on the row, not on the copy the tick read" do
     schedule = insert_schedule(%{consecutive_failures: 2})
 
-    # The copy this node holds is behind: the row has moved on to 3.
+    # The copy this node holds is behind: the row has moved on to 3. Not an
+    # operator's edit, which a tick that read the row before it yields to.
     stale = %{schedule | consecutive_failures: 0}
-    {:ok, _} = schedule |> Ecto.Changeset.change(consecutive_failures: 3) |> Repo.update(config())
+
+    {1, _} =
+      Repo.update_all(config(), from(s in ScheduledWorkflow, where: s.id == ^schedule.id),
+        set: [consecutive_failures: 3]
+      )
 
     assert API.record_failure(stale, "boom", config()).consecutive_failures == 4
     # The fire it failed has been moved on: a second node's failure isn't counted.

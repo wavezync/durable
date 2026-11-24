@@ -9,6 +9,8 @@ defmodule Durable.Storage.Schemas.PendingInput do
   use Ecto.Schema
   import Ecto.Changeset
 
+  alias Durable.Clock
+
   @type input_type :: :form | :single_choice | :multi_choice | :free_text | :approval
 
   @type status :: :pending | :completed | :timeout | :cancelled
@@ -71,7 +73,7 @@ defmodule Durable.Storage.Schemas.PendingInput do
 
     belongs_to(:workflow, Durable.Storage.Schemas.WorkflowExecution, foreign_key: :workflow_id)
 
-    timestamps(type: :utc_datetime_usec)
+    timestamps(type: :utc_datetime_usec, autogenerate: {Clock, :utc_now, []})
   end
 
   @required_fields [:workflow_id, :input_name, :step_name]
@@ -111,7 +113,7 @@ defmodule Durable.Storage.Schemas.PendingInput do
       %{
         status: :completed,
         response: response,
-        completed_at: DateTime.utc_now()
+        completed_at: Clock.utc_now()
       },
       [:status, :response, :completed_at]
     )
@@ -122,7 +124,7 @@ defmodule Durable.Storage.Schemas.PendingInput do
   """
   def timeout_changeset(pending_input) do
     pending_input
-    |> cast(%{status: :timeout, completed_at: DateTime.utc_now()}, [:status, :completed_at])
+    |> cast(%{status: :timeout, completed_at: Clock.utc_now()}, [:status, :completed_at])
   end
 
   @doc """
@@ -130,6 +132,6 @@ defmodule Durable.Storage.Schemas.PendingInput do
   """
   def cancel_changeset(pending_input) do
     pending_input
-    |> cast(%{status: :cancelled, completed_at: DateTime.utc_now()}, [:status, :completed_at])
+    |> cast(%{status: :cancelled, completed_at: Clock.utc_now()}, [:status, :completed_at])
   end
 end

@@ -27,6 +27,7 @@ defmodule Durable.Scheduler do
 
   require Logger
 
+  alias Durable.Clock
   alias Durable.Repo
   alias Durable.Scheduler.API
 
@@ -209,7 +210,7 @@ defmodule Durable.Scheduler do
     execute_schedule(schedule, config)
   rescue
     error ->
-      if Durable.Repo.connection_lost?(error),
+      if Durable.Repo.transient?(error),
         do: reraise(error, __STACKTRACE__),
         else: record_failure(schedule, config, Exception.message(error))
   end
@@ -239,7 +240,7 @@ defmodule Durable.Scheduler do
   defp handle_missing_module(schedule, config, reason) do
     code = "#{schedule.workflow_module} (#{schedule.workflow_name})"
 
-    if DateTime.diff(DateTime.utc_now(), schedule.next_run_at) < @code_grace_seconds do
+    if DateTime.diff(Clock.utc_now(), schedule.next_run_at) < @code_grace_seconds do
       Logger.warning(
         "[Durable.Scheduler] #{schedule.name}: #{code} isn't on this node, " <>
           "leaving it for one that has it"
@@ -294,6 +295,11 @@ defmodule Durable.Scheduler do
       {:ok, :claimed_elsewhere} ->
         Logger.debug("Schedule #{schedule.name} was fired by another node")
 
+      # Its key is being changed right now (a start in a long transaction):
+      # nobody's failure, and the fire stays due for the next check.
+      {:error, :key_locked} ->
+        Logger.debug("Schedule #{schedule.name}: key #{schedule.key} is busy, trying later")
+
       {:error, reason} ->
         record_failure(schedule, config, "Failed to start workflow: #{inspect(reason)}")
     end
@@ -319,7 +325,8 @@ defmodule Durable.Scheduler do
         durable: config.name,
         trigger: :schedule,
         trigger_ref: schedule.name,
-        return: :details
+        return: :details,
+        key_lock: :try
       )
 
     case result do

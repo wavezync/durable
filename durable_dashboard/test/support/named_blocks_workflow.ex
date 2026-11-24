@@ -77,4 +77,22 @@ defmodule DurableDashboard.NamedBlocksWorkflow do
 
     step :decide, fn d -> {:ok, d} end
   end
+
+  # Every option the graph shows: on steps, on a lane of one step, and on a
+  # lane of several.
+  workflow "loan" do
+    step :open, [compensate: :withdraw, timeout: 30_000], fn d -> {:ok, d} end
+
+    parallel :lookups do
+      step :credit, [retry: [max_attempts: 3]], fn d -> {:ok, d} end
+      step :device, [optional: true, default: %{trust: "unknown"}], fn d -> {:ok, d} end
+
+      lane :social, optional: true, default: %{profiles: 0}, timeout: 5_000 do
+        step :find, fn d -> {:ok, d} end
+        step :rate, [queue: :scoring], fn d -> {:ok, d} end
+      end
+    end
+
+    compensate :withdraw, fn d -> {:ok, d} end
+  end
 end

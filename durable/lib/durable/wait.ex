@@ -42,6 +42,7 @@ defmodule Durable.Wait do
   - `wait_for_all/2` - Wait for all of multiple events
   """
 
+  alias Durable.Clock
   alias Durable.Config
   alias Durable.Context
   alias Durable.EngineState
@@ -826,15 +827,15 @@ defmodule Durable.Wait do
   defp deliver_to_waiter(config, workflow_id, event_name, safe_payload) do
     sent =
       Repo.transaction(config, fn ->
-        lock_run(config, workflow_id)
-        deliver_if_waiting(config, workflow_id, event_name, safe_payload)
+        run = lock_run(config, workflow_id)
+        deliver_if_waiting(config, run, workflow_id, event_name, safe_payload)
       end)
 
     wake_resumed(config, sent)
   end
 
-  defp deliver_if_waiting(config, workflow_id, event_name, payload) do
-    case find_pending_event(config, workflow_id, event_name) do
+  defp deliver_if_waiting(config, run, workflow_id, event_name, payload) do
+    case waiting_for(config, run, event_name) do
       {:ok, pending_event} ->
         deliver(config, workflow_id, event_name, pending_event, payload)
 
@@ -843,26 +844,39 @@ defmodule Durable.Wait do
     end
   end
 
+  # Only a waiting run is answered (rule 4). One cancelled a moment ago keeps
+  # its waits open until its canceller closes them, or until the stale sweep
+  # does if the canceller was lost: an event taken there was told :ok and
+  # reached nobody.
+  defp waiting_for(config, %{status: :waiting, id: id}, event_name),
+    do: find_pending_event(config, id, event_name)
+
+  defp waiting_for(_config, _not_waiting, _event_name), do: {:error, :not_found}
+
   # The wake goes out once the transaction that resumed the run has committed.
   defp wake_resumed(config, {:ok, {:resumed, run}}), do: DurablePubSub.wake(config, run)
   defp wake_resumed(_config, {:ok, result}), do: result
   defp wake_resumed(_config, {:error, reason}), do: {:error, reason}
 
-  # An event for a wait_for_any that already has its answer is a no-op, not an
-  # error: the sender can't know which event got there first.
+  # An event under another name of a wait_for_any that already has its answer
+  # is a no-op, not an error: the sender can't know which event got there
+  # first. Only that: under the name that answered it, or one a wait_for_all
+  # took, it is a second event for one wait, and told :ok it was lost, for a
+  # later wait of that name as well. The newest wait for the name says which
+  # it is.
   defp late_for_group?(config, workflow_id, event_name) do
     query =
       from(p in PendingEvent,
-        join: g in WaitGroup,
+        left_join: g in WaitGroup,
         on: g.id == p.wait_group_id,
-        where:
-          p.workflow_id == ^workflow_id and p.event_name == ^event_name and
-            g.status == :completed,
+        where: p.workflow_id == ^workflow_id and p.event_name == ^event_name,
+        where: p.status != :buffered,
+        order_by: [desc: p.inserted_at],
         limit: 1,
-        select: true
+        select: {g.wait_type, g.status, p.status}
       )
 
-    Repo.one(config, query) == true
+    Repo.one(config, query) == {:any, :completed, :cancelled}
   end
 
   defp deliver(config, workflow_id, event_name, pending_event, safe_payload) do
@@ -910,15 +924,15 @@ defmodule Durable.Wait do
         case lock_run(config, workflow_id) do
           nil -> {:error, :not_found}
           %{status: status} when status in @finished -> {:error, :finished}
-          _open -> deliver_or_buffer(config, workflow_id, event_name, payload)
+          open -> deliver_or_buffer(config, open, workflow_id, event_name, payload)
         end
       end)
 
     wake_resumed(config, sent)
   end
 
-  defp deliver_or_buffer(config, workflow_id, event_name, payload) do
-    case find_pending_event(config, workflow_id, event_name) do
+  defp deliver_or_buffer(config, run, workflow_id, event_name, payload) do
+    case waiting_for(config, run, event_name) do
       {:ok, pending_event} ->
         deliver(config, workflow_id, event_name, pending_event, payload)
 
@@ -1040,7 +1054,7 @@ defmodule Durable.Wait do
   defp close_group_events(repo, wait_group_id) do
     repo.update_all(
       from(p in PendingEvent, where: p.wait_group_id == ^wait_group_id and p.status == :pending),
-      set: [status: :cancelled, completed_at: DateTime.utc_now()]
+      set: [status: :cancelled, completed_at: Clock.utc_now()]
     )
   end
 
@@ -1158,17 +1172,21 @@ defmodule Durable.Wait do
   @doc false
   @spec cancel_pending_waits(Config.t(), String.t()) :: :ok
   def cancel_pending_waits(config, workflow_id) do
-    # Cancel pending inputs
-    query = from(p in PendingInput, where: p.workflow_id == ^workflow_id and p.status == :pending)
-    Repo.update_all(config, query, set: [status: :cancelled, completed_at: DateTime.utc_now()])
+    # The run's row first (rule 2). A block's lane takes it before it changes
+    # the block's events; without it, this took them in the table's order and
+    # the lane in its own, and the two deadlocked.
+    {:ok, :ok} =
+      Repo.transaction(config, fn ->
+        lock_run(config, workflow_id)
 
-    # Cancel pending events
-    query = from(p in PendingEvent, where: p.workflow_id == ^workflow_id and p.status == :pending)
-    Repo.update_all(config, query, set: [status: :cancelled, completed_at: DateTime.utc_now()])
+        for schema <- [PendingInput, PendingEvent, WaitGroup] do
+          query = from(p in schema, where: p.workflow_id == ^workflow_id and p.status == :pending)
 
-    # Cancel wait groups
-    query = from(w in WaitGroup, where: w.workflow_id == ^workflow_id and w.status == :pending)
-    Repo.update_all(config, query, set: [status: :cancelled, completed_at: DateTime.utc_now()])
+          Repo.update_all(config, query, set: [status: :cancelled, completed_at: Clock.utc_now()])
+        end
+
+        :ok
+      end)
 
     :ok
   end

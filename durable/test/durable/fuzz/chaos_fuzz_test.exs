@@ -126,7 +126,7 @@ defmodule Durable.Fuzz.ChaosTest do
     label = "#{inspect(describe(run))} #{inspect(Probe.fetch(case_id))}"
 
     assert run.status in terminal(), "not finished: #{label}"
-    assert run.locked_by == nil, "left locked: #{label}"
+    assert let_go?(run.id), "left locked: #{label}"
     assert Probe.peak({:run, case_id}) <= 1, "steps overlapped: #{label}"
 
     refute match?(%{"type" => "zombie_detected"}, run.error), "declared dead: #{label}"

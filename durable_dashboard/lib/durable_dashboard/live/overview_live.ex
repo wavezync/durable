@@ -94,7 +94,7 @@ defmodule DurableDashboard.Live.OverviewLive do
   defp load(socket) do
     %{durable: durable, range: range} = socket.assigns
     {span, bucket} = Charts.range_window(range)
-    now = DateTime.utc_now()
+    now = DurableDashboard.Clock.utc_now()
     since = DateTime.add(now, -span, :second)
     window = [durable: durable, since: since, until: now]
 
@@ -133,7 +133,7 @@ defmodule DurableDashboard.Live.OverviewLive do
   defp feed_item(kind, %{id: id} = payload) when is_binary(id) do
     [
       %{
-        at: DateTime.utc_now(),
+        at: DurableDashboard.Clock.utc_now(),
         id: id,
         workflow: Format.text(payload[:workflow_name]),
         status: feed_status(kind),
@@ -175,7 +175,7 @@ defmodule DurableDashboard.Live.OverviewLive do
       base_path={@base_path}
       current_path={@current_path}
       breadcrumbs={@breadcrumbs}
-      durable={@durable} inbox_count={@inbox_count}
+      durable={@durable} label={@dashboard_label} inbox_count={@inbox_count}
     >
       <header class="flex flex-wrap items-end justify-between gap-3">
         <Core.heading

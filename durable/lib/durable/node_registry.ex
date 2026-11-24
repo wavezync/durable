@@ -3,8 +3,8 @@ defmodule Durable.NodeRegistry do
   Keeps this instance's row in `durable.nodes` fresh, so operators can see
   which nodes are alive and which queues each runs.
 
-  A node heartbeats every #{div(10_000, 1_000)} s and removes its row on a
-  clean shutdown; `list/1` reports a node as `:missing` once its heartbeat is
+  A node heartbeats every #{div(10_000, 1_000)} s, setting `Durable.Clock` to the
+  database's clock as it does, and removes its row on a clean shutdown; `list/1` reports a node as `:missing` once its heartbeat is
   #{div(30_000, 1_000)} s old. Rows unseen for a day are deleted.
 
   On boot it also checks the database schema: a library upgrade whose
@@ -16,6 +16,7 @@ defmodule Durable.NodeRegistry do
 
   import Ecto.Query
 
+  alias Durable.Clock
   alias Durable.Config
   alias Durable.Repo
   alias Durable.Storage.Schemas.Node
@@ -33,7 +34,7 @@ defmodule Durable.NodeRegistry do
   """
   @spec list(Config.t()) :: [map()]
   def list(%Config{} = config) do
-    cutoff = DateTime.add(DateTime.utc_now(), -@missing_after_ms, :millisecond)
+    cutoff = DateTime.add(Clock.utc_now(), -@missing_after_ms, :millisecond)
 
     running =
       config
@@ -62,7 +63,9 @@ defmodule Durable.NodeRegistry do
   @impl true
   def init(%Config{} = config) do
     Process.flag(:trap_exit, true)
-    {:ok, %{config: config, started_at: DateTime.utc_now()}, {:continue, :boot}}
+    # Before the rest of the tree starts, so it starts on the database's clock.
+    Clock.sync(config)
+    {:ok, %{config: config, started_at: Clock.utc_now()}, {:continue, :boot}}
   end
 
   @impl true
@@ -80,7 +83,8 @@ defmodule Durable.NodeRegistry do
   end
 
   defp beat(%{config: config} = state) do
-    now = DateTime.utc_now()
+    Clock.sync(config)
+    now = Clock.utc_now()
 
     node = %Node{
       id: config.node_id,
@@ -88,12 +92,13 @@ defmodule Durable.NodeRegistry do
         if(config.queue_enabled, do: Enum.map(Map.keys(config.queues), &to_string/1), else: []),
       version: Application.spec(:durable, :vsn) |> to_string(),
       started_at: state.started_at,
-      heartbeat_at: now
+      heartbeat_at: now,
+      clock_skew_ms: Clock.skew_ms()
     }
 
     safely(fn ->
       Repo.insert(node, config,
-        on_conflict: {:replace, [:queues, :version, :heartbeat_at]},
+        on_conflict: {:replace, [:queues, :version, :heartbeat_at, :clock_skew_ms]},
         conflict_target: :id
       )
 

@@ -409,7 +409,7 @@ defmodule Durable.Integration.EngineRegressionsTest do
     end
   end
 
-  describe "telling a lost connection from a failed query" do
+  describe "telling a write that says nothing about the step from a failed one" do
     alias Durable.Repo
 
     defp pg_error(severity, pg_code) do
@@ -417,17 +417,25 @@ defmodule Durable.Integration.EngineRegressionsTest do
     end
 
     test "counts a dropped connection, directly or from PgBouncer" do
-      assert Repo.connection_lost?(%DBConnection.ConnectionError{message: "tcp recv: closed"})
-      assert Repo.connection_lost?(pg_error("FATAL", "08P01"))
-      assert Repo.connection_lost?(pg_error("FATAL", "57P01"))
-      assert Repo.connection_lost?(pg_error("ERROR", "08006"))
+      assert Repo.transient?(%DBConnection.ConnectionError{message: "tcp recv: closed"})
+      assert Repo.transient?(pg_error("FATAL", "08P01"))
+      assert Repo.transient?(pg_error("FATAL", "57P01"))
+      assert Repo.transient?(pg_error("ERROR", "08006"))
+    end
+
+    # Issue #48: the database gave up on the statement, rather than refusing it.
+    test "counts a statement or lock timeout, a deadlock, and a serialization failure" do
+      assert Repo.transient?(pg_error("ERROR", "57014"))
+      assert Repo.transient?(pg_error("ERROR", "55P03"))
+      assert Repo.transient?(pg_error("ERROR", "40P01"))
+      assert Repo.transient?(pg_error("ERROR", "40001"))
     end
 
     test "doesn't count a query that was refused" do
-      refute Repo.connection_lost?(pg_error("ERROR", "57014"))
-      refute Repo.connection_lost?(pg_error("ERROR", "23505"))
-      refute Repo.connection_lost?(%RuntimeError{message: "boom"})
-      refute Repo.connection_lost?(:killed)
+      refute Repo.transient?(pg_error("ERROR", "23505"))
+      refute Repo.transient?(pg_error("ERROR", "P0001"))
+      refute Repo.transient?(%RuntimeError{message: "boom"})
+      refute Repo.transient?(:killed)
     end
   end
 

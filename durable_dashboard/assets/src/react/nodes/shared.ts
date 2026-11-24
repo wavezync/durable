@@ -3,7 +3,7 @@
  * tooltip (the dashboard's `data-tip` attributes — see `tooltip.ts`).
  */
 
-import type { GraphNode } from "../../lib/types";
+import type { GraphNode, LaneInfo } from "../../lib/types";
 
 export type NodeData = GraphNode["data"];
 
@@ -111,6 +111,7 @@ export function stepTip(node: NodeData, opensChild: boolean): Record<string, str
       : null,
     started ? `Started ${started}` : null,
     node.parallel ? "Runs alongside the other steps in its parallel block" : null,
+    ...optionLines(node),
     node.clause ? `On the “${node.clause}” path of a branch` : null,
     // A parallel child's execution belongs to the child run; a step that
     // called a workflow ran here and started one.
@@ -127,4 +128,27 @@ export function stepTip(node: NodeData, opensChild: boolean): Record<string, str
     "data-tip": lines.join("\n"),
     "data-tip-meta": node.error ?? (node.name !== node.label ? node.name : undefined),
   };
+}
+
+/** What the definition says about a step, for its tooltip. */
+function optionLines(node: NodeData): string[] {
+  const lane = node.lane;
+  return [
+    node.max_attempts && node.max_attempts > 1 ? `Up to ${node.max_attempts} attempts` : null,
+    node.timeout_ms ? `Stopped after ${formatMs(node.timeout_ms)}` : null,
+    node.compensate ? `Undone by ${node.compensate} on rollback` : null,
+    node.queue ? `Runs on the ${node.queue} queue` : null,
+    lane ? laneLine(lane) : null,
+  ].filter((line): line is string => line !== null);
+}
+
+/** A lane's options in a sentence: "Optional lane: if it fails, the block
+ * goes on with its default. It has 5s to finish." */
+export function laneLine(lane: LaneInfo): string {
+  const limit = lane.timeout_ms ? ` It has ${formatMs(lane.timeout_ms)} to finish.` : "";
+  if (!lane.optional) return `Lane ${lane.name}.${limit}`;
+  const failing = lane.default
+    ? "the block goes on with its default"
+    : "the block goes on without it";
+  return `Optional lane: if it fails, ${failing}.${limit}`;
 }

@@ -98,6 +98,14 @@ defmodule Durable.OperationsTest do
       end)
     end
 
+    test "a node reports how far its own clock is from the database's" do
+      node_id = Config.get(Durable).node_id
+      assert_eventually(fn -> Enum.any?(Durable.list_nodes!(), &(&1.id == node_id)) end)
+
+      assert %{clock_skew_ms: skew} = Enum.find(Durable.list_nodes!(), &(&1.id == node_id))
+      assert is_integer(skew)
+    end
+
     test "a node whose heartbeat is 30 s old is reported missing" do
       stale = DateTime.add(DateTime.utc_now(), -31, :second)
 

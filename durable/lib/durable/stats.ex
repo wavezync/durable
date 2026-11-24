@@ -34,6 +34,7 @@ defmodule Durable.Stats do
 
   import Ecto.Query
 
+  alias Durable.Clock
   alias Durable.Config
   alias Durable.Query.Opts
   alias Durable.Repo
@@ -566,7 +567,7 @@ defmodule Durable.Stats do
 
   defp do_queues(opts) do
     config = Config.get(Keyword.get(opts, :durable, Durable))
-    now = DateTime.utc_now()
+    now = Clock.utc_now()
     hour_ago = DateTime.add(now, -3_600, :second)
     five_min_ago = DateTime.add(now, -300, :second)
 
@@ -870,7 +871,7 @@ defmodule Durable.Stats do
 
   defp window(opts) do
     config = Config.get(Keyword.get(opts, :durable, Durable))
-    until = Keyword.get(opts, :until, DateTime.utc_now())
+    until = Keyword.get(opts, :until, Clock.utc_now())
     since = Keyword.get(opts, :since, DateTime.add(until, -86_400, :second))
     {config, since, until}
   end
@@ -890,7 +891,7 @@ defmodule Durable.Stats do
   end
 
   defp ready(runs) do
-    now = DateTime.utc_now()
+    now = Clock.utc_now()
 
     from(w in runs,
       where: w.status == :pending and (is_nil(w.scheduled_at) or w.scheduled_at <= ^now)

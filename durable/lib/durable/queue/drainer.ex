@@ -34,10 +34,11 @@ defmodule Durable.Queue.Drainer do
   def start_link(%Config{} = config), do: GenServer.start_link(__MODULE__, config)
 
   @doc false
-  # Read before every step, so it's a persistent_term. Booleans are immediates,
-  # so flipping one doesn't trigger a global GC.
+  # Read before every step, so it's a persistent_term. It holds `false`, or
+  # when the drain began (monotonic ms): both are immediates, so changing it
+  # doesn't trigger a global GC.
   @spec stopping?(atom()) :: boolean()
-  def stopping?(name), do: :persistent_term.get({__MODULE__, name}, false)
+  def stopping?(name), do: :persistent_term.get({__MODULE__, name}, false) != false
 
   @doc false
   @spec reset(atom()) :: :ok
@@ -52,7 +53,8 @@ defmodule Durable.Queue.Drainer do
     meta = %{durable: config.name, node_id: config.node_id}
 
     :telemetry.span([:durable, :node, :drain], meta, fn ->
-      :persistent_term.put({__MODULE__, config.name}, true)
+      unless stopping?(config.name),
+        do: :persistent_term.put({__MODULE__, config.name}, System.monotonic_time(:millisecond))
 
       unfinished =
         config.queues
@@ -78,18 +80,35 @@ defmodule Durable.Queue.Drainer do
     {:ok, config}
   end
 
+  # A drain begun before the stop (`Durable.drain/1` from a `preStop` hook)
+  # has used some of the grace period already: this waits for what's left, or
+  # the platform's limit would kill the node before it hands its runs back.
   @impl true
   def terminate(_reason, config) do
-    case drain(config, config.shutdown_grace_period) do
+    case drain(config, grace_left(config)) do
       :ok -> :ok
       {:error, :timeout} -> hand_back_running(config)
     end
   end
 
-  # Its workers are about to be killed. Without this, their runs would sit
-  # locked until `stale_lock_timeout`. Clearing the fencing token means a worker
-  # still finishing up can't record anything over the next claim.
+  defp grace_left(config) do
+    case :persistent_term.get({__MODULE__, config.name}, false) do
+      false ->
+        config.shutdown_grace_period
+
+      began ->
+        max(config.shutdown_grace_period - (System.monotonic_time(:millisecond) - began), 0)
+    end
+  end
+
+  # Its workers are stopped, then their runs go back on their queues. Without
+  # this, those runs would sit locked until `stale_lock_timeout`. Stopped
+  # first: a step still running once its run was back could run beside the
+  # next node's, and steps that held every connection of the pool left none
+  # for the hand-back, so it never happened.
   defp hand_back_running(config) do
+    stop_workers(config)
+
     case Adapter.default_adapter().release_node_jobs(config, config.node_id) do
       {:ok, count} ->
         Logger.warning(
@@ -105,5 +124,14 @@ defmodule Durable.Queue.Drainer do
       {:error, reason} ->
         Logger.error("[Durable] couldn't hand back this node's runs: #{inspect(reason)}")
     end
+  end
+
+  # Killed, as their supervisor would after its own wait: a worker stuck in a
+  # write never gets to a shutdown signal. Its step's task dies with it.
+  defp stop_workers(config) do
+    workers = Manager.workers(config)
+    refs = Enum.map(workers, &Process.monitor/1)
+    Enum.each(workers, &Process.exit(&1, :kill))
+    for ref <- refs, do: receive(do: ({:DOWN, ^ref, :process, _pid, _reason} -> :ok))
   end
 end

@@ -596,8 +596,9 @@ defmodule Durable do
   @doc """
   Lists the Durable nodes that have heartbeated recently, newest first. Each
   has `:id`, `:queues`, `:version`, `:started_at`, `:heartbeat_at`, a
-  `:status` of `:alive` or `:missing` (no heartbeat for 30 s), and `:running`,
-  the number of runs it is executing.
+  `:status` of `:alive` or `:missing` (no heartbeat for 30 s), `:running`,
+  the number of runs it is executing, and `:clock_skew_ms`, how far its own
+  clock is ahead of the database's (Durable reads the database's).
 
       {:ok, nodes} = Durable.list_nodes()
       nodes = Durable.list_nodes!()

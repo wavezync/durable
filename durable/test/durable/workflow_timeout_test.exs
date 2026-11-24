@@ -462,7 +462,7 @@ defmodule Durable.WorkflowTimeoutTest do
     # A run with an undo that completed can't be retried: this one failed with nothing undone.
     repo().delete_all(from(s in StepExecution, where: s.workflow_id == ^id and s.is_compensation))
 
-    before = DateTime.utc_now()
+    before = Durable.Clock.utc_now()
     {:ok, ^id} = Durable.retry(id)
 
     assert DateTime.diff(run(id).deadline_at, before, :millisecond) in 40..60

@@ -44,6 +44,16 @@ defmodule Durable.WorkflowKeyModesTest do
     end
   end
 
+  defmodule QuickDebounce do
+    @moduledoc false
+    use Durable
+
+    # A timeout shorter than the period: the run never waits past it.
+    workflow "keyed_quick_debounce", debounce: [period: 60_000, timeout: 300] do
+      step :work, fn data -> {:ok, data} end
+    end
+  end
+
   setup do
     %{config: Config.get(Durable)}
   end
@@ -179,7 +189,7 @@ defmodule Durable.WorkflowKeyModesTest do
 
   describe "debounce:" do
     test "a keyed start waits out the period" do
-      before = DateTime.utc_now()
+      before = Durable.Clock.utc_now()
       {:ok, id} = Durable.start(Debounced, %{}, key: "d:1")
 
       run = reload(id)
@@ -203,6 +213,19 @@ defmodule Durable.WorkflowKeyModesTest do
       assert [%{"outcome" => "debounced", "input_changed" => true}] = duplicates()
     end
 
+    # A rerun is refused while the key is held, so the operator sees why
+    # nothing ran (`Durable.rerun/2`). It isn't a burst of the same start.
+    test "a rerun is refused by a run that waits out the period, and leaves its input" do
+      {:ok, done} = Durable.start(Debounced, %{"rev" => 1}, key: "d:rerun")
+      set!(done, status: :completed, holds_key: false, completed_at: DateTime.utc_now())
+
+      {:ok, waiting} = Durable.start(Debounced, %{"rev" => 2}, key: "d:rerun")
+      assert waiting != done
+
+      assert {:error, {:key_taken, ^waiting}} = Durable.rerun(done)
+      assert reload(waiting).input == %{"rev" => 2}
+    end
+
     test "never pushes the start past timeout after the first start" do
       {:ok, id} = Durable.start(Debounced, %{}, key: "d:3")
       long_ago = DateTime.add(DateTime.utc_now(), -290, :second)
@@ -211,6 +234,14 @@ defmodule Durable.WorkflowKeyModesTest do
       {:ok, ^id} = Durable.start(Debounced, %{"rev" => 2}, key: "d:3")
 
       assert DateTime.diff(reload(id).scheduled_at, long_ago, :millisecond) == 300_000
+    end
+
+    test "caps the first start's wait at timeout too (issue #48)" do
+      before = Durable.Clock.utc_now()
+      {:ok, id} = Durable.start(QuickDebounce, %{}, key: "d:6")
+
+      wait = DateTime.diff(reload(id).scheduled_at, before, :millisecond)
+      assert wait >= 300 and wait < 1_000
     end
 
     test "once a worker claimed the run, a duplicate is a plain duplicate" do

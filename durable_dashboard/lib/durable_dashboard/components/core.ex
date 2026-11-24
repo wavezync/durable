@@ -218,10 +218,12 @@ defmodule DurableDashboard.Components.Core do
     """
   end
 
+  # The Durable logo, as on durable.wavezync.com (site/public/favicon.svg):
+  # a step done, the wait, the next step. Its own colours, in both themes.
   def icon(%{name: "mark"} = assigns) do
     ~H"""
-    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" class={@class} aria-hidden="true" {@rest}>
-      <rect x="2.5" y="14" width="5.5" height="7.5" rx="1.6" fill="currentColor" opacity=".45" /><rect x="9.25" y="9" width="5.5" height="12.5" rx="1.6" fill="currentColor" opacity=".7" /><rect x="16" y="2.5" width="5.5" height="19" rx="1.6" fill="currentColor" />
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 26 26" class={@class} aria-hidden="true" {@rest}>
+      <path d="M3 8H13" stroke="#8390ab" stroke-width="2.4" stroke-linecap="round" /><path d="M13 8C17 8 17 18 21 18H23" fill="none" stroke="#6997fc" stroke-width="2.4" stroke-linecap="round" stroke-dasharray="2 3" /><circle cx="13" cy="8" r="4" fill="#f2785b" /><circle cx="22" cy="18" r="4" fill="#2bb3a3" />
     </svg>
     """
   end
@@ -602,7 +604,7 @@ defmodule DurableDashboard.Components.Core do
         tone: run_status_tone(tone),
         step: step,
         where: where,
-        then: parked && parked_time(parked, assigns.now || DateTime.utc_now()),
+        then: parked && parked_time(parked, assigns.now || DurableDashboard.Clock.utc_now()),
         note: (error && error.message) || run_note(run, parked),
         error_type: error && error.type,
         tip_title: if(step, do: label <> " " <> where <> step, else: label)
@@ -791,7 +793,8 @@ defmodule DurableDashboard.Components.Core do
   defp relative_time_parts(nil), do: {"—", nil}
 
   defp relative_time_parts(%DateTime{} = dt) do
-    {humanize_diff(DateTime.diff(DateTime.utc_now(), dt, :second)), DateTime.to_iso8601(dt)}
+    {humanize_diff(DateTime.diff(DurableDashboard.Clock.utc_now(), dt, :second)),
+     DateTime.to_iso8601(dt)}
   end
 
   defp relative_time_parts(%NaiveDateTime{} = dt) do

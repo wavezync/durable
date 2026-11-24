@@ -88,7 +88,7 @@ defmodule DurableDashboard.Live.QueuesLive do
     nodes = if durable_config, do: Durable.list_nodes!(durable: durable), else: []
     queues = if durable_config, do: Durable.Stats.queues!(durable: durable), else: []
     alive = Enum.filter(nodes, &(&1.status == :alive))
-    now = DateTime.utc_now()
+    now = DurableDashboard.Clock.utc_now()
 
     history =
       if durable_config,
@@ -156,7 +156,7 @@ defmodule DurableDashboard.Live.QueuesLive do
       base_path={@base_path}
       current_path={@current_path}
       breadcrumbs={@breadcrumbs}
-      durable={@durable} inbox_count={@inbox_count}
+      durable={@durable} label={@dashboard_label} inbox_count={@inbox_count}
     >
       <Core.heading
         level={1}
@@ -278,6 +278,7 @@ defmodule DurableDashboard.Live.QueuesLive do
                 <th class="px-4 py-2 text-right font-medium" data-tip="Runs this node is executing now">Running</th>
                 <th class="px-4 py-2 text-left font-medium" data-tip="The queues this node polls for work">Queues</th>
                 <th class="px-4 py-2 text-right font-medium" data-tip="Nodes heartbeat every 10 s · missing after 30 s without one">Last heartbeat</th>
+                <th class="px-4 py-2 text-right font-medium" data-tip="How far the node's own clock is from the database's · Durable runs on the database's">Clock</th>
                 <th class="px-4 py-2 text-right font-medium">Uptime</th>
                 <th class="px-4 py-2 text-right font-medium" data-tip="The Durable version the node runs">Version</th>
               </tr>
@@ -296,6 +297,7 @@ defmodule DurableDashboard.Live.QueuesLive do
                 <td class="px-4 text-right text-xs text-muted-foreground">
                   <Core.relative_time at={n.heartbeat_at} />
                 </td>
+                <.clock_skew ms={Map.get(n, :clock_skew_ms)} />
                 <td
                   class="px-4 text-right font-mono text-xs"
                   data-tip-title="Up since"
@@ -514,5 +516,46 @@ defmodule DurableDashboard.Live.QueuesLive do
   defp per_minute(done_last_5m) do
     rate = done_last_5m / 5
     if rate >= 10, do: Format.int(rate), else: :erlang.float_to_binary(rate, decimals: 1)
+  end
+
+  attr :ms, :integer, default: nil
+
+  # A node's own clock against the database's, which Durable reads on every
+  # node (ARCHITECTURE rule 33). Off by a second or more is worth a look: other
+  # software on that node reads its own.
+  defp clock_skew(%{ms: nil} = assigns) do
+    ~H"""
+    <td class="px-4 text-right text-xs text-subtle-foreground" data-tip="Not reported: the node runs an older Durable">—</td>
+    """
+  end
+
+  defp clock_skew(assigns) do
+    ms = assigns.ms
+
+    assigns =
+      assign(assigns,
+        label:
+          cond do
+            abs(ms) < 50 -> "in step"
+            ms > 0 -> "#{Format.ms(ms)} ahead"
+            true -> "#{Format.ms(-ms)} behind"
+          end,
+        off?: abs(ms) >= 1_000,
+        tip:
+          "This node's own clock is #{if ms >= 0, do: "#{ms} ms ahead of", else: "#{-ms} ms behind"} " <>
+            "the database's. Durable reads the database's clock on every node, so its locks, " <>
+            "sleeps and schedules don't notice; other software on the node does. Check NTP " <>
+            "if it's a second or more."
+      )
+
+    ~H"""
+    <td
+      class={["px-4 text-right font-mono text-xs", if(@off?, do: "text-warning", else: "text-muted-foreground")]}
+      data-tip-title="Clock"
+      data-tip={@tip}
+    >
+      {@label}
+    </td>
+    """
   end
 end

@@ -207,6 +207,19 @@ Durable uses no session features, so it runs on direct connections and behind
 PgBouncer in transaction mode. A PgBouncer older than 1.24 needs `prepare:
 :unnamed` on your repo.
 
+## Clocks
+
+Nodes compare times that other nodes wrote: how old a lock is, when a sleep or a
+retry is due, when a key's next run may start. So Durable keeps one clock, the
+database's. Each node measures how far its clock is from Postgres's as it starts
+and every 10 seconds, and reads the time with that correction, so nodes whose
+clocks disagree by seconds still agree on all of it. Run NTP on your nodes
+anyway, but a node that's off is no longer a correctness problem. Keep the
+database server's clock right: the whole cluster runs on it.
+
+Two Durable instances in one app, against different database servers, share one
+correction.
+
 ## Queues
 
 - **`concurrency` is per node.** `concurrency: 20` on three nodes runs up to 60 at
@@ -218,8 +231,9 @@ PgBouncer in transaction mode. A PgBouncer older than 1.24 needs `prepare:
 - **Poll less once you have a PubSub.** Every queue on every node runs a claim
   each `poll_interval`, 1 second by default, even when idle. A PubSub wakes pollers
   when a run starts or resumes, so a longer interval only delays work that comes
-  due later: sleeps, retries, snoozes and delayed starts. Between nodes, this needs
-  your cluster connected.
+  due later: sleeps, retries, snoozes and delayed starts. A backlog doesn't wait
+  for it either: while there's more to claim, each worker that finishes claims
+  the next run. Between nodes, this needs your cluster connected.
 - **A deep backlog doesn't slow claiming.** A claim took under a millisecond at
   100 ready runs and at 500,000.
 - **Workers-only and web-only nodes work.** `queue_enabled: false` lets a node
@@ -272,15 +286,19 @@ finishes it: the undo that was cut short runs again, and the ones that completed
 don't.
 
 To start before the signal arrives, call `Durable.drain()`, for example from a
-Kubernetes `preStop` hook. For app-wide cleanup of your own, use OTP's
-`prep_stop/1`. Durable reports each drain as `[:durable, :node, :drain, :stop]`.
+Kubernetes `preStop` hook. The grace period counts from the first drain, so the
+stop that follows waits only for what's left of it. For app-wide cleanup of your
+own, use OTP's `prep_stop/1`. Durable reports each drain as
+`[:durable, :node, :drain, :stop]`.
 
 A node that crashes or gets `kill -9` has no warning. Its runs stay locked until
 the lock goes stale, 300 seconds by default, and a sweep that runs every 60 seconds
 puts them back on the queue. You can shorten that with a smaller
 `stale_lock_timeout`, keeping it several times `heartbeat_interval` (Durable warns
 at boot if it's under 3). A worker whose lock was taken over is fenced out, so
-two copies can't both record a result.
+two copies can't both record a result. A worker cut off from the database, which
+can't refresh its lock, stops its step a heartbeat before the lock goes stale, so
+the step doesn't run on beside the copy another node starts.
 
 Smaller failures don't take a queue down. A poll that raises, because the
 database is away for a moment, is logged and tried again at the next tick. A
@@ -527,6 +545,7 @@ picked up. If you rename or remove the step a run stopped at, it fails with
 | Fire cron schedules | Every 60 s | Worker nodes, one claims each fire |
 | Delete queue samples and activity older than 7 days | With each sample | Every node |
 | Forget nodes unseen for a day | With each heartbeat | Every node |
+| Set its clock to the database's | Every 10 s | Every node |
 
 ## Watching it
 

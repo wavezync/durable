@@ -606,6 +606,57 @@ defmodule Durable.SchedulerTest do
       assert next_run_within?(updated, 86_400)
     end
 
+    # A fire due now that the scheduler's next check hasn't come to yet.
+    defp due_now!(name) do
+      due = DateTime.add(DateTime.utc_now(), -5, :second)
+
+      Config.get(Durable).repo.update_all(from(s in ScheduledWorkflow, where: s.name == ^name),
+        set: [next_run_at: due]
+      )
+
+      due
+    end
+
+    defp fires_due!(name, due) do
+      config = Config.get(Durable)
+      assert [%{name: ^name} = schedule] = API.get_due_schedules(config)
+      assert DateTime.compare(schedule.next_run_at, due) == :eq
+      assert API.claim_fire(schedule, config)
+    end
+
+    test "update_schedule/2 with a new cron keeps the fire that's due now" do
+      {:ok, _} = Durable.schedule(SimpleWorkflow, "0 9 * * *", name: "due_edit")
+      due = due_now!("due_edit")
+
+      {:ok, _} = Durable.update_schedule("due_edit", cron: "30 9 * * *")
+      fires_due!("due_edit", due)
+
+      # The fire after it goes by the new cron.
+      {:ok, fired} = Durable.get_schedule("due_edit")
+      assert %{hour: 9, minute: 30} = fired.next_run_at
+    end
+
+    test "a new cron in code keeps the fire that's due now" do
+      {:ok, _} =
+        Durable.schedule(ScheduledWorkflowModule, "0 0 1 1 *",
+          name: "daily_report",
+          workflow: "daily_report"
+        )
+
+      due = due_now!("daily_report")
+      :ok = API.register(ScheduledWorkflowModule)
+      fires_due!("daily_report", due)
+    end
+
+    test "a schedule turned back on doesn't fire the time it missed while off" do
+      {:ok, _} = Durable.schedule(SimpleWorkflow, "0 9 * * *", name: "off_edit")
+      {:ok, _} = Durable.disable_schedule("off_edit")
+      due_now!("off_edit")
+
+      {:ok, back} = Durable.update_schedule("off_edit", enabled: true, cron: "30 9 * * *")
+      assert DateTime.after?(back.next_run_at, DateTime.utc_now())
+    end
+
     defp next_run_at_for_test(at) do
       Config.get(Durable).repo.update_all(
         from(s in ScheduledWorkflow, where: s.name == "daily_report"),
@@ -800,11 +851,28 @@ defmodule Durable.SchedulerTest do
       assert API.claim_fire(schedule, config)
 
       {:ok, updated} = Durable.get_schedule("claim_test")
-      assert DateTime.diff(DateTime.utc_now(), updated.last_run_at, :second) in 0..4
+      assert DateTime.diff(Durable.Clock.utc_now(), updated.last_run_at, :second) in 0..4
       assert DateTime.compare(updated.next_run_at, updated.last_run_at) == :gt
 
       # A second node that read the same row loses.
       refute API.claim_fire(schedule, config)
+    end
+
+    test "loses to an operator's edit since it was read, and the fire waits for the next check" do
+      config = Config.get(Durable)
+
+      {:ok, schedule} = Durable.schedule(SimpleWorkflow, "0 9 * * *", name: "claim_edit")
+
+      {:ok, read} =
+        schedule
+        |> Ecto.Changeset.change(next_run_at: DateTime.add(DateTime.utc_now(), -5, :second))
+        |> config.repo.update()
+
+      {:ok, _} = Durable.update_schedule("claim_edit", cron: "30 9 * * *", input: %{"v" => 2})
+      refute API.claim_fire(read, config)
+
+      assert [%{name: "claim_edit", input: %{"v" => 2}} = edited] = API.get_due_schedules(config)
+      assert API.claim_fire(edited, config)
     end
 
     test "loses to an operator who turned the schedule off" do
