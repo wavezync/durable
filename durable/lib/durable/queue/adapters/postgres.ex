@@ -344,7 +344,9 @@ defmodule Durable.Queue.Adapters.Postgres do
 
   # A lock is stamped by the database's clock (the claim, the heartbeat), so
   # its age is the database's to tell: a node whose clock read ahead took
-  # live locks, and the step ran on two nodes at once.
+  # live locks, and the step ran on two nodes at once. clock_timestamp(), as
+  # in wake_sleeping_workflows/2: in the test sandbox's one transaction NOW()
+  # never moves, and a lock it stamped would never age.
   @impl true
   def recover_stale_locks(%Config{} = config, timeout_seconds) when timeout_seconds > 0 do
     query =
@@ -353,7 +355,10 @@ defmodule Durable.Queue.Adapters.Postgres do
         where: not is_nil(w.locked_by),
         where:
           w.locked_at <
-            fragment("(NOW() AT TIME ZONE 'UTC') - make_interval(secs => ?)", ^timeout_seconds),
+            fragment(
+              "(clock_timestamp() AT TIME ZONE 'UTC') - make_interval(secs => ?)",
+              ^timeout_seconds
+            ),
         select: struct(w, ^@released)
       )
 
@@ -445,7 +450,10 @@ defmodule Durable.Queue.Adapters.Postgres do
         from(w in kept_lock(WorkflowExecution),
           where:
             w.locked_at <
-              fragment("(NOW() AT TIME ZONE 'UTC') - make_interval(secs => ?)", ^timeout_seconds),
+              fragment(
+                "(clock_timestamp() AT TIME ZONE 'UTC') - make_interval(secs => ?)",
+                ^timeout_seconds
+              ),
           select: w
         ),
         set: [locked_by: nil, locked_at: nil]
@@ -750,7 +758,7 @@ defmodule Durable.Queue.Adapters.Postgres do
     {count, _} =
       Repo.update_all(
         config,
-        update(guarded, set: [locked_at: fragment("(NOW() AT TIME ZONE 'UTC')")]),
+        update(guarded, set: [locked_at: fragment("(clock_timestamp() AT TIME ZONE 'UTC')")]),
         []
       )
 
