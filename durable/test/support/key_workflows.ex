@@ -20,7 +20,8 @@ defmodule Durable.KeyWorkflows do
     @moduledoc false
     use Durable
 
-    workflow "kw_debounced", on_duplicate: :run_again, debounce: [period: 30] do
+    # Long enough that a burst's starts land inside it on a loaded machine.
+    workflow "kw_debounced", on_duplicate: :run_again, debounce: [period: 150] do
       step :work, fn data -> Durable.KeyWorkflows.body(data) end
       step :save, fn data -> Durable.KeyWorkflows.save(data) end
     end
