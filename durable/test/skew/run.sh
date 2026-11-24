@@ -27,7 +27,10 @@ common=(
 run=(mix run --no-compile --no-deps-check test/skew/swarm.exs)
 
 docker build -q -t "$image" "$here" >/dev/null
-docker run --rm "${common[@]}" "$image" sh -c 'mix deps.get --only prod >/dev/null 2>&1 && mix compile'
+# Durable is compiled from clean each time: an incremental compile that
+# changes a module's exports touches the files that use it, on a read-only mount.
+docker run --rm "${common[@]}" "$image" sh -c \
+  'mix deps.get --only prod >/dev/null 2>&1 && rm -rf /build/_build/prod/lib/durable && mix compile'
 
 stop_nodes() {
   for n in zero ahead behind; do docker rm -f "skew-$n" >/dev/null 2>&1 || true; done
