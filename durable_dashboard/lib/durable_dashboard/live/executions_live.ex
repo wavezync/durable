@@ -140,7 +140,9 @@ defmodule DurableDashboard.Live.ExecutionsLive do
     do: {:noreply, socket |> assign(refresh: nil) |> load_rows(:live)}
 
   def handle_info(:tick, socket),
-    do: {:noreply, socket |> assign(tick: nil, now: DateTime.utc_now()) |> schedule_tick()}
+    do:
+      {:noreply,
+       socket |> assign(tick: nil, now: DurableDashboard.Clock.utc_now()) |> schedule_tick()}
 
   def handle_info({:execution_filters, patch}, socket) do
     {:noreply, patch_query(socket, Map.merge(socket.assigns.query, patch))}
@@ -793,7 +795,7 @@ defmodule DurableDashboard.Live.ExecutionsLive do
       held: held,
       total: total,
       status_counts: status_counts,
-      now: DateTime.utc_now()
+      now: DurableDashboard.Clock.utc_now()
     )
     |> schedule_tick()
   end
@@ -858,7 +860,7 @@ defmodule DurableDashboard.Live.ExecutionsLive do
         Keyword.put(
           opts,
           :from,
-          DateTime.add(DateTime.utc_now(), -@preset_seconds[query.range], :second)
+          DateTime.add(DurableDashboard.Clock.utc_now(), -@preset_seconds[query.range], :second)
         )
 
       query.from || query.to ->

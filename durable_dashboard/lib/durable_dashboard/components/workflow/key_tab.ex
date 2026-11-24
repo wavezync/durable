@@ -52,7 +52,7 @@ defmodule DurableDashboard.Components.Workflow.KeyTab do
         )
       )
 
-    since = DateTime.add(DateTime.utc_now(), -@week, :second)
+    since = DateTime.add(DurableDashboard.Clock.utc_now(), -@week, :second)
 
     events =
       Durable.Repo.all(

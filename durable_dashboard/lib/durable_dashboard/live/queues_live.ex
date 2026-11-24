@@ -88,7 +88,7 @@ defmodule DurableDashboard.Live.QueuesLive do
     nodes = if durable_config, do: Durable.list_nodes!(durable: durable), else: []
     queues = if durable_config, do: Durable.Stats.queues!(durable: durable), else: []
     alive = Enum.filter(nodes, &(&1.status == :alive))
-    now = DateTime.utc_now()
+    now = DurableDashboard.Clock.utc_now()
 
     history =
       if durable_config,

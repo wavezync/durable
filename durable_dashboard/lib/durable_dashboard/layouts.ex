@@ -24,6 +24,11 @@ defmodule DurableDashboard.Layouts do
         <meta name="viewport" content="width=device-width, initial-scale=1" />
         <meta name="csrf-token" content={get_csrf_token()} />
         <meta name="live-socket-path" content={@config.live_socket_path} />
+        <%!-- The server's clock (Durable's), for the times the browser works out itself. --%>
+        <meta
+          name="durable-now"
+          content={DateTime.to_unix(DurableDashboard.Clock.utc_now(), :millisecond)}
+        />
         <title>Durable Console</title>
         <link rel="preconnect" href="https://fonts.googleapis.com" />
         <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="anonymous" />

@@ -93,7 +93,7 @@ defmodule DurableDashboard.Live.WorkflowDetailLive do
   defp load(socket) do
     %{durable: durable, name: name, range: range} = socket.assigns
     {span, bucket} = Charts.range_window(range)
-    now = DateTime.utc_now()
+    now = DurableDashboard.Clock.utc_now()
 
     window = [
       durable: durable,

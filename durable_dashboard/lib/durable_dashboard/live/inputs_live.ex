@@ -830,7 +830,7 @@ defmodule DurableDashboard.Live.InputsLive do
       "times out #{relative(input.timeout_at)}, then resumes with #{timeout_value(input.timeout_value)}"
 
   defp relative(at) do
-    seconds = DateTime.diff(at, DateTime.utc_now())
+    seconds = DateTime.diff(at, DurableDashboard.Clock.utc_now())
     if seconds <= 0, do: "now", else: "in " <> Format.ms(seconds * 1_000)
   end
 

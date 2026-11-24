@@ -179,11 +179,20 @@ const UNITS: [Intl.RelativeTimeFormatUnit, number][] = [
   ["second", 1],
 ];
 
+// How far the server's clock (Durable's, the database's) is ahead of this
+// browser's, from the page's `durable-now`: "in 2m" agrees with the text the
+// server rendered however far off this machine's clock is.
+const serverAhead = (() => {
+  const meta = document.querySelector<HTMLMetaElement>('meta[name="durable-now"]');
+  const ms = Number(meta?.content);
+  return meta && Number.isFinite(ms) ? ms - Date.now() : 0;
+})();
+
 function timeParts(iso: string): Parts | null {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return null;
 
-  const seconds = Math.round((d.getTime() - Date.now()) / 1000);
+  const seconds = Math.round((d.getTime() - (Date.now() + serverAhead)) / 1000);
   const [unit, size] = UNITS.find(([, s]) => Math.abs(seconds) >= s) ?? ["second", 1];
   const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
 

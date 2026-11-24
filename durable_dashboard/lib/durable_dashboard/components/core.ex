@@ -602,7 +602,7 @@ defmodule DurableDashboard.Components.Core do
         tone: run_status_tone(tone),
         step: step,
         where: where,
-        then: parked && parked_time(parked, assigns.now || DateTime.utc_now()),
+        then: parked && parked_time(parked, assigns.now || DurableDashboard.Clock.utc_now()),
         note: (error && error.message) || run_note(run, parked),
         error_type: error && error.type,
         tip_title: if(step, do: label <> " " <> where <> step, else: label)
@@ -791,7 +791,8 @@ defmodule DurableDashboard.Components.Core do
   defp relative_time_parts(nil), do: {"—", nil}
 
   defp relative_time_parts(%DateTime{} = dt) do
-    {humanize_diff(DateTime.diff(DateTime.utc_now(), dt, :second)), DateTime.to_iso8601(dt)}
+    {humanize_diff(DateTime.diff(DurableDashboard.Clock.utc_now(), dt, :second)),
+     DateTime.to_iso8601(dt)}
   end
 
   defp relative_time_parts(%NaiveDateTime{} = dt) do

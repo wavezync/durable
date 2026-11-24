@@ -96,7 +96,7 @@ defmodule DurableDashboard.Live.WorkflowLive do
        workflow_id: id,
        page_title: "Run",
        not_found?: false,
-       now: DateTime.utc_now(),
+       now: DurableDashboard.Clock.utc_now(),
        action_error: nil,
        rerun_editor: nil,
        release_confirm?: false,
@@ -145,7 +145,7 @@ defmodule DurableDashboard.Live.WorkflowLive do
   def handle_info(:clock_tick, socket) do
     {:noreply,
      socket
-     |> assign(now: DateTime.utc_now())
+     |> assign(now: DurableDashboard.Clock.utc_now())
      |> assign_trace()
      |> assign_selection()
      |> maybe_schedule_clock_tick()}
