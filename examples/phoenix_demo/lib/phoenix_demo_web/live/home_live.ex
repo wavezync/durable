@@ -76,6 +76,117 @@ defmodule PhoenixDemoWeb.HomeLive do
       ]
     },
     %{
+      key: "account_sync",
+      title: "Account Sync",
+      module: Workflows.AccountSyncWorkflow,
+      description:
+        "One sync per account at a time. Start it, then start it again while it syncs: the edits made meanwhile sync once more after it, with the newest data.",
+      pills: ["key", "on_duplicate: :run_again"],
+      key_from: {"account", ["account_id"]},
+      fields: [
+        %{name: "account_id", label: "Account (the key)", type: "text", default: "ACME"},
+        %{
+          name: "plan",
+          label: "Plan",
+          type: "select",
+          options: ["free", "pro", "enterprise"],
+          default: "pro"
+        },
+        %{name: "seconds", label: "Sync takes (s)", type: "number", default: 8},
+        %{name: "starts", label: "Start it this many times", type: "number", default: 1}
+      ]
+    },
+    %{
+      key: "monthly_invoice",
+      title: "Monthly Invoice",
+      module: Workflows.MonthlyInvoiceWorkflow,
+      description:
+        "Billed at most once per customer and month: every start after the first hands back the first run, even once it has finished.",
+      pills: ["key", "idempotency", "reuse: :never"],
+      key_from: {"invoice", ["customer", "month"]},
+      fields: [
+        %{name: "customer", label: "Customer", type: "text", default: "acme"},
+        %{name: "month", label: "Month", type: "text", default: "2026-11"},
+        %{name: "starts", label: "Start it this many times", type: "number", default: 3}
+      ]
+    },
+    %{
+      key: "reindex_article",
+      title: "Reindex Article",
+      module: Workflows.ReindexArticleWorkflow,
+      description:
+        "Indexed 10 s after the last save: a burst of saves becomes one run with the newest title, and a steady stream is indexed within a minute.",
+      pills: ["key", "debounce"],
+      key_from: {"article", ["article_id"]},
+      fields: [
+        %{name: "article_id", label: "Article (the key)", type: "text", default: "how-to-retry"},
+        %{name: "title", label: "Title", type: "text", default: "How to retry a step"},
+        %{name: "starts", label: "Start it this many times", type: "number", default: 3}
+      ]
+    },
+    %{
+      key: "report_export",
+      title: "Report Export",
+      module: Workflows.ReportExportWorkflow,
+      description:
+        "A newer request replaces the export in progress: the old one is cancelled, and the new one starts once the old one's step has stopped.",
+      pills: ["key", "on_duplicate: :cancel_existing"],
+      key_from: {"export", ["user"]},
+      fields: [
+        %{name: "user", label: "User (the key)", type: "text", default: "dana"},
+        %{name: "filters", label: "Filters", type: "text", default: "last 30 days"},
+        %{name: "seconds", label: "Query takes (s)", type: "number", default: 20},
+        Map.put(
+          %{name: "starts", label: "Start it this many times", type: "number", default: 3},
+          :default,
+          2
+        )
+      ]
+    },
+    %{
+      key: "order_tracker",
+      title: "Order Tracker",
+      module: Workflows.OrderTrackerWorkflow,
+      description:
+        "One tracker per order. Start it again with a new status and it goes to the running tracker as an order_updated event.",
+      pills: ["key", "on_duplicate: {:send_event, _}", "wait_for_event"],
+      key_from: {"order", ["order_id"]},
+      fields: [
+        %{name: "order_id", label: "Order (the key)", type: "text", default: "ORD-1042"},
+        %{
+          name: "status",
+          label: "Status",
+          type: "select",
+          options: ["shipped", "out for delivery", "delivered"],
+          default: "shipped"
+        },
+        Map.put(
+          %{name: "starts", label: "Start it this many times", type: "number", default: 3},
+          :default,
+          1
+        )
+      ]
+    },
+    %{
+      key: "loan_application",
+      title: "Loan Application",
+      module: Workflows.LoanApplicationWorkflow,
+      description:
+        "Credit, device and social lookups at once: the device check can fail with a default, the social lane has a time limit. Then an underwriter signs off.",
+      pills: ["parallel lanes", "optional", "lane timeout", "wait_for_approval"],
+      fields: [
+        %{name: "applicant", label: "Applicant", type: "text", default: "Dana Whitfield"},
+        %{name: "amount", label: "Amount", type: "text", default: "12000"},
+        %{
+          name: "device_check",
+          label: "Device service",
+          type: "select",
+          options: ["up", "down"],
+          default: "up"
+        }
+      ]
+    },
+    %{
       key: "payment_reconciliation",
       title: "Payment Reconciliation",
       module: Workflows.PaymentReconciliationWorkflow,
@@ -158,6 +269,9 @@ defmodule PhoenixDemoWeb.HomeLive do
             {:noreply, put_flash(socket, :error, "Trigger failed: #{inspect(reason)}")}
         end
 
+      %{key_from: _} = wf ->
+        start_keyed(socket, wf, params)
+
       %{module: module, fields: fields} ->
         input = build_input(fields, params["fields"] || %{})
 
@@ -172,6 +286,37 @@ defmodule PhoenixDemoWeb.HomeLive do
           {:error, reason} ->
             {:noreply, put_flash(socket, :error, "Start failed: #{inspect(reason)}")}
         end
+    end
+  end
+
+  # A keyed demo: the key comes from the card's fields, and the start is made
+  # `starts` times in a row, as a burst of edits or retried requests would.
+  defp start_keyed(socket, %{module: module, fields: fields, key_from: {prefix, from}}, params) do
+    {starts, input} = Map.pop(build_input(fields, params["fields"] || %{}), "starts", 1)
+    key = Enum.join([prefix | Enum.map(from, &to_string(input[&1]))], ":")
+
+    results =
+      for _ <- 1..min(max(trunc(starts), 1), 10),
+          do: Durable.start(module, input, key: key, return: :details)
+
+    created = for {:ok, %{created: true, id: id}} <- results, do: id
+    ids = for {:ok, %{id: id}} <- results, do: id
+    refused = for {:error, reason} <- results, do: reason
+
+    summary =
+      "Key #{key}: #{length(results)} starts made #{length(created)} new " <>
+        "run#{if length(created) == 1, do: "", else: "s"}, #{length(ids) - length(created)} " <>
+        "went to a run already there" <>
+        if(refused == [],
+          do: ".",
+          else: ", #{length(refused)} refused (#{inspect(hd(refused))})."
+        )
+
+    socket = socket |> assign(open_modal: nil) |> put_flash(:info, summary)
+
+    case List.last(ids) do
+      nil -> {:noreply, socket}
+      id -> {:noreply, push_navigate(socket, to: ~p"/executions/#{id}")}
     end
   end
 
