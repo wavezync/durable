@@ -189,7 +189,7 @@ defmodule Durable.LaneOptionsTest do
       {:ok, _} = Durable.retry(run.id)
       [lane] = lanes_of(run)
       assert DateTime.after?(lane.deadline_at, first_deadline)
-      assert DateTime.diff(lane.deadline_at, DateTime.utc_now(), :millisecond) in 0..30
+      assert DateTime.diff(lane.deadline_at, Durable.Clock.utc_now(), :millisecond) in 0..30
 
       assert drain(run).status == :completed
       assert {:decide, %{"employer" => %{"employed" => true}}} = List.last(Seen.all())

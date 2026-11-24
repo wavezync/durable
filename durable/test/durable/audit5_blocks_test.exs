@@ -433,7 +433,7 @@ defmodule Durable.Audit5BlocksTest do
     {:ok, _} = Durable.retry(lane(run, "employer").id)
 
     assert %{status: :pending, deadline_at: %DateTime{} = deadline} = lane(run, "employer")
-    assert DateTime.diff(deadline, DateTime.utc_now(), :millisecond) in 0..50
+    assert DateTime.diff(deadline, Durable.Clock.utc_now(), :millisecond) in 0..50
   end
 
   # Its deadline is the run's: the run is the one moved, and it ends the lane.

@@ -373,7 +373,7 @@ defmodule Durable.Audit4ApiWaitsTest do
         slept = execute(id)
 
         assert slept.status == :waiting
-        assert DateTime.compare(slept.scheduled_at, DateTime.utc_now()) != :gt
+        assert DateTime.compare(slept.scheduled_at, Durable.Clock.utc_now()) != :gt
         assert drain(id).current_step == "ask"
       end
     end

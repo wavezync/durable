@@ -189,7 +189,7 @@ defmodule Durable.WorkflowKeyModesTest do
 
   describe "debounce:" do
     test "a keyed start waits out the period" do
-      before = DateTime.utc_now()
+      before = Durable.Clock.utc_now()
       {:ok, id} = Durable.start(Debounced, %{}, key: "d:1")
 
       run = reload(id)
@@ -237,7 +237,7 @@ defmodule Durable.WorkflowKeyModesTest do
     end
 
     test "caps the first start's wait at timeout too (issue #48)" do
-      before = DateTime.utc_now()
+      before = Durable.Clock.utc_now()
       {:ok, id} = Durable.start(QuickDebounce, %{}, key: "d:6")
 
       wait = DateTime.diff(reload(id).scheduled_at, before, :millisecond)
