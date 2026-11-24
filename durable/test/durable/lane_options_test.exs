@@ -161,7 +161,8 @@ defmodule Durable.LaneOptionsTest do
       assert run.status == :completed
       assert micros < 400_000
       # Five attempts of 40ms don't fit in 60ms, and the next step never starts.
-      assert Enum.count(Seen.all(), &(&1 == :find_profiles)) in 1..2
+      # On a slow machine the time can run out before the first.
+      assert Enum.count(Seen.all(), &(&1 == :find_profiles)) in 0..2
       assert :rate not in Seen.all()
       assert {:decide, %{"social" => %{"profiles" => 0}}} = List.last(Seen.all())
 

@@ -661,22 +661,31 @@ defmodule Durable.Executor.StepRunner do
       config: config
     } = ctx
 
-    if attempt < max_attempts and not past?(deadline) do
-      {:ok, _} = fail_step_execution(config, step_exec, error, logs, duration_ms)
+    cond do
+      attempt < max_attempts and not past?(deadline) ->
+        {:ok, _} = fail_step_execution(config, step_exec, error, logs, duration_ms)
 
-      backoff_ms = backoff_ms(step, attempt)
+        backoff_ms = backoff_ms(step, attempt)
 
-      :telemetry.execute(
-        [:durable, :step, :retry],
-        %{backoff_ms: backoff_ms},
-        config
-        |> step_span_meta(step_exec, step, attempt, max_attempts)
-        |> Map.put(:error, error_summary(error))
-      )
+        :telemetry.execute(
+          [:durable, :step, :retry],
+          %{backoff_ms: backoff_ms},
+          config
+          |> step_span_meta(step_exec, step, attempt, max_attempts)
+          |> Map.put(:error, error_summary(error))
+        )
 
-      {:park, backoff_ms}
-    else
-      give_up(error, ctx)
+        {:park, backoff_ms}
+
+      # Out of time, not of attempts: the step's error came back as its time
+      # ran out, before it could be stopped. It fails for the timeout, as one
+      # stopped there does, and the attempt keeps its own error.
+      attempt < max_attempts ->
+        {:ok, _} = fail_step_execution(config, step_exec, error, logs, duration_ms)
+        {:error, timeout_error(step, :run)}
+
+      true ->
+        give_up(error, ctx)
     end
   end
 
