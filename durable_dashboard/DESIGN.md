@@ -607,6 +607,20 @@ One run, one page — header, banner, facts, then a view switch.
   neutral banner: "Debounced: starts 13:42:10 unless the key is added again;
   at the latest 13:46:00" (`local_time`; the latest is its first start plus
   the debounce `timeout`).
+- **The lock says what a worker is doing** (`DurableDashboard.Claim`, rule 30
+  in `ARCHITECTURE.md`). A run cancelled while a worker ran its step keeps
+  that worker's lock until the step stops: it gets a neutral banner with the
+  running dot, "Stopping: its worker on web-2 is still running the step it
+  had. No other run of `export:dana` starts until it stops, by 14:02:10 at
+  the latest". A run of that key that is due but held back by it says so,
+  linking the run it waits for: "Waiting for run `72fa680c` to stop: …".
+  A running run whose worker hasn't refreshed its lock for two heartbeats gets
+  an amber banner: "No heartbeat from its worker on web-2 for 70 s. If it
+  can't reach the database, it stops its step by 14:06:40, and the run goes
+  back on its queue for another node." The page reads the run again every
+  heartbeat while a worker has it, and every 2 s while a kept lock holds
+  anything up, since neither sends an event. A caller running a run inline
+  shows in Queue · node as "inline on web-2".
 - **A parked run says what it's waiting for.** Amber for a retry, with "Show
   error": "`charge_card` failed on attempt 2 of 5 and tries again in 12s:
   gateway timeout". Neutral for the rest: "`render_pdf` snoozed until
@@ -831,8 +845,13 @@ meter** (capacity ≈ this node's concurrency × live nodes polling the
 queue; amber when full), ready, scheduled, oldest ready (amber past a
 minute), done per minute, queue wait p95, and Pause/Resume. A queue no live
 node polls says so in amber instead of a meter. Nodes table: id ("This
-node" badge), alive/missing, running, queues, last heartbeat, uptime,
-version. Polled every 3 s — heartbeats don't publish events.
+node" badge), alive/missing, running, queues, last heartbeat, **clock**,
+uptime, version. Clock is how far the node's own clock is from the
+database's (`clock_skew_ms`): "in step" under 50 ms, else "1.2 s ahead" /
+"300 ms behind", amber from a second. Durable runs on the database's clock
+(rule 33), so it's a hint for whatever else runs on that node; "—" for a node
+on a Durable too old to report it. Polled every 3 s — heartbeats don't
+publish events.
 
 Each queue also gets a **"Ready, last hour" sparkline** (baseline at zero,
 neutral ink, peak beside it) from `Stats.queue_history` — one sample a minute,

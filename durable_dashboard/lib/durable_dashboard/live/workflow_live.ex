@@ -19,6 +19,8 @@ defmodule DurableDashboard.Live.WorkflowLive do
   alias Durable.Storage.Schemas.{PendingEvent, PendingInput, StepExecution, WorkflowExecution}
   alias DurableDashboard.Format
   alias DurableDashboard.Access
+  alias DurableDashboard.Claim
+  alias DurableDashboard.Clock
   alias DurableDashboard.Components.Core
 
   alias DurableDashboard.Components.Workflow.{
@@ -96,12 +98,13 @@ defmodule DurableDashboard.Live.WorkflowLive do
        workflow_id: id,
        page_title: "Run",
        not_found?: false,
-       now: DurableDashboard.Clock.utc_now(),
+       now: Clock.utc_now(),
        action_error: nil,
        rerun_editor: nil,
        release_confirm?: false,
        rollback_confirm?: false,
-       graph_pick: false
+       graph_pick: false,
+       reload_timer: nil
      )
      |> load_workflow()
      |> maybe_schedule_clock_tick()}
@@ -145,10 +148,19 @@ defmodule DurableDashboard.Live.WorkflowLive do
   def handle_info(:clock_tick, socket) do
     {:noreply,
      socket
-     |> assign(now: DurableDashboard.Clock.utc_now())
+     |> assign(now: Clock.utc_now())
      |> assign_trace()
      |> assign_selection()
      |> maybe_schedule_clock_tick()}
+  end
+
+  def handle_info(:reload, socket) do
+    {:noreply,
+     socket
+     |> assign(reload_timer: nil)
+     |> load_workflow()
+     |> assign_selection()
+     |> maybe_schedule_reload()}
   end
 
   def handle_info(_msg, socket), do: {:noreply, socket}
@@ -158,10 +170,39 @@ defmodule DurableDashboard.Live.WorkflowLive do
   defp maybe_schedule_clock_tick(%{assigns: %{workflow: %{status: status}}} = socket)
        when status in @live_statuses do
     Process.send_after(self(), :clock_tick, 500)
-    socket
+    maybe_schedule_reload(socket)
   end
 
-  defp maybe_schedule_clock_tick(socket), do: socket
+  defp maybe_schedule_clock_tick(socket), do: maybe_schedule_reload(socket)
+
+  # Neither a heartbeat nor a stopped worker letting go sends an event: the
+  # run is read again while its lock can change that way, every heartbeat
+  # while a worker runs it (for a late one), and every 2 s while a kept lock
+  # holds it or its key up. One timer at a time.
+  defp maybe_schedule_reload(%{assigns: %{reload_timer: ref}} = socket) when ref != nil,
+    do: socket
+
+  defp maybe_schedule_reload(%{assigns: %{workflow: %{} = run} = assigns} = socket) do
+    config = assigns.durable_config
+
+    every =
+      cond do
+        assigns.held_back || Claim.stopping(run, config, Clock.utc_now()) ->
+          2_000
+
+        run.status in [:running, :compensating] and config ->
+          max(config.heartbeat_interval, 2_000)
+
+        true ->
+          nil
+      end
+
+    if every,
+      do: assign(socket, reload_timer: Process.send_after(self(), :reload, every)),
+      else: socket
+  end
+
+  defp maybe_schedule_reload(socket), do: socket
 
   # ============================================================================
   # Actions
@@ -358,6 +399,13 @@ defmodule DurableDashboard.Live.WorkflowLive do
           now={@now}
         />
         <.key_banner :if={@key_info} workflow={@workflow} info={@key_info} base_path={@base_path} />
+        <.claim_banner
+          workflow={@workflow}
+          durable_config={@durable_config}
+          held_back={@held_back}
+          now={@now}
+          base_path={@base_path}
+        />
         <.facts
           workflow={@workflow}
           trace={@trace}
@@ -814,6 +862,83 @@ defmodule DurableDashboard.Live.WorkflowLive do
 
   defp banner(assigns), do: ~H""
 
+  # ---- Claim banner -------------------------------------------------------------
+
+  attr :workflow, :map, required: true
+  attr :durable_config, :any, required: true
+  attr :held_back, :map, default: nil
+  attr :now, :any, required: true
+  attr :base_path, :string, required: true
+
+  # What the lock on a run says (ARCHITECTURE rule 30): a stopped run whose
+  # worker hasn't stopped its step yet, a run of its key waiting for that, or
+  # a worker whose heartbeat is late.
+  defp claim_banner(assigns) do
+    %{workflow: run, durable_config: config, now: now} = assigns
+
+    assigns =
+      assign(assigns,
+        stopping: Claim.stopping(run, config, now),
+        late: Claim.late(run, config, now)
+      )
+
+    ~H"""
+    <div
+      :if={@stopping}
+      class="mt-4 flex items-center gap-3 rounded-[10px] border border-border bg-secondary px-3.5 py-3"
+      data-claim="stopping"
+    >
+      <Core.status_dot status={:running} />
+      <p class="min-w-0 flex-1">
+        Stopping: {worker_on(@stopping)} is still running the step it had.
+        <%= if @workflow.key do %>
+          No other run of <span class="font-mono">{@workflow.key}</span> starts until it stops,
+        <% else %>
+          Nothing undoes the run until it stops,
+        <% end %>
+        by <Core.local_time at={@stopping.until} format="time" /> at the latest.
+      </p>
+    </div>
+    <div
+      :if={@held_back}
+      class="mt-4 flex items-center gap-3 rounded-[10px] border border-border bg-secondary px-3.5 py-3"
+      data-claim="held-back"
+    >
+      <Core.status_dot status={:pending} />
+      <p class="min-w-0 flex-1">
+        Waiting for run <KeyTab.run_link id={@held_back.run.id} base_path={@base_path} /> to stop:
+        it was cancelled, but {worker_on(@held_back)} is still running its step. Two runs of
+        <span class="font-mono">{@workflow.key}</span> never run at once, so this one starts when
+        that stops, by <Core.local_time at={@held_back.until} format="time" /> at the latest.
+      </p>
+      <.link
+        navigate={DPath.execution(@base_path, @held_back.run.id)}
+        class="shrink-0 text-xs font-medium text-primary hover:underline"
+      >
+        Open that run
+      </.link>
+    </div>
+    <div
+      :if={@late}
+      role="status"
+      class="mt-4 flex items-center gap-3 rounded-[10px] border border-warning/35 bg-warning/10 px-3.5 py-3"
+      data-claim="late"
+    >
+      <Core.status_dot status={:waiting} />
+      <p class="min-w-0 flex-1">
+        No heartbeat from {worker_on(@late)} for {@late.silent_s} s. If it can't reach the database,
+        it stops its step by <Core.local_time at={@late.stops_by} format="time" />, and the run goes
+        back on its queue for another node.
+      </p>
+    </div>
+    """
+  end
+
+  defp worker_on(%{inline?: true, node: node}),
+    do: "the caller running it inline on #{short_node(node)}"
+
+  defp worker_on(%{node: node}), do: "its worker on #{short_node(node)}"
+
   # ---- Key banner ---------------------------------------------------------------
 
   attr :workflow, :map, required: true
@@ -1019,7 +1144,7 @@ defmodule DurableDashboard.Live.WorkflowLive do
         meta={@workflow.locked_by}
         sub={@workflow.home_queue && "home queue #{@workflow.home_queue}"}
       >
-        {@workflow.queue}{if @workflow.locked_by && @workflow.status == :running, do: " · " <> short_node(@workflow.locked_by)}
+        {@workflow.queue}{if @workflow.locked_by && @workflow.status == :running, do: " · " <> owner_label(@workflow.locked_by)}
       </.fact>
       <.fact :if={@workflow.tags != []} label="Tags" tip="What it was started with · open one for the other runs with it">
         <span :for={{tag, index} <- Enum.with_index(@workflow.tags)}>{if index > 0, do: " · "}<.link
@@ -1821,6 +1946,8 @@ defmodule DurableDashboard.Live.WorkflowLive do
     assign(socket,
       not_found?: true,
       workflow: nil,
+      durable_config: nil,
+      held_back: nil,
       steps: [],
       pending_inputs: [],
       kept_events: [],
@@ -1846,6 +1973,9 @@ defmodule DurableDashboard.Live.WorkflowLive do
         |> assign(
           not_found?: false,
           workflow: execution,
+          durable_config: config,
+          held_back:
+            Claim.held_back_by(execution, socket.assigns.durable, config, Clock.utc_now()),
           steps: fetch_steps(config, family.related_ids),
           pending_inputs: fetch_pending_inputs(config, execution.id),
           kept_events: fetch_kept_events(config, execution.id),
@@ -2022,4 +2152,12 @@ defmodule DurableDashboard.Live.WorkflowLive do
   # Node ids are `host-123456` or `name@host`; the host part is what people
   # recognise.
   defp short_node(node), do: node |> String.split("@") |> List.last() |> String.slice(0, 24)
+
+  # A caller running the run inline claims it as `node/inline`.
+  defp owner_label(locked_by) do
+    case Claim.owner(locked_by) do
+      {node, true} -> "inline on " <> short_node(node)
+      {node, false} -> short_node(node)
+    end
+  end
 end
