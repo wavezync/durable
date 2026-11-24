@@ -315,10 +315,23 @@ defmodule Durable.Fuzz.Audit6BlocksChaosTest do
     hit(j, :rollback, Durable.rollback(at(runs, j)))
   end
 
+  # Like a rollback, it goes for a run of the batch with a failed lane now,
+  # starting at `i`, or it would rarely land at all.
   defp apply_op({:retry_lane, i, k}, runs) do
-    case runs |> at(i) |> family() |> Enum.filter(&(&1.status == :failed)) |> tl_or_empty() do
-      [] -> []
-      failed -> hit(i, :retry_lane, Durable.retry(Enum.at(failed, rem(k, length(failed))).id))
+    failed_lanes = fn j ->
+      runs |> at(j) |> family() |> tl_or_empty() |> Enum.filter(&(&1.status == :failed))
+    end
+
+    0..(@batch - 1)
+    |> Stream.map(&rem(i + &1, @batch))
+    |> Stream.map(&{&1, failed_lanes.(&1)})
+    |> Enum.find(fn {_j, failed} -> failed != [] end)
+    |> case do
+      nil ->
+        []
+
+      {j, failed} ->
+        hit(j, :retry_lane, Durable.retry(Enum.at(failed, rem(k, length(failed))).id))
     end
   end
 
