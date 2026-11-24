@@ -183,7 +183,7 @@ defmodule Durable.Keys do
       Repo.transaction(ctx.config, fn ->
         lock_key(ctx.config, ctx.entry, ctx.key_lock)
         ctx = after_undo_settled(ctx)
-        claimed = unheld_waiting(ctx) || claim(ctx, @rounds, nil)
+        claimed = claim(ctx, @rounds, nil)
         {claimed, replace_waiting(ctx, claimed)}
       end)
 
@@ -295,8 +295,25 @@ defmodule Durable.Keys do
            conflict_target: @holder_target,
            returning: true
          ) do
-      {1, [run]} -> {:inserted, run, moved}
+      {1, [run]} -> got_key(ctx, run, rounds, moved)
       {0, _} -> taken(ctx, rounds, moved)
+    end
+  end
+
+  # The key was free. A run waiting for it goes first, however the key came
+  # to be free: nobody held it, or its holder let it go after it was read
+  # (released, rolled back or pruned, none of which takes the key's lock).
+  # The new row is taken back unseen, as it's still in this transaction, and
+  # the start is judged against that run (`next_in_line/4`). Only a start
+  # holding the key's lock makes a run wait, so none can start waiting now.
+  defp got_key(%{mode: :cancel_existing}, run, _rounds, moved), do: {:inserted, run, moved}
+
+  defp got_key(ctx, run, rounds, moved) do
+    if Repo.one(ctx.config, waiter(ctx.entry)) do
+      Repo.delete_all(ctx.config, from(w in WorkflowExecution, where: w.id == ^run.id))
+      with nil <- next_in_line(ctx, nil, rounds, moved), do: claim(ctx, rounds - 1, moved)
+    else
+      {:inserted, run, moved}
     end
   end
 
@@ -332,19 +349,39 @@ defmodule Durable.Keys do
     end
   end
 
-  # Under run_again a run may already be waiting behind this holder, about to
-  # take the key: it goes first (`join_waiter/4`).
+  # A run may already be waiting behind this holder, about to take the key: it
+  # goes first (`next_in_line/4`).
   defp take_from_closed(ctx, holder, rounds, moved) do
-    case ctx.mode == :run_again && join_waiter(ctx, holder, rounds, moved) do
-      joined when is_tuple(joined) or joined == :contended ->
-        joined
+    with nil <- next_in_line(ctx, holder, rounds, moved) do
+      # One cancelled mid-step keeps its worker's lock, and the claim of the
+      # run that takes the key waits for it (`Postgres.claim_sql/1`).
+      if release_closed(ctx.config, holder, ctx.reuse),
+        do: claim(ctx, rounds - 1, {:released, holder}),
+        else: claim(ctx, rounds - 1, moved)
+    end
+  end
 
-      _no_waiter ->
-        # One cancelled mid-step keeps its worker's lock, and the claim of the
-        # run that takes the key waits for it (`Postgres.claim_sql/1`).
-        if release_closed(ctx.config, holder, ctx.reuse),
-          do: claim(ctx, rounds - 1, {:released, holder}),
-          else: claim(ctx, rounds - 1, moved)
+  # The key is free, or about to be, and a run waits for it (run_again): a new
+  # holder would run ahead of it, and leave its older input to run last. So
+  # the start is judged against that run, in any mode, as if it held the key:
+  # run_again gives it the newer input (`join_waiter/4`), :use_existing gets
+  # it back, :error is refused, and :cancel_existing replaces it
+  # (`replace_waiting/2`). On a debounced workflow one no worker has yet
+  # takes the newer input, as an unstarted holder would. nil when no run waits.
+  defp next_in_line(%{mode: :run_again} = ctx, about, rounds, moved),
+    do: join_waiter(ctx, about, rounds, moved)
+
+  defp next_in_line(%{mode: :cancel_existing}, _about, _rounds, _moved), do: nil
+
+  defp next_in_line(ctx, _about, _rounds, _moved) do
+    case Repo.one(ctx.config, waiter(ctx.entry)) do
+      nil ->
+        nil
+
+      waiter ->
+        if ctx.debounce && unclaimed?(waiter) && refresh_waiting(ctx),
+          do: {:debounced, waiter},
+          else: {:taken, waiter}
     end
   end
 
@@ -395,33 +432,41 @@ defmodule Durable.Keys do
   # first, and leave the older input to run last. One no worker has yet takes
   # the newer input. One a worker has claimed has read its input, and is about
   # to take the key: the newer input waits behind it. `about` is the run the
-  # activity is recorded on. nil when there's no such run.
+  # activity is recorded on, the waiting run itself if nil. nil when there's
+  # no such run.
+  defp join_waiter(_ctx, _about, 0, _moved), do: :contended
+
   defp join_waiter(ctx, about, rounds, moved) do
-    refreshed = about && refresh_waiting(ctx)
-
-    cond do
-      is_binary(refreshed) ->
-        {:waiting_refreshed, refreshed, about}
-
-      claimed = Repo.one(ctx.config, claimed_waiter(ctx.entry)) ->
-        run_after(ctx, claimed, rounds, moved)
-
-      true ->
+    case Repo.one(ctx.config, waiter(ctx.entry)) do
+      nil ->
         nil
+
+      waiter ->
+        cond do
+          not unclaimed?(waiter) -> run_after(ctx, waiter, rounds, moved)
+          id = refresh_waiting(ctx) -> {:waiting_refreshed, id, about || waiter}
+          # A worker claimed it since the read: behind it, then.
+          true -> join_waiter(ctx, about, rounds - 1, moved)
+        end
     end
   end
 
   # run_again: a holder that hasn't started takes the newer input; one that's
   # going gets a run waiting behind it. A closed holder `reuse:` keeps is taken.
+  # The run already waiting, if any, is joined first: the holder may have
+  # ended since it was read (a run ends without the key's lock), and a worker
+  # claimed that run. Behind the holder, the new run would be claimable beside
+  # it, and could take the key first.
   defp run_again(ctx, holder, rounds, moved) do
     cond do
-      unstarted?(holder) ->
+      takes_input?(ctx, holder) ->
         if refresh_unstarted(ctx, holder),
           do: {:refreshed, holder},
           else: claim(ctx, rounds - 1, moved)
 
       holder.status in WorkflowExecution.open_statuses() ->
-        run_after(ctx, holder, rounds, moved)
+        with nil <- join_waiter(ctx, holder, rounds, moved),
+             do: run_after(ctx, holder, rounds, moved)
 
       true ->
         {:taken, holder}
@@ -453,7 +498,17 @@ defmodule Durable.Keys do
   end
 
   defp debouncing?(%{debounce: nil}, _holder), do: false
-  defp debouncing?(_ctx, holder), do: unstarted?(holder)
+  defp debouncing?(ctx, holder), do: takes_input?(ctx, holder)
+
+  # A holder that hasn't started takes a duplicate start's input, unless a run
+  # waits behind it: that one runs after it, so the input goes to it instead.
+  # Only a retry leaves a run waiting behind a holder that hasn't started (a
+  # run that failed before it began, retried while another waited), so only a
+  # retried holder is looked at.
+  defp takes_input?(ctx, holder) do
+    unstarted?(holder) and
+      (is_nil(holder.retried_at) or is_nil(Repo.one(ctx.config, waiter(ctx.entry))))
+  end
 
   # Never claimed. A parked retry or snooze is :pending and unlocked too, but
   # it has started.
@@ -511,18 +566,25 @@ defmodule Durable.Keys do
     )
   end
 
-  # A run that waited for the key (run_again), claimed by a worker that hasn't
-  # taken the key for it yet (`take_waiting/3`).
-  defp claimed_waiter(entry) do
+  # The run waiting for the key (run_again): one no worker has yet, or one
+  # claimed by a worker that hasn't taken the key for it (`take_waiting/3`).
+  # One read: a worker moves it between the two without the key's lock (a
+  # claim, `Executor.wait_behind/3`, the stale sweep), so two reads could
+  # both miss it. The unclaimed one first, as it runs last ('pending' sorts
+  # before 'running'). One being rolled back is on its way out.
+  defp waiter(entry) do
     from(w in WorkflowExecution,
       where:
         w.workflow_module == ^entry.workflow_module and
           w.workflow_name == ^entry.workflow_name and w.key == ^entry.key and
-          not is_nil(w.runs_after_id) and w.status == :running,
-      order_by: [desc: w.inserted_at],
+          not is_nil(w.runs_after_id) and w.status in [:pending, :running],
+      where: not EngineState.marked?(w, ^"__rollback__"),
+      order_by: [asc: w.status, desc: w.inserted_at],
       limit: 1
     )
   end
+
+  defp unclaimed?(run), do: run.status == :pending and is_nil(run.locked_by)
 
   defp refresh_waiting(%{config: config, entry: entry}) do
     {_, ids} =
@@ -532,17 +594,6 @@ defmodule Durable.Keys do
 
     List.first(ids)
   end
-
-  # run_again with nobody holding the key: its holder let it go to be rolled
-  # back (`Executor.without_key/2`), or was pruned. A run still waiting takes
-  # the newer input, as it would behind a holder: a new holder would run
-  # first, and leave the older input to run last.
-  defp unheld_waiting(%{mode: :run_again} = ctx) do
-    if is_nil(holder(ctx.config, ctx.entry)),
-      do: join_waiter(ctx, Repo.one(ctx.config, waiting(ctx.entry)), @rounds, nil)
-  end
-
-  defp unheld_waiting(_ctx), do: nil
 
   # Gives the newer input to a debounced run that hasn't been claimed, and
   # pushes its start back by `period`, but not past `timeout` after the first
@@ -717,6 +768,7 @@ defmodule Durable.Keys do
             :locked_at,
             :started_at,
             :completed_at,
+            :retried_at,
             :inserted_at
           ])
       )

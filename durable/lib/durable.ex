@@ -230,10 +230,15 @@ defmodule Durable do
     - `{:send_event, name}` - send this input to the running holder as event
       `name` (kept until it waits for it) and return `{:ok, holder_id}`
 
-    Only `:cancel_existing` and `:run_again` create a run; nothing is
-    broadcast or run inline for the others. A finished holder that the workflow's `reuse:`
-    keeps answers `:cancel_existing` and `{:send_event, name}` with
+    A start that gets an existing run back creates none, and nothing is
+    broadcast or run inline for it. A finished holder that the workflow's `reuse:` keeps answers
+    `:cancel_existing` and `{:send_event, name}` with
     `{:error, {:key_taken, holder_id}}`.
+
+    While a run waits for the key (from a `:run_again` start), a start that
+    finds the key free meets that run as if it held the key, in any mode, so
+    `holder_id` above may be the waiting run's id. See the Workflow Keys
+    guide.
   - `:return` - `:details` makes a success `{:ok, %{id: id, created: boolean}}`,
     so a caller can tell a new run from a duplicate (default: `:id`)
 

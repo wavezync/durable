@@ -61,7 +61,7 @@ workflow "process_article", reuse: :after_failure do
 | Completed | free | taken | taken |
 | Failed, cancelled, compensated, compensation failed | free | free | taken |
 
-*Taken* means the start gets the holder back. *Free* means the start creates a new run, which becomes the holder.
+*Taken* means the start gets the holder back. *Free* means the start creates a new run, which becomes the holder, unless a run is already waiting for the key (from an `on_duplicate: :run_again` start): then that run goes next, and the start meets it as if it held the key (see "Run Once More After It" below).
 
 - **`:after_close`**: one run at a time per key. Use it for "don't run two syncs of account 7 at once".
 - **`:after_failure`**: each item succeeds once. Use it for "process each article once, but let a failed attempt be tried again".
@@ -193,7 +193,7 @@ However many starts arrive, one run waits, with the newest input. When the holde
 
 - `reuse:` still decides. A failed holder lets the waiting run go under the default `:after_close`. If `reuse:` keeps the key (`:after_failure` and the holder completed), the waiting run is cancelled, and its error says why. `:run_again` with `reuse: :never` fails the compile.
 - A holder that no worker has picked up yet takes the newer input itself, as with `debounce:`, so nothing waits behind a run that hasn't started.
-- If another start took the key between the holder ending and the waiting run starting (one with `on_duplicate: :use_existing`, say), the waiting run waits behind that run instead. A `:run_again` start in that time waits behind the waiting run, so the newest input still runs last.
+- Between the holder letting the key go (it ended, was released, rolled back or pruned) and the waiting run taking the key, a start in any mode meets the waiting run as if it held the key: `:use_existing` gets it back, `:error` gets `{:error, {:key_taken, waiting_id}}`, `{:send_event, name}` sends it the input, `:cancel_existing` replaces it, and `:run_again` gives it the newer input (or waits behind it, once a worker has it). On a debounced workflow, a waiting run no worker has picked up takes the newer input under every mode but `:cancel_existing`, as a holder that hasn't started would, though its start isn't pushed back. So the newest input still runs last. A retry of a failed run can take its key back in that time; the waiting run then waits behind the retry.
 - The waiting run's `timeout:` counts from when it takes the key. Its `runs_after_id` is the run it waits for.
 
 In Oban this takes a job that finishes, checks for new work and snoozes to go again.
