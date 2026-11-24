@@ -35,15 +35,26 @@ defmodule Durable.Integration.Audit4EngineStateMigrationTest do
     "shipped" => true
   }
 
+  # The migration under test, not the latest: later ones come after it.
+  @engine_state Durable.Migration.Migrations.V20261122000000AddEngineState.version()
+
   for {name, call} <- [
         {Up, quote(do: Migration.up(prefix: unquote(@prefix), log: false))},
-        {DownOne, quote(do: Migration.down(prefix: unquote(@prefix), step: 1, log: false))},
+        {DownOne,
+         quote(
+           do:
+             Migration.down(
+               prefix: unquote(@prefix),
+               to: Migration.previous_version(unquote(@engine_state)),
+               log: false
+             )
+         )},
         {UpToBefore,
          quote(
            do:
              Migration.up(
                prefix: unquote(@prefix),
-               to: Migration.previous_version(),
+               to: Migration.previous_version(unquote(@engine_state)),
                log: false
              )
          )}
