@@ -4,6 +4,12 @@ All notable changes to this package. Versions follow [Semantic
 Versioning](https://semver.org); entries come from [Conventional
 Commits](https://www.conventionalcommits.org).
 
+## [2.1.1](https://github.com/wavezync/durable/compare/durable-v2.1.0...durable-v2.1.1) - 2026-11-24
+
+### Bug fixes
+
+- A run waiting on a key goes before a start in any mode ([1ca8cfa](https://github.com/wavezync/durable/commit/1ca8cfaf5ace2dcce0a79e3378b2f6024a08ba8f))
+
 ## [2.1.0](https://github.com/wavezync/durable/compare/durable-v2.0.2...durable-v2.1.0) - 2026-11-24
 
 ### Features
