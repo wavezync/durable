@@ -212,6 +212,11 @@ defmodule Durable.Scheduler.API do
   - `:key` - New workflow key (`nil` for none)
   - `:enabled` - Enable/disable
 
+  A new cron or time zone sets the next run from now. A fire that was due
+  before the edit, and that the scheduler hasn't started yet, still fires,
+  with the edited schedule. A schedule turned back on starts from its next
+  time, and doesn't fire the ones it missed.
+
   ## Examples
 
       {:ok, schedule} = Durable.update_schedule("daily_report", cron: "0 10 * * *")
@@ -828,13 +833,25 @@ defmodule Durable.Scheduler.API do
       cron = Keyword.get(changes, :cron_expression, schedule.cron_expression)
       timezone = Keyword.get(changes, :timezone, schedule.timezone)
 
+      # Turned on, it doesn't fire the times it missed while off.
+      kept = if turned_on?, do: %{schedule | enabled: false}, else: schedule
+
       with {:ok, next_run} <- compute_next_run(cron, timezone) do
-        {:ok, %{cron_expression: cron, timezone: timezone, next_run_at: next_run}}
+        {:ok, %{cron_expression: cron, timezone: timezone, next_run_at: due_or(kept, next_run)}}
       end
     else
       {:ok, %{}}
     end
   end
+
+  # A new time for a schedule that's on doesn't drop the fire it has due now,
+  # which the next check hasn't come to yet. That fire goes with what the edit
+  # set, and the one after it by the new time.
+  defp due_or(%{enabled: true, next_run_at: %DateTime{} = due}, next_run) do
+    if DateTime.after?(due, DateTime.utc_now()), do: next_run, else: due
+  end
+
+  defp due_or(_schedule, next_run), do: next_run
 
   defp updated_input(changes) do
     case Keyword.fetch(changes, :input) do
@@ -915,7 +932,7 @@ defmodule Durable.Scheduler.API do
         Map.put(attrs, :enabled, true)
 
       existing.cron_expression != attrs.cron_expression or existing.timezone != attrs.timezone ->
-        attrs
+        %{attrs | next_run_at: due_or(existing, attrs.next_run_at)}
 
       true ->
         Map.delete(attrs, :next_run_at)
