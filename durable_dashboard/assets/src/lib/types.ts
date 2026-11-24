@@ -31,7 +31,22 @@ export type NodeType =
   | "branch_fork"
   | "branch_join"
   | "parallel_fork"
-  | "parallel_join";
+  | "parallel_join"
+  | "lane";
+
+/** A lane of a named parallel block, with the options written on it. */
+export interface LaneInfo {
+  name: string;
+  optional: boolean;
+  /** Whether a failed optional lane hands the block its `default:`. */
+  default: boolean;
+  /** The lane's own `timeout:`, in ms. */
+  timeout_ms: number | null;
+  /** The lane's steps, as node ids (on a join's lanes). */
+  nodes?: string[];
+  /** How the lane did in this run (on a join's lanes). */
+  status?: string;
+}
 
 export interface GraphNode {
   id: string;
@@ -62,6 +77,13 @@ export interface GraphNode {
     error?: string;
     /** The step's retry budget from its definition. */
     max_attempts?: number;
+    /** From the step's definition: its time limit in ms, the compensation
+     * that undoes it, and the queue it moves to. */
+    timeout_ms?: number;
+    compensate?: string;
+    queue?: string;
+    /** A lane of one step: the lane's options, carried on the step. */
+    lane?: LaneInfo;
     /** The step open in the run page's inspector. */
     selected?: boolean;
     /** Set in a finished run on steps that never executed. */
@@ -71,7 +93,7 @@ export interface GraphNode {
     done?: number;
     /** `join` of a named block: its lanes, how many failed, and whether the
      * block collects (a failed lane doesn't fail it). */
-    lanes?: { name: string }[];
+    lanes?: LaneInfo[];
     failed?: number;
     collect?: boolean;
     /** `branch` of a named block: the gateway is the deciding step itself. */

@@ -14,7 +14,7 @@
  */
 
 import { Handle, type NodeProps, Position } from "@xyflow/react";
-import { Box, GitFork } from "lucide-react";
+import { Box, CircleDashed, GitFork, Layers, RotateCw, Timer, Undo2 } from "lucide-react";
 import { memo, useCallback } from "react";
 import { dotClass, type NodeData, statusLine, stepTip, toneFor } from "./shared";
 
@@ -80,8 +80,11 @@ export function StepCard({ node, child }: { node: NodeData; child: boolean }) {
       </div>
 
       <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-        <span className="truncate text-[13px] font-medium leading-tight text-foreground">
-          {node.label}
+        <span className="flex min-w-0 items-center gap-1.5">
+          <span className="truncate text-[13px] font-medium leading-tight text-foreground">
+            {node.label}
+          </span>
+          <OptionMarks node={node} />
         </span>
         <span className="flex min-w-0 items-center gap-1.5 text-[11px] text-muted-foreground">
           <span className={dotClass(node)} aria-hidden="true" />
@@ -89,6 +92,28 @@ export function StepCard({ node, child }: { node: NodeData; child: boolean }) {
         </span>
       </div>
     </div>
+  );
+}
+
+// What the step's definition says, as small marks after its name; the
+// tooltip spells each one out (`optionLines` in `shared.ts`).
+function OptionMarks({ node }: { node: NodeData }) {
+  const mark = "size-3 shrink-0 text-muted-foreground/70";
+  const retries = node.max_attempts && node.max_attempts > 1 ? node.max_attempts : null;
+
+  return (
+    <span className="ml-auto flex shrink-0 items-center gap-1" aria-hidden="true">
+      {node.lane?.optional ? <CircleDashed className={mark} /> : null}
+      {retries ? (
+        <span className="flex items-center gap-px text-[10px] tabular-nums text-muted-foreground/70">
+          <RotateCw className={mark} />
+          {retries}
+        </span>
+      ) : null}
+      {node.timeout_ms || node.lane?.timeout_ms ? <Timer className={mark} /> : null}
+      {node.compensate ? <Undo2 className={mark} /> : null}
+      {node.queue ? <Layers className={mark} /> : null}
+    </span>
   );
 }
 

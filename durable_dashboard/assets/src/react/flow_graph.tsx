@@ -31,6 +31,7 @@ import { ChildWorkflowNode } from "./nodes/child_workflow_node";
 import { EndNode } from "./nodes/end_node";
 import { GatewayNode } from "./nodes/gateway_node";
 import { HiddenNode } from "./nodes/hidden_node";
+import { LaneNode } from "./nodes/lane_node";
 import { StartNode } from "./nodes/start_node";
 import { StepNode } from "./nodes/step_node";
 
@@ -49,6 +50,8 @@ const NODE_TYPES = {
   start: StartNode,
   end: EndNode,
   child_workflow: ChildWorkflowNode,
+  // A frame behind a lane of several steps, laid out in `graph-layout.ts`.
+  lane: LaneNode,
   parallel_fork: HiddenNode,
   parallel_join: HiddenNode,
   branch_fork: HiddenNode,

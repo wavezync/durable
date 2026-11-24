@@ -981,6 +981,7 @@ A left-to-right flow of **cards** (220 × 56) for code that runs, and
 | `decision`       | `GatewayNode`       | card, `GitBranch`, "decide" | A decision step; its dashed edges are the `goto` targets |
 | `join`           | `JoinNode`          | pill, `GitMerge` | Closes a parallel block: "all 3 done" / "2 of 3 done" |
 | `branch`         | `BranchNode`        | pill, `GitBranch` | A branch's gateway: "3 paths", then "→ low" |
+| `lane`           | `LaneNode`          | dashed frame | Behind a lane of several steps in a named block: its name and options |
 
 **Blocks have a join and a gateway.** A parallel block fans out from the
 step before it and meets in its join; a branch is one gateway with an edge
@@ -1005,6 +1006,22 @@ its join turns the success tone once every lane has ended and reads
 that block sits in. The failed lane's own cards stay in the failure tone.
 A lane marked `optional: true` is treated the same way in a block that fails
 fast: its failure counts in "1 failed" and doesn't fail the join.
+
+**Lanes are drawn as lanes.** A lane of several steps gets a frame behind
+them (`lane_node.tsx`, laid out in `graph-layout.ts` from the lanes its join
+lists): a dashed outline, tinted by how the lane did this run (primary while
+it runs, success, destructive), and a tab on its top edge with the lane's
+name and options in mono, "social · optional · default · 5.0 s". The frame
+keeps inside half the row gap, so neighbouring lanes' frames don't touch. A
+lane of one step has no frame: its card carries the lane's options.
+
+**Cards show what the definition says** as small marks after the name, in
+`muted-foreground/70`: `CircleDashed` an optional lane, `RotateCw` with the
+retry budget, `Timer` a time limit (the step's or its lane's), `Undo2` a
+compensation, `Layers` a step `queue:`. Marks never change a card's size;
+the tooltip spells each one out ("Up to 3 attempts", "Undone by
+withdraw_application on rollback", "Optional lane: if it fails, the block
+goes on with its default.").
 
 A named gateway's pill leads with the branch's name: "risk · 3 paths", then
 "risk → review". If the deciding step failed, the pill takes the failure tone
