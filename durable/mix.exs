@@ -29,6 +29,8 @@ defmodule Durable.MixProject do
       version: @version,
       elixir: @elixir_requirement,
       elixirc_paths: elixirc_paths(Mix.env()),
+      # The clock-skew swarm runs in containers, from test/skew/run.sh.
+      test_ignore_filters: [&String.starts_with?(&1, "test/skew/")],
       start_permanent: Mix.env() == :prod,
       aliases: aliases(),
       deps: deps(),
