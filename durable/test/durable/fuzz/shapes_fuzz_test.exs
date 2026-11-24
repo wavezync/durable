@@ -141,7 +141,7 @@ defmodule Durable.Fuzz.ShapesTest do
     label = "#{inspect(script)}\n#{inspect(describe(run))}"
 
     assert run.status == expected_status(outcome, done), "status: #{label}"
-    assert run.locked_by == nil, "left locked: #{label}"
+    assert let_go?(run.id), "left locked: #{label}"
 
     for step <- done, do: assert_done_once(case_id, step, label)
 

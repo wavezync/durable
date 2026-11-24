@@ -5,7 +5,7 @@ defmodule Durable.FuzzScripts do
 
   use ExUnitProperties
 
-  import Durable.IntegrationCase, only: [get: 1]
+  import Durable.IntegrationCase, only: [get: 1, let_go?: 1]
   import Ecto.Query
   import ExUnit.Assertions
 
@@ -182,7 +182,7 @@ defmodule Durable.FuzzScripts do
 
     assert run.status == expected.status, "status, expected #{expected.status}: #{label}"
     assert run.completed_at != nil, "no completed_at: #{label}"
-    assert run.locked_by == nil, "left locked: #{label}"
+    assert let_go?(id), "left locked: #{label}"
 
     for step <- @steps do
       want_done = if step in expected.done, do: 1, else: 0

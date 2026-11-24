@@ -153,7 +153,7 @@ defmodule Durable.Fuzz.Audit4QueueKillTest do
     label = "#{inspect(describe(run))} #{inspect(script)}"
 
     assert run.status in terminal(), "not finished: #{label}"
-    assert run.locked_by == nil, "left locked: #{label}"
+    assert let_go?(id), "left locked: #{label}"
     assert Probe.peak({:run, case_id}) <= 1, "steps overlapped: #{label}"
 
     rows = IntegrationRepo.all(from(s in StepExecution, where: s.workflow_id == ^id))

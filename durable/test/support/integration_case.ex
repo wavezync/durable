@@ -72,6 +72,25 @@ defmodule Durable.IntegrationCase do
     :ok
   end
 
+  @doc """
+  Whether the run's lock is let go within `timeout` ms. A run stopped
+  mid-step keeps its worker's lock a moment after it ends, until the worker
+  has stopped (ARCHITECTURE rule 30).
+  """
+  def let_go?(id, timeout \\ 2_000) do
+    cond do
+      get(id).locked_by == nil ->
+        true
+
+      timeout <= 0 ->
+        false
+
+      true ->
+        Process.sleep(20)
+        let_go?(id, timeout - 20)
+    end
+  end
+
   def await_status(id, status, timeout \\ 10_000) do
     Durable.DataCase.assert_eventually(
       fn -> get(id).status == status end,

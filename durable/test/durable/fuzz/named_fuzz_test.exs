@@ -238,7 +238,7 @@ defmodule Durable.Fuzz.NamedTest do
     {_how, _done, never} = walk(@tree, script)
 
     assert run.status in terminal(), "not finished: #{label}"
-    assert run.locked_by == nil, "left locked: #{label}"
+    assert let_go?(run.id), "left locked: #{label}"
     refute match?(%{"type" => "zombie_detected"}, run.error), "declared dead: #{label}"
 
     for name <- names(@tree) do
@@ -257,7 +257,7 @@ defmodule Durable.Fuzz.NamedTest do
     for member <- family(id) do
       row = get(member)
       assert row.status in terminal(), "family left open: #{inspect(describe(row))} #{label}"
-      assert row.locked_by == nil, "family left locked: #{inspect(describe(row))} #{label}"
+      assert let_go?(row.id), "family left locked: #{inspect(describe(row))} #{label}"
 
       # A lane stopped by a sibling's failure is closed by its own worker at
       # its next heartbeat, which can be after the run has ended.
@@ -461,7 +461,7 @@ defmodule Durable.Fuzz.NamedTest do
 
     for member <- family(id), row = get(member) do
       assert row.status in terminal(), "family left open: #{inspect(describe(row))} #{label}"
-      assert row.locked_by == nil, "family left locked: #{label}"
+      assert let_go?(row.id), "family left locked: #{label}"
     end
 
     children =

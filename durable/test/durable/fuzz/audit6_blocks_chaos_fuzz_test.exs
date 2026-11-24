@@ -518,7 +518,7 @@ defmodule Durable.Fuzz.Audit6BlocksChaosTest do
 
   defp check_member(row, members, label) do
     assert row.status in terminal(), "family left open: #{inspect(describe(row))} #{label}"
-    assert row.locked_by == nil, "family left locked: #{inspect(describe(row))} #{label}"
+    assert let_go?(row.id), "family left locked: #{inspect(describe(row))} #{label}"
 
     refute match?(%{"type" => "zombie_detected"}, row.error),
            "declared dead: #{inspect(describe(row))} #{label}\n#{inspect(post_mortem(members), pretty: true, limit: :infinity)}"

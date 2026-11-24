@@ -64,7 +64,7 @@ defmodule Durable.Fuzz.Audit6QueueRestartTest do
     label = "#{inspect(script)}\n#{inspect(describe(row))}"
 
     assert row.status == expected, "status, expected #{expected}: #{label}"
-    assert row.locked_by == nil, "left locked: #{label}"
+    assert let_go?(id), "left locked: #{label}"
     assert Probe.peak({:run, case_id}) <= 1, "steps overlapped: #{label}"
 
     rows = IntegrationRepo.all(from(s in StepExecution, where: s.workflow_id == ^id))
