@@ -289,7 +289,7 @@ defmodule DurableDashboard.Live.TelemetryLive do
       base_path={@base_path}
       current_path={@current_path}
       breadcrumbs={@breadcrumbs}
-      durable={@durable} inbox_count={@inbox_count}
+      durable={@durable} label={@dashboard_label} inbox_count={@inbox_count}
     >
       <Core.heading level={1} subtitle="What Durable emits, who is listening on this node, and how to wire it up.">
         Telemetry

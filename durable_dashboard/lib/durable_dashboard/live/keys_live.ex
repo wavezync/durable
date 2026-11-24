@@ -188,7 +188,7 @@ defmodule DurableDashboard.Live.KeysLive do
       base_path={@base_path}
       current_path={@current_path}
       breadcrumbs={@breadcrumbs}
-      durable={@durable}
+      durable={@durable} label={@dashboard_label}
       inbox_count={@inbox_count}
     >
       <header class="flex flex-wrap items-end justify-between gap-3">

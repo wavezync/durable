@@ -63,7 +63,8 @@ defmodule DurableDashboard.Access do
   end
 
   @doc false
-  # on_mount hook: puts `:access` and `:user` on every dashboard LiveView.
+  # on_mount hook: puts `:access`, `:user` and `:dashboard_label` (what the sidebar
+  # names this dashboard by) on every dashboard LiveView.
   def on_mount(:default, _params, session, socket) do
     access =
       case session["access"] do
@@ -71,8 +72,32 @@ defmodule DurableDashboard.Access do
         _ -> :viewer
       end
 
-    {:cont, Phoenix.Component.assign(socket, access: access, user: session["user"])}
+    {:cont,
+     Phoenix.Component.assign(socket,
+       access: access,
+       user: session["user"],
+       dashboard_label: dashboard_label(session["config"])
+     )}
   end
+
+  # The router's `:label`, else the database the instance's repo is on. Read
+  # once a mount: `repo.config/0` runs the repo's `init/2` each time.
+  defp dashboard_label(%{durable: durable} = config) do
+    {db, prefix} =
+      case Durable.Config.get_safe(durable) do
+        %{repo: repo, prefix: prefix} -> {repo.config(), prefix}
+        _ -> {[], "durable"}
+      end
+
+    %{
+      text: Map.get(config, :label) || db[:database] || inspect(durable),
+      where:
+        db[:database] && Enum.join(Enum.reject([db[:database], db[:hostname]], &is_nil/1), " on "),
+      prefix: prefix
+    }
+  end
+
+  defp dashboard_label(_config), do: nil
 
   @doc "True when `access` is at least `required`."
   @spec allowed?(level(), level()) :: boolean()

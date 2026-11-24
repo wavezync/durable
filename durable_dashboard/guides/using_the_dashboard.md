@@ -75,9 +75,10 @@ The server checks the level on every action, and each one emits
 `[:durable_dashboard, :action]` with the action, the user and the run ids, so
 you can keep an audit trail.
 
-Three other router options: `:durable` if your instance has its own `name:`,
-`:live_socket_path` if your endpoint's LiveView socket isn't at `/live`, and
-`:as` to mount the dashboard more than once. An app with several Durable
+Four other router options: `:durable` if your instance has its own `name:`,
+`:live_socket_path` if your endpoint's LiveView socket isn't at `/live`,
+`:label` for what the sidebar calls this dashboard (`"Production"`; by default
+the database's name), and `:as` to mount the dashboard more than once. An app with several Durable
 instances mounts one dashboard for each, and every mount after the first needs
 its own `:as`:
 

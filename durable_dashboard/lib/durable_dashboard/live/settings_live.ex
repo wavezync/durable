@@ -107,7 +107,7 @@ defmodule DurableDashboard.Live.SettingsLive do
   @impl true
   def render(%{instance: nil} = assigns) do
     ~H"""
-    <Layouts.app base_path={@base_path} current_path={@current_path} breadcrumbs={@breadcrumbs} durable={@durable} inbox_count={@inbox_count}>
+    <Layouts.app base_path={@base_path} current_path={@current_path} breadcrumbs={@breadcrumbs} durable={@durable} label={@dashboard_label} inbox_count={@inbox_count}>
       <Core.error_state
         title="Durable isn't running here"
         description="The Durable instance for this dashboard isn't started in this BEAM. Add {Durable, repo: YourApp.Repo} to your supervision tree."
@@ -130,7 +130,7 @@ defmodule DurableDashboard.Live.SettingsLive do
       )
 
     ~H"""
-    <Layouts.app base_path={@base_path} current_path={@current_path} breadcrumbs={@breadcrumbs} durable={@durable} inbox_count={@inbox_count}>
+    <Layouts.app base_path={@base_path} current_path={@current_path} breadcrumbs={@breadcrumbs} durable={@durable} label={@dashboard_label} inbox_count={@inbox_count}>
       <Core.heading
         level={1}
         subtitle="How this instance is configured. Values come from your {Durable, …} child spec — change them in code."

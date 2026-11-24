@@ -138,6 +138,7 @@ defmodule Audit4Dash.TwoRouter do
     dashboard_routes("/durable-billing",
       durable: Audit4Dash.Billing,
       as: :billing_dashboard,
+      label: "Billing",
       resolver: DurableDashboard.TestResolver
     )
   end

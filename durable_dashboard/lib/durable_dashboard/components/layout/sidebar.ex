@@ -21,6 +21,11 @@ defmodule DurableDashboard.Components.Layout.Sidebar do
   attr :base_path, :string, required: true
   attr :current_path, :string, required: true
   attr :durable, :any, default: nil
+
+  attr :label, :map,
+    default: nil,
+    doc: "`:text`, `:where` and `:prefix`, from `DurableDashboard.Access`"
+
   attr :inbox_count, :integer, default: 0
   attr :class, :string, default: nil
 
@@ -28,7 +33,6 @@ defmodule DurableDashboard.Components.Layout.Sidebar do
     assigns =
       assign(assigns,
         groups: nav_groups(assigns.base_path, assigns.inbox_count),
-        prefix: prefix(assigns.durable),
         version: durable_version(),
         repo_url: @repo_url
       )
@@ -44,12 +48,13 @@ defmodule DurableDashboard.Components.Layout.Sidebar do
         <div class="flex flex-col leading-tight min-w-0">
           <span class="text-sm font-semibold">Durable</span>
           <span
+            :if={@label}
             class="text-xs text-muted-foreground truncate"
-            data-tip-title="Postgres schema"
-            data-tip="Where Durable keeps its tables · set with the :prefix option"
-            data-tip-meta={@prefix <> ".workflow_executions, " <> @prefix <> ".step_executions, …"}
+            data-tip-title={@label.where && "Database"}
+            data-tip={@label.where || "The router's :label option"}
+            data-tip-meta={"tables in the " <> @label.prefix <> " schema"}
           >
-            {@prefix} schema
+            {@label.text}
           </span>
         </div>
       </div>
@@ -219,15 +224,6 @@ defmodule DurableDashboard.Components.Layout.Sidebar do
       "text-muted-foreground hover:bg-accent hover:text-foreground transition-colors",
       "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
     ]
-  end
-
-  defp prefix(nil), do: "durable"
-
-  defp prefix(durable) do
-    case Durable.Config.get_safe(durable) do
-      %{prefix: prefix} -> prefix
-      _ -> "durable"
-    end
   end
 
   defp durable_version do

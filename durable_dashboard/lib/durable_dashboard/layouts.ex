@@ -106,6 +106,7 @@ defmodule DurableDashboard.Layouts do
   attr :breadcrumbs, :list, default: []
   attr :base_path, :string, required: true
   attr :durable, :any, default: nil
+  attr :label, :map, default: nil, doc: "what the sidebar names this dashboard by"
   attr :inbox_count, :integer, default: 0, doc: "pending inputs, for the sidebar badge"
   slot :inner_block, required: true
 
@@ -118,7 +119,7 @@ defmodule DurableDashboard.Layouts do
       Skip to main content
     </a>
     <div class="flex min-h-screen">
-      <Sidebar.sidebar base_path={@base_path} current_path={@current_path} durable={@durable} inbox_count={@inbox_count} />
+      <Sidebar.sidebar base_path={@base_path} current_path={@current_path} durable={@durable} label={@label} inbox_count={@inbox_count} />
       <div class="flex flex-col flex-1 min-w-0">
         <main
           id="main-content"

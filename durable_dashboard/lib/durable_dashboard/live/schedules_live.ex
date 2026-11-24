@@ -206,7 +206,7 @@ defmodule DurableDashboard.Live.SchedulesLive do
       base_path={@base_path}
       current_path={@current_path}
       breadcrumbs={@breadcrumbs}
-      durable={@durable}
+      durable={@durable} label={@dashboard_label}
       inbox_count={@inbox_count}
     >
       <.index :if={is_nil(@name)} {assigns} />

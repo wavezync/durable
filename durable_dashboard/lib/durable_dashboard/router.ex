@@ -60,6 +60,8 @@ defmodule DurableDashboard.Router do
     LiveView, e.g. authentication (default: `[]`)
   - `:resolver` — a `DurableDashboard.Access` module deciding who may
     retry, cancel, pause and so on. Without one the dashboard is read-only.
+  - `:label` — what the sidebar says under "Durable", e.g. `"Production"`,
+    so it's plain which dashboard is open (default: the repo's database name)
   - `:as` — the name of this mount's `live_session` (default:
     `:durable_dashboard`). Only needed to mount the dashboard more than once.
 
@@ -106,6 +108,7 @@ defmodule DurableDashboard.Router do
     on_mount = Keyword.get(opts, :on_mount, [])
     resolver = Keyword.get(opts, :resolver)
     as = Keyword.get(opts, :as, :durable_dashboard)
+    label = Keyword.get(opts, :label)
 
     quote do
       # The pipelines are the same for every mount, so the first one defines them.
@@ -146,7 +149,8 @@ defmodule DurableDashboard.Router do
                %{
                  durable: unquote(durable),
                  base_path: durable_dashboard_base,
-                 live_socket_path: unquote(live_socket_path)
+                 live_socket_path: unquote(live_socket_path),
+                 label: unquote(label)
                },
                unquote(resolver)
              ]} do

@@ -381,7 +381,9 @@ its own `Phoenix.LiveComponent` module under
   live indicator, version, GitHub and theme toggle.
 - **Sidebar** (232px, `bg-card`, hairline right border):
   - Brand: the Durable logo from the site (`site/public/favicon.svg`, the
-    `mark` icon, in its own colours) + "Durable" over the schema name.
+    `mark` icon, in its own colours) + "Durable" over the router's `:label`
+    (default: the repo's database name; the tooltip says which database, on
+    which host).
   - ⌘K button ("Jump to run, workflow…").
   - Nav in three intent groups under plain sentence-case captions —
     **Observe** (Overview, Runs, Workflows), **Operate** (Inbox, Keys, Queues &

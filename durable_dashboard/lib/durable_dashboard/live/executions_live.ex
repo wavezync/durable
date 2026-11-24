@@ -281,7 +281,7 @@ defmodule DurableDashboard.Live.ExecutionsLive do
       base_path={@base_path}
       current_path={@current_path}
       breadcrumbs={@breadcrumbs}
-      durable={@durable} inbox_count={@inbox_count}
+      durable={@durable} label={@dashboard_label} inbox_count={@inbox_count}
     >
       <Core.heading level={1} subtitle={"#{format_int(@total)} matching · newest first"}>
         {@workflow_name || "Runs"}
