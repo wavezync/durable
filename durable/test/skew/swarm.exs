@@ -278,6 +278,20 @@ defmodule Skew.EventWaiter do
   end
 end
 
+# Fails when its wait times out, to be retried from another node.
+defmodule Skew.RetriedWait do
+  use Durable
+  use Durable.Wait
+
+  workflow "retried_wait" do
+    step :wait, fn data ->
+      wait_for_event("never_sent", timeout: data["ms"], timeout_value: "timed_out")
+      Skew.mark(Skew.run_id(), "done")
+      {:fail, "timed out"}
+    end
+  end
+end
+
 defmodule Skew.Deadline do
   use Durable
 
@@ -512,7 +526,34 @@ defmodule Skew.Orch do
         {starter, runner, id, asked}
       end
 
-    Enum.map(waits, &check_wait/1) ++ Enum.map(deadlines, &check_deadline/1)
+    retried = for retrier <- @labels, do: Task.async(fn -> retried_wait(nodes, retrier) end)
+
+    Enum.map(waits, &check_wait/1) ++
+      Enum.map(deadlines, &check_deadline/1) ++ Enum.map(retried, &Task.await(&1, 60_000))
+  end
+
+  # A run whose wait timed out, retried on `retrier`: its step waits again, as
+  # long as it did the first time.
+  defp retried_wait(nodes, retrier) do
+    {:ok, id} =
+      call(nodes, "zero", Durable, :start, [
+        Skew.RetriedWait,
+        %{"ms" => @wait_ms},
+        [queue: Skew.queue("zero")]
+      ])
+
+    await_final(id, 30_000)
+    Skew.mark(id, "retry")
+    {:ok, ^id} = call(nodes, retrier, Durable, :retry, [id])
+    await(fn -> count(id, "done") >= 2 end, 30_000)
+    due = first_at(id, "retry") + @wait_ms
+
+    on_time(
+      "retried-wait-on-time",
+      "waits written on zero, retried on #{retrier}",
+      due,
+      last_at(id, "done")
+    )
   end
 
   defp check_wait({invariant, label, id}) do
@@ -635,6 +676,16 @@ defmodule Skew.Orch do
       ])
 
     at
+  end
+
+  defp count(id, kind) do
+    %{rows: [[n]]} =
+      Repo.query!("SELECT count(*) FROM skew.marks WHERE run_id = $1 AND kind = $2", [
+        Ecto.UUID.dump!(id),
+        kind
+      ])
+
+    n
   end
 
   defp all_at(kind) do

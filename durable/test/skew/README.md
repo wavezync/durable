@@ -31,5 +31,10 @@ checks:
 | `undo-after-step` | The undo of a `rollback: true` cancel starts after the step it cancelled has stopped |
 | `sleep-on-time`, `snooze-on-time`, `retry-on-time`, `event-timeout-on-time` | A 2 s sleep, snooze, retry backoff and `wait_for_event` timeout, written on each node, end within 500 ms of when they were due |
 | `deadline-on-time` | A `timeout: 2_500` workflow started on one node and run on another is stopped within 500 ms of its deadline |
+| `retried-wait-on-time` | A run whose 2 s wait timed out, retried on each node: its step waits 2 s again, no more and no less |
 | `schedule-once-on-time` | A `* * * * *` schedule fires once a minute, within 1.5 s |
 | `nodes-alive` | Every node sees all three as alive |
+
+Before `Durable.Clock` (ARCHITECTURE.md, rule 33), a 1 s skew broke `key-once`
+and every timing check, 4 s broke `step-once`, `undo-after-step` and
+`schedule-once-on-time` too, and 40 s `nodes-alive`.
