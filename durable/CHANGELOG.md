@@ -4,6 +4,66 @@ All notable changes to this package. Versions follow [Semantic
 Versioning](https://semver.org); entries come from [Conventional
 Commits](https://www.conventionalcommits.org).
 
+## [2.1.0](https://github.com/wavezync/durable/compare/durable-v2.0.2...durable-v2.1.0) - 2026-11-24
+
+### Features
+
+- Durable.Clock, the database's clock on every node ([28dec9c](https://github.com/wavezync/durable/commit/28dec9c5c9384b14d6c9de0d73b5c1a3042706ec))
+- Nodes report their clock's skew, and run reads say when a lock is kept ([87cc42a](https://github.com/wavezync/durable/commit/87cc42a4aead468675c92e61cd95a5f1c7432f00))
+
+### Bug fixes
+
+- The bugs in issue #48 ([a58b8fb](https://github.com/wavezync/durable/commit/a58b8fb5931d3e7ddfd2b64620ebe129eab1158d))
+- A retried wait_for_all keeps the events it had already got ([4efd55d](https://github.com/wavezync/durable/commit/4efd55d0c9d5f794254afa74ad43e24c8d82c978))
+- Only another name of an answered wait_for_any is a late event ([d58758e](https://github.com/wavezync/durable/commit/d58758e271c9fd5dd477f5317c1859917b5dcdd7))
+- An event is delivered only to a run that is waiting ([117f269](https://github.com/wavezync/durable/commit/117f26979873cd83071321fc916a331b2cdfc158))
+- A late group event is judged by the newest wait for its name ([0d378a9](https://github.com/wavezync/durable/commit/0d378a9ed440e3cfc04cb1cfba1d662b23760ce8))
+- A due schedule whose key is busy doesn't stall the other schedules ([f8c9e47](https://github.com/wavezync/durable/commit/f8c9e4737131f85f47430223b00e33dd6e78248e))
+- A worker that can't refresh its lock stops its step before the lock goes stale ([72a78a2](https://github.com/wavezync/durable/commit/72a78a2d9fa0e8a365edad1ee6078af7db7c7b01))
+- A stopping node stops its workers before it hands their runs back ([061c3d6](https://github.com/wavezync/durable/commit/061c3d6a8efec32c14f33a50cd72b0eb4e69b7db))
+- A claim that takes a run 2.0 wrote with a bare input doesn't strand the rest ([d4f595c](https://github.com/wavezync/durable/commit/d4f595cc716c41530a946b7f8d26461ae9195da5))
+- A queue whose worker supervisor is down doesn't stop the hand-back ([e1829e6](https://github.com/wavezync/durable/commit/e1829e6ac318e94c50b6a96f69b3f871bf9323ef))
+- A stopping node doesn't hand back a run its caller is running inline ([0c4624e](https://github.com/wavezync/durable/commit/0c4624edd8ab794c6bac52f0e7edefcc184d0bc5))
+- A run cancelled with rollback: true isn't undone while its step can still finish ([cb61b94](https://github.com/wavezync/durable/commit/cb61b945c372c209ebe44b9a52be2373888f2f91))
+- A rollback asked for as a block fails waits for its stopped lanes ([2046531](https://github.com/wavezync/durable/commit/2046531fd9c3df5a3503452c481969a7a8ae1557))
+- A lane retried by its own id while its block waits is waited for ([19a817d](https://github.com/wavezync/durable/commit/19a817d4ab261147e44055bb6f6dc5acf33acd57))
+- A step undone after a cancel with rollback is handed its own result ([ca881e9](https://github.com/wavezync/durable/commit/ca881e964ab20c6a3c1d2db59abd6b1213bfa6eb))
+- A cancel closes a run's waits under its row, so it can't deadlock a lane's notice ([9beb06a](https://github.com/wavezync/durable/commit/9beb06a596840d73d0a04203376992c014c9a784))
+- A run isn't undone while a run under a stopped lane is still going ([67e0978](https://github.com/wavezync/durable/commit/67e097868cdf0c389756f59acec0b541d50620ba))
+- An attempt begun as its run was cancelled is closed if its node dies ([cd30717](https://github.com/wavezync/durable/commit/cd3071739a0acf84c271cabe792b251adeac63a0))
+- The merged fixes agree on cancelled runs ([d0e7cd4](https://github.com/wavezync/durable/commit/d0e7cd43938ee4240417a3e975b143b9fef066eb))
+- A run_again start doesn't jump ahead of the run claimed to take the key ([cd7118a](https://github.com/wavezync/durable/commit/cd7118a4e7ecffc353c97b3a5279cf78a6483ede))
+- A waiting run lost before it takes its key makes way for a newer start ([1acaec2](https://github.com/wavezync/durable/commit/1acaec239180669525d959cc279890a7ec2da820))
+- A cancel_existing start replaces the run waiting behind the holder too ([8f04e44](https://github.com/wavezync/durable/commit/8f04e44e157b9bf92f2e090cc8d71328f719e22c))
+- A send_event start whose holder just ended takes the free key ([d824ada](https://github.com/wavezync/durable/commit/d824ada851f8abc970480a8ad611218019c03a29))
+- The stale sweep lets go of an undo a lost worker kept ([e19f83b](https://github.com/wavezync/durable/commit/e19f83bcf07f2a3b45460fdbc81f9f11ad20ebc1))
+- A rollback lost as it begins keeps the error it failed with ([38552b5](https://github.com/wavezync/durable/commit/38552b58d7571d099f1fe44cc153d28c798693da))
+- A run stopped mid-step keeps its worker's lock until that step stops ([fb10dbc](https://github.com/wavezync/durable/commit/fb10dbcfb9e21aab9354cb05fe879ea6e9a77a13))
+- A block hands on a lane cancelled with rollback: true as cancelled ([e03b138](https://github.com/wavezync/durable/commit/e03b138c5e53e46e8b499bcd1ff6cca525e53e47))
+- A rerun during a debounce window is refused, not merged ([62f0fb1](https://github.com/wavezync/durable/commit/62f0fb15da18694929168604ac5f886e12b82ee8))
+- A waiter or a retry that takes a key sends the handoff event ([6f06ada](https://github.com/wavezync/durable/commit/6f06ada83ced1a79042d8c9a6ad0f5ba599699ce))
+- A schedule edit keeps the fire it had due ([d29eb2f](https://github.com/wavezync/durable/commit/d29eb2f61b9576227eae0d36e35742ecdc897d2d))
+- A heartbeat the database doesn't answer is given up when the lease runs out ([e28530a](https://github.com/wavezync/durable/commit/e28530a113ccae238d7941e311d5336fa65857ac))
+- A step whose error comes back as its time runs out fails for the timeout ([a808eb1](https://github.com/wavezync/durable/commit/a808eb1f658b0d9fb26689aff55a337248de8bf2))
+- A tick yields to an edit made after it read the schedule ([d18df6a](https://github.com/wavezync/durable/commit/d18df6a004ff3609d37a3536e1da0c3d170b6618))
+- Read the time through Durable.Clock ([721e22c](https://github.com/wavezync/durable/commit/721e22cd739c5b43e6c25dd329fde25bf10587cc))
+- A lock is stamped and judged by the database's clock ([9cf8fec](https://github.com/wavezync/durable/commit/9cf8fec2252e4f07415a542410e63c35295a6512))
+- A lock's time is clock_timestamp(), which moves in a transaction ([60e2ef7](https://github.com/wavezync/durable/commit/60e2ef750b5376fb9bd5bdb29169861e6774c2f7))
+- A poller lets go of the lock its dead worker kept ([619303c](https://github.com/wavezync/durable/commit/619303c84e7ca19e3f7ef77142cbb5124f0a0870))
+- A step's own cancel lets go of its run's lock ([c0c44c5](https://github.com/wavezync/durable/commit/c0c44c521323580b1e5234b18a2920b6ffd283e4))
+- A caller running a run inline is killed when its claim's lease runs out ([3f66b1f](https://github.com/wavezync/durable/commit/3f66b1f8af2b4d06ce2b19ded46dccf9b604d984))
+
+### Performance
+
+- An index for the claim's check for a kept lock ([7f8bce7](https://github.com/wavezync/durable/commit/7f8bce77d3dd08b6bb6550fba94a5afd17b8572a))
+
+### Documentation
+
+- A worker that can't refresh its lock stops its step ([356eed7](https://github.com/wavezync/durable/commit/356eed7e29adbef6d7258d5086700845c9d55cf0))
+- A run_again start while the waiting run starts waits behind it ([9860be1](https://github.com/wavezync/durable/commit/9860be166eb53c9c2c60d29a3662cef997a1edfc))
+- The cost of the claim's kept-lock check, and its upgrade ([e8c7324](https://github.com/wavezync/durable/commit/e8c73248daa0239138312634ea0c9c953b80560d))
+- Rule 33, the cluster has one clock, the database's ([782e864](https://github.com/wavezync/durable/commit/782e8649a3214d895104015568b13fdbcc5d74af))
+
 ## [2.0.2](https://github.com/wavezync/durable/compare/durable-v2.0.1...durable-v2.0.2) - 2026-11-23
 
 ### Bug fixes
