@@ -3,8 +3,8 @@ defmodule Durable.NodeRegistry do
   Keeps this instance's row in `durable.nodes` fresh, so operators can see
   which nodes are alive and which queues each runs.
 
-  A node heartbeats every #{div(10_000, 1_000)} s and removes its row on a
-  clean shutdown; `list/1` reports a node as `:missing` once its heartbeat is
+  A node heartbeats every #{div(10_000, 1_000)} s, setting `Durable.Clock` to the
+  database's clock as it does, and removes its row on a clean shutdown; `list/1` reports a node as `:missing` once its heartbeat is
   #{div(30_000, 1_000)} s old. Rows unseen for a day are deleted.
 
   On boot it also checks the database schema: a library upgrade whose
@@ -62,6 +62,8 @@ defmodule Durable.NodeRegistry do
   @impl true
   def init(%Config{} = config) do
     Process.flag(:trap_exit, true)
+    # Before the rest of the tree starts, so it starts on the database's clock.
+    Durable.Clock.sync(config)
     {:ok, %{config: config, started_at: DateTime.utc_now()}, {:continue, :boot}}
   end
 
@@ -80,6 +82,7 @@ defmodule Durable.NodeRegistry do
   end
 
   defp beat(%{config: config} = state) do
+    Durable.Clock.sync(config)
     now = DateTime.utc_now()
 
     node = %Node{
