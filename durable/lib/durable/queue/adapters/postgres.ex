@@ -342,15 +342,18 @@ defmodule Durable.Queue.Adapters.Postgres do
   defp fenced?(_execution, nil), do: false
   defp fenced?(%WorkflowExecution{lock_token: current}, token), do: current != token
 
+  # A lock is stamped by the database's clock (the claim, the heartbeat), so
+  # its age is the database's to tell: a node whose clock read ahead took
+  # live locks, and the step ran on two nodes at once.
   @impl true
   def recover_stale_locks(%Config{} = config, timeout_seconds) when timeout_seconds > 0 do
-    cutoff = DateTime.add(Clock.utc_now(), -timeout_seconds, :second)
-
     query =
       from(w in WorkflowExecution,
         where: w.status == :running,
         where: not is_nil(w.locked_by),
-        where: w.locked_at < ^cutoff,
+        where:
+          w.locked_at <
+            fragment("(NOW() AT TIME ZONE 'UTC') - make_interval(secs => ?)", ^timeout_seconds),
         select: struct(w, ^@released)
       )
 
@@ -367,7 +370,7 @@ defmodule Durable.Queue.Adapters.Postgres do
              retry: &StepRunner.retry_after_lost(config, &1),
              count_losses: true
            ) do
-      let_go_of_lost(config, cutoff)
+      let_go_of_lost(config, timeout_seconds)
       {:ok, length(runs)}
     end
   rescue
@@ -435,11 +438,16 @@ defmodule Durable.Queue.Adapters.Postgres do
 
   # A lock a cancel kept for a worker that is lost: let go of with the rest of
   # what it held.
-  defp let_go_of_lost(config, cutoff) do
+  defp let_go_of_lost(config, timeout_seconds) do
     {_count, runs} =
       Repo.update_all(
         config,
-        from(w in kept_lock(WorkflowExecution), where: w.locked_at < ^cutoff, select: w),
+        from(w in kept_lock(WorkflowExecution),
+          where:
+            w.locked_at <
+              fragment("(NOW() AT TIME ZONE 'UTC') - make_interval(secs => ?)", ^timeout_seconds),
+          select: w
+        ),
         set: [locked_by: nil, locked_at: nil]
       )
 
@@ -727,9 +735,9 @@ defmodule Durable.Queue.Adapters.Postgres do
     do_heartbeat(config, job_id, lock_token)
   end
 
+  # Stamped by the database's clock, as the claim stamps it and the stale
+  # sweep reads it.
   defp do_heartbeat(config, job_id, lock_token) do
-    now = Clock.utc_now()
-
     base =
       from(w in WorkflowExecution,
         where: w.id == ^job_id,
@@ -739,7 +747,12 @@ defmodule Durable.Queue.Adapters.Postgres do
     guarded =
       if lock_token, do: from(w in base, where: w.lock_token == ^lock_token), else: base
 
-    {count, _} = Repo.update_all(config, guarded, set: [locked_at: now])
+    {count, _} =
+      Repo.update_all(
+        config,
+        update(guarded, set: [locked_at: fragment("(NOW() AT TIME ZONE 'UTC')")]),
+        []
+      )
 
     cond do
       count == 1 -> :ok
