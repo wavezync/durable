@@ -41,6 +41,7 @@ defmodule Audit6BlocksQuotes do
     parallel :rates, on_error: :collect do
       step :dhl, fn order ->
         if Probe.set?(:dhl_up) do
+          Probe.note(:dhl_quoting)
           Probe.wait_for(:dhl_go)
           Probe.note(:dhl_quoted)
           {:ok, assign(order, :price, 12)}
@@ -57,6 +58,7 @@ defmodule Audit6BlocksQuotes do
 
     step :pick, fn order ->
       Probe.put(:handed, Map.new(order["rates"], fn {lane, {how, _}} -> {lane, how} end))
+      Probe.put(:rates, order["rates"])
       {:ok, order}
     end
   end
@@ -256,6 +258,24 @@ defmodule Durable.Integration.Audit6BlocksTest do
 
     assert Probe.hits({:closed_with_assessor_booked, 1}) == 1,
            "undone before the stopped lane's step finished: #{inspect(Probe.log())}"
+  end
+
+  # Cancelled with `rollback: true`, a lane is back on its queue to be undone,
+  # and then undone. A block that collects as it is meanwhile hands on the
+  # cancel, not "child not finished".
+  test "a lane cancelled with rollback: true is handed to its block as cancelled" do
+    start_durable!(%{default: 4}, heartbeat_interval: 1_000)
+    Probe.set(:dhl_up)
+
+    {:ok, id} = Durable.start(Audit6BlocksQuotes, %{})
+    assert_eventually(fn -> Probe.hits(:dhl_quoting) == 1 end)
+
+    :ok = Durable.cancel(lane(id, :dhl).id, "quote took too long", rollback: true)
+    Probe.set(:ups_go)
+    await_status(id, :completed)
+
+    assert {:error, %{"type" => "cancelled", "message" => "quote took too long"}} =
+             Probe.fetch(:rates)["dhl"]
   end
 
   # A lane that failed in a block that collects has told its block. Retried by

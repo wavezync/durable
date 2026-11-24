@@ -2581,8 +2581,13 @@ defmodule Durable.Executor do
         %{status: :completed, context: ctx} ->
           {returns_key, {:ok, EngineState.strip(ctx)}}
 
+        # Cancelled with `rollback: true`: back on its queue to be undone, and
+        # then undone, with the cancel's error.
+        %{status: :pending, error: error, engine_state: %{@rollback => _}} when error != nil ->
+          {returns_key, {:error, error}}
+
         %{status: status, error: error}
-        when status in [:failed, :cancelled, :compensation_failed] ->
+        when status in [:failed, :cancelled, :compensating, :compensated, :compensation_failed] ->
           {returns_key, {:error, error || %{type: "child_failed", message: "#{status}"}}}
 
         _ ->
