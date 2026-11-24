@@ -471,6 +471,33 @@ defmodule Durable.Integration.Issue48Test do
       await_status(next, :completed)
     end
 
+    test "doesn't hold up the key when its own step cancelled it and its worker died meanwhile" do
+      # The cancel a step asks for outlives the step's worker. Slowed down, it
+      # lands after that worker is gone.
+      before_update!(
+        "i48_slow_cancel",
+        "workflow_executions",
+        "NEW.status = 'cancelled' AND OLD.status = 'running'",
+        "PERFORM pg_sleep(0.5)"
+      )
+
+      start_durable!(%{default: 1}, heartbeat_interval: 60_000)
+
+      {:ok, closed} = Durable.start(Issue48CloseAccount, %{"closed" => true}, key: "acct:4")
+
+      find_backend("""
+      SELECT pid FROM pg_stat_activity
+      WHERE wait_event = 'PgSleep' AND datname = current_database()
+      """)
+
+      kill_worker_of(closed)
+      await_status(closed, :cancelled)
+
+      {:ok, next} = Durable.start(Issue48CloseAccount, %{"closed" => false}, key: "acct:4")
+      await_status(next, :completed, 5_000)
+      assert %{locked_by: nil} = get(closed)
+    end
+
     test "doesn't hold up the key when it was cancelled before its step began" do
       start_durable!(%{default: 2}, heartbeat_interval: 60_000)
 

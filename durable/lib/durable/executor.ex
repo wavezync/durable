@@ -3506,6 +3506,9 @@ defmodule Durable.Executor do
     |> Task.Supervisor.async_nolink(fn ->
       _ = cancel_workflow(target.id, reason, durable: config.name)
       _ = cancel_workflow(execution.id, reason, durable: config.name)
+      # This step asked for the cancel and has nothing left to run, so nothing
+      # need wait for it to stop (rule 30). Its worker may be gone by now.
+      Adapter.default_adapter().let_go(config, execution.id)
     end)
     |> Task.await(:infinity)
 
