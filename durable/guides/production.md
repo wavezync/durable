@@ -207,6 +207,19 @@ Durable uses no session features, so it runs on direct connections and behind
 PgBouncer in transaction mode. A PgBouncer older than 1.24 needs `prepare:
 :unnamed` on your repo.
 
+## Clocks
+
+Nodes compare times that other nodes wrote: how old a lock is, when a sleep or a
+retry is due, when a key's next run may start. So Durable keeps one clock, the
+database's. Each node measures how far its clock is from Postgres's as it starts
+and every 10 seconds, and reads the time with that correction, so nodes whose
+clocks disagree by seconds still agree on all of it. Run NTP on your nodes
+anyway, but a node that's off is no longer a correctness problem. Keep the
+database server's clock right: the whole cluster runs on it.
+
+Two Durable instances in one app, against different database servers, share one
+correction.
+
 ## Queues
 
 - **`concurrency` is per node.** `concurrency: 20` on three nodes runs up to 60 at
@@ -532,6 +545,7 @@ picked up. If you rename or remove the step a run stopped at, it fails with
 | Fire cron schedules | Every 60 s | Worker nodes, one claims each fire |
 | Delete queue samples and activity older than 7 days | With each sample | Every node |
 | Forget nodes unseen for a day | With each heartbeat | Every node |
+| Set its clock to the database's | Every 10 s | Every node |
 
 ## Watching it
 
