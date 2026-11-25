@@ -52,6 +52,9 @@ defmodule Durable.Executor.StepRunner do
 
   @gave_up "__gave_up__"
 
+  # When an attempt's start went out, until its row is in (`begin_attempt/4`).
+  @start_out :durable_attempt_start_out
+
   @type result ::
           {:ok, map()}
           | {:error, any()}
@@ -911,7 +914,11 @@ defmodule Durable.Executor.StepRunner do
   # of its the database refuses aborts it: the row is written again then,
   # without the event, which is out.
   defp begin_attempt(config, step_exec, lock_token, span_meta) do
-    start = fn -> Durable.Telemetry.span_start([:durable, :step], span_meta) end
+    start = fn ->
+      started = Durable.Telemetry.span_start([:durable, :step], span_meta)
+      Process.put(@start_out, started)
+      started
+    end
 
     case insert_under_claim(config, step_exec, lock_token, start) do
       {:ok, nil} ->
@@ -923,6 +930,45 @@ defmodule Durable.Executor.StepRunner do
       {:error, :rollback} ->
         begin_started(config, step_exec, lock_token, span_meta)
     end
+  rescue
+    # The connection went with the transaction (rule 32), maybe with the
+    # start already out.
+    error ->
+      started = Process.delete(@start_out)
+
+      if started && Durable.Repo.transient?(error),
+        do: end_if_lost(config, step_exec, span_meta, {started, error})
+
+      reraise error, __STACKTRACE__
+  end
+
+  # Its start is out and the connection took its transaction with it.
+  # Committed, the row is closed by whoever finds it, who sends the end;
+  # rolled back, nobody would. The run's row is taken first, which waits for
+  # that transaction to have ended, one way or the other.
+  defp end_if_lost(config, step_exec, span_meta, {started, error}) do
+    run =
+      from(w in WorkflowExecution,
+        where: w.id == ^step_exec.workflow_id,
+        lock: "FOR UPDATE",
+        select: w.id
+      )
+
+    {:ok, landed?} =
+      Repo.transaction(config, fn ->
+        Repo.one(config, run)
+        Repo.get(config, StepExecution, step_exec.id) != nil
+      end)
+
+    unless landed? do
+      lost = %{type: "worker_lost", message: Exception.message(error)}
+      meta = Map.merge(span_meta, %{result: :error, error: lost})
+      elapsed = %{duration: System.monotonic_time() - started}
+      :telemetry.execute([:durable, :step, :stop], elapsed, meta)
+    end
+  rescue
+    # Still cut off: nothing can say whether the row landed.
+    _unreachable -> :ok
   end
 
   # Again, its start already out.
@@ -959,12 +1005,14 @@ defmodule Durable.Executor.StepRunner do
   end
 
   defp begun(config, row, started) do
+    Process.delete(@start_out)
     DurablePubSub.broadcast_step(config, :step_started, step_event(row))
     {started, row}
   end
 
   # The run is someone else's now.
   defp superseded do
+    Process.delete(@start_out)
     Durable.LogCapture.stop_capture()
     throw(:durable_superseded)
   end

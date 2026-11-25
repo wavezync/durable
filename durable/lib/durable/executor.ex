@@ -1996,18 +1996,38 @@ defmodule Durable.Executor do
   # connection), which says nothing about the step (rule 32): the run goes back
   # on its queue as for a lost connection, and the step runs again. Its row,
   # :waiting for a wait that doesn't exist, is closed as a lost worker's.
+  #
+  # The COMMIT may have landed with only its reply lost: the run is waiting
+  # then, its wait there, and may have been answered and taken on by another
+  # worker since. Only a run still running under this claim lost its wait.
+  # Its row is taken first, which waits for the wait's transaction to have
+  # ended, one way or the other.
   defp wait_given_up(config, exec, error) do
     now = Clock.utc_now()
     lost = %{type: "worker_lost", message: Exception.message(error)}
+    locked = from(w in WorkflowExecution, where: w.id == ^exec.id, lock: "FOR UPDATE")
 
-    Repo.update_all(config, from(s in StepExecution, where: s.id in subquery(suspended(exec))),
-      set: [status: :failed, error: lost, completed_at: now, updated_at: now]
-    )
+    {:ok, ours} =
+      Repo.transaction(config, fn ->
+        case Repo.one(config, locked) do
+          %{status: :running, lock_token: token} = run when token == exec.lock_token ->
+            Repo.update_all(
+              config,
+              from(s in StepExecution, where: s.id in subquery(suspended(exec))),
+              set: [status: :failed, error: lost, completed_at: now, updated_at: now]
+            )
 
-    case release_after_lost_connection(config, exec, error) do
+            run
+
+          _not_ours ->
+            nil
+        end
+      end)
+
+    case ours && release_after_lost_connection(config, ours, error) do
       :waiting -> {:waiting, exec}
-      :fenced -> {:error, :superseded}
-      failed -> failed
+      failed = {:error, _error} -> failed
+      _fenced -> {:error, :superseded}
     end
   end
 
