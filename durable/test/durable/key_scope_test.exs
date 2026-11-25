@@ -10,6 +10,7 @@ defmodule Durable.KeyScopeTest do
   import Durable.Testing
   import ExUnit.CaptureIO
 
+  alias Durable.Clock
   alias Durable.Config
   alias Durable.Executor
   alias Durable.Queue.Adapters.Postgres
@@ -107,6 +108,28 @@ defmodule Durable.KeyScopeTest do
     end
   end
 
+  # swap_index after a deploy took its key_scope: away. Its swap back starts
+  # an update and another swap.
+  defmodule UnscopedSwap do
+    use Durable
+    use Durable.Wait
+
+    workflow "swap_index_unscoped" do
+      step :swap, [compensate: :swap_back], fn request -> {:ok, request} end
+
+      step :verify, fn _request ->
+        wait_for_event("go")
+        {:rollback, "the new index is missing documents"}
+      end
+
+      compensate :swap_back, fn request ->
+        Durable.start(Durable.KeyScopeTest.IndexUpdate, %{"change" => 9}, key: "account:7")
+        Durable.start(__MODULE__, %{}, key: "account:7")
+        {:ok, request}
+      end
+    end
+  end
+
   # A third workflow of the scope: a check of the index.
   defmodule IndexAudit do
     use Durable
@@ -142,6 +165,13 @@ defmodule Durable.KeyScopeTest do
           where: w.workflow_name == ^name and w.id != ^except,
           select: w.id
         )
+      )
+
+  # As a run started while its workflow named `scope` (nil: named none).
+  defp started_under!(id, scope),
+    do:
+      TestRepo.update_all(from(w in WorkflowExecution, where: w.id == ^id),
+        set: [key_scope: scope]
       )
 
   defp finish(id) do
@@ -218,6 +248,28 @@ defmodule Durable.KeyScopeTest do
       assert %{holds_key: true} = claim_and_run(second)
       assert claim() == []
 
+      assert finish(second).status == :completed
+      assert %{holds_key: true} = claim_and_run(third)
+    end
+
+    # A start reads the clock before it has the key's lock, and another
+    # node's clock can be behind: start times can disagree with the line.
+    test "a start on a node whose clock is behind still goes after the run it joined behind" do
+      %{id: first} = run_workflow(IndexUpdate, %{"change" => 1}, key: @key)
+      {:ok, second} = start_rebuild()
+
+      on_exit(fn -> Clock.sync(config()) end)
+
+      minute_behind =
+        System.os_time(:microsecond) - System.monotonic_time(:microsecond) - 60_000_000
+
+      Clock.put_offset(minute_behind)
+      {:ok, third} = start_audit()
+      Clock.sync(config())
+      assert DateTime.before?(get(third).inserted_at, get(second).inserted_at)
+
+      assert finish(first).status == :completed
+      assert %{holds_key: true} = claim_and_run(second)
       assert finish(second).status == :completed
       assert %{holds_key: true} = claim_and_run(third)
     end
@@ -316,6 +368,11 @@ defmodule Durable.KeyScopeTest do
       assert {:ok, ^waiting} = start_update(2, on_duplicate: :cancel_existing)
       assert %{status: :pending, input: %{"change" => 2}, runs_after_id: ^running} = get(waiting)
       assert %{status: :waiting, holds_key: true} = get(running)
+
+      assert [%{workflow_id: ^waiting, details: %{"outcome" => "cancel_existing"} = details}] =
+               Durable.Activity.list!(kinds: ["key_duplicate"])
+
+      assert details["runs_after"] == waiting
     end
   end
 
@@ -354,6 +411,17 @@ defmodule Durable.KeyScopeTest do
       undone = claim_and_run(rebuild)
       assert undone.holds_key and undone.status in WorkflowExecution.closed_statuses()
       assert %{holds_key: true, runs_after_id: nil} = claim_and_run(update)
+    end
+
+    test "keeps it by the scope it was started under, after a deploy took the scope away" do
+      %{id: swap} = run_workflow(UnscopedSwap, %{}, key: @key)
+      started_under!(swap, "account_index")
+      assert finish(swap).status == :compensated
+
+      assert [update] = runs_of("update_index", swap)
+      assert [again] = runs_of("swap_index_unscoped", swap)
+      assert %{holds_key: false, runs_after_id: ^swap} = get(update)
+      assert %{holds_key: false, runs_after_id: ^swap} = get(again)
     end
   end
 
@@ -396,27 +464,28 @@ defmodule Durable.KeyScopeTest do
   end
 
   describe "a workflow that changed its key_scope" do
-    # As a run started before its workflow named the scope.
-    defp unscoped!(id),
-      do:
-        TestRepo.update_all(from(w in WorkflowExecution, where: w.id == ^id),
-          set: [key_scope: nil]
-        )
-
     test "still meets its run from before" do
       %{id: before} = run_workflow(IndexUpdate, %{"change" => 1}, key: @key)
-      unscoped!(before)
+      started_under!(before, nil)
 
       {:ok, waiting} = start_update(2)
       assert %{runs_after_id: ^before, holds_key: false} = get(waiting)
     end
 
-    test "the scope's other workflows don't" do
+    test "the new scope's other workflows don't" do
       %{id: before} = run_workflow(IndexUpdate, %{"change" => 1}, key: @key)
-      unscoped!(before)
+      started_under!(before, nil)
 
       {:ok, rebuild} = start_rebuild()
       assert %{holds_key: true, runs_after_id: nil} = get(rebuild)
+    end
+
+    test "the old scope's other workflows still do" do
+      %{id: before} = run_workflow(Articles, %{}, key: @key, workflow: "process_article")
+      started_under!(before, "account_index")
+
+      {:ok, rebuild} = start_rebuild()
+      assert %{holds_key: false, runs_after_id: ^before} = get(rebuild)
     end
   end
 
@@ -427,13 +496,20 @@ defmodule Durable.KeyScopeTest do
     rows =
       Map.new(Durable.Query.list_keys!(), fn row ->
         {row.workflow_name,
-         Map.take(row, [:key_scope, :holder_id, :holder_status, :holder_workflow_name])}
+         Map.take(row, [
+           :key_scope,
+           :holder_id,
+           :holder_status,
+           :holder_workflow_module,
+           :holder_workflow_name
+         ])}
       end)
 
     held = %{
       key_scope: "account_index",
       holder_id: rebuild,
       holder_status: :waiting,
+      holder_workflow_module: to_string(IndexRebuild),
       holder_workflow_name: "rebuild_index"
     }
 

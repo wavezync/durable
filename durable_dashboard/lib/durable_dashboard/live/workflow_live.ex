@@ -596,7 +596,10 @@ defmodule DurableDashboard.Live.WorkflowLive do
         </.link>.
       </p>
       <KeyTab.blocked_line
-        :if={@can_operate? and @workflow.status in finished_statuses() and not blocked?(@retry_block)}
+        :if={
+          @can_operate? and @workflow.status in finished_statuses() and
+            not (@workflow.status == :failed and blocked?(@retry_block))
+        }
         action={:rerun}
         block={@rerun_block}
         run_id={@workflow.id}

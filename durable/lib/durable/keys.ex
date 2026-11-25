@@ -560,10 +560,11 @@ defmodule Durable.Keys do
     end
   end
 
-  # Under a `key_scope:` a run keeps its key while it's undone
+  # A run started under a `key_scope:` keeps its key while it's undone
   # (`Executor.without_key/2`), and a start of its own workflow waits for the
   # undo, as a start of another's does: it isn't handed a run that only undoes.
-  defp undoing?(%{entry: %{key_scope: nil}}, _holder), do: false
+  # The run's scope, not the start's: its workflow may have dropped it since.
+  defp undoing?(_ctx, %{key_scope: nil}), do: false
   defp undoing?(_ctx, %{status: :compensating}), do: true
   defp undoing?(ctx, %{status: :pending} = holder), do: to_be_rolled_back?(ctx, holder)
   defp undoing?(_ctx, _holder), do: false
@@ -880,8 +881,11 @@ defmodule Durable.Keys do
         record_duplicate(ctx, holder, :run_again, %{runs_after: run.id})
         {:ok, run}
 
+      # :cancel_existing behind another workflow's run gives its own run in
+      # line the newer input in place of replacing it (`behind_others/4`).
       {:waiting_refreshed, id, holder} ->
-        record_duplicate(ctx, holder, :run_again, %{runs_after: id})
+        outcome = if ctx.mode == :cancel_existing, do: :cancel_existing, else: :run_again
+        record_duplicate(ctx, holder, outcome, %{runs_after: id})
         {:duplicate, id, :use_existing}
 
       # Behind another workflow's run of the scope: not a duplicate.
@@ -961,6 +965,7 @@ defmodule Durable.Keys do
             :status,
             :input,
             :key,
+            :key_scope,
             :workflow_module,
             :workflow_name,
             :locked_by,
@@ -1062,22 +1067,29 @@ defmodule Durable.Keys do
     end
   end
 
-  # Under a `key_scope:` the line runs in start order. A run that comes for
-  # the key once the run it waited behind has ended, cancelled out of the
-  # line, waits behind the newest run started before it that still waits,
-  # rather than taking the key or waiting behind the holder beside it.
+  # Under a `key_scope:` the line runs in the order runs joined it. A run that
+  # comes for the key once the run it waited behind has ended, cancelled out
+  # of the line, waits behind the first run before it that still waits,
+  # rather than taking the key or waiting behind the holder beside it. Found
+  # by who each waited behind, not by start times: a start reads the clock
+  # before it has the key's lock, and another node's clock may be behind.
   defp ahead(_config, %{key_scope: nil}), do: nil
+  defp ahead(config, run), do: ahead(config, run, run.runs_after_id, [run.id])
 
-  defp ahead(config, run) do
-    Repo.one(
-      config,
-      from(w in in_line(run),
-        where: w.id != ^run.id and w.inserted_at < ^run.inserted_at,
-        order_by: [desc: w.inserted_at],
-        limit: 1,
-        select: w.id
-      )
-    )
+  defp ahead(_config, _run, nil, _seen), do: nil
+
+  defp ahead(config, run, id, seen) do
+    cond do
+      id in seen ->
+        nil
+
+      Repo.one(config, from(w in in_line(run), where: w.id == ^id, select: true)) ->
+        id
+
+      true ->
+        before = from(w in WorkflowExecution, where: w.id == ^id, select: w.runs_after_id)
+        ahead(config, run, Repo.one(config, before), [id | seen])
+    end
   end
 
   # Only as the claim that came for the key: the run was read before the key's
