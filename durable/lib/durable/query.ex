@@ -165,9 +165,14 @@ defmodule Durable.Query do
   most recently started first.
 
       [%{workflow_module: "Elixir.MyApp.ProcessArticle", workflow_name: "process_article",
-         key: "article:42", runs: 2, last_started_at: ~U[...],
+         key: "article:42", key_scope: nil, runs: 2, last_started_at: ~U[...],
          holder_id: "3f2a91c4-…", holder_status: :running,   # nil when no run holds it
+         holder_workflow_name: "process_article",
          readded: 3, dropped: 1, last_readded_at: ~U[...]}]  # in the last 24 hours
+
+  Under a `key_scope:` (the one its newest run was started under) the holder
+  is the run of the scope that holds the key, which may be another
+  workflow's: `holder_workflow_name` says whose.
 
   ## Filters
 
@@ -197,18 +202,26 @@ defmodule Durable.Query do
     rows =
       Repo.all(
         config,
-        from(w in keys_query(filters),
-          order_by: [desc: max(w.inserted_at)],
+        from([k, h] in keys_query(filters),
+          order_by: [desc: k.last_started_at],
           limit: ^Keyword.get(filters, :limit, 50),
           offset: ^Keyword.get(filters, :offset, 0),
           select: %{
-            workflow_module: w.workflow_module,
-            workflow_name: w.workflow_name,
-            key: w.key,
-            runs: count(w.id),
-            last_started_at: max(w.inserted_at),
-            holder_id: fragment("(array_agg(?::text) FILTER (WHERE ?))[1]", w.id, w.holds_key),
-            holder_status: fragment("(array_agg(?) FILTER (WHERE ?))[1]", w.status, w.holds_key)
+            workflow_module: k.workflow_module,
+            workflow_name: k.workflow_name,
+            key: k.key,
+            key_scope: k.key_scope,
+            runs: k.runs,
+            last_started_at: k.last_started_at,
+            holder_id: fragment("COALESCE(?, ?::text)", k.holder_id, h.id),
+            holder_status: fragment("COALESCE(?, ?)", k.holder_status, h.status),
+            holder_workflow_name:
+              fragment(
+                "CASE WHEN ? IS NOT NULL THEN ? ELSE ? END",
+                k.holder_id,
+                k.workflow_name,
+                h.workflow_name
+              )
           }
         )
       )
@@ -237,8 +250,7 @@ defmodule Durable.Query do
   @spec count_keys(keyword()) :: {:ok, non_neg_integer()} | {:error, Opts.reason()}
   def count_keys(filters \\ []) do
     with {:ok, filters} <- Opts.validate(filters, @key_filters) do
-      keys = from(w in keys_query(filters), select: %{key: w.key})
-      {:ok, filters |> get_config() |> Repo.one(from(k in subquery(keys), select: count()))}
+      {:ok, filters |> get_config() |> Repo.one(from(k in keys_query(filters), select: count()))}
     end
   end
 
@@ -246,14 +258,47 @@ defmodule Durable.Query do
   @spec count_keys!(keyword()) :: non_neg_integer()
   def count_keys!(filters \\ []), do: filters |> count_keys() |> Opts.unwrap!(filters)
 
+  # One row per workflow and key, joined to the run of its scope that holds
+  # the key when no run of its own does. The scope's holder index keeps that
+  # to one run.
   defp keys_query(filters) do
+    filters = if bad_filter?(filters), do: [nothing: true], else: filters
+
+    query =
+      from(k in subquery(workflow_keys(filters)),
+        left_join: h in WorkflowExecution,
+        on: is_nil(k.holder_id) and h.holds_key and h.key_scope == k.key_scope and h.key == k.key
+      )
+
+    case Keyword.get(filters, :holder_status) do
+      nil ->
+        query
+
+      status ->
+        statuses = status |> List.wrap() |> Enum.map(&to_string/1)
+
+        from([k, h] in query,
+          where: fragment("COALESCE(?, ?) = ANY(?)", k.holder_status, h.status, ^statuses)
+        )
+    end
+  end
+
+  defp workflow_keys(filters) do
     query =
       from(w in WorkflowExecution,
         where: not is_nil(w.key),
-        group_by: [w.workflow_module, w.workflow_name, w.key]
+        group_by: [w.workflow_module, w.workflow_name, w.key],
+        select: %{
+          workflow_module: w.workflow_module,
+          workflow_name: w.workflow_name,
+          key: w.key,
+          key_scope: fragment("(array_agg(? ORDER BY ? DESC))[1]", w.key_scope, w.inserted_at),
+          runs: count(w.id),
+          last_started_at: max(w.inserted_at),
+          holder_id: fragment("(array_agg(?::text) FILTER (WHERE ?))[1]", w.id, w.holds_key),
+          holder_status: fragment("(array_agg(?) FILTER (WHERE ?))[1]", w.status, w.holds_key)
+        }
       )
-
-    filters = if bad_filter?(filters), do: [nothing: true], else: filters
 
     Enum.reduce(filters, query, fn
       {:nothing, true}, q ->
@@ -264,19 +309,6 @@ defmodule Durable.Query do
 
       {:key_prefix, prefix}, q when is_binary(prefix) and prefix != "" ->
         from(w in q, where: like(w.key, ^(escape_like(prefix) <> "%")))
-
-      {:holder_status, status}, q when not is_nil(status) ->
-        statuses = status |> List.wrap() |> Enum.map(&to_string/1)
-
-        from(w in q,
-          having:
-            fragment(
-              "(array_agg(?) FILTER (WHERE ?))[1] = ANY(?)",
-              w.status,
-              w.holds_key,
-              ^statuses
-            )
-        )
 
       _, q ->
         q
@@ -865,6 +897,7 @@ defmodule Durable.Query do
       trigger: execution.trigger,
       trigger_ref: execution.trigger_ref,
       key: execution.key,
+      key_scope: execution.key_scope,
       holds_key: execution.holds_key,
       runs_after_id: execution.runs_after_id,
       tags: execution.tags,

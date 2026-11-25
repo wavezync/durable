@@ -316,6 +316,12 @@ defmodule DurableDashboard.Live.KeysLive do
                   <span :if={k.holder_id} class="flex items-center gap-2">
                     <KeyTab.run_link id={k.holder_id} base_path={@base_path} />
                     <Core.status_pill status={k.holder_status} />
+                    <span
+                      :if={Map.get(k, :holder_workflow_name) not in [nil, k.workflow_name]}
+                      class="truncate font-mono text-xs text-muted-foreground"
+                    >
+                      {k.holder_workflow_name}
+                    </span>
                   </span>
                   <span :if={!k.holder_id} class="text-xs text-muted-foreground">No holder</span>
                 </td>

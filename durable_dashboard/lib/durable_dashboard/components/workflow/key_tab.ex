@@ -32,23 +32,34 @@ defmodule DurableDashboard.Components.Workflow.KeyTab do
 
   @doc """
   What the page shows about `run`'s key, or nil for a run without one:
-  `%{key, reuse, debounce, holder, runs, events, duplicates, dropped, took,
-  released?}`.
+  `%{key, scope, reuse, debounce, holder, runs, events, duplicates, dropped,
+  took, released?}`. Under a `key_scope:` the runs are the scope's, of every
+  workflow in it, and the holder may be another workflow's.
   """
   @spec load(Durable.Config.t(), WorkflowExecution.t()) :: map() | nil
   def load(_config, %WorkflowExecution{key: nil}), do: nil
 
   def load(config, %WorkflowExecution{} = run) do
+    # nil on a Durable from before key_scope:.
+    scope = Map.get(run, :key_scope)
+
     runs =
       Durable.Repo.all(
         config,
         from(w in WorkflowExecution,
-          where:
-            w.workflow_module == ^run.workflow_module and w.workflow_name == ^run.workflow_name and
-              w.key == ^run.key,
+          where: ^runs_of_key(run, scope),
           order_by: [desc: w.holds_key, desc: w.inserted_at],
           limit: 50,
-          select: map(w, [:id, :status, :holds_key, :inserted_at, :current_step, :runs_after_id])
+          select:
+            map(w, [
+              :id,
+              :workflow_name,
+              :status,
+              :holds_key,
+              :inserted_at,
+              :current_step,
+              :runs_after_id
+            ])
         )
       )
 
@@ -70,6 +81,7 @@ defmodule DurableDashboard.Components.Workflow.KeyTab do
 
     %{
       key: run.key,
+      scope: scope,
       reuse: definition && Map.get(definition.opts, :reuse, :after_close),
       debounce: definition && Durable.Keys.debounce(definition),
       released?: Enum.any?(events, &(&1.kind == "key_released" and &1.workflow_id == run.id)),
@@ -85,6 +97,17 @@ defmodule DurableDashboard.Components.Workflow.KeyTab do
         )
     }
   end
+
+  defp runs_of_key(run, nil) do
+    dynamic(
+      [w],
+      w.workflow_module == ^run.workflow_module and w.workflow_name == ^run.workflow_name and
+        w.key == ^run.key
+    )
+  end
+
+  defp runs_of_key(run, scope),
+    do: dynamic([w], w.key == ^run.key and (w.key_scope == ^scope or ^runs_of_key(run, nil)))
 
   defp definition(run) do
     module = String.to_existing_atom(run.workflow_module)
@@ -289,8 +312,12 @@ defmodule DurableDashboard.Components.Workflow.KeyTab do
       <section class="min-w-0 overflow-hidden rounded-[10px] border border-border">
         <header class="flex flex-wrap items-baseline justify-between gap-2 border-b border-border px-3.5 py-2.5">
           <h3 class="text-sm font-semibold">Runs with this key</h3>
-          <span :if={@info.reuse} class="font-mono text-xs text-muted-foreground" data-tip={reuse_tip(@info.reuse)}>
-            reuse: {inspect(@info.reuse)}
+          <span class="font-mono text-xs text-muted-foreground">
+            <span :if={@info.scope} data-tip="Every workflow naming this scope shares its keys">
+              key_scope: {inspect(@info.scope)}
+            </span>
+            <span :if={@info.scope && @info.reuse} aria-hidden="true">·</span>
+            <span :if={@info.reuse} data-tip={reuse_tip(@info.reuse)}>reuse: {inspect(@info.reuse)}</span>
           </span>
         </header>
         <ol>
@@ -304,6 +331,9 @@ defmodule DurableDashboard.Components.Workflow.KeyTab do
             <div class="flex min-w-0 flex-col gap-0.5">
               <span class="flex items-center gap-2">
                 <.run_link id={run.id} base_path={@base_path} />
+                <span :if={run.workflow_name != @workflow.workflow_name} class="font-mono text-xs text-muted-foreground">
+                  {run.workflow_name}
+                </span>
                 <span :if={run.id == @workflow.id} class="text-xs text-muted-foreground">this run</span>
               </span>
               <span class="text-xs text-muted-foreground">

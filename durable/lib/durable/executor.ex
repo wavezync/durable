@@ -492,10 +492,13 @@ defmodule Durable.Executor do
   # start may take the key from such a run unless the workflow says
   # `reuse: :never`. Kept until it was undone, the key would hand that start a
   # run that does no work. If the undo finds nothing to do and the run is left
-  # failed, a retry takes the key back as for any run that lost it.
+  # failed, a retry takes the key back as for any run that lost it. Under a
+  # `key_scope:` it keeps the key until the undo has run, and a start waits
+  # for it (`Keys`): the undo writes what the scope's runs work on.
   defp without_key(changeset, %{holds_key: true} = execution) do
     with {:ok, workflow_def} <- get_workflow_definition_from_execution(execution),
-         true <- Keys.reuse(workflow_def) != :never do
+         true <- Keys.reuse(workflow_def) != :never,
+         nil <- Keys.scope(workflow_def) do
       Ecto.Changeset.change(changeset, holds_key: false)
     else
       _ -> changeset

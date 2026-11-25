@@ -15,6 +15,7 @@ defmodule Durable.Keys do
   #   * a retry taking back the key it lost (`retake/3`),
   #   * a rollback beginning, which lets the key go as a start would have
   #     taken it from the failed or cancelled run (`Executor.without_key/2`),
+  #     outside a `key_scope:`,
   #   * an operator releasing it (`release/2`),
   #   * pruning, which deletes the holder.
   #
@@ -393,8 +394,9 @@ defmodule Durable.Keys do
       holder.status in WorkflowExecution.reusable_statuses(ctx.reuse) ->
         take_from_closed(ctx, holder, rounds, moved)
 
-      # Another workflow's run of the scope: not a duplicate, so no answer.
-      not own?(ctx, holder) ->
+      # Another workflow's run of the scope, or one being undone: not a
+      # duplicate, so no answer.
+      not own?(ctx, holder) or undoing?(ctx, holder) ->
         behind_others(ctx, holder, rounds, moved)
 
       # A debounced run that hasn't started takes the newer input and waits again.
@@ -557,6 +559,14 @@ defmodule Durable.Keys do
         claim(ctx, rounds - 1, {:replaced, holder, cancelled})
     end
   end
+
+  # Under a `key_scope:` a run keeps its key while it's undone
+  # (`Executor.without_key/2`), and a start of its own workflow waits for the
+  # undo, as a start of another's does: it isn't handed a run that only undoes.
+  defp undoing?(%{entry: %{key_scope: nil}}, _holder), do: false
+  defp undoing?(_ctx, %{status: :compensating}), do: true
+  defp undoing?(ctx, %{status: :pending} = holder), do: to_be_rolled_back?(ctx, holder)
+  defp undoing?(_ctx, _holder), do: false
 
   # On its queue to be undone, a holder is `pending` like any other, and
   # cancelled it would end with nothing undone (`Executor.cancel_run/3`).
@@ -1015,34 +1025,59 @@ defmodule Durable.Keys do
     do: {:behind, holder_id(config, run) || run.runs_after_id}
 
   defp do_take_waiting(config, run, workflow_def, rounds) do
-    reuse = reuse(workflow_def)
-
     case holder(config, run) do
-      nil ->
-        hold(config, run, workflow_def, nil, rounds)
-
       # The run itself: a retry took the key back for it (`retake/3`).
       %{id: id} when id == run.id ->
         hold(config, run, workflow_def, nil, rounds)
 
       holder ->
-        cond do
-          holder.status in WorkflowExecution.open_statuses() ->
-            {:behind, holder.id}
-
-          holder.status not in WorkflowExecution.reusable_statuses(reuse) ->
-            {:kept, holder.id}
-
-          settling?(config, holder) ->
-            {:behind, holder.id}
-
-          release_closed(config, holder, reuse) ->
-            hold(config, run, workflow_def, holder, rounds)
-
-          true ->
-            do_take_waiting(config, run, workflow_def, rounds - 1)
+        case ahead(config, run) do
+          nil -> take_from(config, run, workflow_def, holder, rounds)
+          id -> {:behind, id}
         end
     end
+  end
+
+  defp take_from(config, run, workflow_def, nil, rounds),
+    do: hold(config, run, workflow_def, nil, rounds)
+
+  defp take_from(config, run, workflow_def, holder, rounds) do
+    reuse = reuse(workflow_def)
+
+    cond do
+      holder.status in WorkflowExecution.open_statuses() ->
+        {:behind, holder.id}
+
+      holder.status not in WorkflowExecution.reusable_statuses(reuse) ->
+        {:kept, holder.id}
+
+      settling?(config, holder) ->
+        {:behind, holder.id}
+
+      release_closed(config, holder, reuse) ->
+        hold(config, run, workflow_def, holder, rounds)
+
+      true ->
+        do_take_waiting(config, run, workflow_def, rounds - 1)
+    end
+  end
+
+  # Under a `key_scope:` the line runs in start order. A run that comes for
+  # the key once the run it waited behind has ended, cancelled out of the
+  # line, waits behind the newest run started before it that still waits,
+  # rather than taking the key or waiting behind the holder beside it.
+  defp ahead(_config, %{key_scope: nil}), do: nil
+
+  defp ahead(config, run) do
+    Repo.one(
+      config,
+      from(w in in_line(run),
+        where: w.id != ^run.id and w.inserted_at < ^run.inserted_at,
+        order_by: [desc: w.inserted_at],
+        limit: 1,
+        select: w.id
+      )
+    )
   end
 
   # Only as the claim that came for the key: the run was read before the key's

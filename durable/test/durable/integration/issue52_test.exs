@@ -33,6 +33,30 @@ defmodule Issue52IndexRebuild do
   end
 end
 
+defmodule Issue52SwappingRebuild do
+  @moduledoc false
+  use Durable
+  alias Durable.IntegrationProbe, as: Probe
+
+  # A rebuild that swaps the old index back when the new one fails its check.
+  # The swap back writes the index too, and is held until the test lets go.
+  workflow "i52_swap_index", key_scope: "i52_account_index" do
+    step :swap, [compensate: :swap_back], fn request -> {:ok, request} end
+
+    step :verify, fn _request -> {:rollback, "the new index is missing documents"} end
+
+    compensate :swap_back, fn request ->
+      Probe.inside([:index], fn ->
+        Probe.note(:swapping_back)
+        Probe.wait_for(:swapped_back)
+      end)
+
+      Probe.note(:swapped_back)
+      {:ok, request}
+    end
+  end
+end
+
 defmodule Durable.Integration.Issue52Test do
   @moduledoc """
   Issue #52: workflows that name one `key_scope:` share its keys, so an update
@@ -72,6 +96,23 @@ defmodule Durable.Integration.Issue52Test do
     assert %{status: :completed} = get(rebuilt)
     assert Probe.peak(:index) == 1
     assert noted() == [{:updated, 1}, :rebuilt, {:updated, 2}]
+  end
+
+  test "an update started while a rebuild is rolled back runs after the undo, not beside it" do
+    start_durable!(%{default: 4})
+
+    {:ok, rebuild} = Durable.start(Issue52SwappingRebuild, %{}, key: @key)
+    assert_eventually(fn -> :swapping_back in noted() end)
+    update = start_update(1)
+
+    # Long enough for a poller to claim the update, were it free to run.
+    Process.sleep(300)
+    :ok = Probe.set(:swapped_back)
+    await_status(update, :completed)
+
+    assert Probe.peak(:index) == 1
+    assert noted() == [:swapping_back, :swapped_back, {:updated, 1}]
+    assert %{status: :compensated} = get(rebuild)
   end
 
   # Starts of the two workflows take one lock for the key, so they make one

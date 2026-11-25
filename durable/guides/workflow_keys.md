@@ -40,11 +40,11 @@ end
 - **One holder per key.** Among the runs of one workflow, at most one *holds* a key. A start that finds the key held returns the holder (or an error, see below) and creates nothing: no run, no `:workflow_started` broadcast, nothing run inline. The exception is `on_duplicate: :cancel_existing`, which replaces the holder with a new run.
 - **Keys are scoped per workflow.** `"article:42"` on `process_article` and on `index_article` are two different keys, unless both name one `key_scope:` (see [Share Keys Between Workflows](#share-keys-between-workflows-key_scope)).
 - **A run that's still going always holds its key.** Pending, running and waiting (sleep, events, input) runs keep it, including while a step is between retry attempts.
-- **A run that is being rolled back has failed or been cancelled, and its key says so.** It lets the key go when its rollback begins, unless the workflow says `reuse: :never`, so the next start gets a run of its own and not one that is only undoing. Both runs are then going at once, so a compensation should undo what its own run did (cancel booking `FL-123`) and not whatever the key names (cancel traveller 7's flight). If the rollback finds nothing to undo and the run is left failed, a retry takes the key back.
+- **A run that is being rolled back has failed or been cancelled, and its key says so.** It lets the key go when its rollback begins, unless the workflow says `reuse: :never` or names a `key_scope:` (see [Share Keys Between Workflows](#share-keys-between-workflows-key_scope)), so the next start gets a run of its own and not one that is only undoing. Both runs are then going at once, so a compensation should undo what its own run did (cancel booking `FL-123`) and not whatever the key names (cancel traveller 7's flight). If the rollback finds nothing to undo and the run is left failed, a retry takes the key back.
 - **After the run finishes, `reuse:` decides** whether the next start may take the key or gets the finished run back.
 - **A run cancelled while its step runs keeps the next run waiting until that step has stopped.** Its worker hears of the cancel at its next heartbeat (`heartbeat_interval`, 30 seconds by default), stops the step and lets go of the run. A worker that can't reach the database never hears, and stops its step before its lock goes stale (`stale_lock_timeout`). A run that takes the key from it, or waits behind it under `:run_again`, starts only after that, so two runs of one key never overlap. That holds for `on_duplicate: :cancel_existing` too.
 
-Status isn't part of the uniqueness rule. A key changes hands only when a new start asks for it, when a retry takes it back, when the holder's rollback begins, when you release it, or when the holder is pruned. Moving a run between statuses (claiming it, recovering it from a dead node, cancelling it) never frees a key or fails on one.
+Status isn't part of the uniqueness rule. A key changes hands only when a new start asks for it, when a retry takes it back, when the holder's rollback begins (outside a `key_scope:`), when you release it, or when the holder is pruned. Moving a run between statuses (claiming it, recovering it from a dead node, cancelling it) never frees a key or fails on one.
 
 ## Choosing `reuse:`
 
@@ -283,7 +283,8 @@ Durable.start(MyApp.IndexRebuild, %{"account_id" => 7}, key: "account:7")  #=> {
 Durable.start(MyApp.IndexUpdate, %{"account_id" => 7}, key: "account:7")   #=> {:ok, next_id}, waits for the rebuild
 ```
 
-- **One run in the scope holds a key**, whichever workflow it's of. The others wait in line for it, and run one at a time in the order they were started.
+- **One run in the scope holds a key**, whichever workflow it's of. The others wait in line for it, and run one at a time in the order they were started. A run cancelled out of the line leaves the others in that order.
+- **A run being rolled back keeps its key until its rollback has run.** Its compensations write what the next run works on, so a start of any workflow in the scope, its own included, waits in line behind it, whatever its `on_duplicate:`. This covers a run that rolls back as it fails and one cancelled with `rollback: true`. A run that failed and halted has let its key go to the next run; if it's rolled back later (`Durable.rollback/2`, or `on_failure: [rollback_after: ms]`), its compensations run beside whichever run holds the key then.
 - **A run of another workflow isn't a duplicate.** A start that finds one holding the key, or waiting for it, waits at the end of the line, whatever its `on_duplicate:`. It never gets that run back, cancels it, sends it an event or gives it its input, and Activity records no `"key_duplicate"` on it.
 - **`on_duplicate:` and `debounce:` answer for the start's own workflow**, as they do without a scope. Each workflow has at most one run waiting in line, and that's the run they meet: `:run_again` gives it the newer input, `:use_existing` gets it back, `:error` is refused with its id. Above, a second rebuild asked for while one waits gets the waiting one back.
 - **`:cancel_existing` only replaces a run of its own workflow.** It takes that run's place in line. With another workflow's run holding the key, it waits like any other start, and gives its own waiting run the newer input.
@@ -291,6 +292,7 @@ Durable.start(MyApp.IndexUpdate, %{"account_id" => 7}, key: "account:7")   #=> {
 - **A scope is a name you choose**, shared wherever the workflows are defined. Workflows that don't name one keep their keys to themselves, even two in one module.
 - **It's set on the workflow.** `Durable.start/3` refuses `key_scope:`, as it does `reuse:`.
 - **Changing a workflow's `key_scope:`** applies to its next start. A run started under the old scope still holds its key against its own workflow, but not against the old scope's other workflows.
+- **Listing a shared key.** `Durable.Query.list_keys/1` still has one row per workflow and key, and gives each row the scope's holder, which may be another workflow's run: `holder_workflow_name` says whose, and `key_scope` names the scope. The dashboard's Keys page does the same, and a run's Key view lists the runs of every workflow in the scope with its key. `Durable.get_execution/2` returns a run's `key_scope`, and `Durable.list_executions!(key: "account:7")` returns the runs of every workflow.
 
 ## Watching Keys
 
@@ -317,7 +319,6 @@ workflow "cleanup" do
 - **Keys aren't inherited.** Parallel branches and `call_workflow` children start without a key. A cron schedule fire starts without one unless the schedule has a `key:` (next section).
 - **Runs started before the upgrade** have no key and never hold one.
 - **Upgrading** adds two columns and three indexes (`mix durable.gen.upgrade`, then migrate). Creating the indexes scans the runs table and blocks inserts into it while it runs, so on a large table, deploy at a quiet time. `key_scope:` adds one more column and index (migration `20261125000000`); it rewrites no rows, and runs started before it keep their keys to their own workflow.
-- **Keys are listed per workflow.** `Durable.Query.list_keys/1`, `Durable.Stats.keys/1` and the dashboard group runs by workflow and key, with or without a `key_scope:`: a shared key held by a rebuild shows the rebuild as its holder, and the update's row shows none. `Durable.list_executions!(key: "account:7")` returns the runs of every workflow.
 
 ## Coming From Oban or Temporal
 

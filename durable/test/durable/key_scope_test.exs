@@ -75,6 +75,51 @@ defmodule Durable.KeyScopeTest do
     end
   end
 
+  # A rebuild that swaps a new index in, and swaps the old one back if the new
+  # one fails its check. Swapping back writes the index too. `"start"` makes
+  # the swap back start a run of the key, as a producer would meanwhile.
+  defmodule SwappingRebuild do
+    use Durable
+    use Durable.Wait
+
+    workflow "swap_index", key_scope: "account_index" do
+      step :swap, [compensate: :swap_back], fn request -> {:ok, request} end
+
+      step :verify, fn _request ->
+        wait_for_event("go")
+        {:rollback, "the new index is missing documents"}
+      end
+
+      compensate :swap_back, fn request ->
+        case request["start"] do
+          "update" ->
+            Durable.start(Durable.KeyScopeTest.IndexUpdate, %{"change" => 9}, key: "account:7")
+
+          "swap" ->
+            Durable.start(__MODULE__, %{}, key: "account:7")
+
+          nil ->
+            :ok
+        end
+
+        {:ok, request}
+      end
+    end
+  end
+
+  # A third workflow of the scope: a check of the index.
+  defmodule IndexAudit do
+    use Durable
+    use Durable.Wait
+
+    workflow "audit_index", key_scope: "account_index" do
+      step :check, fn request ->
+        wait_for_event("go")
+        {:ok, request}
+      end
+    end
+  end
+
   @key "account:7"
 
   defp config, do: Config.get(Durable)
@@ -87,6 +132,17 @@ defmodule Durable.KeyScopeTest do
 
   defp start_rebuild(opts \\ []),
     do: Durable.start(IndexRebuild, %{"full" => true}, [key: @key] ++ opts)
+
+  defp start_audit, do: Durable.start(IndexAudit, %{}, key: @key)
+
+  defp runs_of(name, except),
+    do:
+      TestRepo.all(
+        from(w in WorkflowExecution,
+          where: w.workflow_name == ^name and w.id != ^except,
+          select: w.id
+        )
+      )
 
   defp finish(id) do
     :ok = Durable.send_event(id, "go", %{})
@@ -263,6 +319,82 @@ defmodule Durable.KeyScopeTest do
     end
   end
 
+  # A run being rolled back keeps its key until its undo has run: the undo
+  # writes what the next run of the key works on.
+  describe "a run being rolled back" do
+    test "keeps the key while it undoes: an update asked for meanwhile waits for it" do
+      %{id: rebuild} = run_workflow(SwappingRebuild, %{"start" => "update"}, key: @key)
+      assert finish(rebuild).status == :compensated
+
+      assert [update] = runs_of("update_index", rebuild)
+      assert %{holds_key: false, runs_after_id: ^rebuild} = get(update)
+      assert %{status: :compensated, holds_key: true} = get(rebuild)
+      assert %{holds_key: true, runs_after_id: nil} = claim_and_run(update)
+    end
+
+    test "isn't handed to a start of its own workflow: that one waits for the undo" do
+      %{id: rebuild} = run_workflow(SwappingRebuild, %{"start" => "swap"}, key: @key)
+      assert finish(rebuild).status == :compensated
+
+      assert [again] = runs_of("swap_index", rebuild)
+      assert %{holds_key: false, runs_after_id: ^rebuild} = get(again)
+    end
+
+    test "cancelled with rollback: true, keeps the key until its undo has run" do
+      %{id: rebuild} = run_workflow(SwappingRebuild, %{}, key: @key)
+      :ok = Durable.cancel(rebuild, "wrong account", rollback: true)
+      assert %{status: :pending, holds_key: true} = get(rebuild)
+
+      {:ok, update} = start_update(1)
+      {:ok, again} = Durable.start(SwappingRebuild, %{}, key: @key)
+      assert again not in [rebuild, update]
+      assert %{holds_key: false, runs_after_id: ^rebuild} = get(update)
+      assert %{holds_key: false, runs_after_id: ^update} = get(again)
+
+      undone = claim_and_run(rebuild)
+      assert undone.holds_key and undone.status in WorkflowExecution.closed_statuses()
+      assert %{holds_key: true, runs_after_id: nil} = claim_and_run(update)
+    end
+  end
+
+  # The line is kept in start order when a run in the middle of it goes.
+  describe "a run of the line cancelled" do
+    test "the run behind it waits again behind the run before it, not the holder" do
+      %{id: holder} = run_workflow(IndexUpdate, %{"change" => 1}, key: @key)
+      {:ok, rebuild} = start_rebuild()
+      {:ok, audit} = start_audit()
+      {:ok, update} = start_update(2)
+      assert get(update).runs_after_id == audit
+
+      :ok = Durable.cancel(audit, "not needed")
+
+      assert %{status: :pending, holds_key: false, runs_after_id: ^rebuild} =
+               claim_and_run(update)
+
+      assert finish(holder).status == :completed
+      assert %{holds_key: true} = claim_and_run(rebuild)
+    end
+
+    test "the run behind it doesn't take the key ahead of a run started before it" do
+      %{id: holder} = run_workflow(IndexUpdate, %{"change" => 1}, key: @key)
+      {:ok, rebuild} = start_rebuild()
+      {:ok, audit} = start_audit()
+      {:ok, update} = start_update(2)
+
+      :ok = Durable.cancel(audit, "not needed")
+      assert finish(holder).status == :completed
+
+      jobs = Map.new(claim(), &{&1.id, &1.lock_token})
+      assert Enum.sort(Map.keys(jobs)) == Enum.sort([rebuild, update])
+
+      Executor.execute_workflow(update, config(), jobs[update])
+      assert %{status: :pending, holds_key: false, runs_after_id: ^rebuild} = get(update)
+
+      Executor.execute_workflow(rebuild, config(), jobs[rebuild])
+      assert %{status: :waiting, holds_key: true} = get(rebuild)
+    end
+  end
+
   describe "a workflow that changed its key_scope" do
     # As a run started before its workflow named the scope.
     defp unscoped!(id),
@@ -288,15 +420,40 @@ defmodule Durable.KeyScopeTest do
     end
   end
 
-  test "keys are listed per workflow, and a key's runs of every workflow" do
+  test "a shared key is listed for each workflow, with the run of the scope that holds it" do
     %{id: rebuild} = run_workflow(IndexRebuild, %{"full" => true}, key: @key)
     {:ok, update} = start_update(1)
 
-    holders = Map.new(Durable.Query.list_keys!(), &{&1.workflow_name, &1.holder_id})
-    assert holders == %{"rebuild_index" => rebuild, "update_index" => nil}
+    rows =
+      Map.new(Durable.Query.list_keys!(), fn row ->
+        {row.workflow_name,
+         Map.take(row, [:key_scope, :holder_id, :holder_status, :holder_workflow_name])}
+      end)
+
+    held = %{
+      key_scope: "account_index",
+      holder_id: rebuild,
+      holder_status: :waiting,
+      holder_workflow_name: "rebuild_index"
+    }
+
+    assert rows == %{"rebuild_index" => held, "update_index" => held}
+    assert length(Durable.Query.list_keys!(holder_status: :waiting)) == 2
+    assert Durable.Query.count_keys!(holder_status: :waiting) == 2
+    assert Durable.Query.list_keys!(holder_status: :running) == []
 
     ids = for run <- Durable.list_executions!(key: @key), do: run.id
     assert Enum.sort(ids) == Enum.sort([rebuild, update])
+    assert {:ok, %{key_scope: "account_index"}} = Durable.get_execution(update)
+  end
+
+  test "an unscoped key is listed as before, its holder of its own workflow" do
+    %{id: held} = run_workflow(Articles, %{}, key: "article:42", workflow: "process_article")
+
+    assert [%{key_scope: nil, holder_id: ^held, holder_workflow_name: "process_article"}] =
+             Durable.Query.list_keys!()
+
+    assert {:ok, %{key_scope: nil}} = Durable.get_execution(held)
   end
 
   describe "workflows without key_scope" do

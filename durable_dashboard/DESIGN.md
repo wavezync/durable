@@ -667,7 +667,11 @@ side by side:
   "Failed at `fetch_article`, so the key could move", "Replaced by
   `9c1e77a0`", "Released by alice · 2d ago", "Runs after `3f2a91c4` with the
   newest input". The panel's subtitle is the
-  workflow's policy, `reuse: :after_failure`.
+  workflow's policy, `reuse: :after_failure`. Under a `key_scope:` the panel
+  lists the runs of every workflow in the scope with the key, and the holder
+  may be another workflow's. Such a run gives its workflow name, muted mono,
+  after its id. The subtitle gives the scope before the policy:
+  `key_scope: "account_index" · reuse: :after_close`.
 
 Empty state: "Nobody added `article:42` again."
 
@@ -832,7 +836,9 @@ most recently started first (`Durable.Query.list_keys/1`). It sits under
   need the Runs query bar's tags; the values still live in the URL
   (`?q=&workflow=&status=a,b&page=`).
 - **Columns**: key (mono), workflow, holder (short id → its Key view, with
-  its status pill; "No holder" muted), runs (→ Runs filtered by `key:`),
+  its status pill; "No holder" muted; under a `key_scope:` the scope's
+  holder, with its workflow name muted after the pill when it's another
+  workflow's), runs (→ Runs filtered by `key:`),
   re-added in the last 24h, dropped (warning when > 0), last added
   (`relative_time`, the newest re-add or start), and the workflow's `reuse:`
   in mono.
