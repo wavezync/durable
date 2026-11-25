@@ -146,6 +146,7 @@ defmodule Durable.Queue.Worker do
   def handle_info({ref, result}, %{task_ref: ref} = state) do
     Process.demonitor(ref, [:flush])
     cancel_heartbeat(state.heartbeat_timer)
+    result = put_back(state, result)
 
     duration_ms = System.monotonic_time(:millisecond) - state.started_at
 
@@ -227,7 +228,7 @@ defmodule Durable.Queue.Worker do
   rescue
     error ->
       if Durable.Repo.transient?(error),
-        do: release_after_lost_connection(job, config, error),
+        do: release_after_lost_connection(job, error),
         else: crashed(job, error, __STACKTRACE__)
   catch
     kind, reason ->
@@ -240,14 +241,24 @@ defmodule Durable.Queue.Worker do
   end
 
   # Says nothing about the step, so the run goes back rather than failing.
-  defp release_after_lost_connection(job, config, error) do
+  defp release_after_lost_connection(job, error) do
     Logger.error(
       "Lost the database connection, or it gave up on a statement, running job " <>
         "#{job.id}: #{Exception.message(error)}"
     )
 
-    safely(:fenced, fn -> Durable.Executor.connection_lost(job, error, config) end)
+    {:connection_lost, error}
   end
+
+  # The run goes back from here, not from the task. Back on its queue it is
+  # no longer this claim's, and a heartbeat that heard so before the task had
+  # sent the ends of the attempts it closed killed the task first: closed,
+  # with no end (rule 11). This process sends no heartbeat while it does it.
+  defp put_back(state, {:connection_lost, error}),
+    do:
+      safely(:fenced, fn -> Durable.Executor.connection_lost(state.job, error, state.config) end)
+
+  defp put_back(_state, result), do: result
 
   defp crashed(job, error, stacktrace) do
     Logger.error(

@@ -914,6 +914,9 @@ defmodule Durable.Executor.StepRunner do
   # of its the database refuses aborts it: the row is written again then,
   # without the event, which is out.
   defp begin_attempt(config, step_exec, lock_token, span_meta) do
+    # A flag left by an attempt this process exited from belongs to none.
+    Process.delete(@start_out)
+
     start = fn ->
       started = Durable.Telemetry.span_start([:durable, :step], span_meta)
       Process.put(@start_out, started)
@@ -936,8 +939,27 @@ defmodule Durable.Executor.StepRunner do
     error ->
       started = Process.delete(@start_out)
 
-      if started && Durable.Repo.transient?(error),
-        do: end_if_lost(config, step_exec, span_meta, {started, error})
+      cond do
+        is_nil(started) ->
+          :ok
+
+        Durable.Repo.transient?(error) ->
+          end_if_lost(config, step_exec, span_meta, {started, error})
+
+        # Refused (a COMMIT the database answered with an error), the row
+        # isn't in, and this is outside the step's span: the end is ours, as
+        # an :exception, the one the nack's close counts on (rule 11).
+        true ->
+          now = System.monotonic_time()
+          details = %{kind: :error, reason: error, stacktrace: __STACKTRACE__}
+          measurements = %{duration: now - started, monotonic_time: now}
+
+          :telemetry.execute(
+            [:durable, :step, :exception],
+            measurements,
+            Map.merge(span_meta, details)
+          )
+      end
 
       reraise error, __STACKTRACE__
   end
