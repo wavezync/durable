@@ -99,10 +99,11 @@ defmodule Durable.Fuzz.Audit6QueueRestartTest do
         else: Enum.each(runs, &check_run/1)
     end
 
-    # The property means nothing if no restart ever caught a step running. How
-    # many do is timing: one right after another finds nothing claimed yet. Nor
-    # does a step cut off mid-attempt always show: its body is a millisecond,
-    # and on a loaded machine a stop mostly finds its run between steps.
-    assert :counters.get(outlasted, 1) > 0, "no restart caught a step running"
+    # The property means nothing if no restart ever stopped with work still
+    # claimed: a drain whose grace ran out with its runs to hand back. How many
+    # do is timing: one right after another finds nothing claimed yet. A step
+    # cut off mid-attempt doesn't always show: its body is a millisecond, and
+    # on a loaded machine a stop mostly finds its run between steps.
+    assert :counters.get(outlasted, 1) > 0, "no restart stopped with work still claimed"
   end
 end

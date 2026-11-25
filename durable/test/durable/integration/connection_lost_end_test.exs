@@ -14,6 +14,8 @@ end
 defmodule Durable.Integration.ConnectionLostEndTest do
   use Durable.IntegrationCase, async: false
 
+  alias Durable.Queue.Manager
+
   @moduletag :capture_log
 
   # The first write of the step's result is given up on, as a statement
@@ -114,5 +116,36 @@ defmodule Durable.Integration.ConnectionLostEndTest do
 
     assert length(started) == 2
     assert {started -- ended, ended -- started} == {[], []}
+  end
+
+  # The worker puts the run back while still answering its poller: one
+  # restarted meanwhile adopts it in init. Done in the worker's own
+  # handle_info, the adopt waited out its 5 s and the worker was left out.
+  test "a poller restarted while a worker puts a run back adopts it at once" do
+    give_up_first_result!()
+    handler = "connection-lost-adopt-#{System.unique_integer([:positive])}"
+    query = [:durable, :integration_repo, :query]
+    :telemetry.attach(handler, query, &__MODULE__.hold_closer/4, nil)
+    on_exit(fn -> :telemetry.detach(handler) end)
+
+    start_durable!(%{default: 1}, heartbeat_interval: 100)
+    {:ok, id} = Durable.start(ConnectionLostEndShip, %{"parcel" => 1})
+    assert_eventually(fn -> Probe.hits(:held) == 1 end, 5_000)
+
+    poller = Process.whereis(Durable.Queue.Poller.Default)
+    started = System.monotonic_time(:millisecond)
+    Process.exit(poller, :kill)
+
+    assert_eventually(fn ->
+      Process.whereis(Durable.Queue.Poller.Default) not in [nil, poller]
+    end)
+
+    status = Manager.status(Durable, :default)
+
+    assert System.monotonic_time(:millisecond) - started < 1_000
+    assert status.active_jobs == 1
+
+    Probe.set(:go)
+    await_status(id, :completed)
   end
 end
