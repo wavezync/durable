@@ -572,6 +572,50 @@ defmodule Durable.Integration.Audit6BlocksTest do
     assert get(id).status == :cancelled
   end
 
+  # A task killed as its attempt's row was committing: the worker closed what
+  # the run had open before the row was in, and put the run back. The row
+  # landed after. A next attempt closes what the run left open, but a run that
+  # fails at the step's boundary (its deadline) never begins one, and the row
+  # stayed running on a failed run.
+  test "an attempt whose task is killed as its row commits isn't left running" do
+    hold_row_commits!()
+    start_durable!(%{default: 1}, heartbeat_interval: 5_000)
+    test = self()
+
+    holder =
+      Task.async(fn ->
+        IntegrationRepo.transaction(fn ->
+          IntegrationRepo.query!("SELECT pg_advisory_xact_lock($1)", [@row_lock])
+          send(test, :holding)
+          receive do: (:release -> :ok)
+        end)
+      end)
+
+    assert_receive :holding
+    {:ok, id} = Durable.start(Audit6BlocksLabel, %{})
+    assert_eventually(fn -> running_statements("AND wait_event = 'advisory'") == 1 end)
+    :ok = Durable.pause_queue(:default)
+
+    [{_, worker, _, _}] = DynamicSupervisor.which_children(Durable.Queue.WorkerSupervisor.Default)
+    Process.exit(:sys.get_state(worker).task_pid, :kill)
+    # The worker has closed what it could see, and waits to put the run back.
+    assert_eventually(fn ->
+      running_statements("AND wait_event_type = 'Lock' AND wait_event <> 'advisory'") == 1
+    end)
+
+    send(holder.pid, :release)
+    assert {:ok, :ok} = Task.await(holder)
+    assert_eventually(fn -> get(id).status == :pending end)
+
+    expire!(id)
+    :ok = Durable.resume_queue(:default)
+    await_status(id, :failed)
+    assert_eventually(fn -> Manager.status(Durable, :default).active_jobs == 0 end)
+
+    running = from(s in StepExecution, where: s.workflow_id == ^id and s.status == :running)
+    assert IntegrationRepo.all(running) == []
+  end
+
   # Holds the weighing's attempt as its start event is sent, and says so.
   def hold_at_start(_event, _measurements, %{step: :weigh} = meta, test) do
     send(test, {:started, meta.step_execution_id})

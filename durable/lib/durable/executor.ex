@@ -4109,6 +4109,18 @@ defmodule Durable.Executor do
   # comes back the same way.
   @spec attempt_died(map(), map(), Config.t()) :: :waiting | :fenced | {:error, map()}
   def attempt_died(job, error, %Config{} = config) do
+    # An attempt whose commit was under way as its task died holds the run's
+    # row until its row is in (`StepRunner.begin_attempt/4`). Closed before
+    # then, the row landed after, and stayed running if the run went no further.
+    Repo.one(
+      config,
+      from(w in WorkflowExecution,
+        where: w.id == ^job.id,
+        lock: "FOR NO KEY UPDATE",
+        select: w.id
+      )
+    )
+
     {:ok, run} = load_execution(config, job.id)
 
     cond do
