@@ -32,9 +32,7 @@ defmodule Durable.Telemetry do
 
   One span per attempt. A step that raises or returns an error is a normal
   `:stop` with `result: :error` — `:exception` means Durable itself failed.
-  `:start` is sent inside the transaction that writes the attempt's row, with
-  the run's row held for the claim: a handler that writes through the same
-  repo writes in that transaction, and a slow one holds up a cancel of the run.
+  `:start` is sent once the attempt's row is written.
 
     * `[:durable, :step, :start]` — metadata `:workflow_id`,
       `:root_workflow_id`, `:step_execution_id` (the attempt's row), `:workflow`,

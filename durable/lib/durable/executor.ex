@@ -1972,11 +1972,24 @@ defmodule Durable.Executor do
         select: s.id
       )
 
-    Repo.update_all(
-      config,
-      from(s in StepExecution, where: s.id in subquery(suspended)),
-      set: [status: :failed, error: storable_error(error), completed_at: now, updated_at: now]
-    )
+    # Named as the attempt that ended its step, in one transaction with its
+    # close: a run lost before it fails would run the step again
+    # (`StepRunner.mark_ended/3`). The run's row first, as `give_up/2` takes them.
+    with row_id when is_binary(row_id) <- Repo.one(config, suspended) do
+      {:ok, _} =
+        Repo.transaction(config, fn ->
+          StepRunner.mark_ended(config, exec.id, row_id)
+
+          Repo.update_all(config, from(s in StepExecution, where: s.id == ^row_id),
+            set: [
+              status: :failed,
+              error: storable_error(error),
+              completed_at: now,
+              updated_at: now
+            ]
+          )
+        end)
+    end
 
     handle_step_failure(exec, error, workflow_def, config)
   end
