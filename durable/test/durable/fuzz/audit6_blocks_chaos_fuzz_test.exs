@@ -750,7 +750,12 @@ defmodule Durable.Fuzz.Audit6BlocksChaosTest do
             max_runs: @runs,
             max_shrinking_steps: 10
           ) do
-      if second_node? do
+      # A crash needs a node to crash: without one, a seed whose crashes all
+      # fell in one-node cases never landed one. Only until one has landed,
+      # so as many cases as before run on one node.
+      if second_node? or
+           (Enum.any?(ops, &match?({_, :crash_node}, &1)) and
+              Probe.hits({:op_hit, :crash_node}) == 0) do
         peer = start_node!(:"audit6_b#{System.unique_integer([:positive])}", @limits)
         Probe.put(:peer, peer)
       end
