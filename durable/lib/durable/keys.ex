@@ -101,7 +101,11 @@ defmodule Durable.Keys do
       nil ->
         nil
 
+      # Text Postgres can't hold fails the key's lock: every start of a batch with it.
       scope when is_binary(scope) and scope != "" ->
+        if Repo.bad_text?(scope),
+          do: raise(ArgumentError, "invalid key_scope: #{inspect(scope)}; it can't be stored")
+
         if reuse(workflow_def) != :after_close,
           do: raise(ArgumentError, scope_reuse_message(name))
 

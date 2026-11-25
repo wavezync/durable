@@ -589,6 +589,16 @@ defmodule Durable.KeyScopeTest do
       assert %{key_scope: " ", holds_key: false, runs_after_id: ^holder} = get(waiting)
     end
 
+    # Like a key's: text Postgres can't hold fails the key's lock, and with it
+    # every start of a start_many batch.
+    test "a key_scope Postgres can't hold is refused when a run starts" do
+      module = define(workflow(~S|key_scope: "a\0b"|))
+
+      assert_raise ArgumentError, ~r/invalid key_scope/, fn ->
+        Durable.start(module, %{}, key: @key)
+      end
+    end
+
     test "key_scope: is set on the workflow, not per call" do
       assert_raise ArgumentError, ~r/key_scope: is set on the workflow/, fn ->
         Durable.start(IndexUpdate, %{}, key: @key, key_scope: "other")
