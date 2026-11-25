@@ -15,6 +15,9 @@ defmodule DurableDashboard.Fixtures do
       started with a `key:` keeps it until it's released
     * `Digests` (`send_digest`) — completes; `debounce: [period: 1 min,
       timeout: 5 min]`, so a keyed start waits and takes newer input
+    * `SearchUpdate` (`update_search_index`) and `SearchRebuild`
+      (`rebuild_search_index`) — both wait for a `go` event; they name one
+      `key_scope: "search_index"`, so a run of one waits for the other's
   """
 
   alias Durable.Config
@@ -217,6 +220,32 @@ defmodule DurableDashboard.Fixtures do
 
     workflow "rebuild_index", on_duplicate: :run_again do
       step :await, fn data ->
+        _ = wait_for_event("go", timeout: hours(1))
+        {:ok, data}
+      end
+    end
+  end
+
+  defmodule SearchUpdate do
+    @moduledoc false
+    use Durable
+    use Durable.Wait
+
+    workflow "update_search_index", key_scope: "search_index", on_duplicate: :run_again do
+      step :apply, fn data ->
+        _ = wait_for_event("go", timeout: hours(1))
+        {:ok, data}
+      end
+    end
+  end
+
+  defmodule SearchRebuild do
+    @moduledoc false
+    use Durable
+    use Durable.Wait
+
+    workflow "rebuild_search_index", key_scope: "search_index" do
+      step :rebuild, fn data ->
         _ = wait_for_event("go", timeout: hours(1))
         {:ok, data}
       end

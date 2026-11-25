@@ -592,10 +592,8 @@ defmodule DurableDashboard.Components.Core do
     parked = Map.get(run, :parked)
     key = if parked, do: Atom.to_string(parked.status), else: status_key(run.status)
     {label, tone} = status_meta(key)
-
-    step = if key != "completed" && run.current_step, do: Trace.display_name(run.current_step)
+    {step, where} = step_where(key, run.current_step)
     error = Trace.error_parts(run.error)
-    where = step && "#{where_word(key)} "
 
     assigns =
       assign(assigns,
@@ -627,6 +625,12 @@ defmodule DurableDashboard.Components.Core do
       <span :if={@note} class="truncate pl-3.5 text-xs text-muted-foreground">{@note}</span>
     </div>
     """
+  end
+
+  # The step a run is at, and the word before it: nil once it completed.
+  defp step_where(key, current_step) do
+    step = if key != "completed" && current_step, do: Trace.display_name(current_step)
+    {step, step && "#{where_word(key)} "}
   end
 
   defp where_word("compensated"), do: "after"
@@ -681,59 +685,61 @@ defmodule DurableDashboard.Components.Core do
     """
   end
 
+  @status_help %{
+    "pending" => "Queued · waiting for a worker to pick it up",
+    "retrying" => "A step failed · it runs again when its backoff ends",
+    "snoozed" => "A step asked to run again later · a snooze doesn't use an attempt",
+    "running" => "A worker is running its steps now",
+    "waiting" => "Paused on a sleep, an event or a person's input · resumes by itself",
+    "completed" => "Finished every step",
+    "failed" => "A step ran out of attempts · retry picks up from that step",
+    "cancelled" => "Stopped before it finished · by a person, its parent or a timeout",
+    "scheduled" => "Set to start later",
+    "compensating" => "A step failed · undoing the steps before it",
+    "compensated" => "A step failed, and the steps before it were undone",
+    "compensation_failed" => "A step failed, and undoing the steps before it failed too",
+    "timeout" => "Ran past its time limit",
+    "paused" => "Paused · resume to carry on",
+    "alive" => "Sending heartbeats",
+    "missing" => "No heartbeat lately · its runs are taken over once their locks go stale"
+  }
+
   @doc """
   What a status means, in a line — the tooltip on a status pill, and for any
   other place that shows a status and wants to explain it.
   """
   @spec status_help(atom() | String.t()) :: String.t() | nil
-  def status_help(status) do
-    case status_key(status) do
-      "pending" -> "Queued · waiting for a worker to pick it up"
-      "retrying" -> "A step failed · it runs again when its backoff ends"
-      "snoozed" -> "A step asked to run again later · a snooze doesn't use an attempt"
-      "running" -> "A worker is running its steps now"
-      "waiting" -> "Paused on a sleep, an event or a person's input · resumes by itself"
-      "completed" -> "Finished every step"
-      "failed" -> "A step ran out of attempts · retry picks up from that step"
-      "cancelled" -> "Stopped before it finished · by a person, its parent or a timeout"
-      "scheduled" -> "Set to start later"
-      "compensating" -> "A step failed · undoing the steps before it"
-      "compensated" -> "A step failed, and the steps before it were undone"
-      "compensation_failed" -> "A step failed, and undoing the steps before it failed too"
-      "timeout" -> "Ran past its time limit"
-      "paused" -> "Paused · resume to carry on"
-      "alive" -> "Sending heartbeats"
-      "missing" -> "No heartbeat lately · its runs are taken over once their locks go stale"
-      _ -> nil
-    end
-  end
+  def status_help(status), do: Map.get(@status_help, status_key(status))
 
   defp status_key(s) when is_atom(s), do: Atom.to_string(s)
   defp status_key(s) when is_binary(s), do: s
 
+  @status_meta %{
+    "pending" => {"Pending", "muted"},
+    "retrying" => {"Retrying", "warning"},
+    "snoozed" => {"Snoozed", "muted"},
+    "running" => {"Running", "primary"},
+    "waiting" => {"Waiting", "warning"},
+    "completed" => {"Completed", "success"},
+    "failed" => {"Failed", "destructive"},
+    "cancelled" => {"Cancelled", "muted"},
+    "scheduled" => {"Scheduled", "muted"},
+    "compensating" => {"Compensating", "comp"},
+    "compensated" => {"Compensated", "comp"},
+    "compensation_failed" => {"Compensation failed", "destructive"},
+    "timeout" => {"Timed out", "destructive"},
+    "paused" => {"Paused", "warning"},
+    "idle" => {"Idle", "muted"},
+    "alive" => {"Alive", "success"},
+    "missing" => {"Missing", "destructive"}
+  }
+
   defp status_meta(s) when is_atom(s), do: status_meta(Atom.to_string(s))
 
   defp status_meta(s) when is_binary(s) do
-    case s do
-      "pending" -> {"Pending", "muted"}
-      "retrying" -> {"Retrying", "warning"}
-      "snoozed" -> {"Snoozed", "muted"}
-      "running" -> {"Running", "primary"}
-      "waiting" -> {"Waiting", "warning"}
-      "completed" -> {"Completed", "success"}
-      "failed" -> {"Failed", "destructive"}
-      "cancelled" -> {"Cancelled", "muted"}
-      "scheduled" -> {"Scheduled", "muted"}
-      "compensating" -> {"Compensating", "comp"}
-      "compensated" -> {"Compensated", "comp"}
-      "compensation_failed" -> {"Compensation failed", "destructive"}
-      "timeout" -> {"Timed out", "destructive"}
-      "paused" -> {"Paused", "warning"}
-      "idle" -> {"Idle", "muted"}
-      "alive" -> {"Alive", "success"}
-      "missing" -> {"Missing", "destructive"}
-      other -> {other |> String.replace("_", " ") |> String.capitalize(), "muted"}
-    end
+    Map.get_lazy(@status_meta, s, fn ->
+      {s |> String.replace("_", " ") |> String.capitalize(), "muted"}
+    end)
   end
 
   defp status_pill_class(tone) do

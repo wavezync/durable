@@ -6,8 +6,8 @@ defmodule DurableDashboard.Layouts do
   import Phoenix.Controller, only: [get_csrf_token: 0]
 
   alias DurableDashboard.Components.Command.CommandPalette
-  alias DurableDashboard.Components.Layout.Sidebar
   alias DurableDashboard.Components.Layout.Breadcrumb
+  alias DurableDashboard.Components.Layout.Sidebar
 
   # ============================================================================
   # Root layout — HTML shell, theme bootstrap, asset loading.

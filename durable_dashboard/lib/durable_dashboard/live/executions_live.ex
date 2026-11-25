@@ -22,10 +22,10 @@ defmodule DurableDashboard.Live.ExecutionsLive do
 
   alias Durable.PubSub, as: DurablePubSub
   alias Durable.Storage.Schemas.StepExecution
-  alias DurableDashboard.Format
   alias DurableDashboard.Access
   alias DurableDashboard.Components.Core
   alias DurableDashboard.Components.Data.ExecutionFilters
+  alias DurableDashboard.Format
   alias DurableDashboard.Layouts
   alias DurableDashboard.Params
   alias DurableDashboard.Path, as: DPath
@@ -206,7 +206,7 @@ defmodule DurableDashboard.Live.ExecutionsLive do
     action = String.to_existing_atom(action)
     ids = eligible_ids(socket.assigns, action)
     durable = socket.assigns.durable
-    required = if length(ids) > 100, do: :admin, else: :operator
+    required = if Enum.count_until(ids, 101) > 100, do: :admin, else: :operator
 
     result =
       Access.perform(socket, required, action, ids, fn ->

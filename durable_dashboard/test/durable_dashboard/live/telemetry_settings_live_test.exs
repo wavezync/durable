@@ -1,6 +1,8 @@
 defmodule DurableDashboard.Live.TelemetrySettingsLiveTest do
   use DurableDashboard.LiveCase
 
+  alias Durable.Migration.Migrator
+
   defp text(html),
     do:
       html
@@ -84,7 +86,7 @@ defmodule DurableDashboard.Live.TelemetrySettingsLiveTest do
     test "shows the schema up to date at the latest migration", %{conn: conn} do
       {:ok, _view, html} = live(conn, dash("/settings"))
 
-      assert text(html) =~ "Up to date at v#{Durable.Migration.Migrator.current_version()}."
+      assert text(html) =~ "Up to date at v#{Migrator.current_version()}."
       assert html =~ "add_deadlines_and_history"
     end
 

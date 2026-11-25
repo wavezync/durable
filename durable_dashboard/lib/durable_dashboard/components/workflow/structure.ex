@@ -260,7 +260,7 @@ defmodule DurableDashboard.Components.Workflow.Structure do
     candidate = Enum.max_by(timed, & &1.p95_ms, fn -> nil end)
 
     slowest =
-      if length(timed) > 1 and candidate.p95_ms >= @slow_floor_ms and
+      if match?([_, _ | _], timed) and candidate.p95_ms >= @slow_floor_ms and
            candidate.p95_ms * 2 >= total,
          do: candidate
 

@@ -9,6 +9,7 @@ defmodule DurableDashboard.Live.Audit4RegressionsTest do
   import Ecto.Query
 
   alias Durable.Storage.Schemas.{PendingEvent, PendingInput, WorkflowExecution}
+  alias Ecto.Adapters.SQL.Sandbox
 
   @endpoint Audit4Dash.Endpoint
 
@@ -26,7 +27,7 @@ defmodule DurableDashboard.Live.Audit4RegressionsTest do
       log: false
     )
 
-    Ecto.Adapters.SQL.Sandbox.mode(Audit4Dash.BillingRepo, :manual)
+    Sandbox.mode(Audit4Dash.BillingRepo, :manual)
     :ok
   end
 
@@ -630,8 +631,8 @@ defmodule DurableDashboard.Live.Audit4RegressionsTest do
     # instances couldn't mount a dashboard for each: the router didn't compile.
     # `:as` names a mount's live_session, and the pipelines are defined once.
     setup %{conn: conn} do
-      owner = Ecto.Adapters.SQL.Sandbox.start_owner!(Audit4Dash.BillingRepo, shared: true)
-      on_exit(fn -> Ecto.Adapters.SQL.Sandbox.stop_owner(owner) end)
+      owner = Sandbox.start_owner!(Audit4Dash.BillingRepo, shared: true)
+      on_exit(fn -> Sandbox.stop_owner(owner) end)
 
       start_supervised!(
         Supervisor.child_spec(

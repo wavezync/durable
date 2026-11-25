@@ -217,7 +217,7 @@ defmodule DurableDashboard.Components.Workflow.ChildrenTab do
     for key <- ["__parallel_children", "__call_children"],
         {child_id, meta} <- Map.get(elem(split(root), 1), key) || %{},
         into: %{},
-        do: {child_id, meta["step_name"] || meta[:step_name]}
+        do: {child_id, meta["step_name"]}
   end
 
   defp parent_step_lookup(_), do: %{}

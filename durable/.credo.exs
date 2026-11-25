@@ -4,6 +4,15 @@
 # If you find anything wrong or unclear in this file, please report an
 # issue on GitHub: https://github.com/rrrene/credo/issues
 #
+# ex_slop's recommended checks. LengthComparison leaves test/ alone: a test
+# asserts the exact size of a list it built, and the check is for code that
+# runs, where `length/1` walks a list of any size.
+slop_checks =
+  Enum.map(ExSlop.recommended_checks(), fn
+    ExSlop.Check.Refactor.LengthComparison = check -> {check, [files: %{excluded: ["test/"]}]}
+    check -> {check, []}
+  end)
+
 %{
   #
   # You can have as many configs as you like in the `configs:` field.
@@ -161,6 +170,7 @@
           {Credo.Check.Warning.UnusedStringOperation, []},
           {Credo.Check.Warning.UnusedTupleOperation, []},
           {Credo.Check.Warning.WrongTestFileExtension, []}
+          | slop_checks
         ],
         disabled: [
           #

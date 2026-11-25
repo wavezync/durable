@@ -1,9 +1,7 @@
 defmodule Durable.DataCase do
   @moduledoc """
-  This module defines the setup for tests requiring access to the
-  application's data layer.
-
-  You may define functions here to be used as helpers in your tests.
+  For tests that touch the database. Each test owns an
+  `Ecto.Adapters.SQL.Sandbox` connection, so nothing it writes outlives it.
 
   ## Supervised mode
 

@@ -33,8 +33,8 @@ defmodule DurableDashboard.Components.Data.ExecutionFilters do
 
   use Phoenix.LiveComponent
 
-  alias DurableDashboard.Format
   alias DurableDashboard.Components.Core
+  alias DurableDashboard.Format
   alias DurableDashboard.RunSearch
   alias Phoenix.LiveView.JS
 

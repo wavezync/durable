@@ -222,16 +222,18 @@ defmodule DurableDashboard.GraphBuilder do
 
   @doc "How many attempts a run's step gets; nil if its workflow isn't loaded here."
   def max_attempts(run, step_name) do
-    with {:ok, %Workflow{steps: steps}} <- definition_for(run) do
-      case Enum.find(steps, &(to_string(&1.name) == step_name)) do
-        %Step{opts: %{retry: %{max_attempts: max}}} -> max
-        %Step{} -> 1
-        nil -> nil
-      end
-    else
-      :error -> nil
+    case definition_for(run) do
+      {:ok, %Workflow{steps: steps}} ->
+        steps |> Enum.find(&(to_string(&1.name) == step_name)) |> attempts()
+
+      :error ->
+        nil
     end
   end
+
+  defp attempts(%Step{opts: %{retry: %{max_attempts: max}}}), do: max
+  defp attempts(%Step{}), do: 1
+  defp attempts(nil), do: nil
 
   @doc """
   Overlays runtime step execution status onto graph nodes.
@@ -311,19 +313,7 @@ defmodule DurableDashboard.GraphBuilder do
   # on such a branch reads as done from the decision until its arm's step
   # starts. Track the taken arm per lane if that flicker matters.
   defp derive_block_status(%{type: "join", data: %{lanes: lanes}} = node, statuses, absorbed) do
-    lane_statuses =
-      Enum.map(lanes, fn lane ->
-        inside =
-          (lane.nodes -- Enum.flat_map(lane.nodes, &Map.get(absorbed, &1, [])))
-          |> Enum.map(&statuses[&1])
-
-        cond do
-          "failed" in inside -> "failed"
-          Enum.any?(inside, &(&1 in ["running", "waiting"])) -> "running"
-          Enum.any?(lane.tails, &(statuses[&1] == "completed")) -> "completed"
-          true -> "pending"
-        end
-      end)
+    lane_statuses = Enum.map(lanes, &lane_status(&1, statuses, absorbed))
 
     # A failed lane fails the block unless the block collects or can do
     # without that lane; then the lane has just ended.
@@ -334,13 +324,7 @@ defmodule DurableDashboard.GraphBuilder do
         status == "failed" and not (node.data[:collect] || lane.optional)
       end)
 
-    status =
-      cond do
-        fatal? -> "failed"
-        "running" in lane_statuses -> "running"
-        Enum.all?(lane_statuses, &(&1 in ["completed", "failed"])) -> "completed"
-        true -> "pending"
-      end
+    status = if fatal?, do: "failed", else: join_status(lane_statuses)
 
     node
     |> put_in([:data, :status], status)
@@ -384,6 +368,27 @@ defmodule DurableDashboard.GraphBuilder do
   end
 
   defp derive_block_status(node, _statuses, _absorbed), do: node
+
+  defp lane_status(lane, statuses, absorbed) do
+    inside =
+      (lane.nodes -- Enum.flat_map(lane.nodes, &Map.get(absorbed, &1, [])))
+      |> Enum.map(&statuses[&1])
+
+    cond do
+      "failed" in inside -> "failed"
+      Enum.any?(inside, &(&1 in ["running", "waiting"])) -> "running"
+      Enum.any?(lane.tails, &(statuses[&1] == "completed")) -> "completed"
+      true -> "pending"
+    end
+  end
+
+  defp join_status(lane_statuses) do
+    cond do
+      "running" in lane_statuses -> "running"
+      Enum.all?(lane_statuses, &(&1 in ["completed", "failed"])) -> "completed"
+      true -> "pending"
+    end
+  end
 
   # In a finished run, a step with no execution never ran — say so, rather
   # than "pending", which reads as "about to".
@@ -463,13 +468,13 @@ defmodule DurableDashboard.GraphBuilder do
   end
 
   defp put_taken(%{type: "branch"} = node, %{output: %{} = output}),
-    do: put_in(node, [:data, :taken], output["target_step"] || output[:target_step])
+    do: put_in(node, [:data, :taken], output["target_step"])
 
   defp put_taken(node, _step_exec), do: node
 
   defp error_line(%{} = error) do
-    type = error["type"] || error[:type]
-    message = error["message"] || error[:message]
+    type = error["type"]
+    message = error["message"]
 
     [type, message]
     |> Enum.reject(&is_nil/1)
@@ -783,8 +788,7 @@ defmodule DurableDashboard.GraphBuilder do
               }
             }
 
-            ce = if prev, do: add_edges(ce, [prev], id), else: ce
-            {[node | cn], ce, id}
+            {[node | cn], chain_edge(ce, prev, id), id}
           end)
 
         nodes = Enum.reverse(clause_nodes) ++ nodes
@@ -879,19 +883,20 @@ defmodule DurableDashboard.GraphBuilder do
     end
   end
 
-  defp index_steps(step_executions) do
-    Enum.reduce(step_executions, %{}, fn step, acc ->
-      key = step.step_name
+  defp index_steps(step_executions), do: Enum.reduce(step_executions, %{}, &keep_latest/2)
 
-      case Map.get(acc, key) do
-        nil ->
-          Map.put(acc, key, step)
+  defp keep_latest(step, acc) do
+    case Map.get(acc, step.step_name) do
+      nil ->
+        Map.put(acc, step.step_name, step)
 
-        existing ->
-          if step_more_recent?(step, existing), do: Map.put(acc, key, step), else: acc
-      end
-    end)
+      existing ->
+        if step_more_recent?(step, existing), do: Map.put(acc, step.step_name, step), else: acc
+    end
   end
+
+  defp chain_edge(edges, nil, _id), do: edges
+  defp chain_edge(edges, prev, id), do: add_edges(edges, [prev], id)
 
   defp step_more_recent?(a, b) do
     cond do

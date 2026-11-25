@@ -40,8 +40,8 @@ defmodule DurableDashboard.Components.Command.CommandPalette do
 
   use Phoenix.LiveComponent
 
-  alias DurableDashboard.Format
   alias DurableDashboard.Components.Core
+  alias DurableDashboard.Format
   alias DurableDashboard.Path, as: DPath
   alias Phoenix.LiveView.JS
 

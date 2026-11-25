@@ -346,15 +346,7 @@ defmodule DurableDashboard.Live.QueuesLive do
   attr :values, :list, default: nil
   attr :labels, :list, required: true
 
-  defp backlog(%{values: values} = assigns) when not is_list(values) or length(values) < 2 do
-    ~H"""
-    <span class="text-xs text-muted-foreground" data-tip="Sampled once a minute · the line appears after two samples">
-      collecting…
-    </span>
-    """
-  end
-
-  defp backlog(assigns) do
+  defp backlog(%{values: [_, _ | _]} = assigns) do
     assigns =
       assign(assigns,
         peak: assigns.values |> Enum.reject(&is_nil/1) |> Enum.max(fn -> 0 end),
@@ -370,6 +362,14 @@ defmodule DurableDashboard.Live.QueuesLive do
       <span class="font-mono text-[11px] text-muted-foreground" data-tip="The most ready at once in the last hour">
         {@peak}
       </span>
+    </span>
+    """
+  end
+
+  defp backlog(assigns) do
+    ~H"""
+    <span class="text-xs text-muted-foreground" data-tip="Sampled once a minute · the line appears after two samples">
+      collecting…
     </span>
     """
   end
@@ -542,7 +542,7 @@ defmodule DurableDashboard.Live.QueuesLive do
           end,
         off?: abs(ms) >= 1_000,
         tip:
-          "This node's own clock is #{if ms >= 0, do: "#{ms} ms ahead of", else: "#{-ms} ms behind"} " <>
+          "This node's own clock is #{skew_words(ms)} " <>
             "the database's. Durable reads the database's clock on every node, so its locks, " <>
             "sleeps and schedules don't notice; other software on the node does. Check NTP " <>
             "if it's a second or more."
@@ -558,4 +558,7 @@ defmodule DurableDashboard.Live.QueuesLive do
     </td>
     """
   end
+
+  defp skew_words(ms) when ms >= 0, do: "#{ms} ms ahead of"
+  defp skew_words(ms), do: "#{-ms} ms behind"
 end

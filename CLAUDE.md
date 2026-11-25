@@ -22,7 +22,7 @@ mix test              # Run tests (creates/migrates DB automatically)
 
 # Code quality
 mix format            # Format code
-mix credo --strict    # Lint (strict mode)
+mix credo --strict    # Lint (strict mode, plus ex_slop's recommended checks)
 mix dialyzer          # Type checking
 
 # Precommit (matches CI)

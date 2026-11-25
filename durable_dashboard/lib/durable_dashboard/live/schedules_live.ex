@@ -15,6 +15,7 @@ defmodule DurableDashboard.Live.SchedulesLive do
   use Phoenix.LiveView
 
   alias Durable.PubSub, as: DurablePubSub
+  alias Durable.Scheduler.API, as: SchedulerAPI
   alias DurableDashboard.Access
   alias DurableDashboard.Components.Charts
   alias DurableDashboard.Components.Core
@@ -179,7 +180,7 @@ defmodule DurableDashboard.Live.SchedulesLive do
       schedules: schedules,
       schedule: schedule,
       runs: runs,
-      upcoming: if(schedule, do: Durable.Scheduler.API.upcoming_runs!(schedule, 6), else: []),
+      upcoming: if(schedule, do: SchedulerAPI.upcoming_runs!(schedule, 6), else: []),
       page_title: name,
       breadcrumbs: [
         %{label: "Schedules", href: DPath.schedules(socket.assigns.base_path)},

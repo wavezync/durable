@@ -6,7 +6,7 @@ defmodule DurableDashboard.Live.KeysLiveTest do
   """
   use DurableDashboard.LiveCase
 
-  alias Fixtures.{Approvals, Digests, Invoices, Payments, Webhooks}
+  alias Fixtures.{Approvals, Digests, Invoices, Payments, SearchRebuild, SearchUpdate, Webhooks}
 
   # Starts a keyed run, inline unless `inline: false`; returns its id.
   defp start!(module, input, key, opts \\ []) do
@@ -21,6 +21,36 @@ defmodule DurableDashboard.Live.KeysLiveTest do
     |> LazyHTML.text()
     |> String.split()
     |> Enum.join(" ")
+  end
+
+  # update_search_index and rebuild_search_index share key_scope: "search_index".
+  describe "a key shared by a key_scope" do
+    test "the Key view lists the scope's runs, the holder of another workflow by name", %{
+      conn: conn
+    } do
+      rebuild = start!(SearchRebuild, %{}, "acct:7")
+      update = start!(SearchUpdate, %{}, "acct:7", inline: false)
+      short = String.slice(rebuild, 0, 8)
+
+      {:ok, _view, html} = live(conn, dash("/executions/#{update}/key"))
+      page = text(html)
+
+      assert page =~ ~s|key_scope: "search_index" · reuse: :after_close|
+      assert page =~ "#{short} rebuild_search_index Holds the key"
+      assert page =~ "Runs after #{short}"
+    end
+
+    test "the Keys page gives each workflow's row the scope's holder", %{conn: conn} do
+      rebuild = start!(SearchRebuild, %{}, "acct:7")
+      _update = start!(SearchUpdate, %{}, "acct:7", inline: false)
+      short = String.slice(rebuild, 0, 8)
+
+      {:ok, _view, html} = live(conn, dash("/keys"))
+      page = text(html)
+
+      assert page =~ ~r/acct:7 update_search_index #{short} \w+ rebuild_search_index/
+      assert page =~ ~r/acct:7 rebuild_search_index #{short} \w+ 1/
+    end
   end
 
   describe "the run page" do

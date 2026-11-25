@@ -17,11 +17,11 @@ defmodule DurableDashboard.Live.WorkflowLive do
 
   alias Durable.PubSub, as: DurablePubSub
   alias Durable.Storage.Schemas.{PendingEvent, PendingInput, StepExecution, WorkflowExecution}
-  alias DurableDashboard.Format
   alias DurableDashboard.Access
   alias DurableDashboard.Claim
   alias DurableDashboard.Clock
   alias DurableDashboard.Components.Core
+  alias DurableDashboard.Format
 
   alias DurableDashboard.Components.Workflow.{
     ChildrenTab,

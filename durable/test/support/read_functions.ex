@@ -16,7 +16,7 @@ defmodule Durable.ReadFunctions do
   @doc "The modules whose read functions are listed."
   def modules, do: [Durable, Query, Stats, Activity, Wait, API]
 
-  @doc "The modules that hold nothing but read functions."
+  @doc "Of those, the ones every public function of is a read function."
   def read_only_modules, do: [Query, Stats]
 
   @doc """

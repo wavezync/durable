@@ -186,10 +186,15 @@ defmodule Durable.LaneOptionsTest do
       first_deadline = lane.deadline_at
 
       Seen.note(:employer_answers)
+      before_retry = Durable.Clock.utc_now()
       {:ok, _} = Durable.retry(run.id)
+      after_retry = Durable.Clock.utc_now()
       [lane] = lanes_of(run)
       assert DateTime.after?(lane.deadline_at, first_deadline)
-      assert DateTime.diff(lane.deadline_at, Durable.Clock.utc_now(), :millisecond) in 0..30
+
+      # Its 30 ms count from the retry, however long the retry took.
+      refute DateTime.before?(lane.deadline_at, DateTime.add(before_retry, 30, :millisecond))
+      refute DateTime.after?(lane.deadline_at, DateTime.add(after_retry, 30, :millisecond))
 
       assert drain(run).status == :completed
       assert {:decide, %{"employer" => %{"employed" => true}}} = List.last(Seen.all())

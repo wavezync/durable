@@ -52,6 +52,6 @@ defmodule DurableDashboard.LiveCase do
     {:ok, conn: conn}
   end
 
-  @doc "The dashboard path for `path` (`\"/executions\"` → `\"/dashboard/executions\"`)."
+  @doc ~s|The dashboard path for `path` (`"/executions"` → `"/dashboard/executions"`).|
   def dash(path \\ ""), do: "/dashboard" <> path
 end

@@ -113,6 +113,8 @@ defmodule Audit4Dash.BillingRepo do
   # start it.
   use Ecto.Repo, otp_app: :durable_dashboard, adapter: Ecto.Adapters.Postgres
 
+  alias Ecto.Adapters.Postgres
+
   def config! do
     config =
       :durable_dashboard
@@ -121,7 +123,7 @@ defmodule Audit4Dash.BillingRepo do
       |> Keyword.put(:pool_size, 3)
 
     Application.put_env(:durable_dashboard, __MODULE__, config)
-    _ = Ecto.Adapters.Postgres.storage_up(config)
+    _ = Postgres.storage_up(config)
   end
 end
 

@@ -64,7 +64,7 @@ defmodule DurableDashboard.Params do
 
   def int(_value, default), do: default
 
-  @doc "A comma-separated param as a list: `\"failed,cancelled\"` → `[\"failed\", \"cancelled\"]`."
+  @doc ~s|A comma-separated param as a list: `"failed,cancelled"` → `["failed", "cancelled"]`.|
   @spec list(term()) :: [String.t()]
   def list(value), do: String.split(text(value) || "", ",", trim: true)
 end
