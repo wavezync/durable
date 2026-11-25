@@ -306,7 +306,7 @@ defmodule Mix.Tasks.Durable.Inspect do
   # Multiple rows per step_name means the step paused (wait_for_*) and
   # then resumed; flag that so operators don't read a completed step as
   # "never waited".
-  defp resume_note(%{attempts: attempts}) when length(attempts) > 1, do: "wait→resume"
+  defp resume_note(%{attempts: [_, _ | _]}), do: "wait→resume"
   defp resume_note(_), do: ""
 
   defp print_pending_inputs(_info, []), do: :ok

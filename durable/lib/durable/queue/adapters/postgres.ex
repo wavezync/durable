@@ -276,14 +276,14 @@ defmodule Durable.Queue.Adapters.Postgres do
     |> then(&Repo.update_all(config, &1, []))
   end
 
+  # The error as the run stores it: `Executor.storable_error/1` may give atom keys.
   defp rollback_interrupted(config, run, error) do
+    stored = error |> Jason.encode!() |> Jason.decode!()
+
     Durable.Activity.record(config, "rollback_interrupted",
       workflow_id: run.id,
       queue: run.queue,
-      details: %{
-        reason: error["type"] || error[:type],
-        message: error["message"] || error[:message]
-      }
+      details: %{reason: stored["type"], message: stored["message"]}
     )
   end
 

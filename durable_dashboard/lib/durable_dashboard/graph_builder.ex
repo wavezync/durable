@@ -468,13 +468,13 @@ defmodule DurableDashboard.GraphBuilder do
   end
 
   defp put_taken(%{type: "branch"} = node, %{output: %{} = output}),
-    do: put_in(node, [:data, :taken], output["target_step"] || output[:target_step])
+    do: put_in(node, [:data, :taken], output["target_step"])
 
   defp put_taken(node, _step_exec), do: node
 
   defp error_line(%{} = error) do
-    type = error["type"] || error[:type]
-    message = error["message"] || error[:message]
+    type = error["type"]
+    message = error["message"]
 
     [type, message]
     |> Enum.reject(&is_nil/1)

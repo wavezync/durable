@@ -135,8 +135,7 @@ defmodule Durable.DSL.Workflow do
       # Define a function that returns the compensations map
       @doc false
       def unquote(compensations_fn)() do
-        @durable_collected_comps_list
-        |> Enum.reduce(%{}, fn comp, acc -> Map.put(acc, comp.name, comp) end)
+        Map.new(@durable_collected_comps_list, &{&1.name, &1})
       end
 
       # Define a function that returns this workflow's definition

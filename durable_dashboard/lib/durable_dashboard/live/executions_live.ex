@@ -206,7 +206,7 @@ defmodule DurableDashboard.Live.ExecutionsLive do
     action = String.to_existing_atom(action)
     ids = eligible_ids(socket.assigns, action)
     durable = socket.assigns.durable
-    required = if length(ids) > 100, do: :admin, else: :operator
+    required = if Enum.count_until(ids, 101) > 100, do: :admin, else: :operator
 
     result =
       Access.perform(socket, required, action, ids, fn ->

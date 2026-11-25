@@ -559,8 +559,7 @@ defmodule DocumentApprovalWorkflow do
     # Batch processing to update items (only updates if approved)
     step :update_items, fn data ->
       if data["approval_processed"] == "approved" do
-        items_updated = Enum.map(data["affected_items"], fn item -> item end)
-        {:ok, assign(data, :items_updated, items_updated)}
+        {:ok, assign(data, :items_updated, data["affected_items"])}
       else
         {:ok, data}
       end

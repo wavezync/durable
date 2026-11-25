@@ -300,7 +300,7 @@ defmodule DurableDashboard.Components.Charts do
     dots =
       assigns.series
       |> Enum.map(fn s -> Enum.map(s.ys, &(&1 && {&1, s.class})) end)
-      |> Enum.zip_with(&Enum.reject(&1, fn dot -> is_nil(dot) end))
+      |> Enum.zip_with(fn dots -> Enum.reject(dots, &is_nil/1) end)
 
     assigns =
       assign(assigns,

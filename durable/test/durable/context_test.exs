@@ -259,9 +259,9 @@ defmodule NestedContextWorkflow do
     step :extract, fn data ->
       # Access nested data
       user = data["user"]
-      profile = user["profile"] || user[:profile]
-      name = profile["name"] || profile[:name]
-      age = profile["age"] || profile[:age]
+      profile = user["profile"]
+      name = profile["name"]
+      age = profile["age"]
 
       data =
         data
@@ -281,10 +281,10 @@ defmodule DeepNestedContextWorkflow do
     step :extract, fn data ->
       # Navigate through 5 levels
       l1 = data["level1"]
-      l2 = l1["level2"] || l1[:level2]
-      l3 = l2["level3"] || l2[:level3]
-      l4 = l3["level4"] || l3[:level4]
-      l5 = l4["level5"] || l4[:level5]
+      l2 = l1["level2"]
+      l3 = l2["level3"]
+      l4 = l3["level4"]
+      l5 = l4["level5"]
 
       {:ok, assign(data, :deep_value, l5)}
     end

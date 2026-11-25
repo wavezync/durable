@@ -166,7 +166,7 @@ defmodule DurableDashboard.Components.Workflow.FlowGraph do
   end
 
   defp step_child({child_id, meta}) do
-    step_name = meta["step_name"] || meta[:step_name]
+    step_name = meta["step_name"]
     if step_name in [nil, ""], do: nil, else: {step_name, child_id}
   end
 

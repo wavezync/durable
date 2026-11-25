@@ -66,6 +66,7 @@ defmodule DurableDashboard.MixProject do
       {:lazy_html, ">= 0.1.0", only: :test},
       {:stream_data, "~> 1.1", only: :test},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
+      {:ex_slop, "~> 0.4", only: [:dev, :test], runtime: false},
       {:ex_doc, "~> 0.34", only: :dev, runtime: false}
     ]
   end
