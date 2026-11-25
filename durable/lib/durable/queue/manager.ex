@@ -118,6 +118,16 @@ defmodule Durable.Queue.Manager do
         do: pid
   end
 
+  @doc false
+  # This node's pollers, on every queue.
+  @spec pollers(Config.t()) :: [pid()]
+  def pollers(%Config{} = config) do
+    for queue <- Map.keys(config.queues),
+        pid = Process.whereis(poller_name(to_string(queue), config.name)),
+        is_pid(pid),
+        do: pid
+  end
+
   defp children(supervisor) do
     DynamicSupervisor.which_children(supervisor)
   catch

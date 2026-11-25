@@ -254,10 +254,11 @@ finishes the step it's on, then goes back on its queue, and another node carries
 on straight away. The node waits for that for up to `shutdown_grace_period`, 15
 seconds by default.
 
-Keep your platform's shutdown limit longer than that. In Kubernetes that's
-`terminationGracePeriodSeconds`, which is 30 seconds by default. List `Durable`
-after whatever your steps depend on in your supervision tree, because children
-stop in reverse order.
+Keep your platform's shutdown limit longer than that, with a few seconds to
+spare: handing the runs back can take up to 5 seconds more when the database is
+busy. In Kubernetes that's `terminationGracePeriodSeconds`, which is 30 seconds
+by default. List `Durable` after whatever your steps depend on in your
+supervision tree, because children stop in reverse order.
 
 A step still running when the time is up is killed, and its run goes back on its
 queue at once. That step runs again from the start. If a step can run longer than

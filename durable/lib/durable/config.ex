@@ -30,8 +30,10 @@ defmodule Durable.Config do
   * `:shutdown_grace_period` - Milliseconds a stopping node waits for its running
     steps, with no new claims (default: `15_000`). Each run finishes its
     current step, then goes back on its queue for another node. Keep your
-    platform's shutdown limit longer than this. A step still running then is
-    killed, and its run goes back on its queue. At `0` the node doesn't wait:
+    platform's shutdown limit a few seconds longer than this: the hand-back
+    itself can take up to 5 seconds more when the database is busy. A step
+    still running then is killed, and its run goes back on its queue. At `0`
+    the node doesn't wait:
     every run it has goes back on its queue at once
   * `:log_level` - Log level for Ecto queries, or `false` to disable (default: `false`)
 

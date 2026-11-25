@@ -20,8 +20,26 @@ defmodule Durable.Fuzz.Audit6QueueRestartTest do
 
   setup do
     boot()
-    :ok
+    outlasted = :counters.new(1, [])
+    handler = "audit6-restart-#{System.unique_integer([:positive])}"
+
+    :telemetry.attach(
+      handler,
+      [:durable, :node, :drain, :stop],
+      &__MODULE__.outlasted/4,
+      outlasted
+    )
+
+    on_exit(fn -> :telemetry.detach(handler) end)
+    %{outlasted: outlasted}
   end
+
+  # A stop whose grace period ran out with steps still running: it killed them
+  # and handed their runs back.
+  def outlasted(_event, _measurements, %{result: {:error, :timeout}}, counter),
+    do: :counters.add(counter, 1, 1)
+
+  def outlasted(_event, _measurements, _meta, _counter), do: :ok
 
   defp boot,
     do: start_durable!(@limits, heartbeat_interval: 100, shutdown_grace_period: grace())
@@ -63,7 +81,9 @@ defmodule Durable.Fuzz.Audit6QueueRestartTest do
     run
   end
 
-  property "a node restarting cleanly mid-run never changes how a run ends" do
+  property "a node restarting cleanly mid-run never changes how a run ends", %{
+    outlasted: outlasted
+  } do
     check all(
             scripts <- list_of(script(), length: @batch),
             ops <- list_of(op(), min_length: 2, max_length: 8),
@@ -79,16 +99,10 @@ defmodule Durable.Fuzz.Audit6QueueRestartTest do
         else: Enum.each(runs, &check_run/1)
     end
 
-    # The property means nothing if no restart ever cut a step off: its
-    # attempt is closed `node_stopped` as its run is handed back. How many
-    # restarts find a step running is timing: one right after another finds
-    # nothing claimed yet, more often on a slower machine.
-    cut_off =
-      IntegrationRepo.aggregate(
-        from(s in StepExecution, where: fragment("?->>'type' = 'node_stopped'", s.error)),
-        :count
-      )
-
-    assert cut_off > 0, "no restart cut a step off"
+    # The property means nothing if no restart ever caught a step running. How
+    # many do is timing: one right after another finds nothing claimed yet. Nor
+    # does a step cut off mid-attempt always show: its body is a millisecond,
+    # and on a loaded machine a stop mostly finds its run between steps.
+    assert :counters.get(outlasted, 1) > 0, "no restart caught a step running"
   end
 end

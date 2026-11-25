@@ -113,6 +113,18 @@ defmodule Durable.Integration.ShutdownTest do
 
   def forward(event, measurements, meta, pid), do: send(pid, {event, measurements, meta})
 
+  defmodule Held do
+    use Durable
+
+    workflow "shut_held" do
+      step :work, fn data ->
+        Probe.here(:held)
+        Probe.wait_for(:never)
+        {:ok, data}
+      end
+    end
+  end
+
   defp start!(workflow, input, opts \\ []) do
     {:ok, id} = Durable.start(workflow, input, opts)
     id
@@ -295,6 +307,60 @@ defmodule Durable.Integration.ShutdownTest do
 
       assert_received {[:durable, :node, :drain, :start], _, %{durable: Durable}}
       assert_received {[:durable, :node, :drain, :stop], %{duration: _}, %{result: :ok}}
+    end
+  end
+
+  describe "a poller that answers the drain too late" do
+    # The poller is resumed from inside the Drainer, once the hand-back has
+    # written the last of it, and the Drainer waits for it to get through what
+    # it had queued: a poll, then the drain.
+    def resume_poller(_event, _measurements, %{query: query}, poller) do
+      if Process.get(:"$initial_call") == {Durable.Queue.Drainer, :init, 1} and
+           query =~ ~s(SET "locked_by" = $1, "locked_at" = $2) do
+        :sys.resume(poller)
+        :sys.get_state(poller)
+      end
+    end
+
+    # Its drain call timed out (a poller busy in a slow query can't answer),
+    # so the node handed its runs back without it paused. It then polled, and
+    # claimed a run that stayed running under a node that was gone, until the
+    # stale sweep.
+    test "doesn't leave a run claimed by the stopped node" do
+      start_durable!(%{default: 1}, shutdown_grace_period: 0)
+      poller = Process.whereis(Durable.Queue.Poller.Default)
+      :sys.suspend(poller)
+      id = start!(Held, %{})
+      assert_eventually(fn -> :poll in elem(Process.info(poller, :messages), 1) end)
+
+      handler = "late-poller-#{System.unique_integer()}"
+      event = [:durable, :integration_repo, :query]
+      :telemetry.attach(handler, event, &__MODULE__.resume_poller/4, poller)
+      on_exit(fn -> :telemetry.detach(handler) end)
+      stop_supervised!(Durable)
+
+      assert %{status: :pending, locked_by: nil, lock_token: nil} = get(id)
+    end
+  end
+
+  describe "a hand-back the database is slow over" do
+    # The Drainer had a second past the grace period, and was killed with its
+    # hand-back still on the wire: the run stayed running until the stale sweep.
+    test "still hands the run back" do
+      start_durable!(%{default: 1}, shutdown_grace_period: 0)
+      id = start!(Held, %{})
+      assert_eventually(fn -> Probe.hits(:held) == 1 end)
+
+      before_update!(
+        "shut_slow_hand_back",
+        "workflow_executions",
+        "OLD.status = 'running' AND NEW.status = 'pending'",
+        "PERFORM pg_sleep(1.5)"
+      )
+
+      stop_supervised!(Durable)
+
+      assert %{status: :pending, locked_by: nil, lock_token: nil} = get(id)
     end
   end
 end

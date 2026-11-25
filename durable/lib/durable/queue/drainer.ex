@@ -21,12 +21,20 @@ defmodule Durable.Queue.Drainer do
   alias Durable.Queue.Adapter
   alias Durable.Queue.Manager
 
+  # Past the grace period, the time the hand-back has: killed sooner, by its
+  # supervisor, with the hand-back still on the wire, the node left its runs
+  # locked until `stale_lock_timeout`. A second wasn't always enough: a poller
+  # that answers the drain late uses half of it (`drain/2`), and a database
+  # that is busy as a node stops can take the rest.
+  # ponytail: fixed, make it an option if a platform's own limit is tighter.
+  @hand_back_ms 5_000
+
   @spec child_spec(Config.t()) :: Supervisor.child_spec()
   def child_spec(%Config{} = config) do
     %{
       id: __MODULE__,
       start: {__MODULE__, :start_link, [config]},
-      shutdown: config.shutdown_grace_period + 1_000
+      shutdown: config.shutdown_grace_period + @hand_back_ms
     }
   end
 
@@ -128,10 +136,19 @@ defmodule Durable.Queue.Drainer do
 
   # Killed, as their supervisor would after its own wait: a worker stuck in a
   # write never gets to a shutdown signal. Its step's task dies with it.
+  #
+  # The pollers go first. One busy in a slow query answers the drain after it
+  # has timed out, unpaused, and its next claim came after the hand-back: that
+  # run stayed locked by a node that was gone. A claim killed on its way is
+  # cancelled, and one that landed is a run the hand-back finds running.
   defp stop_workers(config) do
-    workers = Manager.workers(config)
-    refs = Enum.map(workers, &Process.monitor/1)
-    Enum.each(workers, &Process.exit(&1, :kill))
+    kill(Manager.pollers(config))
+    kill(Manager.workers(config))
+  end
+
+  defp kill(pids) do
+    refs = Enum.map(pids, &Process.monitor/1)
+    Enum.each(pids, &Process.exit(&1, :kill))
     for ref <- refs, do: receive(do: ({:DOWN, ^ref, :process, _pid, _reason} -> :ok))
   end
 end
