@@ -50,6 +50,8 @@ defmodule Durable.Executor.StepRunner do
   # ponytail: fixed at 3, make it an option if anyone needs another number
   @max_lost_workers 3
 
+  @gave_up "__gave_up__"
+
   @type result ::
           {:ok, map()}
           | {:error, any()}
@@ -81,12 +83,14 @@ defmodule Durable.Executor.StepRunner do
   def execute(%Step{} = step, data, workflow_id, %Config{} = config, deadline \\ nil) do
     max_attempts = get_max_attempts(step)
     close_left_open(config, workflow_id)
-    %{failed: failed, lost: lost} = attempts_used(config, workflow_id, Atom.to_string(step.name))
+    step_name = Atom.to_string(step.name)
+    %{failed: failed, lost: lost} = attempts_used(config, workflow_id, step_name)
     attempt = failed + 1
 
-    # Spent before it started only when the last attempt died or lost its
-    # worker before anything could fail the run. It fails now.
-    if attempt > max(max_attempts, 1) or lost >= @max_lost_workers do
+    # Spent before it started only when the last attempt died, lost its worker
+    # or gave up before anything could fail the run. It fails now.
+    if attempt > max(max_attempts, 1) or lost >= @max_lost_workers or
+         gave_up?(config, workflow_id, step_name) do
       {:error, last_error(config, workflow_id, step)}
     else
       execute_with_retry(step, data, workflow_id, attempt, max_attempts, config, deadline)
@@ -325,15 +329,7 @@ defmodule Durable.Executor.StepRunner do
   # waited, failed) starts the count again, so a step that polls for days
   # isn't failed by three outages over its life.
   defp attempts_used(config, workflow_id, step_name) do
-    # Only attempts since the last Durable.retry/2 count: an operator retry
-    # hands the step a fresh max_attempts budget.
-    rows =
-      from(s in StepExecution,
-        join: w in WorkflowExecution,
-        on: w.id == s.workflow_id,
-        where: s.workflow_id == ^workflow_id and s.step_name == ^step_name,
-        where: is_nil(w.retried_at) or s.inserted_at > w.retried_at
-      )
+    rows = attempt_rows(workflow_id, step_name)
 
     since =
       Repo.one(
@@ -360,6 +356,31 @@ defmodule Durable.Executor.StepRunner do
         }
       )
     )
+  end
+
+  # Only attempts since the last Durable.retry/2 count: an operator retry
+  # hands the step a fresh max_attempts budget.
+  defp attempt_rows(workflow_id, step_name) do
+    from(s in StepExecution,
+      join: w in WorkflowExecution,
+      on: w.id == s.workflow_id,
+      where: s.workflow_id == ^workflow_id and s.step_name == ^step_name,
+      where: is_nil(w.retried_at) or s.inserted_at > w.retried_at
+    )
+  end
+
+  # The step's last attempt gave up (`give_up/2`) and its row says so, but
+  # the run was lost before it failed. The marker names that row; one from
+  # before a `Durable.retry/2` names none of these.
+  defp gave_up?(config, workflow_id, step_name) do
+    case EngineState.current()[@gave_up] do
+      nil ->
+        false
+
+      row_id ->
+        rows = from(s in attempt_rows(workflow_id, step_name), where: s.id == ^row_id)
+        Repo.aggregate(config, rows, :count) > 0
+    end
   end
 
   defp last_error(config, workflow_id, %Step{name: name}) do
@@ -710,10 +731,8 @@ defmodule Durable.Executor.StepRunner do
   defp handle_result({:cancel, reason, [scope: scope]}, ctx) when scope in @cancel_scopes,
     do: cancel(reason, scope, ctx)
 
-  # Handle invalid return (not {:ok, map} or {:goto, ...})
+  # Any other return is a bug in the step: no retries.
   defp handle_result(other, ctx) do
-    %{step_exec: step_exec, logs: logs, duration_ms: duration_ms, config: config} = ctx
-
     error = %{
       type: "invalid_step_return",
       message:
@@ -724,13 +743,25 @@ defmodule Durable.Executor.StepRunner do
           "got: #{inspect(other)}"
     }
 
-    {:ok, _} = fail_step_execution(config, step_exec, error, logs, duration_ms)
-    {:error, error}
+    give_up(error, ctx)
   end
 
+  # The row says the step failed for good before the run does. Lost in
+  # between, a node that stopped handed the run back still running, and the
+  # next claim found attempts left by the count and ran the step again. The
+  # marker naming the row is written with it, so that claim fails the run
+  # instead (`gave_up?/3`). It is in the process's state too, or the run's
+  # next write would drop it before the run has failed.
   defp give_up(error, ctx) do
     %{step_exec: step_exec, logs: logs, duration_ms: duration_ms, config: config} = ctx
-    {:ok, _} = fail_step_execution(config, step_exec, error, logs, duration_ms)
+
+    {:ok, _} =
+      Repo.transaction(config, fn ->
+        add_to_engine_state(config, step_exec.workflow_id, %{@gave_up => step_exec.id})
+        {:ok, _} = fail_step_execution(config, step_exec, error, logs, duration_ms)
+      end)
+
+    EngineState.put_current(@gave_up, step_exec.id)
     {:error, error}
   end
 
@@ -787,14 +818,18 @@ defmodule Durable.Executor.StepRunner do
   # that exists, and is read for no other.
   defp record_deleted(_config, _step_exec, []), do: :ok
 
-  defp record_deleted(config, step_exec, keys) do
-    dropped = %{EngineState.dropped_key(step_exec.id) => keys}
+  defp record_deleted(config, step_exec, keys),
+    do:
+      add_to_engine_state(config, step_exec.workflow_id, %{
+        EngineState.dropped_key(step_exec.id) => keys
+      })
 
+  defp add_to_engine_state(config, workflow_id, state) do
     Repo.update_all(
       config,
       from(w in WorkflowExecution,
-        where: w.id == ^step_exec.workflow_id,
-        update: [set: [engine_state: fragment("? || ?", w.engine_state, type(^dropped, :map))]]
+        where: w.id == ^workflow_id,
+        update: [set: [engine_state: fragment("? || ?", w.engine_state, type(^state, :map))]]
       ),
       []
     )

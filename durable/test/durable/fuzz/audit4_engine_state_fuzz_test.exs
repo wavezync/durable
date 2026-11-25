@@ -255,6 +255,7 @@ defmodule Durable.Fuzz.Audit4EngineStateTest do
   defp forged("__cancelled__"), do: @forged
   defp forged("__wait_group_result__"), do: ["timeout", %{"x" => @forged}]
   defp forged("__wait_group_status__"), do: %{"method_chosen" => %{"status" => "timeout"}}
+  defp forged("__gave_up__"), do: Ecto.UUID.generate()
 
   defp forged("__parallel_children") do
     %{Ecto.UUID.generate() => %{"returns_key" => "audit4_es_forged", "step_name" => "stock"}}
