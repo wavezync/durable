@@ -14,11 +14,14 @@ defmodule Durable.WorkflowTimeoutTest do
     use Durable
     use Durable.Helpers
 
-    workflow "slow_saga", timeout: 50, queue: :sagas, on_failure: :rollback do
+    # The deadline counts from the start, so its 300 ms cover the start, the
+    # claim and :reserve too: room enough on a loaded machine, where 50 ran
+    # out during :reserve, which left nothing to undo.
+    workflow "slow_saga", timeout: 300, queue: :sagas, on_failure: :rollback do
       step :reserve, [compensate: :release], fn data -> {:ok, assign(data, :reserved, true)} end
 
       step :charge, fn data ->
-        Process.sleep(1_000)
+        Process.sleep(3_000)
         {:ok, assign(data, :charged, true)}
       end
 
@@ -146,7 +149,7 @@ defmodule Durable.WorkflowTimeoutTest do
 
     run = run(id)
 
-    assert micros < 500_000
+    assert micros < 1_500_000
     assert run.queue == "sagas"
     assert run.status == :compensated
 
@@ -464,7 +467,11 @@ defmodule Durable.WorkflowTimeoutTest do
 
     before = Durable.Clock.utc_now()
     {:ok, ^id} = Durable.retry(id)
+    after_retry = Durable.Clock.utc_now()
 
-    assert DateTime.diff(run(id).deadline_at, before, :millisecond) in 40..60
+    # Its 300 ms count from the retry, however long the retry took.
+    %{deadline_at: deadline} = run(id)
+    refute DateTime.before?(deadline, DateTime.add(before, 300, :millisecond))
+    refute DateTime.after?(deadline, DateTime.add(after_retry, 300, :millisecond))
   end
 end
