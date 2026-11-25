@@ -6,6 +6,8 @@ defmodule Durable.FuzzTerms do
 
   @strings [
     "",
+    " ",
+    "\t",
     "\0",
     "a\0b",
     <<0xFF>>,

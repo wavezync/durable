@@ -10,6 +10,7 @@ defmodule Durable.Storage.Schemas.ScheduledWorkflow do
 
   alias Crontab.CronExpression.Parser, as: CronParser
   alias Durable.Clock
+  alias Durable.Storage.Schemas.WorkflowExecution
 
   @type t :: %__MODULE__{
           id: Ecto.UUID.t(),
@@ -64,7 +65,6 @@ defmodule Durable.Storage.Schemas.ScheduledWorkflow do
     :timezone,
     :input,
     :queue,
-    :key,
     :enabled,
     :source,
     :last_run_at,
@@ -81,6 +81,7 @@ defmodule Durable.Storage.Schemas.ScheduledWorkflow do
   def changeset(scheduled_workflow, attrs) do
     scheduled_workflow
     |> cast(attrs, @required_fields ++ @optional_fields)
+    |> WorkflowExecution.cast_key(attrs)
     |> validate_required(@required_fields)
     |> unique_constraint(:name)
     |> validate_cron_expression()
@@ -122,7 +123,6 @@ defmodule Durable.Storage.Schemas.ScheduledWorkflow do
       :timezone,
       :input,
       :queue,
-      :key,
       :source,
       :next_run_at,
       :enabled
@@ -130,6 +130,7 @@ defmodule Durable.Storage.Schemas.ScheduledWorkflow do
 
     scheduled_workflow
     |> cast(attrs, [:name | upsert_fields])
+    |> WorkflowExecution.cast_key(attrs)
     |> validate_required(@required_fields)
     |> validate_cron_expression()
   end
@@ -139,11 +140,12 @@ defmodule Durable.Storage.Schemas.ScheduledWorkflow do
   """
   def update_changeset(scheduled_workflow, attrs) do
     update_fields =
-      [:cron_expression, :timezone, :input, :queue, :key, :enabled, :next_run_at] ++
+      [:cron_expression, :timezone, :input, :queue, :enabled, :next_run_at] ++
         Map.keys(cleared_failures())
 
     scheduled_workflow
     |> cast(attrs, update_fields)
+    |> WorkflowExecution.cast_key(attrs)
     |> validate_cron_expression()
   end
 

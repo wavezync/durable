@@ -178,18 +178,24 @@ defmodule Durable.Storage.Schemas.WorkflowExecution do
   """
   def changeset(execution, attrs) do
     execution
-    |> cast(attrs, @required_fields ++ @optional_fields)
+    |> cast(attrs, (@required_fields ++ @optional_fields) -- [:key])
     |> validate_required(@required_fields)
-    |> validate_key(attrs)
+    |> cast_key(attrs)
+    |> holder_constraints()
   end
 
-  # `cast/3` turns "" into nil, which would silently start an unkeyed run.
-  defp validate_key(changeset, %{key: ""}), do: add_error(changeset, :key, "can't be blank")
-
-  defp validate_key(changeset, _attrs) do
+  @doc false
+  # A key is any string of 1 to 255 bytes, kept as given. `cast/3` on its own
+  # turns "" and "\t" (any blank string) into nil: the start went on as keyed
+  # with no key, and a schedule fired with none.
+  @spec cast_key(Ecto.Changeset.t(), map()) :: Ecto.Changeset.t()
+  def cast_key(changeset, attrs) do
     changeset
+    |> cast(attrs, [:key], empty_values: [])
     |> validate_length(:key, min: 1, max: 255, count: :bytes)
-    |> holder_constraints()
+    |> validate_change(:key, fn :key, key ->
+      if Durable.Repo.bad_text?(key), do: [key: "can't be stored"], else: []
+    end)
   end
 
   @doc false

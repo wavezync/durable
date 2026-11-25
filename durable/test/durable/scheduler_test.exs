@@ -52,6 +52,17 @@ defmodule Durable.SchedulerTest do
     end
   end
 
+  defmodule BlankKeySchedule do
+    use Durable
+    use Durable.Helpers
+    use Durable.Scheduler.DSL
+
+    @schedule cron: "*/5 * * * *", key: " "
+    workflow "blank_key_cleanup" do
+      step :do_work, fn data -> {:ok, data} end
+    end
+  end
+
   defmodule MultiWorkflow do
     use Durable
     use Durable.Helpers
@@ -431,6 +442,31 @@ defmodule Durable.SchedulerTest do
       assert [%{key: "cleanup"}] = KeyedSchedule.__schedules__()
       :ok = API.register(KeyedSchedule)
       assert {:ok, %{key: "cleanup"}} = Durable.get_schedule("keyed_cleanup")
+    end
+
+    # A blank key was saved as none, so each fire started a run beside the
+    # last; one a start refuses was saved, and failed every fire, or raised.
+    test "a schedule's key is checked as a start's is, and a blank one is kept" do
+      {:ok, _} = Durable.schedule(SimpleWorkflow, "0 9 * * *", name: "blank_key", key: " ")
+      assert {:ok, %{key: " "}} = Durable.get_schedule("blank_key")
+      {:ok, id} = Durable.trigger_schedule("blank_key")
+      assert {:ok, %{key: " "}} = Durable.get_execution(id)
+
+      for key <- ["", String.duplicate("k", 256), "a\0b", <<0xFF>>] do
+        assert {:error, %Ecto.Changeset{}} =
+                 Durable.schedule(SimpleWorkflow, "0 9 * * *", name: "bad_key", key: key)
+
+        assert {:error, %Ecto.Changeset{}} = Durable.update_schedule("blank_key", key: key)
+      end
+
+      assert {:ok, %{key: " "}} = Durable.get_schedule("blank_key")
+
+      # @schedule, registered new and then over a changed record.
+      :ok = API.register(BlankKeySchedule)
+      assert {:ok, %{key: " "}} = Durable.get_schedule("blank_key_cleanup")
+      {:ok, _} = Durable.update_schedule("blank_key_cleanup", key: "other")
+      :ok = API.register(BlankKeySchedule)
+      assert {:ok, %{key: " "}} = Durable.get_schedule("blank_key_cleanup")
     end
   end
 
