@@ -159,7 +159,12 @@ defmodule Durable.Executor do
           key = item_opts[:key],
           is_binary(key) and not Repo.bad_text?(key),
           {:ok, workflow_def} <- [get_workflow_definition(module, item_opts)] do
-        Keys.lock_name(module, workflow_def.name, key)
+        Keys.lock_name(%{
+          workflow_module: module,
+          workflow_name: workflow_def.name,
+          key: key,
+          key_scope: Keys.scope(workflow_def)
+        })
       end
 
     Keys.lock_all(config, names)
@@ -637,7 +642,7 @@ defmodule Durable.Executor do
     with {:ok, key_attrs} <- Keys.retake(config, execution, definition_or_nil(execution)) do
       execution
       |> Ecto.Changeset.change([status: :pending] ++ retry_attrs ++ key_attrs)
-      |> Ecto.Changeset.unique_constraint(:key, name: :workflow_executions_key_holder_index)
+      |> WorkflowExecution.holder_constraints()
       |> reopen(config, retry_attrs, mode: :savepoint)
       |> not_failed_if_superseded()
       |> key_taken_if_conflict(config, execution)
@@ -716,7 +721,7 @@ defmodule Durable.Executor do
     parent
     |> Ecto.Changeset.change([status: status] ++ retry_attrs ++ key_attrs)
     |> still_holding(parent)
-    |> Ecto.Changeset.unique_constraint(:key, name: :workflow_executions_key_holder_index)
+    |> WorkflowExecution.holder_constraints()
     |> reopen(config, retry_attrs, mode: :savepoint)
     |> not_failed_if_superseded()
     |> key_taken_if_conflict(config, parent)
@@ -1444,7 +1449,8 @@ defmodule Durable.Executor do
 
     case Keyword.fetch(opts, :key) do
       {:ok, key} when not is_nil(key) ->
-        changeset = WorkflowExecution.changeset(%WorkflowExecution{}, Map.put(attrs, :key, key))
+        attrs = Map.merge(attrs, %{key: key, key_scope: Keys.scope(workflow_def)})
+        changeset = WorkflowExecution.changeset(%WorkflowExecution{}, attrs)
         Keys.insert(config, changeset, workflow_def, opts)
 
       _ ->

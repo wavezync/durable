@@ -83,13 +83,15 @@ defmodule Durable.Queue.Adapters.Postgres do
         -- Nor does any run of a key while another run of it keeps the lock of
         -- a worker that may still be running its step: stopped mid-step
         -- (`WorkflowExecution.keeping_worker/1`), or queued to be undone
-        -- since. Until that worker lets go, or the lock is stale.
+        -- since. Until that worker lets go, or the lock is stale. Under a
+        -- key_scope, a run of any workflow in it.
         -- Read through workflow_executions_kept_lock_index, which holds only
         -- such runs: none of the key's history.
         AND (w.key IS NULL OR NOT EXISTS (
           SELECT 1 FROM #{prefix}.workflow_executions k
           WHERE k.lock_token IS NULL AND k.locked_by IS NOT NULL
-            AND k.workflow_module = w.workflow_module AND k.workflow_name = w.workflow_name
+            AND ((k.workflow_module = w.workflow_module AND k.workflow_name = w.workflow_name)
+              OR k.key_scope = w.key_scope)
             AND k.key = w.key AND k.id <> w.id
             AND k.status IN ('pending', 'cancelled')
             AND k.locked_at >= #{@utc_now} - INTERVAL '#{config.stale_lock_timeout} seconds'

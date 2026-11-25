@@ -51,6 +51,10 @@ defmodule Durable.DSL.Workflow do
     the running holder with a new run), `:run_again` (run once more after the
     holder ends, with the newest input) or `{:send_event, name}` (send the new
     input to the running holder as an event)
+  - `:key_scope` - A name workflows share their keys under: a run of one
+    waits for a run of another with the same key, in the order they were
+    started. Without it, a workflow's keys are its own. Needs
+    `reuse: :after_close`. See the Workflow keys guide
   - `:debounce` - `[period: ms, timeout: ms]`: a start with a `key:` waits
     `period` before it runs, and each start with the same key in that time
     gives it the newer input and restarts the wait, up to `timeout` after the
@@ -231,7 +235,16 @@ defmodule Durable.DSL.Workflow do
           "It takes milliseconds, as in timeout: hours(2)"
   end
 
-  @workflow_opts [:timeout, :on_failure, :queue, :reuse, :on_duplicate, :debounce, :log_metadata]
+  @workflow_opts [
+    :timeout,
+    :on_failure,
+    :queue,
+    :reuse,
+    :on_duplicate,
+    :key_scope,
+    :debounce,
+    :log_metadata
+  ]
 
   # Literal values are checked here; anything computed is checked when a run starts.
   @allowed_values %{
@@ -260,6 +273,7 @@ defmodule Durable.DSL.Workflow do
         end)
 
         validate_debounce!(Keyword.get(opts, :debounce), name)
+        validate_key_scope!(opts, name)
 
         if opts[:on_duplicate] == :run_again and opts[:reuse] == :never do
           raise ArgumentError,
@@ -289,6 +303,27 @@ defmodule Durable.DSL.Workflow do
   end
 
   defp validate_debounce!(_debounce, _name), do: :ok
+
+  # A literal is checked here; anything computed is checked when a run starts.
+  defp validate_key_scope!(opts, name) do
+    scope = Keyword.get(opts, :key_scope)
+
+    cond do
+      is_nil(scope) ->
+        :ok
+
+      scope == "" or is_atom(scope) or is_number(scope) ->
+        raise ArgumentError,
+              "invalid key_scope: #{inspect(scope)} for workflow #{inspect(name)}; " <>
+                ~s|expected a non-empty string, as in key_scope: "account_index"|
+
+      is_atom(opts[:reuse]) and opts[:reuse] not in [nil, :after_close] ->
+        raise ArgumentError, Durable.Keys.scope_reuse_message(name)
+
+      true ->
+        :ok
+    end
+  end
 
   defp validate_value!(opts, key, allowed, name) do
     value = Keyword.get(opts, key)

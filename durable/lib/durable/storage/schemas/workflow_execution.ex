@@ -48,6 +48,7 @@ defmodule Durable.Storage.Schemas.WorkflowExecution do
           trigger: :api | :schedule | :parent | :rerun | nil,
           trigger_ref: String.t() | nil,
           key: String.t() | nil,
+          key_scope: String.t() | nil,
           holds_key: boolean(),
           tags: [String.t()],
           runs_after_id: Ecto.UUID.t() | nil,
@@ -118,6 +119,9 @@ defmodule Durable.Storage.Schemas.WorkflowExecution do
     # `holds_key`. Status changes never write `holds_key` — see Durable.Keys.
     field(:key, :string)
     field(:holds_key, :boolean, default: false)
+    # The workflow's `key_scope:` when the run was started: its key is shared
+    # with every workflow's under that name. nil, it's the workflow's own.
+    field(:key_scope, :string)
     field(:tags, {:array, :string}, default: [])
     # A run waiting for this run to end before it takes the key (run_again).
     field(:runs_after_id, :binary_id)
@@ -154,6 +158,7 @@ defmodule Durable.Storage.Schemas.WorkflowExecution do
     :trigger_ref,
     :deadline_at,
     :key,
+    :key_scope,
     :tags
   ]
 
@@ -184,7 +189,17 @@ defmodule Durable.Storage.Schemas.WorkflowExecution do
   defp validate_key(changeset, _attrs) do
     changeset
     |> validate_length(:key, min: 1, max: 255, count: :bytes)
+    |> holder_constraints()
+  end
+
+  @doc false
+  # The unique indexes a run taking its key can meet: its workflow's, and its
+  # `key_scope:`'s.
+  @spec holder_constraints(Ecto.Changeset.t()) :: Ecto.Changeset.t()
+  def holder_constraints(changeset) do
+    changeset
     |> unique_constraint(:key, name: :workflow_executions_key_holder_index)
+    |> unique_constraint(:key, name: :workflow_executions_key_scope_holder_index)
   end
 
   @doc false

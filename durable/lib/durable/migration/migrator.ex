@@ -27,7 +27,8 @@ defmodule Durable.Migration.Migrator do
     Durable.Migration.Migrations.V20261111000000AddRootWorkflowId,
     Durable.Migration.Migrations.V20261122000000AddEngineState,
     Durable.Migration.Migrations.V20261124000000AddKeptLockIndex,
-    Durable.Migration.Migrations.V20261124000001AddNodeClockSkew
+    Durable.Migration.Migrations.V20261124000001AddNodeClockSkew,
+    Durable.Migration.Migrations.V20261125000000AddKeyScopes
   ]
 
   @doc """
