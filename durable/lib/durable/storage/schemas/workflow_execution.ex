@@ -178,7 +178,9 @@ defmodule Durable.Storage.Schemas.WorkflowExecution do
   """
   def changeset(execution, attrs) do
     execution
-    |> cast(attrs, (@required_fields ++ @optional_fields) -- [:key])
+    |> cast(attrs, (@required_fields ++ @optional_fields) -- [:key, :key_scope])
+    # A scope is kept as given too: " " is a name `Keys.scope/1` and the lock use.
+    |> cast(attrs, [:key_scope], empty_values: [])
     |> validate_required(@required_fields)
     |> cast_key(attrs)
     |> holder_constraints()

@@ -579,6 +579,16 @@ defmodule Durable.KeyScopeTest do
       end
     end
 
+    # Ecto's cast took " " for nil: the two held one key at once.
+    test "a blank key_scope is a scope like any other" do
+      [first, second] = for _ <- 1..2, do: define(workflow(~s|key_scope: " "|))
+      {:ok, holder} = Durable.start(first, %{}, key: @key)
+      {:ok, waiting} = Durable.start(second, %{}, key: @key)
+
+      assert %{key_scope: " ", holds_key: true} = get(holder)
+      assert %{key_scope: " ", holds_key: false, runs_after_id: ^holder} = get(waiting)
+    end
+
     test "key_scope: is set on the workflow, not per call" do
       assert_raise ArgumentError, ~r/key_scope: is set on the workflow/, fn ->
         Durable.start(IndexUpdate, %{}, key: @key, key_scope: "other")
