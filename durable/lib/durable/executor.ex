@@ -1926,7 +1926,15 @@ defmodule Durable.Executor do
     handle_wait_result(config, exec, wait_type, opts)
   rescue
     error ->
-      wait_not_recorded(exec, caught_error(:error, error, __STACKTRACE__), workflow_def, config)
+      if Durable.Repo.transient?(error),
+        do: wait_given_up(config, exec, error),
+        else:
+          wait_not_recorded(
+            exec,
+            caught_error(:error, error, __STACKTRACE__),
+            workflow_def,
+            config
+          )
   end
 
   defp step_stopped({:call_workflow, opts}, exec, data, _workflow_def, config) do
@@ -1962,20 +1970,10 @@ defmodule Durable.Executor do
   defp wait_not_recorded(exec, error, workflow_def, config) do
     now = Clock.utc_now()
 
-    suspended =
-      from(s in StepExecution,
-        where:
-          s.workflow_id == ^exec.id and s.step_name == ^exec.current_step and
-            s.status == :waiting,
-        order_by: [desc: s.inserted_at],
-        limit: 1,
-        select: s.id
-      )
-
     # Named as the attempt that ended its step, in one transaction with its
     # close: a run lost before it fails would run the step again
     # (`StepRunner.mark_ended/3`). The run's row first, as `give_up/2` takes them.
-    with row_id when is_binary(row_id) <- Repo.one(config, suspended) do
+    with row_id when is_binary(row_id) <- Repo.one(config, suspended(exec)) do
       {:ok, _} =
         Repo.transaction(config, fn ->
           StepRunner.mark_ended(config, exec.id, row_id)
@@ -1992,6 +1990,36 @@ defmodule Durable.Executor do
     end
 
     handle_step_failure(exec, error, workflow_def, config)
+  end
+
+  # The database gave up on the wait's write (a deadlock, a timeout, a dropped
+  # connection), which says nothing about the step (rule 32): the run goes back
+  # on its queue as for a lost connection, and the step runs again. Its row,
+  # :waiting for a wait that doesn't exist, is closed as a lost worker's.
+  defp wait_given_up(config, exec, error) do
+    now = Clock.utc_now()
+    lost = %{type: "worker_lost", message: Exception.message(error)}
+
+    Repo.update_all(config, from(s in StepExecution, where: s.id in subquery(suspended(exec))),
+      set: [status: :failed, error: lost, completed_at: now, updated_at: now]
+    )
+
+    case release_after_lost_connection(config, exec, error) do
+      :waiting -> {:waiting, exec}
+      :fenced -> {:error, :superseded}
+      failed -> failed
+    end
+  end
+
+  # The row of the wait its step was entering.
+  defp suspended(exec) do
+    from(s in StepExecution,
+      where: s.workflow_id == ^exec.id and s.step_name == ^exec.current_step,
+      where: s.status == :waiting,
+      order_by: [desc: s.inserted_at],
+      limit: 1,
+      select: s.id
+    )
   end
 
   defp handle_decision_result(

@@ -902,11 +902,46 @@ defmodule Durable.Executor.StepRunner do
   # lands first finds nothing begun, and one that lands after finds the row
   # to close and sends its end. Begun outside the claim, a write on its way
   # as a cancel's heartbeat killed the task landed after the worker had
-  # closed what the run had open, and stayed running. The start event goes
-  # out once the row is in, not in the transaction: a :start handler that
-  # uses the repo would run in it, and a statement of its the database
-  # refused would abort it, and fail the run.
+  # closed what the run had open, and stayed running.
+  #
+  # The start event goes out before the commit: a row that is in has had its
+  # start, whenever the process is killed. Sent after it, a process killed as
+  # its COMMIT was on the wire left a row whoever closed it sent an end for,
+  # with no start. A :start handler runs in the transaction, and a statement
+  # of its the database refuses aborts it: the row is written again then,
+  # without the event, which is out.
   defp begin_attempt(config, step_exec, lock_token, span_meta) do
+    start = fn -> Durable.Telemetry.span_start([:durable, :step], span_meta) end
+
+    case insert_under_claim(config, step_exec, lock_token, start) do
+      {:ok, nil} ->
+        superseded()
+
+      {:ok, {row, started}} ->
+        begun(config, row, started)
+
+      {:error, :rollback} ->
+        begin_started(config, step_exec, lock_token, span_meta)
+    end
+  end
+
+  # Again, its start already out.
+  defp begin_started(config, step_exec, lock_token, span_meta) do
+    started = System.monotonic_time()
+
+    case insert_under_claim(config, step_exec, lock_token, fn -> started end) do
+      {:ok, {row, ^started}} ->
+        begun(config, row, started)
+
+      # It has no row: nobody else will end it.
+      {:ok, nil} ->
+        meta = Map.put(span_meta, :result, :cancelled)
+        :telemetry.execute([:durable, :step, :stop], %{duration: 0}, meta)
+        superseded()
+    end
+  end
+
+  defp insert_under_claim(config, step_exec, lock_token, start) do
     claim =
       from(w in WorkflowExecution,
         where: w.id == ^step_exec.workflow_id and w.status == :running,
@@ -915,25 +950,23 @@ defmodule Durable.Executor.StepRunner do
         select: w.id
       )
 
-    {:ok, begun} =
-      Repo.transaction(config, fn ->
-        if Repo.one(config, claim) do
-          {:ok, row} = step_exec |> StepExecution.start_changeset() |> Repo.insert(config)
-          row
-        end
-      end)
+    Repo.transaction(config, fn ->
+      if Repo.one(config, claim) do
+        {:ok, row} = step_exec |> StepExecution.start_changeset() |> Repo.insert(config)
+        {row, start.()}
+      end
+    end)
+  end
 
-    case begun do
-      %StepExecution{} = row ->
-        started = Durable.Telemetry.span_start([:durable, :step], span_meta)
-        DurablePubSub.broadcast_step(config, :step_started, step_event(row))
-        {started, row}
+  defp begun(config, row, started) do
+    DurablePubSub.broadcast_step(config, :step_started, step_event(row))
+    {started, row}
+  end
 
-      # The run is someone else's now.
-      nil ->
-        Durable.LogCapture.stop_capture()
-        throw(:durable_superseded)
-    end
+  # The run is someone else's now.
+  defp superseded do
+    Durable.LogCapture.stop_capture()
+    throw(:durable_superseded)
   end
 
   defp update_step_execution(config, step_exec, :waiting, child_id) do
