@@ -195,9 +195,9 @@ defmodule DurableDashboard.Components.Workflow.LogLine do
   def parse_message(msg) when is_binary(msg) do
     trimmed = String.trim(msg)
 
-    cond do
-      term = whole_term(trimmed) -> {:term, term}
-      true -> prefix_term(msg)
+    case whole_term(trimmed) do
+      nil -> prefix_term(msg)
+      term -> {:term, term}
     end
   end
 

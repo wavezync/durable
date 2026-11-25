@@ -280,6 +280,9 @@ jobs:
       - name: Compile
         run: mix compile --warnings-as-errors
 
+      - name: Credo
+        run: mix credo --strict
+
       - name: Run tests
         run: mix test
 

@@ -20,6 +20,7 @@ defmodule DurableDashboard.Components.Workflow.FlowGraph do
   use Phoenix.LiveComponent
 
   alias DurableDashboard.Components.Core
+  alias DurableDashboard.Components.Workflow.ChildrenTab
   alias DurableDashboard.GraphBuilder
   alias DurableDashboard.Path, as: DPath
 
@@ -143,7 +144,7 @@ defmodule DurableDashboard.Components.Workflow.FlowGraph do
   # by `Durable.Orchestration` for `call_workflow` / `start_workflow`).
   # Empty if the family is flat.
   defp parallel_children_lookup(%{root: %{} = root}) do
-    {_context, state} = DurableDashboard.Components.Workflow.ChildrenTab.split(root)
+    {_context, state} = ChildrenTab.split(root)
     parallel = extract_step_to_child(state, "__parallel_children")
     call = extract_step_to_child(state, "__call_children")
     Map.merge(parallel, call)
@@ -155,16 +156,18 @@ defmodule DurableDashboard.Components.Workflow.FlowGraph do
     case Map.get(ctx, key) do
       m when is_map(m) ->
         m
-        |> Enum.map(fn {child_id, meta} ->
-          step_name = meta["step_name"] || meta[:step_name]
-          if step_name in [nil, ""], do: nil, else: {step_name, child_id}
-        end)
+        |> Enum.map(&step_child/1)
         |> Enum.reject(&is_nil/1)
         |> Map.new()
 
       _ ->
         %{}
     end
+  end
+
+  defp step_child({child_id, meta}) do
+    step_name = meta["step_name"] || meta[:step_name]
+    if step_name in [nil, ""], do: nil, else: {step_name, child_id}
   end
 
   # ReactFlow-shaped: stringify atoms in node ids, types, and data keys so

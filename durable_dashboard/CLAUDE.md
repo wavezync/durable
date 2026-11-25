@@ -34,6 +34,7 @@ cd assets && pnpm format:check && pnpm lint && pnpm typecheck && pnpm run react-
 # Elixir (durable comes from Hex unless DURABLE_PATH points at a checkout)
 export DURABLE_PATH=../durable
 mix compile --warnings-as-errors
+mix credo --strict    # same config as durable/.credo.exs
 mix test
 ```
 

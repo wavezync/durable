@@ -19,7 +19,7 @@ defmodule DurableDashboard.Format do
 
   def int(n) when is_float(n), do: int(round(n))
 
-  @doc "A count and its noun: `count(1, \"queue\")` → `1 queue`, `count(1200, \"run\")` → `1,200 runs`."
+  @doc ~s|A count and its noun: `count(1, "queue")` → `1 queue`, `count(1200, "run")` → `1,200 runs`.|
   def count(n, singular, plural \\ nil)
   def count(1, singular, _plural), do: "1 #{singular}"
   def count(n, singular, plural), do: "#{int(n)} #{plural || singular <> "s"}"

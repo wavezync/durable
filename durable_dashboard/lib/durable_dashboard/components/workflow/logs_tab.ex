@@ -70,9 +70,10 @@ defmodule DurableDashboard.Components.Workflow.LogsTab do
     filtered =
       assigns.steps
       |> flatten_logs()
-      |> Enum.filter(&match_step?(&1, assigns.step_filter))
-      |> Enum.filter(&match_level?(&1, assigns.level_filter))
-      |> Enum.filter(&match_search?(&1, assigns.search))
+      |> Enum.filter(
+        &(match_step?(&1, assigns.step_filter) and match_level?(&1, assigns.level_filter) and
+            match_search?(&1, assigns.search))
+      )
       |> sort_logs(assigns.sort_dir)
 
     total = length(filtered)

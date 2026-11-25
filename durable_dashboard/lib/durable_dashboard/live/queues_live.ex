@@ -542,7 +542,7 @@ defmodule DurableDashboard.Live.QueuesLive do
           end,
         off?: abs(ms) >= 1_000,
         tip:
-          "This node's own clock is #{if ms >= 0, do: "#{ms} ms ahead of", else: "#{-ms} ms behind"} " <>
+          "This node's own clock is #{skew_words(ms)} " <>
             "the database's. Durable reads the database's clock on every node, so its locks, " <>
             "sleeps and schedules don't notice; other software on the node does. Check NTP " <>
             "if it's a second or more."
@@ -558,4 +558,7 @@ defmodule DurableDashboard.Live.QueuesLive do
     </td>
     """
   end
+
+  defp skew_words(ms) when ms >= 0, do: "#{ms} ms ahead of"
+  defp skew_words(ms), do: "#{-ms} ms behind"
 end

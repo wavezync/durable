@@ -22,10 +22,10 @@ defmodule DurableDashboard.Live.ExecutionsLive do
 
   alias Durable.PubSub, as: DurablePubSub
   alias Durable.Storage.Schemas.StepExecution
-  alias DurableDashboard.Format
   alias DurableDashboard.Access
   alias DurableDashboard.Components.Core
   alias DurableDashboard.Components.Data.ExecutionFilters
+  alias DurableDashboard.Format
   alias DurableDashboard.Layouts
   alias DurableDashboard.Params
   alias DurableDashboard.Path, as: DPath

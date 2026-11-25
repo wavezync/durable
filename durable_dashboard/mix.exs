@@ -65,6 +65,7 @@ defmodule DurableDashboard.MixProject do
       {:jason, "~> 1.4"},
       {:lazy_html, ">= 0.1.0", only: :test},
       {:stream_data, "~> 1.1", only: :test},
+      {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:ex_doc, "~> 0.34", only: :dev, runtime: false}
     ]
   end
@@ -92,7 +93,7 @@ defmodule DurableDashboard.MixProject do
       "hex.publish": ["assets.build", "hex.publish"],
       # All formatting + checks, Elixir and frontend. `format` + `assets.format`
       # cover formatting (Elixir + TS); `assets.typecheck` is the JS-side static
-      # check (this package has no credo dependency). Runs in :test env via cli/0.
+      # check, and `credo --strict` the Elixir one. Runs in :test env via cli/0.
       #
       # Ordering matters: the `assets.*` steps shell out via `mix cmd --cd assets`,
       # which shifts the VM's cwd. A `cmd` step interleaved between `compile` and
@@ -104,6 +105,7 @@ defmodule DurableDashboard.MixProject do
         "assets.typecheck",
         "format",
         "compile --warnings-as-errors",
+        "credo --strict",
         "test"
       ]
     ]
