@@ -6,7 +6,16 @@ defmodule DurableDashboard.Live.KeysLiveTest do
   """
   use DurableDashboard.LiveCase
 
-  alias Fixtures.{Approvals, Digests, Invoices, Payments, SearchRebuild, SearchUpdate, Webhooks}
+  alias Fixtures.{
+    Approvals,
+    Digests,
+    IndexerSearchUpdate,
+    Invoices,
+    Payments,
+    SearchRebuild,
+    SearchUpdate,
+    Webhooks
+  }
 
   # Starts a keyed run, inline unless `inline: false`; returns its id.
   defp start!(module, input, key, opts \\ []) do
@@ -50,6 +59,59 @@ defmodule DurableDashboard.Live.KeysLiveTest do
 
       assert page =~ ~r/acct:7 update_search_index #{short} \w+ rebuild_search_index/
       assert page =~ ~r/acct:7 rebuild_search_index #{short} \w+ 1/
+    end
+
+    test "a holder of another module's workflow of the same name is named", %{conn: conn} do
+      other = start!(IndexerSearchUpdate, %{}, "acct:7")
+      update = start!(SearchUpdate, %{}, "acct:7", inline: false)
+      short = String.slice(other, 0, 8)
+
+      {:ok, _view, html} = live(conn, dash("/keys"))
+      assert text(html) =~ ~r/acct:7 update_search_index #{short} \w+ update_search_index/
+
+      {:ok, _view, html} = live(conn, dash("/executions/#{update}/key"))
+      assert text(html) =~ "#{short} update_search_index Holds the key"
+    end
+
+    test "Rerun isn't blocked by another workflow's run holding the key: it waits behind it", %{
+      conn: conn
+    } do
+      update = start!(SearchUpdate, %{}, "acct:7")
+      :ok = Durable.cancel(update, "superseded")
+      rebuild = start!(SearchRebuild, %{}, "acct:7")
+
+      {:ok, view, html} = live(conn, dash("/executions/#{update}"))
+      refute text(html) =~ "Rerun would be refused"
+      refute has_element?(view, ~s|button[phx-click="rerun"][disabled]|)
+
+      {:ok, again} = Durable.rerun(update)
+      assert {:ok, %{runs_after_id: ^rebuild}} = Durable.get_execution(again)
+    end
+
+    test "Rerun is refused while its own workflow has a run in line", %{conn: conn} do
+      update = start!(SearchUpdate, %{}, "acct:7")
+      :ok = Durable.cancel(update, "superseded")
+      _rebuild = start!(SearchRebuild, %{}, "acct:7")
+      waiting = start!(SearchUpdate, %{}, "acct:7", inline: false)
+
+      {:ok, view, html} = live(conn, dash("/executions/#{update}"))
+
+      assert text(html) =~
+               "Rerun would be refused: #{String.slice(waiting, 0, 8)} is already waiting for acct:7."
+
+      assert has_element?(view, ~s|button[phx-click="rerun"][disabled]|)
+      assert {:error, _} = Durable.rerun(update)
+    end
+
+    test "a run in line given the newer input by :cancel_existing says so", %{conn: conn} do
+      _rebuild = start!(SearchRebuild, %{}, "acct:7")
+      waiting = start!(SearchUpdate, %{"n" => 1}, "acct:7", inline: false)
+
+      {:ok, ^waiting} =
+        Durable.start(SearchUpdate, %{"n" => 2}, key: "acct:7", on_duplicate: :cancel_existing)
+
+      {:ok, _view, html} = live(conn, dash("/executions/#{waiting}/key"))
+      assert text(html) =~ "Gave it the newer input (cancel_existing)"
     end
   end
 

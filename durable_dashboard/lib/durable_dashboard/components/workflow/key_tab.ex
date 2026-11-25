@@ -53,6 +53,7 @@ defmodule DurableDashboard.Components.Workflow.KeyTab do
           select:
             map(w, [
               :id,
+              :workflow_module,
               :workflow_name,
               :status,
               :holds_key,
@@ -126,7 +127,9 @@ defmodule DurableDashboard.Components.Workflow.KeyTab do
   @doc """
   Whether `action` (`:retry` or `:rerun`) can go ahead for `run` given its
   key: `:ok`, `{:take, holder}` (it will take the key from `holder`, or a
-  free key when nil), or `{:blocked, reason, holder}`.
+  free key when nil), or `{:blocked, reason, holder}`. Under a `key_scope:`
+  a rerun waits in line behind another workflow's run, or one being rolled
+  back, unless a run of its own workflow waits there already (`:waiting`).
   """
   def block(_action, _run, nil), do: :ok
 
@@ -144,11 +147,19 @@ defmodule DurableDashboard.Components.Workflow.KeyTab do
 
   def block(:rerun, _run, %{holder: nil}), do: :ok
 
-  def block(:rerun, _run, %{holder: holder} = info) do
+  def block(:rerun, run, %{holder: holder} = info) do
     cond do
-      holder.status in WorkflowExecution.open_statuses() -> {:blocked, :open, holder}
-      reusable?(holder, info) -> :ok
-      true -> {:blocked, :kept, holder}
+      info.scope && (other_workflow?(holder, run) or holder.status == :compensating) ->
+        rerun_in_line(run, info)
+
+      holder.status in WorkflowExecution.open_statuses() ->
+        {:blocked, :open, holder}
+
+      reusable?(holder, info) ->
+        :ok
+
+      true ->
+        {:blocked, :kept, holder}
     end
   end
 
@@ -162,6 +173,20 @@ defmodule DurableDashboard.Components.Workflow.KeyTab do
     run.holds_key and run.status in WorkflowExecution.closed_statuses() and
       not reusable?(run, info)
   end
+
+  defp rerun_in_line(run, info) do
+    waiting =
+      Enum.find(info.runs, fn r ->
+        not other_workflow?(r, run) and r.runs_after_id != nil and
+          r.status in [:pending, :running]
+      end)
+
+    if waiting, do: {:blocked, :waiting, waiting}, else: :ok
+  end
+
+  @doc "Whether `a` and `b` are runs of different workflows: by module and name."
+  def other_workflow?(a, b),
+    do: {a.workflow_module, a.workflow_name} != {b.workflow_module, b.workflow_name}
 
   defp reusable?(_holder, %{reuse: nil}), do: false
 
@@ -203,6 +228,9 @@ defmodule DurableDashboard.Components.Workflow.KeyTab do
           <.run_link id={@holder.id} base_path={@base_path} />
           holds it, and the workflow's <span class="font-mono">reuse: {inspect(@info.reuse)}</span>
           keeps a {status_word(@holder.status)} run's key. Release its key first.
+        <% @why == :waiting -> %>
+          Rerun would be refused: <.run_link id={@holder.id} base_path={@base_path} />
+          is already waiting for <span class="font-mono">{@info.key}</span>.
         <% @why == :open -> %>
           Rerun would be refused: <.run_link id={@holder.id} base_path={@base_path} />
           holds <span class="font-mono">{@info.key}</span> and {still(@holder.status)}.
@@ -331,7 +359,11 @@ defmodule DurableDashboard.Components.Workflow.KeyTab do
             <div class="flex min-w-0 flex-col gap-0.5">
               <span class="flex items-center gap-2">
                 <.run_link id={run.id} base_path={@base_path} />
-                <span :if={run.workflow_name != @workflow.workflow_name} class="font-mono text-xs text-muted-foreground">
+                <span
+                  :if={other_workflow?(run, @workflow)}
+                  class="font-mono text-xs text-muted-foreground"
+                  data-tip={run.workflow_module}
+                >
                   {run.workflow_name}
                 </span>
                 <span :if={run.id == @workflow.id} class="text-xs text-muted-foreground">this run</span>
@@ -355,6 +387,11 @@ defmodule DurableDashboard.Components.Workflow.KeyTab do
     ~H|Sent as event <span class="font-mono">{@event}</span>|
   end
 
+  defp outcome(
+         %{dup: %{details: %{"outcome" => "cancel_existing", "runs_after" => _}}} = assigns
+       ),
+       do: ~H|Gave it the newer input (cancel_existing)|
+
   defp outcome(assigns), do: ~H|{outcome_text(@dup.details["outcome"])}|
 
   defp outcome_text("error"), do: "Returned {:error, {:key_taken, …}}"
@@ -368,8 +405,8 @@ defmodule DurableDashboard.Components.Workflow.KeyTab do
 
   # A differing input is a disclosure button, so the diff opens from the
   # keyboard too.
-  defp input_cell(%{dup: %{details: %{"input_changed" => true}}} = assigns) do
-    assigns = assign(assigns, tip: input_tip(assigns.dup.details["outcome"]))
+  defp input_cell(%{dup: %{details: %{"input_changed" => true} = details}} = assigns) do
+    assigns = assign(assigns, tip: input_tip(details["outcome"], details["runs_after"]))
 
     ~H"""
     <button
@@ -390,6 +427,10 @@ defmodule DurableDashboard.Components.Workflow.KeyTab do
   end
 
   defp input_cell(assigns), do: ~H|<span class="text-xs text-muted-foreground">Same input</span>|
+
+  # :cancel_existing gave a run waiting in a scope's line the newer input.
+  defp input_tip("cancel_existing", runs_after) when runs_after != nil, do: input_tip("debounced")
+  defp input_tip(outcome, _runs_after), do: input_tip(outcome)
 
   defp input_tip("use_existing"),
     do: "The caller got this run back, so its newer input wasn't run"

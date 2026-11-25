@@ -492,13 +492,13 @@ defmodule Durable.Executor do
   # start may take the key from such a run unless the workflow says
   # `reuse: :never`. Kept until it was undone, the key would hand that start a
   # run that does no work. If the undo finds nothing to do and the run is left
-  # failed, a retry takes the key back as for any run that lost it. Under a
-  # `key_scope:` it keeps the key until the undo has run, and a start waits
-  # for it (`Keys`): the undo writes what the scope's runs work on.
-  defp without_key(changeset, %{holds_key: true} = execution) do
+  # failed, a retry takes the key back as for any run that lost it. Started
+  # under a `key_scope:`, it keeps the key until the undo has run, and a start
+  # waits for it (`Keys`): the undo writes what the scope's runs work on. The
+  # scope it was started under, though its workflow may have dropped it since.
+  defp without_key(changeset, %{holds_key: true, key_scope: nil} = execution) do
     with {:ok, workflow_def} <- get_workflow_definition_from_execution(execution),
-         true <- Keys.reuse(workflow_def) != :never,
-         nil <- Keys.scope(workflow_def) do
+         true <- Keys.reuse(workflow_def) != :never do
       Ecto.Changeset.change(changeset, holds_key: false)
     else
       _ -> changeset
@@ -1854,7 +1854,7 @@ defmodule Durable.Executor do
   # the step's data.
   defp run_step(step, data, exec, config) do
     EngineState.put_current(exec.engine_state)
-    result = StepRunner.execute(step, data, exec.id, config, exec.deadline_at)
+    result = StepRunner.execute(step, data, exec, config)
     # Merged: a body only ever adds to it.
     {result, %{exec | engine_state: Map.merge(exec.engine_state, EngineState.current())}}
   end
@@ -1926,7 +1926,15 @@ defmodule Durable.Executor do
     handle_wait_result(config, exec, wait_type, opts)
   rescue
     error ->
-      wait_not_recorded(exec, caught_error(:error, error, __STACKTRACE__), workflow_def, config)
+      if Durable.Repo.transient?(error),
+        do: wait_given_up(config, exec, error),
+        else:
+          wait_not_recorded(
+            exec,
+            caught_error(:error, error, __STACKTRACE__),
+            workflow_def,
+            config
+          )
   end
 
   defp step_stopped({:call_workflow, opts}, exec, data, _workflow_def, config) do
@@ -1962,23 +1970,76 @@ defmodule Durable.Executor do
   defp wait_not_recorded(exec, error, workflow_def, config) do
     now = Clock.utc_now()
 
-    suspended =
-      from(s in StepExecution,
-        where:
-          s.workflow_id == ^exec.id and s.step_name == ^exec.current_step and
-            s.status == :waiting,
-        order_by: [desc: s.inserted_at],
-        limit: 1,
-        select: s.id
-      )
+    # Named as the attempt that ended its step, in one transaction with its
+    # close: a run lost before it fails would run the step again
+    # (`StepRunner.mark_ended/3`). The run's row first, as `give_up/2` takes them.
+    with row_id when is_binary(row_id) <- Repo.one(config, suspended(exec)) do
+      {:ok, _} =
+        Repo.transaction(config, fn ->
+          StepRunner.mark_ended(config, exec.id, row_id)
 
-    Repo.update_all(
-      config,
-      from(s in StepExecution, where: s.id in subquery(suspended)),
-      set: [status: :failed, error: storable_error(error), completed_at: now, updated_at: now]
-    )
+          Repo.update_all(config, from(s in StepExecution, where: s.id == ^row_id),
+            set: [
+              status: :failed,
+              error: storable_error(error),
+              completed_at: now,
+              updated_at: now
+            ]
+          )
+        end)
+    end
 
     handle_step_failure(exec, error, workflow_def, config)
+  end
+
+  # The database gave up on the wait's write (a deadlock, a timeout, a dropped
+  # connection), which says nothing about the step (rule 32): the run goes back
+  # on its queue as for a lost connection, and the step runs again. Its row,
+  # :waiting for a wait that doesn't exist, is closed as a lost worker's.
+  #
+  # The COMMIT may have landed with only its reply lost: the run is waiting
+  # then, its wait there, and may have been answered and taken on by another
+  # worker since. Only a run still running under this claim lost its wait.
+  # Its row is taken first, which waits for the wait's transaction to have
+  # ended, one way or the other.
+  defp wait_given_up(config, exec, error) do
+    now = Clock.utc_now()
+    lost = %{type: "worker_lost", message: Exception.message(error)}
+    locked = from(w in WorkflowExecution, where: w.id == ^exec.id, lock: "FOR UPDATE")
+
+    {:ok, ours} =
+      Repo.transaction(config, fn ->
+        case Repo.one(config, locked) do
+          %{status: :running, lock_token: token} = run when token == exec.lock_token ->
+            Repo.update_all(
+              config,
+              from(s in StepExecution, where: s.id in subquery(suspended(exec))),
+              set: [status: :failed, error: lost, completed_at: now, updated_at: now]
+            )
+
+            run
+
+          _not_ours ->
+            nil
+        end
+      end)
+
+    case ours && release_after_lost_connection(config, ours, error) do
+      :waiting -> {:waiting, exec}
+      failed = {:error, _error} -> failed
+      _fenced -> {:error, :superseded}
+    end
+  end
+
+  # The row of the wait its step was entering.
+  defp suspended(exec) do
+    from(s in StepExecution,
+      where: s.workflow_id == ^exec.id and s.step_name == ^exec.current_step,
+      where: s.status == :waiting,
+      order_by: [desc: s.inserted_at],
+      limit: 1,
+      select: s.id
+    )
   end
 
   defp handle_decision_result(
@@ -3990,9 +4051,9 @@ defmodule Durable.Executor do
         )
       end
 
-    # An attempt its worker began as the run was cancelled is written after
-    # the cancel closed what the run had open. Its worker closes it as it
-    # stops; lost with its node, nobody else would.
+    # The attempt a worker was running as the run was cancelled, when
+    # whoever cancelled it was lost before closing it. Its worker closes it as
+    # it stops; lost with its node, nobody else would.
     with_attempt =
       from(w in cancelled,
         join: s in StepExecution,
@@ -4056,7 +4117,7 @@ defmodule Durable.Executor do
   # The process running this claim died, so nothing recorded how its attempt
   # ended. The attempt counts: it's closed as failed and the run goes back on
   # its queue, where the next claim retries the step or, out of attempts, fails
-  # the run the normal way, compensations and all (StepRunner.execute/5).
+  # the run the normal way, compensations and all (StepRunner.execute/4).
   #
   # A process lost outside a step (between two, in a branch's `on:`, in a
   # parallel `into:`) has no attempt to count, and nothing says the workflow's
@@ -4068,6 +4129,18 @@ defmodule Durable.Executor do
   # comes back the same way.
   @spec attempt_died(map(), map(), Config.t()) :: :waiting | :fenced | {:error, map()}
   def attempt_died(job, error, %Config{} = config) do
+    # An attempt whose commit was under way as its task died holds the run's
+    # row until its row is in (`StepRunner.begin_attempt/4`). Closed before
+    # then, the row landed after, and stayed running if the run went no further.
+    Repo.one(
+      config,
+      from(w in WorkflowExecution,
+        where: w.id == ^job.id,
+        lock: "FOR NO KEY UPDATE",
+        select: w.id
+      )
+    )
+
     {:ok, run} = load_execution(config, job.id)
 
     cond do

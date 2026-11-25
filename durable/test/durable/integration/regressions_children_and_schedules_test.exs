@@ -224,9 +224,13 @@ defmodule Durable.Integration.ChildrenAndSchedulesRegressionsTest do
   test "an event name equal to a data key still waits" do
     start_durable!(%{default: 2})
     {:ok, id} = Durable.start(Collides, %{})
-    Process.sleep(600)
-    run = get(id)
-    assert run.status == :waiting
+    # However long the machine takes to get there: 600 ms ran out through
+    # PgBouncer under load. The key taken for the event never lets it reach it.
+    await_status(id, :waiting)
+
+    # And it stays there, its body run once.
+    Process.sleep(300)
+    assert get(id).status == :waiting
     assert Probe.hits(:body) == 1
   end
 

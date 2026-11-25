@@ -167,12 +167,13 @@ defmodule Durable.Query do
       [%{workflow_module: "Elixir.MyApp.ProcessArticle", workflow_name: "process_article",
          key: "article:42", key_scope: nil, runs: 2, last_started_at: ~U[...],
          holder_id: "3f2a91c4-…", holder_status: :running,   # nil when no run holds it
+         holder_workflow_module: "Elixir.MyApp.ProcessArticle",
          holder_workflow_name: "process_article",
          readded: 3, dropped: 1, last_readded_at: ~U[...]}]  # in the last 24 hours
 
   Under a `key_scope:` (the one its newest run was started under) the holder
   is the run of the scope that holds the key, which may be another
-  workflow's: `holder_workflow_name` says whose.
+  workflow's: `holder_workflow_module` and `holder_workflow_name` say whose.
 
   ## Filters
 
@@ -215,6 +216,13 @@ defmodule Durable.Query do
             last_started_at: k.last_started_at,
             holder_id: fragment("COALESCE(?, ?::text)", k.holder_id, h.id),
             holder_status: fragment("COALESCE(?, ?)", k.holder_status, h.status),
+            holder_workflow_module:
+              fragment(
+                "CASE WHEN ? IS NOT NULL THEN ? ELSE ? END",
+                k.holder_id,
+                k.workflow_module,
+                h.workflow_module
+              ),
             holder_workflow_name:
               fragment(
                 "CASE WHEN ? IS NOT NULL THEN ? ELSE ? END",

@@ -73,10 +73,10 @@ defmodule Durable.LaneOptionsTest do
 
     workflow "needed_lane_times_out" do
       parallel :lookups do
-        lane :employer, timeout: 30 do
+        lane :employer, timeout: 300 do
           step :call_employer, fn application ->
             Seen.note(:call_employer)
-            unless :employer_answers in Seen.all(), do: Process.sleep(500)
+            unless :employer_answers in Seen.all(), do: Process.sleep(1_000)
             {:ok, assign(application, :employed, true)}
           end
         end
@@ -192,9 +192,10 @@ defmodule Durable.LaneOptionsTest do
       [lane] = lanes_of(run)
       assert DateTime.after?(lane.deadline_at, first_deadline)
 
-      # Its 30 ms count from the retry, however long the retry took.
-      refute DateTime.before?(lane.deadline_at, DateTime.add(before_retry, 30, :millisecond))
-      refute DateTime.after?(lane.deadline_at, DateTime.add(after_retry, 30, :millisecond))
+      # Its 300 ms count from the retry, however long the retry took, and are
+      # room enough for the step on a loaded machine.
+      refute DateTime.before?(lane.deadline_at, DateTime.add(before_retry, 300, :millisecond))
+      refute DateTime.after?(lane.deadline_at, DateTime.add(after_retry, 300, :millisecond))
 
       assert drain(run).status == :completed
       assert {:decide, %{"employer" => %{"employed" => true}}} = List.last(Seen.all())

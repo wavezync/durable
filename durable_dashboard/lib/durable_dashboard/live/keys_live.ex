@@ -317,8 +317,9 @@ defmodule DurableDashboard.Live.KeysLive do
                     <KeyTab.run_link id={k.holder_id} base_path={@base_path} />
                     <Core.status_pill status={k.holder_status} />
                     <span
-                      :if={Map.get(k, :holder_workflow_name) not in [nil, k.workflow_name]}
+                      :if={other_holder?(k)}
                       class="truncate font-mono text-xs text-muted-foreground"
+                      data-tip={Map.get(k, :holder_workflow_module)}
                     >
                       {k.holder_workflow_name}
                     </span>
@@ -422,4 +423,14 @@ defmodule DurableDashboard.Live.KeysLive do
   end
 
   defp trimmed(value), do: Params.text(String.trim(Params.text(value) || ""))
+
+  # Under a `key_scope:` the holder may be another workflow's run: another
+  # module's of the same name too. (No holder_workflow_* from a Durable before
+  # key_scope:.)
+  defp other_holder?(%{holder_workflow_name: name} = k) when is_binary(name) do
+    module = Map.get(k, :holder_workflow_module, k.workflow_module)
+    {module, name} != {k.workflow_module, k.workflow_name}
+  end
+
+  defp other_holder?(_k), do: false
 end

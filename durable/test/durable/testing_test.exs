@@ -143,6 +143,15 @@ defmodule Durable.TestingTest do
       assert :ok = refute_started(Declined)
     end
 
+    test "key: nil matches the runs started without one" do
+      {:ok, id} = Durable.start(Payment, %{})
+      {:ok, _keyed} = Durable.start(Payment, %{}, key: "order:42")
+
+      assert [%{id: ^id}] = all_started(Payment, key: nil)
+      assert %{id: ^id} = assert_started(Payment, key: nil)
+      assert :ok = refute_started(Declined, key: nil)
+    end
+
     test "leave out parallel branches" do
       run = run_workflow(Order)
 

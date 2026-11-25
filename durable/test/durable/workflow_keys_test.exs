@@ -155,6 +155,23 @@ defmodule Durable.WorkflowKeysTest do
       assert runs_with("") == []
     end
 
+    # Ecto's cast took a blank string for nil: the start went on as keyed with
+    # no key, and raised comparing it (CI fuzz, seed 846409).
+    test "a blank key is a key like any other, kept as given" do
+      for key <- ["\t", " ", "\n", " \r\n ", "\u00A0"] do
+        {:ok, id} = Durable.start(Again, %{}, key: key)
+        assert {:ok, ^id} = Durable.start(Again, %{}, key: key)
+
+        assert {:error, {:key_taken, ^id}} =
+                 Durable.start(Again, %{}, key: key, on_duplicate: :error)
+
+        assert [{:ok, ^id}] = Durable.start_many([{Again, %{}, key: key}])
+
+        assert [%{id: ^id, key: ^key, holds_key: true}] = runs_with(key)
+        assert [%{id: ^id}] = Durable.list_executions!(key: key)
+      end
+    end
+
     test "reuse: is the workflow's, not the call's" do
       assert_raise ArgumentError, ~r/reuse: is set on the workflow/, fn ->
         Durable.start(Article, %{}, key: "a", reuse: :never)

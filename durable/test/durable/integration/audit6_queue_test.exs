@@ -162,6 +162,20 @@ defmodule Audit6QueuePayment do
   end
 end
 
+defmodule Audit6QueueCharge do
+  @moduledoc false
+  use Durable
+  alias Durable.IntegrationProbe, as: Probe
+
+  # A declined card isn't tried again. This gateway declines a card once, and
+  # asked again would take it.
+  workflow "audit6_queue_charge" do
+    step :charge_card, [retry: [max_attempts: 3]], fn trip ->
+      if Probe.note(:charge) == 1, do: Probe.fetch(:declined), else: {:ok, trip}
+    end
+  end
+end
+
 defmodule Audit6QueueProxy do
   @moduledoc false
   # A TCP proxy in front of Postgres that can stop passing bytes without
@@ -530,6 +544,79 @@ defmodule Durable.Integration.Audit6QueueTest do
 
       :ok = Probe.set(:gateway_answered)
       await_status(order, :completed)
+    end
+  end
+
+  describe "a node that stops after a step failed for good, before its run failed" do
+    # Holds the step's process, for the node to stop with the run still
+    # running: once the step's row is closed, failed, or once the run's next
+    # write after that has landed.
+    def hold(_event, _measurements, %{result: :error}, :row_closed), do: held()
+
+    def hold(_event, _measurements, %{result: :error}, :run_written),
+      do: Process.put(:audit6_row_closed, true)
+
+    def hold(_event, _measurements, %{source: "workflow_executions", query: query}, :run_written) do
+      if Process.get(:audit6_row_closed) == true and
+           query =~ ~r/^UPDATE .* SET "engine_state" = \$1/,
+         do: held()
+    end
+
+    def hold(_event, _measurements, _meta, _at), do: :ok
+
+    defp held do
+      Probe.note(:held)
+      Probe.wait_for(:never)
+    end
+
+    # The next node took the failed row for one with attempts left, and ran
+    # the step again: a card the step had declined was charged.
+    defp declined_then_stopped(declined, at) do
+      Probe.put(:declined, declined)
+      handler = "audit6-queue-hold-#{System.unique_integer([:positive])}"
+      events = [[:durable, :step, :stop], [:durable, :integration_repo, :query]]
+      :telemetry.attach_many(handler, events, &__MODULE__.hold/4, at)
+      start_durable!(%{default: 1}, shutdown_grace_period: 0)
+
+      {:ok, id} = Durable.start(Audit6QueueCharge, %{"trip" => 1})
+      assert_eventually(fn -> Probe.hits(:held) == 1 end)
+      :telemetry.detach(handler)
+      stop_supervised!(Durable)
+
+      start_durable!(%{default: 1})
+      assert_eventually(fn -> get(id).status in [:completed, :failed] end, 5_000)
+
+      rows = IntegrationRepo.all(from(s in StepExecution, where: s.workflow_id == ^id))
+      {get(id), rows}
+    end
+
+    test "fails the run on the next node, without running the step again" do
+      {run, rows} = declined_then_stopped({:fail, "card declined"}, :row_closed)
+
+      assert %{status: :failed, error: %{"message" => "card declined"}} = run
+      assert Probe.hits(:charge) == 1
+      assert [%{status: :failed, attempt: 1}] = rows
+
+      # Retried, the step runs again: the marker names an attempt from before.
+      {:ok, _} = Durable.retry(run.id)
+      await_status(run.id, :completed)
+      assert Probe.hits(:charge) == 2
+    end
+
+    test "fails it for a return no step may give, too" do
+      {run, rows} = declined_then_stopped(:declined, :row_closed)
+
+      assert %{status: :failed, error: %{"type" => "invalid_step_return"}} = run
+      assert Probe.hits(:charge) == 1
+      assert [%{status: :failed, attempt: 1}] = rows
+    end
+
+    test "fails it when the node stops after the run's next write, too" do
+      {run, rows} = declined_then_stopped({:fail, "card declined"}, :run_written)
+
+      assert %{status: :failed, error: %{"message" => "card declined"}} = run
+      assert Probe.hits(:charge) == 1
+      assert [%{status: :failed, attempt: 1}] = rows
     end
   end
 end

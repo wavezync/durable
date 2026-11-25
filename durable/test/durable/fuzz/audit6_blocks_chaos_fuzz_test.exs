@@ -584,9 +584,10 @@ defmodule Durable.Fuzz.Audit6BlocksChaosTest do
         do: Probe.note({:reached, what})
   end
 
-  defp assert_reached do
+  defp unreached do
     for what <- [:kid, :deep, :into, :undo_charge],
-        do: assert(Probe.hits({:reached, what}) > 0, "never reached #{what}")
+        Probe.hits({:reached, what}) == 0,
+        do: "never reached #{what}"
   end
 
   # Everything the family's rows say, for a failure that needs explaining.
@@ -709,11 +710,40 @@ defmodule Durable.Fuzz.Audit6BlocksChaosTest do
   # Properties
   # ===========================================================================
 
+  # The gates after a batch of @runs cases (how far the cases got, which
+  # operators landed, how the runs ended) ask for paths one batch can miss by
+  # chance. A gate a batch missed gets up to two more batches, each from a seed
+  # of its own (`--seed` replays them all), before it fails: a path that's
+  # broken is missed by every batch.
+  @batches 4
+
+  defp in_batches(name, batch, unmet, n \\ 1) do
+    seed = ExUnit.configuration()[:seed]
+    batch.(if n == 1, do: seed, else: :erlang.phash2({seed, n}))
+
+    case unmet.() do
+      [] ->
+        :ok
+
+      left when n < @batches ->
+        IO.puts("\n#{name}: another batch for #{inspect(left)}")
+        in_batches(name, batch, unmet, n + 1)
+
+      left ->
+        flunk("after #{@batches} batches of #{@runs} cases: #{Enum.join(left, "; ")}")
+    end
+  end
+
   property "untouched, an order of lanes, a child and an into: does what its script says" do
+    in_batches("blocks untouched", &untouched/1, &untouched_unmet/0)
+  end
+
+  defp untouched(seed) do
     check all(
             scripts <- list_of(script(), length: @batch),
             workflows <-
               list_of(member_of(["fuzz_blocks_order", "fuzz_blocks_order_halt"]), length: @batch),
+            initial_seed: seed,
             max_runs: @runs,
             max_shrinking_steps: 10
           ) do
@@ -727,30 +757,43 @@ defmodule Durable.Fuzz.Audit6BlocksChaosTest do
         Probe.note({:ended, get(run.id).status})
       end
     end
+  end
 
+  # The far end has to be reached often, and every other way to end.
+  defp untouched_unmet do
     ended = Map.new(terminal(), &{&1, Probe.hits({:ended, &1})})
     total = ended |> Map.values() |> Enum.sum()
+    few = if ended.completed * 6 < total, do: ["too few runs completed: #{inspect(ended)}"]
 
-    # The far end has to be reached often, and every other way to end.
-    assert ended.completed * 6 >= total, "too few runs completed: #{inspect(ended)}"
+    never =
+      for status <- [:compensated, :failed, :cancelled],
+          ended[status] == 0,
+          do: "never ended #{status}: #{inspect(ended)}"
 
-    for status <- [:compensated, :failed, :cancelled],
-        do: assert(ended[status] > 0, "never ended #{status}: #{inspect(ended)}")
-
-    assert_reached()
+    List.wrap(few) ++ never ++ unreached()
   end
 
   property "operators, sweeps and kills never hang an order, undo what never ran, or lose a lane" do
+    in_batches("blocks chaos", &chaos/1, &chaos_unmet/0)
+  end
+
+  defp chaos(seed) do
     check all(
             scripts <- list_of(script(), length: @batch),
             workflows <-
               list_of(member_of(["fuzz_blocks_order", "fuzz_blocks_order_halt"]), length: @batch),
             ops <- list_of(tuple({integer(0..250), op()}), min_length: 4, max_length: 24),
             second_node? <- boolean(),
+            initial_seed: seed,
             max_runs: @runs,
             max_shrinking_steps: 10
           ) do
-      if second_node? do
+      # A crash needs a node to crash: without one, a seed whose crashes all
+      # fell in one-node cases never landed one. Only until one has landed,
+      # so as many cases as before run on one node.
+      if second_node? or
+           (Enum.any?(ops, &match?({_, :crash_node}, &1)) and
+              Probe.hits({:op_hit, :crash_node}) == 0) do
         peer = start_node!(:"audit6_b#{System.unique_integer([:positive])}", @limits)
         Probe.put(:peer, peer)
       end
@@ -819,26 +862,30 @@ defmodule Durable.Fuzz.Audit6BlocksChaosTest do
         Probe.note({:chaos_ended, get(run.id).status})
       end
     end
+  end
 
-    # The operators have to land, not only be refused.
-    for how <- [
-          :retry,
-          :rollback,
-          :retry_lane,
-          :cancel_rollback,
-          :cancel_lane,
-          :kill_task,
-          :kill_worker,
-          :crash_node,
-          :expire
-        ] do
-      assert Probe.hits({:op_hit, how}) > 0, "#{how} never landed"
-    end
+  # The operators have to land, not only be refused, and the runs end every way.
+  defp chaos_unmet do
+    landed =
+      for how <- [
+            :retry,
+            :rollback,
+            :retry_lane,
+            :cancel_rollback,
+            :cancel_lane,
+            :kill_task,
+            :kill_worker,
+            :crash_node,
+            :expire
+          ],
+          Probe.hits({:op_hit, how}) == 0,
+          do: "#{how} never landed"
 
-    for status <- [:completed, :compensated, :failed, :cancelled] do
-      assert Probe.hits({:chaos_ended, status}) > 0, "never ended #{status} under chaos"
-    end
+    ended =
+      for status <- [:completed, :compensated, :failed, :cancelled],
+          Probe.hits({:chaos_ended, status}) == 0,
+          do: "never ended #{status} under chaos"
 
-    assert_reached()
+    landed ++ ended ++ unreached()
   end
 end

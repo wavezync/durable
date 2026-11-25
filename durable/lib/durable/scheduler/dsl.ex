@@ -33,7 +33,9 @@ defmodule Durable.Scheduler.DSL do
   - `:queue` - Queue to run on (default: :default)
   - `:key` - Workflow key each run starts with. A fire while the last run
     still holds the key follows the workflow's `on_duplicate:`; with the
-    default `:use_existing` it starts nothing, and Activity records it
+    default `:use_existing` it starts nothing, and Activity records it.
+    Checked as `Durable.start/3`'s `key:` is: a string of 1 to 255 bytes,
+    kept as given; `""` is refused, not taken for no key
 
   """
 

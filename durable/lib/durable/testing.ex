@@ -320,7 +320,7 @@ defmodule Durable.Testing do
 
   - `:input` - only runs whose input contains this map. `%{"order_id" => 42}`
     matches an input that has more keys too
-  - `:key` - only runs started with this `key:`
+  - `:key` - only runs started with this `key:` (`nil`: started with none)
   - `:durable` - the Durable instance (default `Durable`)
   """
   @spec all_started(module(), keyword()) :: [WorkflowExecution.t()]
@@ -348,6 +348,7 @@ defmodule Durable.Testing do
     query =
       Enum.reduce(opts, query, fn
         {:input, input}, q -> where(q, [w], fragment("? @> ?", w.input, type(^input, :map)))
+        {:key, nil}, q -> where(q, [w], is_nil(w.key))
         {:key, key}, q -> where(q, [w], w.key == ^key)
         {:durable, _}, q -> q
       end)

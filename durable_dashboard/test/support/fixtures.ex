@@ -18,6 +18,8 @@ defmodule DurableDashboard.Fixtures do
     * `SearchUpdate` (`update_search_index`) and `SearchRebuild`
       (`rebuild_search_index`) — both wait for a `go` event; they name one
       `key_scope: "search_index"`, so a run of one waits for the other's
+    * `IndexerSearchUpdate` — another module's `update_search_index`, in the
+      same scope, as a second app would define it
   """
 
   alias Durable.Config
@@ -246,6 +248,19 @@ defmodule DurableDashboard.Fixtures do
 
     workflow "rebuild_search_index", key_scope: "search_index" do
       step :rebuild, fn data ->
+        _ = wait_for_event("go", timeout: hours(1))
+        {:ok, data}
+      end
+    end
+  end
+
+  defmodule IndexerSearchUpdate do
+    @moduledoc false
+    use Durable
+    use Durable.Wait
+
+    workflow "update_search_index", key_scope: "search_index" do
+      step :apply, fn data ->
         _ = wait_for_event("go", timeout: hours(1))
         {:ok, data}
       end

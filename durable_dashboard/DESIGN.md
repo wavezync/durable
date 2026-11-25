@@ -578,7 +578,11 @@ One run, one page — header, banner, facts, then a view switch.
   holds it and is still running: cancel it or wait for it to finish." When
   Retry would take the key back from a closed holder, its label says so:
   "Retry and take the key back". When Retry and Rerun are blocked by the
-  same key, one sentence covers both ("Retry and rerun need …").
+  same key, one sentence covers both ("Retry and rerun need …"). Under a
+  `key_scope:` another workflow's run holding the key doesn't block Rerun:
+  the rerun waits in line. A run of its own workflow already waiting there
+  does: "Rerun would be refused: `3f2a91c4` is already waiting for
+  `acct:7`."
 - **Release key confirms inline**: a strip under the header, never a modal
   (§10), that says what happens next: "Release `invoice:INV-2208`? This run
   keeps its history. The next start for this key sends the invoice again."
@@ -654,7 +658,8 @@ side by side:
   newest first (`Activity`, kind `key_duplicate`). Columns: when
   (`local_time`), outcome as a phrase ("Returned this run", "Returned
   `{:error, {:key_taken, …}}`", "Replaced this run", "Sent as event
-  `article_updated`", "Gave it the newer input (debounce)"), input ("Same
+  `article_updated`", "Gave it the newer input (debounce)", "Gave it the
+  newer input (cancel_existing)" for a run waiting in a scope's line), input ("Same
   input", muted; a warning badge "Newer input dropped"; or a muted "Different
   input"), node. A row whose input differed opens in place — through a
   disclosure button in its Input cell (`aria-expanded`), so it works from the
@@ -670,7 +675,8 @@ side by side:
   workflow's policy, `reuse: :after_failure`. Under a `key_scope:` the panel
   lists the runs of every workflow in the scope with the key, and the holder
   may be another workflow's. Such a run gives its workflow name, muted mono,
-  after its id. The subtitle gives the scope before the policy:
+  after its id (another module's workflow of the same name too, with the
+  module in its tooltip). The subtitle gives the scope before the policy:
   `key_scope: "account_index" · reuse: :after_close`.
 
 Empty state: "Nobody added `article:42` again."
@@ -838,7 +844,7 @@ most recently started first (`Durable.Query.list_keys/1`). It sits under
 - **Columns**: key (mono), workflow, holder (short id → its Key view, with
   its status pill; "No holder" muted; under a `key_scope:` the scope's
   holder, with its workflow name muted after the pill when it's another
-  workflow's), runs (→ Runs filtered by `key:`),
+  workflow's, by module and name, the module in its tooltip), runs (→ Runs filtered by `key:`),
   re-added in the last 24h, dropped (warning when > 0), last added
   (`relative_time`, the newest re-add or start), and the workflow's `reuse:`
   in mono.
