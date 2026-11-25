@@ -1854,7 +1854,7 @@ defmodule Durable.Executor do
   # the step's data.
   defp run_step(step, data, exec, config) do
     EngineState.put_current(exec.engine_state)
-    result = StepRunner.execute(step, data, exec.id, config, exec.deadline_at)
+    result = StepRunner.execute(step, data, exec, config)
     # Merged: a body only ever adds to it.
     {result, %{exec | engine_state: Map.merge(exec.engine_state, EngineState.current())}}
   end
@@ -3990,9 +3990,9 @@ defmodule Durable.Executor do
         )
       end
 
-    # An attempt its worker began as the run was cancelled is written after
-    # the cancel closed what the run had open. Its worker closes it as it
-    # stops; lost with its node, nobody else would.
+    # The attempt a worker was running as the run was cancelled, when
+    # whoever cancelled it was lost before closing it. Its worker closes it as
+    # it stops; lost with its node, nobody else would.
     with_attempt =
       from(w in cancelled,
         join: s in StepExecution,
@@ -4056,7 +4056,7 @@ defmodule Durable.Executor do
   # The process running this claim died, so nothing recorded how its attempt
   # ended. The attempt counts: it's closed as failed and the run goes back on
   # its queue, where the next claim retries the step or, out of attempts, fails
-  # the run the normal way, compensations and all (StepRunner.execute/5).
+  # the run the normal way, compensations and all (StepRunner.execute/4).
   #
   # A process lost outside a step (between two, in a branch's `on:`, in a
   # parallel `into:`) has no attempt to count, and nothing says the workflow's

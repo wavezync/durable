@@ -32,6 +32,9 @@ defmodule Durable.Telemetry do
 
   One span per attempt. A step that raises or returns an error is a normal
   `:stop` with `result: :error` — `:exception` means Durable itself failed.
+  `:start` is sent inside the transaction that writes the attempt's row, with
+  the run's row held for the claim: a handler that writes through the same
+  repo writes in that transaction, and a slow one holds up a cancel of the run.
 
     * `[:durable, :step, :start]` — metadata `:workflow_id`,
       `:root_workflow_id`, `:step_execution_id` (the attempt's row), `:workflow`,
@@ -303,7 +306,13 @@ defmodule Durable.Telemetry do
   # attempt that was closed while it ran had its end event sent by the closer.
   # `meta` carries a `:telemetry_span_context` the closer can work out too.
   @spec span([atom()], map(), (-> {result, map()})) :: result when result: term()
-  def span(prefix, %{telemetry_span_context: _} = meta, fun) do
+  def span(prefix, meta, fun), do: span_from(span_start(prefix, meta), prefix, meta, fun)
+
+  @doc false
+  # The start event alone, for a span that has to begin inside something
+  # else (an attempt, inside its claim). span_from/4 carries it on.
+  @spec span_start([atom()], map()) :: integer()
+  def span_start(prefix, %{telemetry_span_context: _} = meta) do
     started = System.monotonic_time()
 
     :telemetry.execute(
@@ -312,25 +321,29 @@ defmodule Durable.Telemetry do
       meta
     )
 
-    try do
-      {result, stop_meta} = fun.()
-      :telemetry.execute(prefix ++ [:stop], elapsed(started), stop_meta)
-      result
-    catch
-      :throw, :durable_attempt_closed ->
-        throw(:durable_attempt_closed)
+    started
+  end
 
-      kind, reason ->
-        stacktrace = __STACKTRACE__
-        # With the connection gone the attempt is still open, and whoever closes it
-        # sends the end event.
-        unless Durable.Repo.transient?(reason) do
-          details = %{kind: kind, reason: reason, stacktrace: stacktrace}
-          :telemetry.execute(prefix ++ [:exception], elapsed(started), Map.merge(meta, details))
-        end
+  @doc false
+  @spec span_from(integer(), [atom()], map(), (-> {result, map()})) :: result when result: term()
+  def span_from(started, prefix, meta, fun) do
+    {result, stop_meta} = fun.()
+    :telemetry.execute(prefix ++ [:stop], elapsed(started), stop_meta)
+    result
+  catch
+    :throw, :durable_attempt_closed ->
+      throw(:durable_attempt_closed)
 
-        :erlang.raise(kind, reason, stacktrace)
-    end
+    kind, reason ->
+      stacktrace = __STACKTRACE__
+      # With the connection gone the attempt is still open, and whoever closes it
+      # sends the end event.
+      unless Durable.Repo.transient?(reason) do
+        details = %{kind: kind, reason: reason, stacktrace: stacktrace}
+        :telemetry.execute(prefix ++ [:exception], elapsed(started), Map.merge(meta, details))
+      end
+
+      :erlang.raise(kind, reason, stacktrace)
   end
 
   defp elapsed(started) do

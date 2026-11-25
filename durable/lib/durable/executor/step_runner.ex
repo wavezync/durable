@@ -72,15 +72,16 @@ defmodule Durable.Executor.StepRunner do
 
   - `step` - The step definition
   - `data` - The data to pass to the step (from previous step or workflow input)
-  - `workflow_id` - The workflow execution ID
+  - `run` - The run, as its claim has it. The attempt is written only while
+    the row is still that claim's. Its `deadline_at` is when the run's
+    `timeout:` runs out, if it has one: a step still running then is stopped,
+    and isn't retried.
   - `config` - The Durable config
-  - `deadline` - When the run's `timeout:` runs out, if it has one. A step
-    still running then is stopped, and isn't retried.
 
   Returns `{:ok, data}` on success or `{:error, reason}` after all retries exhausted.
   """
-  @spec execute(Step.t(), map(), String.t(), Config.t(), DateTime.t() | nil) :: result()
-  def execute(%Step{} = step, data, workflow_id, %Config{} = config, deadline \\ nil) do
+  @spec execute(Step.t(), map(), WorkflowExecution.t(), Config.t()) :: result()
+  def execute(%Step{} = step, data, %WorkflowExecution{id: workflow_id} = run, %Config{} = config) do
     max_attempts = get_max_attempts(step)
     close_left_open(config, workflow_id)
     step_name = Atom.to_string(step.name)
@@ -93,7 +94,7 @@ defmodule Durable.Executor.StepRunner do
          gave_up?(config, workflow_id, step_name) do
       {:error, last_error(config, workflow_id, step)}
     else
-      execute_with_retry(step, data, workflow_id, attempt, max_attempts, config, deadline)
+      execute_with_retry(step, data, run, attempt, max_attempts, config)
     end
   end
 
@@ -404,7 +405,9 @@ defmodule Durable.Executor.StepRunner do
     Backoff.calculate_with_jitter(strategy, attempt, retry_opts)
   end
 
-  defp execute_with_retry(step, data, workflow_id, attempt, max_attempts, config, deadline) do
+  defp execute_with_retry(step, data, run, attempt, max_attempts, config) do
+    %{id: workflow_id, deadline_at: deadline} = run
+
     # Set current step for logging/observability
     Context.set_current_step(step.name)
     Context.set_attempt(attempt, max_attempts)
@@ -440,14 +443,11 @@ defmodule Durable.Executor.StepRunner do
     start_time = System.monotonic_time(:millisecond)
     span_meta = step_span_meta(config, step_exec, step, attempt, max_attempts)
 
-    # The row is written inside the span: its end event belongs to whoever
-    # closes the row, and that may turn out not to be this process. It is
-    # inserted there, running, after the start event: a row that exists can
-    # be closed by someone else, so an end never comes without a start, and a
-    # process killed before this leaves no row behind.
-    Durable.Telemetry.span([:durable, :step], span_meta, fn ->
-      {:ok, step_exec} = start_step_execution(config, step_exec)
+    # The span's end event belongs to whoever closes the row, and that may
+    # turn out not to be this process (begin_attempt/4).
+    {started, step_exec} = begin_attempt(config, step_exec, run.lock_token, span_meta)
 
+    Durable.Telemetry.span_from(started, [:durable, :step], span_meta, fn ->
       result = run_body(step, data, time_limit(step, deadline))
       duration_ms = System.monotonic_time(:millisecond) - start_time
 
@@ -869,16 +869,40 @@ defmodule Durable.Executor.StepRunner do
     end
   end
 
-  defp start_step_execution(config, step_exec) do
-    case step_exec
-         |> StepExecution.start_changeset()
-         |> Repo.insert(config) do
-      {:ok, updated} = ok ->
-        DurablePubSub.broadcast_step(config, :step_started, step_event(updated))
-        ok
+  # The attempt begins, its row and its start event, only while the run is
+  # still this claim's, holding the run's row until the row is in: a cancel or
+  # a takeover that lands first finds nothing begun, and one that lands after
+  # finds the row to close and sends its end. Nobody sees the row before the
+  # commit, after the start event, so an end never comes before its start.
+  # Begun outside the claim, a task a cancel's heartbeat killed in between
+  # left a start with no end, and a write on its way then landed after the
+  # worker had closed what the run had open, and stayed running.
+  defp begin_attempt(config, step_exec, lock_token, span_meta) do
+    claim =
+      from(w in WorkflowExecution,
+        where: w.id == ^step_exec.workflow_id and w.status == :running,
+        where: w.lock_token == ^lock_token,
+        lock: "FOR SHARE",
+        select: w.id
+      )
 
-      other ->
-        other
+    {:ok, begun} =
+      Repo.transaction(config, fn ->
+        if Repo.one(config, claim) do
+          {:ok, row} = step_exec |> StepExecution.start_changeset() |> Repo.insert(config)
+          {Durable.Telemetry.span_start([:durable, :step], span_meta), row}
+        end
+      end)
+
+    case begun do
+      {_started, row} ->
+        DurablePubSub.broadcast_step(config, :step_started, step_event(row))
+        begun
+
+      # The run is someone else's now.
+      nil ->
+        Durable.LogCapture.stop_capture()
+        throw(:durable_superseded)
     end
   end
 

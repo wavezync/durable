@@ -233,6 +233,8 @@ defmodule Durable.Integration.Audit6BlocksTest do
   """
   use Durable.IntegrationCase, async: false
 
+  alias Durable.Queue.Manager
+
   @moduletag :capture_log
 
   defp lanes(id),
@@ -448,42 +450,168 @@ defmodule Durable.Integration.Audit6BlocksTest do
     end
   end
 
-  # Holds a step's task as it counts the step's attempts: after the run moved
-  # to the step, before the attempt's row is written.
-  def hold_before_attempt(_event, _measurements, %{query: query, params: params}, _config) do
-    if query =~ "FILTER" and "weigh" in params and not Probe.set?(:held) do
-      Probe.set(:held)
-      Probe.wait_for(:cancelled)
-    end
+  # Kills the process cancelling a run as the cancel commits, before it has
+  # closed what the run had open.
+  def kill_after_cancelling(_event, _measurements, %{query: "commit"}, _config) do
+    if Process.get(:audit6_cancelling), do: Process.exit(self(), :kill)
   end
 
-  # Cancelled as its worker began a step, the run's next attempt was written
-  # running after the cancel had closed what the run had open. The node then
-  # died in the step: nobody closed the row, and no sweep looks at a cancelled
-  # run's attempts. It stayed running for good.
-  test "an attempt begun as its run was cancelled, on a node that then died, is closed" do
-    handler = "audit6-hold-#{System.unique_integer([:positive])}"
+  def kill_after_cancelling(_event, _measurements, _meta, _config), do: :ok
+
+  # Cancelled mid-step by a process lost as it committed the cancel, on a node
+  # that then died: nobody closed the step's attempt, and no sweep looked at a
+  # cancelled run's attempts. It stayed running for good.
+  test "a cancelled run's attempt nobody was left to close is closed by the sweep" do
+    handler = "audit6-kill-#{System.unique_integer([:positive])}"
     event = [:durable, :integration_repo, :query]
-    :telemetry.attach(handler, event, &__MODULE__.hold_before_attempt/4, nil)
+    :telemetry.attach(handler, event, &__MODULE__.kill_after_cancelling/4, nil)
     on_exit(fn -> :telemetry.detach(handler) end)
     start_durable!(%{default: 2}, heartbeat_interval: 5_000)
 
     {:ok, id} = Durable.start(Audit6BlocksLabel, %{})
-    assert_eventually(fn -> Probe.set?(:held) and get(id).current_step == "weigh" end)
-
-    :ok = Durable.cancel(id, "the order was withdrawn")
-    Probe.set(:cancelled)
     assert_eventually(fn -> Probe.set?(:weighing) end)
 
+    {canceller, ref} =
+      spawn_monitor(fn ->
+        Process.put(:audit6_cancelling, true)
+        Durable.cancel(id, "the order was withdrawn")
+      end)
+
+    assert_receive {:DOWN, ^ref, :process, ^canceller, :killed}
     [{_, worker, _, _}] = DynamicSupervisor.which_children(Durable.Queue.WorkerSupervisor.Default)
     Process.exit(worker, :kill)
 
     running = from(s in StepExecution, where: s.workflow_id == ^id and s.status == :running)
     assert [%{step_name: "weigh"}] = IntegrationRepo.all(running)
+    assert get(id).status == :cancelled
 
     Process.sleep(1_100)
     Durable.Executor.close_out_lost(Durable.Config.get(Durable), 1)
 
+    assert IntegrationRepo.all(running) == []
+  end
+
+  # Committing the weighing's attempt, the database waits for whoever holds
+  # @row_lock. A worker that stops the step cancels the statement as it drops
+  # the connection, too late for a commit under way: the wait carries on.
+  @row_lock 6_421_001
+
+  defp hold_row_commits! do
+    IntegrationRepo.query!("""
+    CREATE FUNCTION durable.audit6_hold_row() RETURNS trigger AS $$
+    BEGIN
+      IF NEW.step_name = 'weigh' THEN
+        LOOP
+          BEGIN
+            PERFORM pg_advisory_xact_lock(#{@row_lock});
+            EXIT;
+          EXCEPTION WHEN query_canceled THEN
+          END;
+        END LOOP;
+      END IF;
+      RETURN NULL;
+    END $$ LANGUAGE plpgsql
+    """)
+
+    IntegrationRepo.query!("""
+    CREATE CONSTRAINT TRIGGER audit6_hold_row AFTER INSERT ON durable.step_executions
+    DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION durable.audit6_hold_row()
+    """)
+
+    on_exit(fn ->
+      IntegrationRepo.query!("DROP TRIGGER audit6_hold_row ON durable.step_executions")
+      IntegrationRepo.query!("DROP FUNCTION durable.audit6_hold_row()")
+    end)
+  end
+
+  # How many statements other than this one the database is running now.
+  defp running_statements(and_also \\ "") do
+    %{rows: [[count]]} =
+      IntegrationRepo.query!("""
+      SELECT count(*) FROM pg_stat_activity
+      WHERE datname = current_database() AND state = 'active' AND pid <> pg_backend_pid()
+      #{and_also}
+      """)
+
+    count
+  end
+
+  # A cancel reached a run whose worker was writing its next attempt's row.
+  # The worker stopped the step at its heartbeat, closed what the run had
+  # open, and let go, but the write, slow in a pooler or committing, landed
+  # after that: the row stayed running on a cancelled run, and nothing but the
+  # sweep, minutes later, closes it.
+  test "an attempt's row written as its run is cancelled isn't left running" do
+    hold_row_commits!()
+    start_durable!(%{default: 1}, heartbeat_interval: 100)
+    test = self()
+
+    holder =
+      Task.async(fn ->
+        IntegrationRepo.transaction(fn ->
+          IntegrationRepo.query!("SELECT pg_advisory_xact_lock($1)", [@row_lock])
+          send(test, :holding)
+          receive do: (:release -> :ok)
+        end)
+      end)
+
+    assert_receive :holding
+    {:ok, id} = Durable.start(Audit6BlocksLabel, %{})
+    assert_eventually(fn -> running_statements("AND wait_event = 'advisory'") == 1 end)
+
+    canceller = Task.async(fn -> Durable.cancel(id, "the order was withdrawn") end)
+    let_go?(id)
+    send(holder.pid, :release)
+    assert {:ok, :ok} = Task.await(holder)
+    assert :ok = Task.await(canceller)
+    assert_eventually(fn -> running_statements() == 0 end)
+    assert_eventually(fn -> Manager.status(Durable, :default).active_jobs == 0 end)
+
+    running = from(s in StepExecution, where: s.workflow_id == ^id and s.status == :running)
+    assert IntegrationRepo.all(running) == []
+    assert get(id).status == :cancelled
+  end
+
+  # Holds the weighing's attempt as its start event is sent, and says so.
+  def hold_at_start(_event, _measurements, %{step: :weigh} = meta, test) do
+    send(test, {:started, meta.step_execution_id})
+    Probe.wait_for(:go)
+  end
+
+  def hold_at_start(_event, _measurements, _meta, _test), do: :ok
+
+  def note_end(_event, _measurements, meta, test),
+    do: send(test, {:ended, meta.step_execution_id})
+
+  # A cancel reached a run whose worker had sent its next attempt's start
+  # event and not yet written its row. The worker killed the step at its
+  # heartbeat and closed what the run had open, which was nothing: the
+  # attempt had a start and never an end.
+  test "an attempt stopped by a cancel as it begins sends its end once" do
+    handler = "audit6-start-#{System.unique_integer([:positive])}"
+    :telemetry.attach(handler, [:durable, :step, :start], &__MODULE__.hold_at_start/4, self())
+    ends = [[:durable, :step, :stop], [:durable, :step, :exception]]
+    :telemetry.attach_many("#{handler}-end", ends, &__MODULE__.note_end/4, self())
+
+    on_exit(fn ->
+      :telemetry.detach(handler)
+      :telemetry.detach("#{handler}-end")
+    end)
+
+    start_durable!(%{default: 1}, heartbeat_interval: 100)
+
+    {:ok, id} = Durable.start(Audit6BlocksLabel, %{})
+    assert_receive {:started, attempt}, 5_000
+
+    canceller = Task.async(fn -> Durable.cancel(id, "the order was withdrawn") end)
+    let_go?(id)
+    Probe.set(:go)
+    assert :ok = Task.await(canceller)
+    assert_eventually(fn -> Manager.status(Durable, :default).active_jobs == 0 end)
+
+    assert_receive {:ended, ^attempt}, 2_000
+    refute_receive {:ended, ^attempt}, 200
+    running = from(s in StepExecution, where: s.workflow_id == ^id and s.status == :running)
     assert IntegrationRepo.all(running) == []
     assert get(id).status == :cancelled
   end
