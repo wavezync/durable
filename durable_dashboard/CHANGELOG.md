@@ -4,6 +4,13 @@ All notable changes to this package. Versions follow [Semantic
 Versioning](https://semver.org); entries come from [Conventional
 Commits](https://www.conventionalcommits.org).
 
+## [2.1.1](https://github.com/wavezync/durable/compare/durable_dashboard-v2.1.0...durable_dashboard-v2.1.1) - 2026-11-26
+
+### Bug fixes
+
+- Key_scope: rollbacks keep the key, the line keeps its order ([d2c92ec](https://github.com/wavezync/durable/commit/d2c92ec8e3805d22fec431730c3e6aee707efdbb))
+- Key_scope review findings: no line deadlock, rollback by stored scope ([10270b2](https://github.com/wavezync/durable/commit/10270b2be9cc702e5157748b8d68a44498f079d9))
+
 ## [2.1.0](https://github.com/wavezync/durable/compare/durable_dashboard-v2.0.1...durable_dashboard-v2.1.0) - 2026-11-24
 
 ### Features
