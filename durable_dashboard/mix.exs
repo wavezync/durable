@@ -77,7 +77,7 @@ defmodule DurableDashboard.MixProject do
   # the durable beside it.
   defp durable_dep do
     case System.get_env("DURABLE_PATH") do
-      nil -> {:durable, "~> 2.1"}
+      nil -> {:durable, "~> 2.2"}
       path -> {:durable, path: path}
     end
   end
