@@ -4,6 +4,29 @@ All notable changes to this package. Versions follow [Semantic
 Versioning](https://semver.org); entries come from [Conventional
 Commits](https://www.conventionalcommits.org).
 
+## [2.2.0](https://github.com/wavezync/durable/compare/durable-v2.1.1...durable-v2.2.0) - 2026-11-26
+
+### Features
+
+- Key_scope: lets runs of different workflows share a key ([a281f61](https://github.com/wavezync/durable/commit/a281f61900939e9fabcfaf6b591474abffeabcec))
+
+### Bug fixes
+
+- Key_scope: rollbacks keep the key, the line keeps its order ([d2c92ec](https://github.com/wavezync/durable/commit/d2c92ec8e3805d22fec431730c3e6aee707efdbb))
+- Key_scope review findings: no line deadlock, rollback by stored scope ([10270b2](https://github.com/wavezync/durable/commit/10270b2be9cc702e5157748b8d68a44498f079d9))
+- A blank key is a key, not none ([a1f4155](https://github.com/wavezync/durable/commit/a1f4155abd8b172a748365549a02d639fd3e6a22))
+- A blank key_scope is a scope; Testing matches key: nil ([48ca91c](https://github.com/wavezync/durable/commit/48ca91c906166d85a88764f821cde67320b6426e))
+- A step that gave up isn't run again after its node stops ([0ce2f39](https://github.com/wavezync/durable/commit/0ce2f396e508780ee3a091c6c06952cd57387543))
+- An attempt begins under its run's claim, so a cancel can't strand it ([73d9f10](https://github.com/wavezync/durable/commit/73d9f107fc2ea5858a6f57f60b782179b23e9f27))
+- A key_scope Postgres can't store is refused at start ([a92b2ce](https://github.com/wavezync/durable/commit/a92b2ce3836c8a5386b5c082095717f0aa1b5c29))
+- A step that cancelled its run, or whose wait couldn't be written, isn't run again; :start goes out after the attempt's row ([38ec2e6](https://github.com/wavezync/durable/commit/38ec2e6c6241bf5141d60e31bdb247c688bbf189))
+- An attempt's start goes out before its row commits; a transient error entering a wait sends the run back ([3ae6b90](https://github.com/wavezync/durable/commit/3ae6b9009ca3f7e9fbc2405dd8091632404a4156))
+- A task killed as its attempt's row commits doesn't leave the row running ([39a2266](https://github.com/wavezync/durable/commit/39a2266c1a46d996c2b9974ee732e4c3e1a6e38e))
+- A wait or attempt whose connection drops checks what landed before it acts ([64e62f1](https://github.com/wavezync/durable/commit/64e62f116aa9f2b83386395693e718dd5e923793))
+- An attempt closed after a lost connection, or refused its COMMIT, sends its end ([2623a84](https://github.com/wavezync/durable/commit/2623a8485449862dd664243208f51f4d7193c7bf))
+- A node that stops cleanly hands back runs a late poller claimed, and has time to ([1052813](https://github.com/wavezync/durable/commit/105281355e315ce48d732d1fda16252b42e3e1f5))
+- A worker putting a run back after a lost connection still answers its poller ([eaa6650](https://github.com/wavezync/durable/commit/eaa66505af49edea7fa4ad77de98d9cada38b4ad))
+
 ## [2.1.1](https://github.com/wavezync/durable/compare/durable-v2.1.0...durable-v2.1.1) - 2026-11-24
 
 ### Bug fixes
